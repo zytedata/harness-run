@@ -59,24 +59,19 @@ class SkillSource:
 
     A tagged union over ``kind``:
 
-    * ``"git"``   — clone ``url`` (optionally at ``ref``), read skills from ``subdir``.
-    * ``"path"``  — a local directory ``path``.
+    * ``"git"``     — clone ``url`` (optionally at ``ref``), read skills from ``subdir``.
+    * ``"local"``   — a local directory ``path``.
     * ``"builtin"`` — a named, library-provided skill bundle ``name``.
 
     A list of sources allows a base + extra sources (multi-source skills, DESIGN.md §12).
     """
 
-    kind: Literal["git", "path", "builtin"]
+    kind: Literal["git", "local", "builtin"]
     url: str | None = None
     ref: str | None = None
     path: str | None = None
     name: str | None = None
     subdir: str = "skills"
-
-    # NOTE: the ``path`` builder (DESIGN names it ``SkillSource.path``) collides with
-    # the ``path`` field, so it is defined as ``_path`` and bound as ``SkillSource.path``
-    # after ``@dataclass`` runs (see below) — defining it inline would clobber the
-    # field's default with the classmethod object.
 
     @classmethod
     def git(cls, url: str, ref: str | None = None, subdir: str = "skills") -> SkillSource:
@@ -84,9 +79,9 @@ class SkillSource:
         return cls(kind="git", url=url, ref=ref, subdir=subdir)
 
     @classmethod
-    def _path(cls, dir: str) -> SkillSource:  # noqa: A002 - matches DESIGN signature
-        """Skills from a local directory ``dir``."""
-        return cls(kind="path", path=dir)
+    def local(cls, path: str) -> SkillSource:
+        """Skills from a local directory ``path``."""
+        return cls(kind="local", path=path)
 
     @classmethod
     def builtin(cls, name: str) -> SkillSource:
@@ -113,11 +108,6 @@ class SkillSource:
         )
 
 
-# Bind the ``path`` builder under its DESIGN name without shadowing the ``path`` field
-# at class-definition time (which would clobber the field default).
-SkillSource.path = SkillSource._path  # type: ignore[assignment]
-
-
 @dataclass(frozen=True)
 class McpServer:
     """An MCP server attached to the agent.
@@ -125,7 +115,7 @@ class McpServer:
     A tagged union over ``kind``:
 
     * ``"github"`` — the GitHub MCP server.
-    * ``"url"``    — a remote MCP server at ``url`` with optional static ``headers``.
+    * ``"remote"`` — a remote MCP server at ``url`` with optional static ``headers``.
     * ``"stdio"``  — a local subprocess MCP server (``command`` + ``args``).
 
     Credentials are NOT carried here. Reference secret *names* via
@@ -133,7 +123,7 @@ class McpServer:
     injected into the server's environment/headers by the harness.
     """
 
-    kind: Literal["github", "url", "stdio"]
+    kind: Literal["github", "remote", "stdio"]
     name: str | None = None
     url: str | None = None
     headers: Mapping[str, str] | None = None
@@ -145,20 +135,16 @@ class McpServer:
         """The GitHub MCP server. Auth token comes from ``AgentSpec.secrets``."""
         return cls(kind="github", name="github")
 
-    # NOTE: the ``url`` builder (DESIGN names it ``McpServer.url``) collides with the
-    # ``url`` field; defined as ``_url`` and bound as ``McpServer.url`` after
-    # ``@dataclass`` (see below).
-
     @classmethod
-    def _url(
+    def remote(
         cls,
         name: str,
-        url: str,  # noqa: A002 - matches DESIGN signature
+        url: str,
         headers: Mapping[str, str] | None = None,
     ) -> McpServer:
         """A remote MCP server. Secrets are referenced via ``AgentSpec.secrets``."""
         return cls(
-            kind="url",
+            kind="remote",
             name=name,
             url=url,
             headers=dict(headers) if headers is not None else None,
@@ -198,10 +184,6 @@ class McpServer:
             command=d.get("command"),
             args=tuple(args) if args is not None else None,
         )
-
-
-# Bind the ``url`` builder under its DESIGN name (see the SkillSource.path note above).
-McpServer.url = McpServer._url  # type: ignore[assignment]
 
 
 @dataclass(frozen=True)

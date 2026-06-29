@@ -223,9 +223,9 @@ new version. App code pins or takes latest; it does not deploy.
 - `AgentSpec` — the declarative definition. Serializable (`to_dict` / `AgentSpec.from_yaml`).
 - `SystemPrompt.inherit(append=..., exclude_dynamic_sections=...)` — inherit the harness's built-in
   system prompt and append. A plain `str` replaces it entirely.
-- `SkillSource` — `.git(url, ref=)`, `.path(dir)`, `.builtin(name)`; a list allows base + extra sources
+- `SkillSource` — `.git(url, ref=)`, `.local(path)`, `.builtin(name)`; a list allows base + extra sources
   (multi-source skills, §12). Resolved & staged at deploy/run time.
-- `McpServer` — `.github()`, `.url(name, url)`, `.stdio(...)`; credentials come from `secrets`, not here.
+- `McpServer` — `.github()`, `.remote(name, url)`, `.stdio(...)`; credentials come from `secrets`, not here.
 - `Engine` — `start_session()`, `get_session(id)`, `versions()`, `name`/`version`/`resource`.
 - `Session` — `run()`, `send()`, `interrupt()`, `status`, `stop_reason`, `last_result`, `resume()`, `fork()`.
 - `Run` — `__await__` (→ `RunResult`), `__aiter__` (→ `AgentEvent`s), `done`, `status`, `result`.

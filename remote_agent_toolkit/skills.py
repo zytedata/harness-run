@@ -1,25 +1,82 @@
-"""Discover + provision skills from ``SkillSource[]`` (DESIGN.md §8, §12) — P1.
+"""Discover + provision skills from ``SkillSource[]`` (DESIGN.md §8, §12).
 
-Resolves git/path/builtin sources, stages them into the per-job cwd, and merges
-multiple sources (precedence on name collision / per-source ref pinning is the open
-P1 merge-policy decision — DESIGN.md §12). Lifted from the PoC ``skills.py``. Uses git
-via ``integrations.git`` lazily. P0: stub.
+The Claude Agent SDK discovers Agent Skills from ``<cwd>/.claude/skills/<name>/SKILL.md``
+when ``setting_sources`` includes ``"project"``. We therefore resolve each ``SkillSource``
+(git clone / local path / builtin) to a directory of skill folders and copy each folder into
+the per-job cwd before starting the engine. Lifted from the PoC ``skills.py``; git is used
+via ``integrations.git`` lazily.
+
+Merge policy for name collisions across sources (the open DESIGN.md §12 question): **last
+wins**. Sources are processed in order, and a later source's skill of the same name
+overwrites an earlier one (``shutil.copytree`` after ``rmtree``). This makes a base + extra
+layering predictable: list the base first, overrides last.
 """
 
 from __future__ import annotations
 
+import shutil
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .spec import SkillSource
 
 
-def provision(sources: tuple[SkillSource, ...], dest: str) -> list[str]:
-    """Resolve & stage ``sources`` into ``dest``, returning staged skill dirs (P1).
-
-    Merge policy for name collisions across sources is the open question in DESIGN.md §12.
-    """
-    raise NotImplementedError(
-        "P1: resolve each SkillSource (git clone / local path / builtin), stage skills "
-        "under dest, and merge per the §12 precedence policy; return the staged dirs."
+def discover_skill_names(src: Path) -> list[str]:
+    """Return the names of skills available in ``src`` (dirs containing a SKILL.md)."""
+    if not src.is_dir():
+        return []
+    return sorted(
+        p.name
+        for p in src.iterdir()
+        if p.is_dir() and (p / "SKILL.md").is_file()
     )
+
+
+def _resolve_source_dir(source: SkillSource) -> Path:
+    """Resolve a ``SkillSource`` to a local directory of skill folders."""
+    if source.kind == "local":
+        if not source.path:
+            raise ValueError("local SkillSource requires a path")
+        return Path(source.path)
+    if source.kind == "git":
+        if not source.url:
+            raise ValueError("git SkillSource requires a url")
+        from .integrations import git  # lazy: subprocess-backed, no third-party dep
+
+        clone_dir = git.clone(source.url, ref=source.ref)
+        return clone_dir / source.subdir
+    if source.kind == "builtin":
+        raise NotImplementedError("builtin skill bundles are not shipped yet (P3)")
+    raise ValueError(f"unknown SkillSource kind: {source.kind!r}")
+
+
+def provision(sources: tuple[SkillSource, ...], dest: str) -> list[str]:
+    """Resolve & stage ``sources`` into ``dest/.claude/skills/``; return the staged names.
+
+    For each source, every skill folder (a dir containing ``SKILL.md``) is copied to
+    ``dest/.claude/skills/<name>/`` (overwriting any existing). On name collision across
+    sources, later sources win (see module docstring). Raises ``FileNotFoundError`` if a
+    source stages zero skills — a source that yields nothing is a config error.
+
+    Returns the merged, sorted list of provisioned skill names.
+    """
+    dest_root = Path(dest) / ".claude" / "skills"
+    dest_root.mkdir(parents=True, exist_ok=True)
+
+    provisioned: set[str] = set()
+    for source in sources:
+        src_dir = _resolve_source_dir(source)
+        names = discover_skill_names(src_dir)
+        if not names:
+            raise FileNotFoundError(
+                f"No skills found under {src_dir} (expected <name>/SKILL.md folders)"
+            )
+        for name in names:
+            dst = dest_root / name
+            if dst.exists():
+                shutil.rmtree(dst)  # last source wins on collision
+            shutil.copytree(src_dir / name, dst)
+            provisioned.add(name)
+
+    return sorted(provisioned)

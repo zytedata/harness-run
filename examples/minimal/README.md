@@ -1,9 +1,43 @@
 # minimal example agent
 
-> Status: **placeholder (P0).** The first-milestone generic (non-Zyte) example agent (DESIGN.md §9.3, §11).
+A tiny, generic (non-Zyte) agent that proves the core API end-to-end: define an
+`AgentSpec`, `local.deploy` it, run one task, stream events, and read a structured result.
+This is the **P1 local gate**; the same spec runs on Gemini Agent Runtime via `gemini`
+once P2 lands (DESIGN.md §9.3, §11).
 
-This will hold the minimal generic example that proves the core API + deploy + warm pool with the least
-surface — run **locally** (P1 gate) and **on Gemini Agent Runtime with a warm start** (P2 first-milestone
-gate), before any real PoC is ported.
+[`agent.py`](agent.py) asks the agent to write `is_prime(n)`, run it on 2–10, and report a
+`{checked, primes}` JSON object — exercising the `Write` + `Bash` tools and structured
+output, with a verifiable answer.
 
-See [`../../DESIGN.md`](../../DESIGN.md) §11 (roadmap).
+## Prerequisites
+
+- **Python 3.12** (the `claude-agent-sdk` supports ≤3.13; the repo pins `>=3.12,<3.14`).
+- The toolkit installed into that environment, e.g. with [uv](https://docs.astral.sh/uv/):
+
+  ```bash
+  uv venv --python 3.12 .venv
+  uv pip install --python .venv/bin/python -e .
+  ```
+
+- **Claude Code auth available in your environment.** The Agent SDK drives the `claude`
+  CLI, so it uses whatever auth that CLI finds (an `ANTHROPIC_API_KEY`, or a logged-in
+  Claude Code session). This example makes a **real model call** (a few cents on Haiku).
+
+## Run
+
+```bash
+.venv/bin/python examples/minimal/agent.py
+```
+
+You'll see streamed progress lines (`tool_use`, `tool_result`, `message`, …) followed by
+the final text, the parsed `PrimeReport`, and the turn/cost summary.
+
+## What it shows
+
+- **Declarative spec** → `local.deploy` → `start_session` → `run` (same API as `gemini`).
+- **Streaming** a `Run` with `async for` (also awaitable, and pollable via `run.done`).
+- **Structured output** — `output_schema=PrimeReport` parses the final message into a
+  validated pydantic model on `result.structured_output`.
+
+Swap `model="claude-haiku-4-5"` for `"claude-sonnet-4-6"` for tougher tasks. To add custom
+skills, pass `skills=[SkillSource.local("path/to/skills")]` (or `SkillSource.git(...)`).

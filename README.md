@@ -5,9 +5,11 @@ declaratively as an `AgentSpec`, then run it both **locally** (in-process, for d
 **Gemini Agent Runtime** (prod) through *one* API — with custom skills, GitHub access, structured outputs,
 checkpoint/resume and warm starts, without re-learning the platform's sharp edges.
 
-> **Status: early scaffold (P0).** This is a typed skeleton — real signatures (protocols + dataclasses) with
-> `NotImplementedError` stub bodies. See [`DESIGN.md`](DESIGN.md) for the full architecture, the platform
-> contracts (§6), and the phased roadmap (§11). The example below is the **north-star target**, not yet runnable.
+> **Status: P1 — the local run plane works.** You can define an `AgentSpec` and run it in-process today
+> (`local.deploy` → `Session`/`Run`, with skills, structured output, and checkpoint/resume). The **`gemini`
+> backend is P2** (deploy / warm pool / lookup are still stubs). See [`examples/minimal`](examples/minimal)
+> for a runnable agent, and [`DESIGN.md`](DESIGN.md) for the architecture, platform contracts (§6), and
+> roadmap (§11). Sections below marked _(P2)_ are the north-star target, not yet runnable.
 
 ## Install
 
@@ -41,14 +43,25 @@ spec = AgentSpec(
 
 ## Dev: run locally, in-process
 
-Same `Engine` + `Session` API as prod, no GCP beyond model access.
+Same `Engine` + `Session` API as prod, no GCP beyond model access. Needs **Python 3.12** and Claude Code
+auth in your environment (the Agent SDK drives the `claude` CLI). See a complete runnable agent in
+[`examples/minimal`](examples/minimal).
 
 ```python
-engine = local.deploy(spec)
-session = engine.start_session()
-result = await session.run("scrape https://books.toscrape.com for title, price")   # wait for completion
-print(result.text, result.structured_output, result.cost_usd)
+import asyncio
+from remote_agent_toolkit import local
+
+async def main():
+    engine = local.deploy(spec)
+    session = engine.start_session()
+    result = await session.run("scrape https://books.toscrape.com for title, price")   # wait for completion
+    print(result.text, result.structured_output, result.cost_usd)
+
+asyncio.run(main())
 ```
+
+For a quick sync script, `local.run(spec, "…")` does `deploy → start_session → await run` and returns the
+`RunResult`.
 
 **Three ways to consume a run** (`session.run(msg)` returns a `Run` handle):
 
@@ -74,7 +87,7 @@ if session.status == "idle" and session.stop_reason == "needs_input":
     await session.send("yes, that schema looks right")     # resumes via checkpoint on a warm worker
 ```
 
-## Prod: deploy once, look up and run
+## Prod: deploy once, look up and run _(P2)_
 
 ```python
 # Ops / CI deploys once (rare):

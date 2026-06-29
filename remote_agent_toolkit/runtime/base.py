@@ -1,0 +1,134 @@
+"""Engine / Session / Run protocols + the session state machine (DESIGN.md §4).
+
+Stdlib-only: these are ``typing.Protocol`` contracts that ``local`` and ``gemini``
+both implement identically, so app code is backend-agnostic.
+"""
+
+from __future__ import annotations
+
+from typing import AsyncIterator, Protocol, runtime_checkable
+
+from ..events import AgentEvent, RunResult, RunStatus, StopReason
+
+
+@runtime_checkable
+class Run(Protocol):
+    """Handle returned by :meth:`Session.run` / :meth:`Session.send`.
+
+    Consumable three ways (DESIGN.md §5):
+
+    * **await** it       → wait for completion, returns :class:`RunResult`.
+    * **async-iterate**  → stream :class:`AgentEvent`s as they happen.
+    * **poll**           → check ``done`` / ``status``, read ``result`` when done.
+
+    For ``gemini``: "stream" = tail the EventSink; "await" = wait for the terminal
+    result event; "poll" = read the latest logged status.
+    """
+
+    def __await__(self):  # -> Generator[Any, None, RunResult]
+        """Await the run to completion, yielding a :class:`RunResult`."""
+        ...
+
+    def __aiter__(self) -> AsyncIterator[AgentEvent]:
+        """Async-iterate over :class:`AgentEvent`s for the run."""
+        ...
+
+    @property
+    def done(self) -> bool:
+        """Whether the run has reached a terminal state."""
+        ...
+
+    @property
+    def status(self) -> RunStatus:
+        """Current run status."""
+        ...
+
+    @property
+    def result(self) -> RunResult | None:
+        """The terminal result once ``done``, else ``None``."""
+        ...
+
+
+@runtime_checkable
+class Session(Protocol):
+    """A run-plane session with the CMA-style lifecycle.
+
+    ``pending → running ↔ idle(stop_reason) → terminated`` (DESIGN.md §4). A session
+    is addressable by ``session_id``, so another process can re-attach via
+    :meth:`Engine.get_session` and poll / continue it.
+    """
+
+    def run(self, message: str) -> Run:
+        """Start a run from ``message`` (kicks off a fresh turn)."""
+        ...
+
+    def send(self, message: str) -> Run:
+        """Resume an idle session with ``message`` (e.g. answer a ``needs_input`` pause).
+
+        Resumes via checkpoint on a warm worker (DESIGN.md §3.7).
+        """
+        ...
+
+    async def interrupt(self) -> None:
+        """Interrupt the in-flight run, transitioning the session toward idle."""
+        ...
+
+    @property
+    def status(self) -> RunStatus:
+        """Current session status."""
+        ...
+
+    @property
+    def stop_reason(self) -> StopReason | None:
+        """Why the session is idle, or ``None`` while running/pending."""
+        ...
+
+    @property
+    def last_result(self) -> RunResult | None:
+        """The most recent run's result, or ``None`` if no run completed yet."""
+        ...
+
+    @property
+    def session_id(self) -> str:
+        """Stable id for re-attach / resume."""
+        ...
+
+    def fork(self) -> Session:
+        """Fork this session into an independent branch sharing prior history."""
+        ...
+
+
+@runtime_checkable
+class Engine(Protocol):
+    """A deployed (or local) agent handle (DESIGN.md §4).
+
+    ``gemini.deploy(spec)`` / ``local.deploy(spec)`` return an ``Engine``;
+    ``gemini.get_engine(name)`` looks one up without deploying.
+    """
+
+    def start_session(self) -> Session:
+        """Begin a new session against this engine."""
+        ...
+
+    def get_session(self, session_id: str) -> Session:
+        """Re-attach to an existing session by id (poll / continue)."""
+        ...
+
+    def versions(self) -> list[str]:
+        """List the deployed versions of this engine."""
+        ...
+
+    @property
+    def name(self) -> str:
+        """The agent name (maps to the engine display name)."""
+        ...
+
+    @property
+    def version(self) -> str:
+        """The resolved engine version."""
+        ...
+
+    @property
+    def resource(self) -> str:
+        """The underlying resource name (e.g. the Agent Engine resource path)."""
+        ...

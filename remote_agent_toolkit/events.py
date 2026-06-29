@@ -1,0 +1,74 @@
+"""Run-plane value types: status/stop-reason enums, events, and results (DESIGN.md §5).
+
+Stdlib-only. The ``Run`` *handle* protocol lives in ``runtime/base.py``; this module
+holds the plain data carried over the wire / event stream.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Any, Literal
+
+
+class RunStatus(str, Enum):
+    """Session/run lifecycle state (CMA-style; DESIGN.md §4).
+
+    ``IDLE`` is *not* "done" — it carries a :class:`StopReason`. ``IDLE`` +
+    ``StopReason.NEEDS_INPUT`` is the interactive checkpoint-and-resume pause.
+    """
+
+    PENDING = "pending"
+    RUNNING = "running"
+    IDLE = "idle"
+    TERMINATED = "terminated"
+
+
+class StopReason(str, Enum):
+    """Why a run/turn stopped."""
+
+    NEEDS_INPUT = "needs_input"
+    END_TURN = "end_turn"
+    MAX_TURNS = "max_turns"
+    BUDGET_EXCEEDED = "budget_exceeded"
+    ERROR = "error"
+
+
+@dataclass
+class AgentEvent:
+    """A single generic event from a run (harness-agnostic).
+
+    ``cost_usd`` and ``usage`` are populated only on the terminal ``"result"`` event.
+    ``raw`` carries the original harness/SDK payload for callers that need detail.
+    """
+
+    kind: Literal["thinking", "tool_use", "tool_result", "message", "status", "result"]
+    summary: str
+    raw: dict | None = None
+    cost_usd: float | None = None
+    usage: dict | None = None
+
+
+@dataclass
+class RunResult:
+    """The terminal result of a run.
+
+    Attributes:
+        text: Final assistant text, or ``None``.
+        structured_output: Parsed structured output if an ``output_schema`` was set.
+        is_error: Whether the run terminated in error.
+        num_turns: Number of agent turns consumed.
+        cost_usd: Total spend for the run.
+        usage: Raw token/usage accounting from the harness.
+        session_id: The session this result belongs to (for re-attach/resume).
+        artifacts: Blob keys/URIs of artifacts produced by the run.
+    """
+
+    text: str | None
+    structured_output: Any = None
+    is_error: bool = False
+    num_turns: int = 0
+    cost_usd: float = 0.0
+    usage: dict | None = None
+    session_id: str | None = None
+    artifacts: tuple[str, ...] = field(default=())

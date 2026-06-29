@@ -203,7 +203,11 @@ class AgentSpec:
         mcp_servers: MCP servers attached to the agent.
         allowed_tools / disallowed_tools: Tool allow/deny lists, or ``None`` for default.
         secrets: Secret *names* resolved from Secret Manager at runtime (never pickled).
-        permission_mode: Claude Code permission mode (e.g. ``"bypassPermissions"``).
+        permission_mode: Claude Code permission mode. Defaults to ``"bypassPermissions"``
+            (unattended runs): these agents run in an isolated, throwaway working
+            directory, so there is no human present to answer prompts. Set ``"default"``
+            (or ``"acceptEdits"``) when running somewhere a prompt could actually be
+            answered, or when the cwd is not disposable.
         max_turns: Hard cap on agent turns.
         max_budget_usd: Hard cap on spend.
         checkpoint: Enable checkpoint/resume (interactive pauses).
@@ -219,7 +223,7 @@ class AgentSpec:
     allowed_tools: tuple[str, ...] | None = None
     disallowed_tools: tuple[str, ...] | None = None
     secrets: tuple[str, ...] = ()
-    permission_mode: str = "default"
+    permission_mode: str = "bypassPermissions"
     max_turns: int = 120
     max_budget_usd: float = 10.0
     checkpoint: bool = False

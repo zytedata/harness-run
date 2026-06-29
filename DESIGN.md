@@ -353,19 +353,16 @@ Each is a `typing.Protocol`; concrete adapters ship for prod (GCP) and dev (loca
 
 ```
 remote-agent-toolkit/
-├── pyproject.toml                 # core + extras: [gemini] [pubsub] [dev]
-├── README.md                      # team onboarding (grows each phase, §11)
-├── DESIGN.md                      # this file
-├── docs/
-│   ├── permissions.md             # the two-identity IAM runbook (per-port grants)
-│   └── platform-notes.md          # the §6 contracts, expanded
+├── pyproject.toml                 # all deps in core (no extras); dev tooling in a dependency group
+├── README.md                      # team onboarding (grows each phase, §11); the only user-facing doc
+├── DESIGN.md                      # this file (internal design record)
 ├── remote_agent_toolkit/
 │   ├── __init__.py                # AgentSpec, SystemPrompt, SkillSource, McpServer, gemini, local
 │   ├── spec.py                    # AgentSpec + value types (serializable)
 │   ├── events.py                  # AgentEvent, RunResult, RunStatus, StopReason, Run handle
 │   ├── harness/
 │   │   ├── base.py                # Harness protocol
-│   │   ├── claude_code.py         # ClaudeCodeHarness (ADK BaseAgent over the Agent SDK)
+│   │   ├── claude_code.py         # ClaudeCodeHarness (drives the Agent SDK query(); ADK-free)
 │   │   └── translate.py           # Claude SDK message → AgentEvent
 │   ├── runtime/
 │   │   ├── base.py                # Engine + Session protocol + state machine + Run handle
@@ -399,8 +396,8 @@ remote-agent-toolkit/
 The **README grows with the code** — each phase leaves the README runnable for what's shipped, rather than
 saving all onboarding docs for the end.
 
-- **P0 — Scaffold.** Repo skeleton (no `src/`), `pyproject` (core + `[gemini]`/`[pubsub]`/`[dev]`), the port
-  & harness protocols as real signatures, the conformance harness, CI.
+- **P0 — Scaffold.** Repo skeleton (no `src/`), `pyproject` (all deps in core; dev tooling in a dependency
+  group), the port & harness protocols as real signatures, the conformance harness, CI.
   *README:* skeleton + install + the headline example as the north-star target.
 - **P1 — Generic core + local.** `ClaudeCodeHarness`, checkpoint/SessionStore, skills, git/github,
   artifacts, `AgentSpec`, `local.deploy`/`local.run` with filesystem/in-memory adapters.

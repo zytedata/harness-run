@@ -8,22 +8,26 @@ version = "0.0.1"
 description = "Define and run remote/background Claude-Code agents locally and on Gemini Agent Runtime."
 readme = "README.md"
 requires-python = ">=3.12,<3.14"
+# One install pulls everything (local + Gemini Agent Runtime) — no extras to choose. None
+# of these are hard to install, so keeping the surface flat beats making teams guess which
+# extra they need. Backend imports stay lazy, so `import remote_agent_toolkit` is still fast.
 dependencies = [
     "claude-agent-sdk>=0.2",
     "google-adk>=1.0",
-]
-
-[project.optional-dependencies]
-gemini = [
     "google-cloud-aiplatform[adk,agent-engines]>=1.110",
     "google-cloud-storage",
     "google-cloud-logging",
-    "uv>=0.5",
-    "a2a-sdk>=0.3.4,<0.4",
-]
-pubsub = [
     "google-cloud-pubsub",
+    "a2a-sdk>=0.3.4,<0.4",
+    "uv>=0.5",
+    "pyyaml",
+    "jsonschema",
 ]
+
+# Dev tooling lives in a dependency group (PEP 735), not an install extra: `pip install
+# git+…` (or the github URL) gets a clean runtime install; developers add tooling with
+# `uv sync` / `uv pip install --group dev`.
+[dependency-groups]
 dev = [
     "pytest",
     "pytest-asyncio",

@@ -34,8 +34,8 @@ SPEC = AgentSpec(
     system_prompt=SystemPrompt.inherit(
         append="You are a concise coding assistant. Verify your work by running code."
     ),
-    # bypassPermissions is safe ONLY because each run gets a throwaway, isolated cwd.
-    permission_mode="bypassPermissions",
+    # permission_mode defaults to "bypassPermissions" — safe here because each run gets an
+    # isolated, throwaway cwd and there's no human to answer prompts.
     max_turns=12,
     max_budget_usd=1.0,
     output_schema=PrimeReport,

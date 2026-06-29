@@ -17,14 +17,12 @@ Private package — install straight from GitHub (you need repo access). Require
 (`claude-agent-sdk` supports ≤3.13):
 
 ```bash
-pip install "git+https://github.com/zytedata/remote-agent-toolkit.git"
-# or:  uv pip install "git+https://github.com/zytedata/remote-agent-toolkit.git"
+pip install "git+ssh://git@github.com/zytedata/remote-agent-toolkit.git"
+# or:  uv pip install "git+ssh://git@github.com/zytedata/remote-agent-toolkit.git"
 ```
 
-One install pulls **everything** — local *and* Gemini Agent Runtime — with no extras to choose between.
-`import remote_agent_toolkit` itself needs no third-party deps (backend imports are lazy), so import stays
-fast. Developing on the toolkit itself? Clone it and `uv sync` (installs the runtime deps plus the `dev`
-group: pytest, ruff, mypy).
+Developing on the toolkit itself (early users are expected to contribute)? Clone it and `uv sync` — that
+installs the runtime deps plus the `dev` group (pytest, ruff, mypy).
 
 ## Define an agent
 
@@ -71,7 +69,10 @@ asyncio.run(main())
 For a quick sync script, `local.run(spec, "…")` does `deploy → start_session → await run` and returns the
 `RunResult`.
 
-**Three ways to consume a run** (`session.run(msg)` returns a `Run` handle):
+## Consuming a run: wait, stream, or poll
+
+`session.run(msg)` (and `session.send(msg)` to resume) returns a `Run` handle, consumable three ways — the
+same on `local` and `gemini`:
 
 ```python
 # (a) wait for completion (simplest — the headline default)
@@ -92,17 +93,19 @@ result = run.result
 # re-attach later / elsewhere by session id, then poll or continue
 session = engine.get_session(session_id)
 if session.status == "idle" and session.stop_reason == "needs_input":
-    await session.send("yes, that schema looks right")     # resumes via checkpoint on a warm worker
+    await session.send("yes, that schema looks right")     # resumes the conversation (a fresh turn)
 ```
 
 ## Structured output
 
 Set `output_schema` to a **pydantic model** (or a JSON-schema `dict`) and `result.structured_output` holds
 the parsed, validated object. The schema only describes the *shape* — you must **also tell the agent, in the
-prompt, to emit that shape as its final message**. The toolkit parses JSON out of the agent's final text
-(from a ```` ```json ```` block, a bare object, or the whole message); it does not constrain decoding.
+prompt, what to emit**. Don't restate the fields by hand; serialize the schema into the prompt so the two
+never drift. The toolkit parses JSON out of the agent's final text (a ```` ```json ```` block, a bare object,
+or the whole message); it does not constrain decoding.
 
 ```python
+import json
 import pydantic
 from remote_agent_toolkit import AgentSpec, local
 
@@ -111,11 +114,11 @@ class PriceCheck(pydantic.BaseModel):
     price_gbp: float
 
 spec = AgentSpec(name="price-check", model="claude-sonnet-4-6", output_schema=PriceCheck)
-engine = local.deploy(spec)
-result = await engine.start_session().run(
-    "Check the product at <url> and report the result as a JSON object with keys "
-    "in_stock (boolean) and price_gbp (number)."          # ← the schema must be spelled out here
+prompt = (
+    "Check the product at <url> and report the result as a JSON object matching this schema:\n"
+    f"{json.dumps(PriceCheck.model_json_schema())}"
 )
+result = await local.deploy(spec).start_session().run(prompt)
 print(result.structured_output)    # PriceCheck(in_stock=True, price_gbp=51.77), or None if unparseable
 ```
 
@@ -140,12 +143,31 @@ Beyond skills, several `AgentSpec` fields shape what the agent can do and the en
 **Python libraries & CLI tools.** The agent's `Bash` tool runs in a real shell with **`uv`** and **`git`** on
 `PATH`, so it can fetch and run dependencies on the fly — e.g. `uv run --with httpx script.py`, or
 `uv pip install …` inside its working directory. That covers most "use library X" needs with no change to
-the deployment.
+the deployment. To pin libraries into the deployed engine instead, see
+[Pre-baked engine dependencies](#pre-baked-engine-dependencies-p2) below.
 
-_(P2)_ For libraries that should be **pre-baked into the deployed `gemini` engine** (pinned versions, a private
-index, or system packages), `gemini.deploy` will accept a declared dependency set and encode it into the engine
-image, so a deployed agent starts with them already installed instead of fetching per run. Locally the agent
-just uses your machine's environment plus whatever it installs at runtime.
+## Pre-baked engine dependencies _(P2)_
+
+Runtime `uv` (above) is great for experimentation, but for **pinned versions, a private index, or packages
+you don't want re-fetched on every run**, declare them on the spec. `gemini.deploy` bakes them into the
+engine image (via the platform's uv-via-requirements contract), so a deployed agent starts with them already
+installed:
+
+```python
+spec = AgentSpec(
+    name="data-agent",
+    model="claude-sonnet-4-6",
+    packages=["pandas==2.2.*", "httpx>=0.27"],   # pip/uv requirement specifiers, baked at deploy time
+)
+```
+
+The **`local` path ignores `packages`** — locally the agent uses your machine's environment plus whatever it
+installs at runtime, so you iterate without a rebuild. Because building the engine image is slow (~10 min),
+pin only what genuinely needs to be baked in and lean on runtime `uv` for the rest.
+
+> **Troubleshooting install issues locally.** Reproducing the exact engine image (base OS, glibc, Python
+> 3.12, system tools) on your machine — so you don't debug install failures through 10-minute cloud
+> rebuilds — is a known pain point we're still scoping (see the open question in `DESIGN.md`).
 
 ## Prod: deploy once, look up and run _(P2)_
 
@@ -177,23 +199,32 @@ Platform realities the toolkit encodes (measured on Agent Runtime; the `local` p
 **Deploy** is a rare ops/CI action and takes **minutes** (image build + engine provisioning). App code never
 deploys — it looks an engine up by name and runs.
 
-**Running a turn** has three latency profiles:
+**Running a turn** has these latency profiles:
 
 | Path | Start latency | Ceiling | Use for |
 |---|---|---|---|
 | Async (default) | **~2.5 min** per-job worker provisioning | long-running | one-shot / long autonomous jobs |
-| Sync | **~3–9 s** | ~600 s (10 min) hard | short, interactive turns |
-| **Warm pool** (`warm=True`) | **~5 s** | long-running | interactive *and* long — best of both |
+| **Warm pool** (`warm_pool=True`) | **~5 s** | long-running | interactive *and* long — best of both |
+| Sync | ~3–9 s | ~600 s (10 min) hard | _not supported yet (see below)_ |
 
 The ~2.5 min async start is **per job, not a one-time cold start** — it's Vertex provisioning a dedicated
 worker, and it is *not* reducible via concurrency / min-instances knobs. So for one long task, do it in a
 **single** job (pay the start once) rather than many short jobs.
 
-**How `warm=True` works.** `gemini.deploy(spec, warm_pool=True)` keeps a pool of pre-provisioned workers, each
-blocked on a Pub/Sub subscription (a competing-consumers *atomic claim*). A run is dispatched to a free worker
-that has already provisioned skills and warmed its storage channel during its idle wait, so the turn goes
-nearly straight to the model (**~5 s** dispatch→first step vs ~2.5 min cold). On claim the pool refills, so the
-next turn is warm too.
+The platform also offers a **sync** path (fast start, but a hard ~10 min ceiling). The toolkit **does not
+expose it yet** — the run plane is built around the async + warm-pool paths, which cover long *and*
+interactive work. We can add sync later if a genuinely short-turn use case needs the lower start latency.
+
+**How `warm_pool=True` works.** `gemini.deploy(spec, warm_pool=True)` keeps a pool of pre-provisioned workers,
+each blocked on a Pub/Sub subscription (a competing-consumers *atomic claim*). A run is dispatched to a free
+worker that has already provisioned skills and warmed its storage channel during its idle wait, so the turn
+goes nearly straight to the model (**~5 s** dispatch→first step vs ~2.5 min cold). On claim the pool refills,
+so the next turn is warm too.
+
+> _Keeping the pool full:_ warm workers are themselves long-running jobs and will eventually exit at the
+> platform's max-job-duration limit (whose exact value we haven't pinned down). Topping the pool back up
+> across that boundary is a future refinement; in practice the refill-on-claim cadence likely keeps enough
+> workers warm, so it shouldn't bite early on.
 
 **Cost.** Warm workers are long-running jobs sitting idle waiting for work, so you **pay for that idle compute**
 continuously — `warm_pool=True` trades money for latency. Size the pool to your concurrency, and leave it off

@@ -213,6 +213,10 @@ class AgentSpec:
         checkpoint: Enable checkpoint/resume (interactive pauses).
         output_schema: Optional structured-output schema (pydantic model or JSON schema).
         env: Extra environment variables for the runtime.
+        packages: Python package requirement specifiers (e.g. ``"pandas==2.2.*"``) baked
+            into the deployed ``gemini`` engine image at deploy time (P2). The ``local``
+            runtime ignores these — locally the agent uses your environment plus whatever
+            it installs at runtime via ``uv``.
     """
 
     name: str
@@ -229,12 +233,14 @@ class AgentSpec:
     checkpoint: bool = False
     output_schema: Any = None
     env: Mapping[str, str] | None = field(default=None)
+    packages: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         # Coerce list args to frozen-hashable tuples without breaking frozen-ness.
         object.__setattr__(self, "skills", tuple(self.skills))
         object.__setattr__(self, "mcp_servers", tuple(self.mcp_servers))
         object.__setattr__(self, "secrets", tuple(self.secrets))
+        object.__setattr__(self, "packages", tuple(self.packages))
         if self.allowed_tools is not None:
             object.__setattr__(self, "allowed_tools", tuple(self.allowed_tools))
         if self.disallowed_tools is not None:
@@ -254,6 +260,7 @@ class AgentSpec:
             "max_turns": self.max_turns,
             "max_budget_usd": self.max_budget_usd,
             "checkpoint": self.checkpoint,
+            "packages": list(self.packages),
         }
         if isinstance(self.system_prompt, SystemPrompt):
             d["system_prompt"] = self.system_prompt.to_dict()
@@ -293,12 +300,13 @@ class AgentSpec:
             allowed_tools=tuple(allowed) if allowed is not None else None,
             disallowed_tools=tuple(disallowed) if disallowed is not None else None,
             secrets=tuple(d.get("secrets", ())),
-            permission_mode=d.get("permission_mode", "default"),
+            permission_mode=d.get("permission_mode", "bypassPermissions"),
             max_turns=int(d.get("max_turns", 120)),
             max_budget_usd=float(d.get("max_budget_usd", 10.0)),
             checkpoint=bool(d.get("checkpoint", False)),
             output_schema=d.get("output_schema"),
             env=dict(d["env"]) if d.get("env") is not None else None,
+            packages=tuple(d.get("packages", ())),
         )
 
     def to_yaml(self) -> str:

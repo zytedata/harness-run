@@ -220,8 +220,11 @@ class ToolkitAgent(BaseAgent):
         """
         import time
 
-        from .pool import resolve_max_wait_s, worker_dispatch_from_env
+        from ...ports.eventsink import CloudLoggingSink
+        from .pool import pool_log_id_from_subscription, resolve_max_wait_s, worker_dispatch_from_env
         from .translate import to_adk_event
+
+        pool_id = pool_log_id_from_subscription(os.environ.get("AGENT_POOL_SUBSCRIPTION", ""))
 
         dispatch = worker_dispatch_from_env()
         if dispatch is None:
@@ -242,7 +245,21 @@ class ToolkitAgent(BaseAgent):
         claimed: dict | None = None
         beat = 0
         while time.monotonic() < deadline:
-            claimed = await asyncio.to_thread(dispatch.claim, 10.0)
+            try:
+                claimed = await asyncio.to_thread(dispatch.claim, 10.0)
+            except Exception as exc:  # noqa: BLE001 — a missing grant must not crash silently
+                # e.g. the RE service agent lacking pubsub.subscriber on the dispatch sub.
+                # Surface it to Cloud Logging (the only async channel) instead of dying quietly.
+                err = AgentEvent(
+                    kind="status", summary=f"pool claim failed: {str(exc)[:200]}",
+                    raw={"event": "pool_error"},
+                )
+                try:
+                    CloudLoggingSink(session_id=pool_id).emit(err)
+                except Exception:  # noqa: BLE001
+                    pass
+                yield to_adk_event(err, self.name)
+                return
             if claimed is not None:
                 break
             beat += 1

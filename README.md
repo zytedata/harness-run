@@ -226,7 +226,7 @@ for the running job. Grant it:
 | `roles/secretmanager.secretAccessor` | each secret in `spec.secrets` | the platform injects secret_refs, read as this agent |
 | `roles/storage.objectAdmin` | the output/checkpoint bucket | workspace snapshots, artifacts, the session store |
 | `roles/logging.logWriter` | project | the agent emits structured step logs |
-| `roles/pubsub.subscriber` | the dispatch subscription | warm-pool workers pull turns _(P2b)_ |
+| `roles/pubsub.subscriber` | project _(warm pool)_ | warm-pool workers pull turns; project-level since the toolkit auto-creates a per-engine subscription |
 
 **Prerequisites** (create with admin creds; `deploy` ensures the buckets it needs):
 

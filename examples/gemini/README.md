@@ -15,19 +15,24 @@ Garden**. Plus a Python 3.12 env with the toolkit installed (`uv pip install -e 
 ## Run
 
 ```bash
-# cold (default): one deploy, one run, teardown
+# reuse-or-deploy, then run a turn (cold). Deploys only if no engine of this name exists.
 .venv/bin/python examples/gemini/deploy_and_run.py
 
 # warm pool: pre-warmed workers, ~12 s pickup instead of ~2.5 min
 WARM=1 .venv/bin/python examples/gemini/deploy_and_run.py
+
+# tear the engine down — cancels warm-pool workers + removes the engine and dispatch topic/sub
+TEARDOWN=1 .venv/bin/python examples/gemini/deploy_and_run.py
 
 # point at your own project / least-priv SA
 PROJECT=my-proj LOCATION=us-central1 IMPERSONATE_SA=agent-runtime@my-proj.iam.gserviceaccount.com \
   .venv/bin/python examples/gemini/deploy_and_run.py
 ```
 
-Defaults target the shared `my-project` test project. The script **always tears the engine down**
-(`engine.delete(delete_pool_resources=True)`) in a `finally` block, so a deployed engine never lingers and
-bills — including cancelling warm-pool workers.
+The engine is **reused** if one of this name already exists (so a second run skips the ~4 min deploy), and is
+**left running** afterwards for that reuse. A deployed engine bills while it exists — warm pools especially,
+with idle workers — so run with `TEARDOWN=1` when you're done; that calls
+`engine.delete(delete_pool_resources=True)`, which cancels the pool workers and removes the engine + topic/sub.
+Defaults target the shared `my-project` test project.
 
 > Deploy builds an engine image (~4 min) and creates a billed engine. The model run itself is a few cents.

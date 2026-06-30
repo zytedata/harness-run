@@ -246,7 +246,9 @@ class ToolkitAgent(BaseAgent):
         beat = 0
         while time.monotonic() < deadline:
             try:
-                claimed = await asyncio.to_thread(dispatch.claim, 10.0)
+                # A pull is a long-poll (returns the instant a turn is published), so this
+                # timeout mainly bounds the heartbeat cadence, not pickup latency.
+                claimed = await asyncio.to_thread(dispatch.claim, 5.0)
             except Exception as exc:  # noqa: BLE001 — a missing grant must not crash silently
                 # e.g. the RE service agent lacking pubsub.subscriber on the dispatch sub.
                 # Surface it to Cloud Logging (the only async channel) instead of dying quietly.

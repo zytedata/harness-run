@@ -22,8 +22,10 @@ from ..events import AgentEvent
 # under that. summary is the only free-form field that can grow without bound.
 _SUMMARY_CAP = 60000
 # tail poll cadence and overall safety ceiling: a client must not block forever if the
-# terminal "result" event never arrives (crashed runtime, lost log entry, etc.).
-_POLL_INTERVAL_S = 2.0
+# terminal "result" event never arrives (crashed runtime, lost log entry, etc.). 1s keeps
+# the observed stream snappy; the residual first-event latency is Cloud Logging's own
+# write→queryable ingestion lag (a few seconds), inherent to a log-tail channel.
+_POLL_INTERVAL_S = 1.0
 _MAX_WAIT_S = 3600.0
 # RFC3339 with microseconds + trailing Z — the timestamp format Cloud Logging filters accept.
 _RFC3339 = "%Y-%m-%dT%H:%M:%S.%fZ"

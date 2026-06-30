@@ -130,7 +130,7 @@ def deploy(
     )
     if warm_pool:
         try:
-            geng._fill_pool(pool_size)  # block pool_size workers on the dispatch sub
+            geng.fill_pool(pool_size)  # block pool_size workers on the dispatch sub
         except Exception:  # don't leak the freshly-created engine if filling the pool fails
             try:
                 client.agent_engines.delete(name=geng.resource, force=True)
@@ -239,7 +239,7 @@ class GeminiSession:
             # then refill so the next turn stays warm. No cold run_query_job.
             engine._dispatch().publish(dispatch_payload(sid, message, resume))
             try:
-                engine._fill_pool(1)
+                engine.fill_pool(1)
             except Exception:  # noqa: BLE001 — refill is best-effort; the turn already dispatched
                 pass
         else:
@@ -274,13 +274,29 @@ class GeminiSession:
         self._status = RunStatus.IDLE
 
     async def interrupt(self) -> None:
-        """Stop tailing the in-flight run. (Platform-side job cancellation is P2c.)"""
+        """Interrupt the in-flight run: stop tailing AND cancel the remote job.
+
+        Cancelling the ``run_query_job`` stops the agent (and its billing). The warm path
+        has no per-turn job handle (the turn runs in a pool worker), so there it only stops
+        tailing — the worker finishes its turn.
+        """
         run = self._current_run
         if run is not None and run.task is not None and not run.task.done():
             run.task.cancel()
             try:
                 await run.task
             except asyncio.CancelledError:
+                pass
+        job_name = getattr(self._last_job, "job_name", None)
+        if job_name:
+            engine = self._engine
+            try:
+                await asyncio.to_thread(
+                    lambda: engine._agent_engines().cancel_query_job(
+                        name=engine._resource, config={"operation_name": job_name}
+                    )
+                )
+            except Exception:  # noqa: BLE001 — best effort (job may already be done)
                 pass
 
     @property
@@ -350,8 +366,12 @@ class GeminiEngine:
             project=self._project, credentials=self._credentials,
         )
 
-    def _fill_pool(self, n: int) -> None:
-        """Submit ``n`` pre-warmed workers (each a job blocked on ``__POOL_WAIT__``)."""
+    def fill_pool(self, n: int) -> None:
+        """Submit ``n`` pre-warmed workers (each a job blocked on ``__POOL_WAIT__``).
+
+        Use this to top a warm pool back up — e.g. after reusing an engine via
+        ``get_engine`` whose workers have idle-expired, or to grow the pool.
+        """
         ae = self._agent_engines()
         query = json.dumps({"input": {"user_id": _USER_ID, "message": POOL_WAIT_SENTINEL}})
         bucket = self._output_bucket or f"gs://{self._project}-agent-output"
@@ -410,6 +430,31 @@ class GeminiEngine:
         except (TimeoutError, asyncio.TimeoutError):
             return False
 
+    def _cancel_running_operations(self) -> None:
+        """Cancel the engine's still-running long-running operations (e.g. idle pool workers).
+
+        The genai surface only cancels a job by operation name, with no list — so enumerate
+        the engine's operations over REST (via an auth'd session; no raw token handling) and
+        cancel the unfinished ones. Best-effort; needed to delete a reused warm engine whose
+        worker jobs weren't submitted in this process.
+        """
+        import google.auth
+        import google.auth.transport.requests as greq
+
+        creds = self._credentials
+        if creds is None:
+            creds, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
+        session = greq.AuthorizedSession(creds)
+        base = f"https://{self._location}-aiplatform.googleapis.com"
+        for ver in ("v1beta1", "v1"):
+            resp = session.get(f"{base}/{ver}/{self._resource}/operations", timeout=30)
+            if resp.status_code != 200:
+                continue
+            for op in resp.json().get("operations", []):
+                if not op.get("done"):
+                    session.post(f"{base}/{ver}/{op['name']}:cancel", timeout=30)
+            return
+
     def delete(self, *, delete_pool_resources: bool = False, timeout: float = 300.0) -> None:
         """Tear down the engine (ops action). Cancels tracked pool workers first.
 
@@ -424,6 +469,12 @@ class GeminiEngine:
                 ae.cancel_query_job(name=self._resource, config={"operation_name": job_name})
             except Exception:  # noqa: BLE001 — already done / cancelled / unknown
                 pass
+        # Also cancel running ops not submitted in this process (e.g. a warm engine reused
+        # via get_engine, whose pool workers were started by an earlier deploy).
+        try:
+            self._cancel_running_operations()
+        except Exception:  # noqa: BLE001 — best effort; the retry-delete below still applies
+            pass
 
         deadline = time.time() + timeout
         while True:

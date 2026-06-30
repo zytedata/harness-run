@@ -109,6 +109,25 @@ def test_gemini_session_run_drives_from_sink(monkeypatch):
     assert captured["config"]["output_gcs_uri"] == "gs://out/jobs/sid-1.jsonl"
 
 
+def test_gemini_interrupt_cancels_remote_job(monkeypatch):
+    import types
+
+    spec = AgentSpec(name="g", model="m")
+    engine = backend.GeminiEngine(resource="r/reasoningEngines/1", spec=spec, project=None, location=None)
+    cancelled = {}
+
+    class FakeAE:
+        def cancel_query_job(self, name, config):
+            cancelled["name"] = name
+            cancelled["op"] = config["operation_name"]
+
+    monkeypatch.setattr(engine, "_agent_engines", lambda: FakeAE())
+    session = backend.GeminiSession(engine, "sid")
+    session._last_job = types.SimpleNamespace(job_name="jobX")  # as run_query_job would set it
+    asyncio.run(session.interrupt())
+    assert cancelled == {"name": engine.resource, "op": "jobX"}
+
+
 def test_gemini_session_send_prefixes_resume(monkeypatch):
     spec = AgentSpec(name="g", model="m", checkpoint=True)
     engine = backend.GeminiEngine(resource="r/reasoningEngines/9", spec=spec,

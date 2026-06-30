@@ -44,7 +44,7 @@ def test_warm_session_dispatches_and_tails(monkeypatch):
     published = []
     monkeypatch.setattr(engine, "_dispatch", lambda: type("D", (), {"publish": lambda _self, m: published.append(m)})())
     refilled = []
-    monkeypatch.setattr(engine, "_fill_pool", lambda n: refilled.append(n))
+    monkeypatch.setattr(engine, "fill_pool", lambda n: refilled.append(n))
 
     # The worker would emit to the session_id; pre-seed a sink that the client tails.
     seed = InMemorySink(session_id="warm-sid")

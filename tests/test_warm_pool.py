@@ -81,11 +81,39 @@ def test_engine_delete_cancels_pool_jobs_then_deletes(monkeypatch):
             calls["delete"] += 1
 
     monkeypatch.setattr(engine, "_agent_engines", lambda: FakeAE())
-    monkeypatch.setattr(engine, "_cancel_running_operations", lambda: None)  # no REST in unit test
     engine.delete()  # delete_pool_resources defaults False -> no pubsub calls
     # Both tracked workers cancelled before the engine is deleted.
     assert calls["cancel"] == ["jobA", "jobB"]
     assert calls["delete"] == 1
+
+
+def test_engine_delete_cancels_blocking_ops_from_error(monkeypatch):
+    # A reused engine has no tracked jobs; the running worker is named in the delete error.
+    spec = AgentSpec(name="w", model="m")
+    engine = backend.GeminiEngine(resource="projects/p/locations/l/reasoningEngines/1",
+                                  spec=spec, project="p", location="l")
+    cancelled = []
+    op = "projects/p/locations/l/operations/999"
+
+    class FakeAE:
+        def __init__(self):
+            self.attempts = 0
+
+        def cancel_query_job(self, name, config):
+            cancelled.append(config["operation_name"])
+
+        def delete(self, name, force):
+            self.attempts += 1
+            if self.attempts == 1:  # first attempt blocked, naming the running op
+                raise RuntimeError(f"400 FAILED_PRECONDITION ... Operation(s) are: {op}.")
+            # second attempt succeeds (after the cancel)
+
+    fake = FakeAE()
+    monkeypatch.setattr(engine, "_agent_engines", lambda: fake)
+    monkeypatch.setattr(backend.time, "sleep", lambda _s: None)  # no real wait in the test
+    engine.delete()
+    assert cancelled == [op]  # parsed out of the error and cancelled
+    assert fake.attempts == 2  # retried after cancelling, then succeeded
 
 
 def test_pool_worker_claims_and_runs(monkeypatch):

@@ -433,69 +433,41 @@ class GeminiEngine:
         except (TimeoutError, asyncio.TimeoutError):
             return False
 
-    def _cancel_running_operations(self) -> None:
-        """Cancel the engine's still-running query jobs (e.g. idle pool workers).
+    def delete(self, *, delete_pool_resources: bool = False, timeout: float = 600.0) -> None:
+        """Tear down the engine (ops action), cancelling its pool workers first.
 
-        The genai surface cancels a query job by operation name but has no list — so enumerate
-        the engine's operations over REST, then cancel each unfinished one with
-        ``cancel_query_job`` (the *generic* operation ``:cancel`` does NOT stop a query-job
-        worker — verified). Best-effort; needed to delete a reused warm engine whose worker
-        jobs weren't submitted in this process. A cancelled worker takes a few minutes to
-        actually stop, so ``delete`` retries well past this.
+        A warm pool's idle workers are long-running query jobs that block engine deletion
+        until they stop. We cancel this process's tracked jobs up front, then on each blocked
+        delete attempt parse the blocking operation names *out of the FAILED_PRECONDITION
+        error* and ``cancel_query_job`` them — the reliable way to find a reused engine's
+        workers, since the engine's ``/operations`` collection lists only engine LROs, not
+        query jobs. A cancelled worker takes a few minutes to actually stop, so deletion
+        retries up to ``timeout``. ``delete_pool_resources`` also removes the topic + sub.
         """
-        import google.auth
-        import google.auth.transport.requests as greq
-        import requests
+        import re
 
-        creds = self._credentials
-        if creds is None:
-            creds, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
-        creds.refresh(greq.Request())  # explicit refresh — reliable for impersonated creds
-        headers = {"Authorization": f"Bearer {creds.token}"}
         ae = self._agent_engines()
-        base = f"https://{self._location}-aiplatform.googleapis.com"
-        for ver in ("v1beta1", "v1"):
-            resp = requests.get(f"{base}/{ver}/{self._resource}/operations", headers=headers, timeout=30)
-            if resp.status_code != 200:
-                continue
-            for op in resp.json().get("operations", []):
-                if not op.get("done"):
-                    try:
-                        ae.cancel_query_job(name=self._resource, config={"operation_name": op["name"]})
-                    except Exception:  # noqa: BLE001 — not a query job / already done
-                        pass
-            return
-
-    def delete(self, *, delete_pool_resources: bool = False, timeout: float = 480.0) -> None:
-        """Tear down the engine (ops action). Cancels its pool workers first.
-
-        A warm pool's idle workers are long-running jobs that block engine deletion until
-        they stop, so cancel them (both this process's tracked jobs and, for a reused engine,
-        any running ops found via ``_cancel_running_operations``) before deleting. A cancelled
-        worker takes a few minutes to actually stop, so deletion retries up to ``timeout``.
-        ``delete_pool_resources`` also removes the dispatch topic + subscription.
-        """
-        ae = self._agent_engines()
-        for job_name in self._pool_jobs:
+        for job_name in self._pool_jobs:  # fast path: jobs this process submitted
             try:
                 ae.cancel_query_job(name=self._resource, config={"operation_name": job_name})
             except Exception:  # noqa: BLE001 — already done / cancelled / unknown
                 pass
-        # Also cancel running ops not submitted in this process (e.g. a warm engine reused
-        # via get_engine, whose pool workers were started by an earlier deploy).
-        try:
-            self._cancel_running_operations()
-        except Exception:  # noqa: BLE001 — best effort; the retry-delete below still applies
-            pass
 
+        op_pat = re.compile(r"projects/[^/\s]+/locations/[^/\s]+/operations/\d+")
         deadline = time.time() + timeout
         while True:
             try:
                 ae.delete(name=self._resource, force=True)
                 break
-            except Exception:  # noqa: BLE001 — retry past a still-finalizing operation
+            except Exception as exc:  # noqa: BLE001 — retry past blocking/finalizing operations
                 if time.time() >= deadline:
                     raise
+                # The platform names the blocking query-job operations in the error; cancel each.
+                for op in set(op_pat.findall(str(exc))):
+                    try:
+                        ae.cancel_query_job(name=self._resource, config={"operation_name": op})
+                    except Exception:  # noqa: BLE001 — not a query job / already cancelled
+                        pass
                 time.sleep(15)
 
         if delete_pool_resources and self._topic and self._subscription:

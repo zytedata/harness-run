@@ -327,6 +327,7 @@ class GeminiEngine:
         self._warm = warm
         self._topic = topic
         self._subscription = subscription
+        self._created = time.time()  # readiness-tail watermark (ignore stale pool markers)
         self._sessions: dict[str, GeminiSession] = {}
 
     def _client(self) -> Any:
@@ -370,6 +371,35 @@ class GeminiEngine:
 
     def get_session(self, session_id: str) -> GeminiSession:
         return self._sessions.get(session_id) or GeminiSession(self, session_id)
+
+    def wait_until_warm(self, timeout: float = 300.0) -> bool:
+        """Block until a pool worker reports ready (or ``timeout``); ``True`` if warm.
+
+        Tails Cloud Logging for the pool readiness marker a worker emits once it has finished
+        its cold start and pre-warmed. No-op (returns ``True``) for a non-warm engine. Sync —
+        call it from sync code, after ``deploy``, before dispatching turns.
+        """
+        if not self._warm:
+            return True
+        from .pool import pool_log_id
+
+        pool_id = pool_log_id(self.name)
+        created = self._created
+
+        async def _await() -> bool:
+            from ...ports.eventsink import CloudLoggingSink
+
+            sink = CloudLoggingSink(
+                log_name=_LOG_NAME, project=self._project, credentials=self._credentials
+            )
+            async for _ in sink.tail(pool_id, since=created):
+                return True  # first marker since deploy => a worker is warm
+            return False
+
+        try:
+            return asyncio.run(asyncio.wait_for(_await(), timeout))
+        except (TimeoutError, asyncio.TimeoutError):
+            return False
 
     def versions(self) -> list[str]:
         return ["latest"]

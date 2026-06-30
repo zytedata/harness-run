@@ -88,6 +88,33 @@ def _checkpoint_ports(spec: Any) -> tuple[Any | None, Any | None]:
     return blobs, BlobSessionStore(blobs)
 
 
+def _prewarm(spec: Any) -> None:
+    """Best-effort warm-up an idle pool worker runs before blocking on a claim.
+
+    Warms the Cloud Logging client (by emitting the readiness marker under the pool id — which
+    also signals the control plane that this worker is warm) and the GCS channel when
+    checkpointing. Never raises — a pre-warm failure must not take the worker down.
+    """
+    from ...events import AgentEvent
+    from ...ports.eventsink import CloudLoggingSink
+    from .pool import pool_log_id_from_subscription
+
+    if spec.checkpoint and os.environ.get("AGENT_CHECKPOINT_GCS"):
+        try:
+            from google.cloud import storage
+
+            storage.Client()  # establish auth/channel so the first checkpoint call is fast
+        except Exception:  # noqa: BLE001
+            pass
+    try:
+        pool_id = pool_log_id_from_subscription(os.environ.get("AGENT_POOL_SUBSCRIPTION", ""))
+        CloudLoggingSink(session_id=pool_id).emit(
+            AgentEvent(kind="status", summary="pool worker ready", raw={"event": "pool_ready"})
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _prepare_workspace(rc: Any) -> dict:
     """Restore a prior workspace (resume) or stage the baked skills into a fresh cwd. Sync."""
     from ...skills import provision
@@ -205,6 +232,11 @@ class ToolkitAgent(BaseAgent):
             )
             yield to_adk_event(ev, self.name)
             return
+
+        # Pre-warm during the idle wait (the dominant post-claim cost in-cloud is the first
+        # GCS/Logging channel + auth). Emitting the readiness marker doubles as warming the
+        # Cloud Logging client AND the "pool is warm" signal the control plane waits on.
+        await asyncio.to_thread(_prewarm, spec)
 
         deadline = time.monotonic() + resolve_max_wait_s()
         claimed: dict | None = None

@@ -48,6 +48,27 @@ def dispatch_payload(session_id: str, message: str, resume: bool) -> dict:
     return {"session_id": session_id, "message": message, "resume": bool(resume)}
 
 
+def pool_log_id(name: str) -> str:
+    """A stable Cloud Logging ``session_id`` an idle worker emits readiness under.
+
+    Idle workers have no real session, so they tag a "pool ready" marker with this id; the
+    control plane tails it to learn the pool is warm (see ``GeminiEngine.wait_until_warm``).
+    """
+    return f"ratk-{_safe(name)}-pool"
+
+
+def pool_log_id_from_subscription(subscription: str) -> str:
+    """Derive the same :func:`pool_log_id` from ``AGENT_POOL_SUBSCRIPTION`` (worker side).
+
+    The subscription is ``.../ratk-<slug>-dispatch-sub``; strip to ``ratk-<slug>-pool`` so it
+    matches ``pool_log_id(name)`` without the worker needing the agent name.
+    """
+    base = subscription.rsplit("/", 1)[-1]
+    if base.endswith("-dispatch-sub"):
+        base = base[: -len("-dispatch-sub")]
+    return f"{base}-pool"
+
+
 def worker_dispatch_from_env(credentials: Any | None = None):
     """Build a claim-only ``DispatchTransport`` for a pool worker, from the env.
 

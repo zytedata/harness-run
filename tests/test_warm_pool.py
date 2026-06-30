@@ -28,6 +28,11 @@ def test_pool_helpers(monkeypatch):
     monkeypatch.delenv("AGENT_POOL_SUBSCRIPTION", raising=False)
     assert pool.worker_dispatch_from_env() is None  # not a pool worker without the env
 
+    # Readiness pool-id is consistent: derived from the name (control plane) == from the
+    # subscription (worker side), so both tail/emit the same Cloud Logging key.
+    assert pool.pool_log_id("Spider-Builder") == "ratk-spider-builder-pool"
+    assert pool.pool_log_id_from_subscription(sub) == pool.pool_log_id("Spider-Builder")
+
 
 def test_warm_session_dispatches_and_tails(monkeypatch):
     spec = AgentSpec(name="w", model="m")

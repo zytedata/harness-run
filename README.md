@@ -165,9 +165,11 @@ The **`local` path ignores `packages`** — locally the agent uses your machine'
 installs at runtime, so you iterate without a rebuild. Because building the engine image is slow (~10 min),
 pin only what genuinely needs to be baked in and lean on runtime `uv` for the rest.
 
-> **Troubleshooting install issues locally.** Reproducing the exact engine image (base OS, glibc, Python
-> 3.12, system tools) on your machine — so you don't debug install failures through 10-minute cloud
-> rebuilds — is a known pain point we're still scoping (see the open question in `DESIGN.md`).
+> **Troubleshooting install issues locally.** A dev image under [`dev/`](dev/) mirrors the engine's install
+> contract (Debian/glibc, Python 3.12, `uv`, `git`, your `packages`) so dependency failures surface in seconds
+> instead of through ~10-min cloud rebuilds: `make parity-build PACKAGES="pandas==2.2.*"`, then `make
+> parity-check` (or `parity-shell` to run your agent inside it). It reproduces the *install* environment, not
+> the full managed runtime.
 
 ## Prod: deploy once, look up and run _(P2)_
 

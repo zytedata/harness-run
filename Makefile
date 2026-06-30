@@ -1,0 +1,32 @@
+# Developer convenience targets. The `parity-*` targets build/run a dev image that mirrors
+# the Gemini Agent Runtime install contract (see dev/Dockerfile and dev/README.md), so
+# dependency/install issues surface locally instead of via ~10-min cloud rebuilds.
+
+VENV ?= .venv
+IMAGE ?= ratk-dev
+PACKAGES ?=
+
+.PHONY: test lint parity-build parity-shell parity-check
+
+test:
+	$(VENV)/bin/python -m pytest -q
+
+lint:
+	$(VENV)/bin/ruff check .
+
+# Build the parity image. Pass the agent's spec.packages so they install exactly as on the
+# engine, e.g.:  make parity-build PACKAGES="pandas==2.2.* httpx>=0.27"
+parity-build:
+	docker build -f dev/Dockerfile -t $(IMAGE) $(if $(PACKAGES),--build-arg EXTRA_PACKAGES="$(PACKAGES)",) .
+
+# Interactive shell in the parity image, with the repo mounted at /work and your Claude auth
+# forwarded — run `python examples/minimal/agent.py` (or your own script) inside it.
+parity-shell:
+	docker run --rm -it -e ANTHROPIC_API_KEY -v "$(CURDIR)":/work -w /work $(IMAGE)
+
+# Sanity check (no model call): confirm the toolkit imports and uv is present in the image.
+parity-check:
+	docker run --rm $(IMAGE) python -c "import remote_agent_toolkit, shutil, sys; \
+print('python', sys.version.split()[0]); \
+print('toolkit import OK'); \
+print('uv on PATH:', shutil.which('uv') is not None)"

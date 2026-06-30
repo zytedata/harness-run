@@ -1,0 +1,12 @@
+# Keep the build context small/fast (esp. the multi-hundred-MB .venv) — the dev image
+# COPYs only what it needs from the context anyway.
+.venv
+.git
+**/__pycache__
+*.pyc
+.pytest_cache
+.ruff_cache
+.mypy_cache
+*.egg-info
+dist
+build

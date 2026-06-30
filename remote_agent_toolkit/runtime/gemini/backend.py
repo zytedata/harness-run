@@ -403,12 +403,13 @@ class GeminiEngine:
     def get_session(self, session_id: str) -> GeminiSession:
         return self._sessions.get(session_id) or GeminiSession(self, session_id)
 
-    def wait_until_warm(self, timeout: float = 300.0) -> bool:
+    def wait_until_warm(self, timeout: float = 600.0) -> bool:
         """Block until a pool worker reports ready (or ``timeout``); ``True`` if warm.
 
         Tails Cloud Logging for the pool readiness marker a worker emits once it has finished
-        its cold start and pre-warmed. No-op (returns ``True``) for a non-warm engine. Sync —
-        call it from sync code, after ``deploy``, before dispatching turns.
+        its cold start and pre-warmed. The worker's cold start varies (~2.5–5 min: image pull
+        + scheduling), so the default timeout is generous. No-op (returns ``True``) for a
+        non-warm engine. Sync — call it after ``deploy``, before dispatching turns.
         """
         if not self._warm:
             return True
@@ -436,23 +437,25 @@ class GeminiEngine:
         """Cancel the engine's still-running query jobs (e.g. idle pool workers).
 
         The genai surface cancels a query job by operation name but has no list — so enumerate
-        the engine's operations over REST (via an auth'd session; no raw token handling), then
-        cancel each unfinished one with ``cancel_query_job`` (the *generic* operation ``:cancel``
-        does NOT stop a query-job worker — verified). Best-effort; needed to delete a reused
-        warm engine whose worker jobs weren't submitted in this process. Note a cancelled
-        worker takes a few minutes to actually stop, so ``delete`` retries well past this.
+        the engine's operations over REST, then cancel each unfinished one with
+        ``cancel_query_job`` (the *generic* operation ``:cancel`` does NOT stop a query-job
+        worker — verified). Best-effort; needed to delete a reused warm engine whose worker
+        jobs weren't submitted in this process. A cancelled worker takes a few minutes to
+        actually stop, so ``delete`` retries well past this.
         """
         import google.auth
         import google.auth.transport.requests as greq
+        import requests
 
         creds = self._credentials
         if creds is None:
             creds, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
-        session = greq.AuthorizedSession(creds)
+        creds.refresh(greq.Request())  # explicit refresh — reliable for impersonated creds
+        headers = {"Authorization": f"Bearer {creds.token}"}
         ae = self._agent_engines()
         base = f"https://{self._location}-aiplatform.googleapis.com"
         for ver in ("v1beta1", "v1"):
-            resp = session.get(f"{base}/{ver}/{self._resource}/operations", timeout=30)
+            resp = requests.get(f"{base}/{ver}/{self._resource}/operations", headers=headers, timeout=30)
             if resp.status_code != 200:
                 continue
             for op in resp.json().get("operations", []):

@@ -352,9 +352,12 @@ class GeminiEngine:
     def _fill_pool(self, n: int) -> None:
         """Submit ``n`` pre-warmed workers (each a job blocked on ``__POOL_WAIT__``)."""
         ae = self._agent_engines()
-        payload = {"input": {"user_id": _USER_ID, "message": POOL_WAIT_SENTINEL}}
-        cfg: dict[str, Any] = {"query": json.dumps(payload)}
+        query = json.dumps({"input": {"user_id": _USER_ID, "message": POOL_WAIT_SENTINEL}})
+        bucket = self._output_bucket or f"gs://{self._project}-agent-output"
         for _ in range(n):
+            # run_query_job requires output_gcs_uri; a worker's job output is never read (we
+            # tail Cloud Logging), so a throwaway per-worker path is fine.
+            cfg = {"query": query, "output_gcs_uri": f"{bucket}/pool/{uuid.uuid4().hex}.jsonl"}
             ae.run_query_job(name=self._resource, config=cfg)
 
     def start_session(self) -> GeminiSession:

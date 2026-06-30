@@ -1,4 +1,4 @@
-"""Generic ``AgentEvent`` → ADK ``Event`` (the gemini deploy side) — P2.
+"""Generic ``AgentEvent`` → ADK ``Event`` (the gemini deploy side).
 
 On Gemini Agent Runtime the deployed agent is an ADK ``BaseAgent``, so each generic
 :class:`AgentEvent` the harness emits is also surfaced as an ADK ``Event`` for the engine's

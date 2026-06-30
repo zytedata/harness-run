@@ -87,3 +87,38 @@ def provision_repo(
     for cfg_key, val in (("user.name", user_name), ("user.email", user_email)):
         subprocess.run(["git", "config", cfg_key, val], cwd=str(repo_dir), check=False)
     return repo_dir
+
+
+# Conventional GitHub token names looked up in resolved secrets, in priority order.
+_GH_TOKEN_KEYS = ("GH_TOKEN", "GITHUB_TOKEN", "GH_PAT")
+
+
+def provision_repos(
+    job_dir: Path,
+    repos,
+    secrets: dict | None = None,
+    *,
+    user_name: str = "Agent",
+    user_email: str = "agent@example.com",
+) -> list[str]:
+    """Clone each ``RepoSource`` in ``repos`` into ``job_dir`` before the agent runs.
+
+    If ``secrets`` carries a GitHub token (``GH_TOKEN`` / ``GITHUB_TOKEN`` / ``GH_PAT``) and
+    the URL is HTTPS, the clone is token-authenticated (push-ready, with a commit identity);
+    otherwise it's a plain read-only clone (fine for public repos). Honors each source's
+    ``ref``. Returns the cloned directory names (under ``job_dir``).
+    """
+    if not repos:
+        return []
+    secrets = secrets or {}
+    token = next((secrets[k] for k in _GH_TOKEN_KEYS if secrets.get(k)), None)
+    names: list[str] = []
+    for repo in repos:
+        dest = Path(job_dir) / repo_name(repo.url)
+        use_pat = token if (token and repo.url.startswith("https://")) else None
+        clone(repo.url, ref=repo.ref, dest=dest, pat=use_pat)
+        if use_pat:  # configure a commit identity so the agent can commit + push
+            for cfg_key, val in (("user.name", user_name), ("user.email", user_email)):
+                subprocess.run(["git", "config", cfg_key, val], cwd=str(dest), check=False)
+        names.append(dest.name)
+    return names

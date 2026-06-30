@@ -41,7 +41,7 @@ spec = AgentSpec(
     permission_mode="bypassPermissions",     # the default — safe because each run gets an isolated cwd
     max_turns=120,
     max_budget_usd=10.0,
-    checkpoint=True,                          # enable resume / interactive pauses
+    checkpoint=True,                         # enable resume / interactive pauses
 )
 ```
 
@@ -147,6 +147,28 @@ Beyond skills, several `AgentSpec` fields shape what the agent can do and the en
 `uv pip install …` inside its working directory. That covers most "use library X" needs with no change to
 the deployment. To pin libraries into the deployed engine instead, see
 [Pre-baked engine dependencies](#pre-baked-engine-dependencies) below.
+
+## Cloning a git repo
+
+A common setup is to clone a repo into the agent's working directory **before it runs** — so it can read and
+modify the code, then commit and push. Declare repos on the spec:
+
+```python
+from remote_agent_toolkit import AgentSpec, RepoSource
+
+spec = AgentSpec(
+    name="repo-fixer",
+    model="claude-sonnet-4-6",
+    repos=[RepoSource.git("https://github.com/zytedata/some-repo", ref="main")],
+    secrets=["GH_TOKEN"],   # a GitHub token makes the clone push-ready (and clones private repos)
+)
+```
+
+Each repo is cloned into the agent's cwd before the loop starts. If `secrets` carries a GitHub token
+(`GH_TOKEN` / `GITHUB_TOKEN` / `GH_PAT`), the clone is **authenticated and push-ready** — the token is injected
+into `origin` and a commit identity is configured, so the agent can `git push` without handling credentials;
+otherwise it's a read-only clone (fine for public repos). On `gemini` the token comes from Secret Manager, on
+`local` from your environment. (To make the agent open PRs, also add `McpServer.github()`.)
 
 ## Pre-baked engine dependencies
 

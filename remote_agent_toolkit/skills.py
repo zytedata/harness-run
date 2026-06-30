@@ -47,7 +47,7 @@ def _resolve_source_dir(source: SkillSource) -> Path:
         clone_dir = git.clone(source.url, ref=source.ref)
         return clone_dir / source.subdir
     if source.kind == "builtin":
-        raise NotImplementedError("builtin skill bundles are not shipped yet (P3)")
+        raise NotImplementedError("builtin skill bundles are not shipped yet")
     raise ValueError(f"unknown SkillSource kind: {source.kind!r}")
 
 

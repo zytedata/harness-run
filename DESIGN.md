@@ -221,7 +221,7 @@ new version. App code pins or takes latest; it does not deploy.
 **Key types** (sketch — finalized in `spec.py` / `runtime/base.py`):
 
 - `AgentSpec` — the declarative definition. Serializable (`to_dict` / `AgentSpec.from_yaml`).
-- `SystemPrompt.inherit(append=..., exclude_dynamic_sections=...)` — inherit the harness's built-in
+- `SystemPrompt.inherit(append=...)` — inherit the harness's built-in
   system prompt and append. A plain `str` replaces it entirely.
 - `SkillSource` — `.git(url, ref=)`, `.local(path)`, `.builtin(name)`; a list allows base + extra sources
   (multi-source skills, §12). Resolved & staged at deploy/run time.

@@ -23,10 +23,12 @@ class SecretResolver(Protocol):
 
 
 class GcpSecretResolver:
-    """Secret Manager-backed :class:`SecretResolver` (P2).
+    """Secret Manager-backed :class:`SecretResolver` (not implemented yet).
 
     Authorizes against the RE service agent at runtime (DESIGN.md §6). The Secret
-    Manager client is imported lazily inside ``resolve``.
+    Manager client is imported lazily inside ``resolve``. Note: on the deployed engine the
+    platform already injects ``spec.secrets`` as env vars, so the runtime path uses
+    ``EnvSecretResolver``; this is only for reading secrets at the control plane.
     """
 
     def __init__(self, project: str) -> None:
@@ -34,8 +36,8 @@ class GcpSecretResolver:
 
     def resolve(self, name: str) -> str:
         raise NotImplementedError(
-            "P2: read the latest version of secret `name` from Secret Manager in "
-            "self.project (authorized against the RE service agent)."
+            "GcpSecretResolver is not implemented yet: read the latest version of secret "
+            "`name` from Secret Manager in self.project (authorized against the RE service agent)."
         )
 
 

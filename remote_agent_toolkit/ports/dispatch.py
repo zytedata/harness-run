@@ -31,7 +31,7 @@ class DispatchTransport(Protocol):
 
 
 class PubSubDispatch:
-    """Pub/Sub-backed :class:`DispatchTransport` (competing-consumers; P2).
+    """Pub/Sub-backed :class:`DispatchTransport` (competing-consumers).
 
     ``google.cloud.pubsub_v1`` / ``google.api_core`` are imported lazily inside the
     methods so importing this module pulls in no third-party deps. A worker that only
@@ -123,7 +123,7 @@ class PubSubDispatch:
 
 
 class InMemoryDispatch:
-    """In-process :class:`DispatchTransport` for local dev / tests (P1).
+    """In-process :class:`DispatchTransport` for local dev / tests.
 
     Backed by a thread-safe :class:`queue.Queue`: ``claim`` runs from
     ``asyncio.to_thread`` and several workers may claim concurrently, so we rely on

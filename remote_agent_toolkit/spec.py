@@ -23,34 +23,21 @@ class SystemPrompt:
 
     Attributes:
         append: Text appended after the inherited prompt, or ``None`` for no addition.
-        exclude_dynamic_sections: Drop harness-injected dynamic sections (e.g. env/date
-            context) from the inherited prompt.
     """
 
     append: str | None = None
-    exclude_dynamic_sections: bool = False
 
     @classmethod
-    def inherit(
-        cls,
-        append: str | None = None,
-        exclude_dynamic_sections: bool = False,
-    ) -> SystemPrompt:
+    def inherit(cls, append: str | None = None) -> SystemPrompt:
         """Inherit the harness's built-in system prompt and append ``append``."""
-        return cls(append=append, exclude_dynamic_sections=exclude_dynamic_sections)
+        return cls(append=append)
 
     def to_dict(self) -> dict[str, Any]:
-        return {
-            "append": self.append,
-            "exclude_dynamic_sections": self.exclude_dynamic_sections,
-        }
+        return {"append": self.append}
 
     @classmethod
     def from_dict(cls, d: Mapping[str, Any]) -> SystemPrompt:
-        return cls(
-            append=d.get("append"),
-            exclude_dynamic_sections=bool(d.get("exclude_dynamic_sections", False)),
-        )
+        return cls(append=d.get("append"))
 
 
 @dataclass(frozen=True)
@@ -187,6 +174,36 @@ class McpServer:
 
 
 @dataclass(frozen=True)
+class RepoSource:
+    """A git repository cloned into the agent's working directory *before* it runs.
+
+    A common setup step: clone a repo so the agent can read/modify it, then commit and push.
+    Auth (for private repos / pushing) comes from a GitHub token in ``AgentSpec.secrets``
+    (``GH_TOKEN`` / ``GITHUB_TOKEN`` / ``GH_PAT``) — never carried here; the token is injected
+    into the clone's ``origin`` so the agent can ``git push`` without handling it. Without a
+    token the repo is cloned read-only (fine for public repos).
+    """
+
+    url: str
+    ref: str | None = None
+
+    @classmethod
+    def git(cls, url: str, ref: str | None = None) -> RepoSource:
+        """Clone ``url`` (optionally checking out ``ref``) into the agent's cwd before it runs."""
+        return cls(url=url, ref=ref)
+
+    def to_dict(self) -> dict[str, Any]:
+        d: dict[str, Any] = {"url": self.url}
+        if self.ref is not None:
+            d["ref"] = self.ref
+        return d
+
+    @classmethod
+    def from_dict(cls, d: Mapping[str, Any]) -> RepoSource:
+        return cls(url=d["url"], ref=d.get("ref"))
+
+
+@dataclass(frozen=True)
 class AgentSpec:
     """The declarative agent definition.
 
@@ -200,6 +217,8 @@ class AgentSpec:
         system_prompt: A ``SystemPrompt`` (inherit + append) or a plain ``str``
             (replace entirely) or ``None`` (harness default).
         skills: Skill sources, resolved & staged at deploy/run time.
+        repos: Git repositories cloned into the agent's cwd before it runs (with push auth
+            from a GitHub token in ``secrets`` when present).
         mcp_servers: MCP servers attached to the agent.
         allowed_tools / disallowed_tools: Tool allow/deny lists, or ``None`` for default.
         secrets: Secret *names* resolved from Secret Manager at runtime (never pickled).
@@ -214,15 +233,16 @@ class AgentSpec:
         output_schema: Optional structured-output schema (pydantic model or JSON schema).
         env: Extra environment variables for the runtime.
         packages: Python package requirement specifiers (e.g. ``"pandas==2.2.*"``) baked
-            into the deployed ``gemini`` engine image at deploy time (P2). The ``local``
-            runtime ignores these — locally the agent uses your environment plus whatever
-            it installs at runtime via ``uv``.
+            into the deployed ``gemini`` engine image at deploy time. The ``local`` runtime
+            ignores these — locally the agent uses your environment plus whatever it installs
+            at runtime via ``uv``.
     """
 
     name: str
     model: str
     system_prompt: str | SystemPrompt | None = None
     skills: tuple[SkillSource, ...] = ()
+    repos: tuple[RepoSource, ...] = ()
     mcp_servers: tuple[McpServer, ...] = ()
     allowed_tools: tuple[str, ...] | None = None
     disallowed_tools: tuple[str, ...] | None = None
@@ -238,6 +258,7 @@ class AgentSpec:
     def __post_init__(self) -> None:
         # Coerce list args to frozen-hashable tuples without breaking frozen-ness.
         object.__setattr__(self, "skills", tuple(self.skills))
+        object.__setattr__(self, "repos", tuple(self.repos))
         object.__setattr__(self, "mcp_servers", tuple(self.mcp_servers))
         object.__setattr__(self, "secrets", tuple(self.secrets))
         object.__setattr__(self, "packages", tuple(self.packages))
@@ -254,6 +275,7 @@ class AgentSpec:
             "name": self.name,
             "model": self.model,
             "skills": [s.to_dict() for s in self.skills],
+            "repos": [r.to_dict() for r in self.repos],
             "mcp_servers": [m.to_dict() for m in self.mcp_servers],
             "secrets": list(self.secrets),
             "permission_mode": self.permission_mode,
@@ -296,6 +318,7 @@ class AgentSpec:
             model=d["model"],
             system_prompt=system_prompt,
             skills=tuple(SkillSource.from_dict(s) for s in d.get("skills", ())),
+            repos=tuple(RepoSource.from_dict(r) for r in d.get("repos", ())),
             mcp_servers=tuple(McpServer.from_dict(m) for m in d.get("mcp_servers", ())),
             allowed_tools=tuple(allowed) if allowed is not None else None,
             disallowed_tools=tuple(disallowed) if disallowed is not None else None,
@@ -330,9 +353,8 @@ def _output_schema_to_dict(schema: Any) -> Any:
     * a plain ``dict`` is assumed to already be a JSON schema → pass through.
     * anything else is stored as-is.
 
-    TODO(P1): round-tripping back to a pydantic *class* is not supported; ``from_dict``
-    returns the JSON-schema dict. Decide whether to reconstruct via ``jsonschema``/a
-    registry once structured outputs land.
+    Note: round-tripping back to a pydantic *class* is not supported; ``from_dict`` returns
+    the JSON-schema dict (which the parser validates against just the same).
     """
     model_json_schema = getattr(schema, "model_json_schema", None)
     if callable(model_json_schema):

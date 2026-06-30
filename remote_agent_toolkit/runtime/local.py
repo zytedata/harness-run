@@ -134,8 +134,8 @@ class LocalSession:
 
     def fork(self) -> LocalSession:
         raise NotImplementedError(
-            "P2: fork copies this session's workspace snapshot + transcript under a new "
-            "session id so the branch shares prior history."
+            "fork is not supported yet — it would copy this session's workspace snapshot + "
+            "transcript under a new session id so the branch shares prior history."
         )
 
 
@@ -172,7 +172,11 @@ class LocalEngine:
         return out
 
     def _prepare_workspace(self, ctx: Any, is_resume: bool) -> dict:
-        """Restore a prior workspace (resume) or stage skills into a fresh cwd. Sync."""
+        """Restore a prior workspace (resume) or stage skills + clone repos into a fresh cwd.
+
+        On resume the repos/skills come back in the restored workspace, so we only stage on a
+        fresh cwd. Sync (runs off the event loop).
+        """
         restored = False
         if is_resume and ctx.blobs is not None and ctx.resume_sid:
             from ..checkpoint.workspace import restore
@@ -182,17 +186,26 @@ class LocalEngine:
             except Exception:  # noqa: BLE001 — fall back to a fresh workspace
                 restored = False
         names: list[str] = []
+        repos: list[str] = []
         if not restored:
             ctx.job_dir.mkdir(parents=True, exist_ok=True)
             if ctx.spec.skills:
                 from ..skills import provision
 
                 names = provision(ctx.spec.skills, str(ctx.job_dir))
+            if ctx.spec.repos:
+                from ..integrations.git import provision_repos
+
+                repos = provision_repos(ctx.job_dir, ctx.spec.repos, ctx.secrets)
         return {
             "event": "workspace_ready",
             "restored": restored,
             "skills": names,
-            "summary": f"workspace ready (restored={restored}, skills staged={len(names)})",
+            "repos": repos,
+            "summary": (
+                f"workspace ready (restored={restored}, skills staged={len(names)}, "
+                f"repos cloned={len(repos)})"
+            ),
         }
 
     # -- Engine protocol -------------------------------------------------------

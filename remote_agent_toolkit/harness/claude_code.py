@@ -4,7 +4,7 @@ Drives ``claude_agent_sdk.query()`` against the per-run working directory and tr
 each streamed SDK message into a generic :class:`AgentEvent` (via :mod:`translate`), so
 the rest of the toolkit — and every runtime (``local`` / ``gemini``) — stays harness-
 agnostic. This is the generalized, ADK-free core of the PoC ``ClaudeCodeAgent``: the
-ADK / Agent Engine wrapping is a ``gemini``-side concern (P2), not the harness's.
+ADK / Agent Engine wrapping is a ``gemini``-side concern, not the harness's.
 
 ``claude_agent_sdk`` is imported lazily inside methods, so importing this module needs no
 third-party deps.
@@ -68,7 +68,6 @@ class ClaudeCodeHarness:
             return sp + suffix if suffix else sp
         if isinstance(sp, SystemPrompt):
             append = (sp.append or "") + suffix
-            # TODO(P2): sp.exclude_dynamic_sections has no documented preset knob yet.
             preset: dict[str, Any] = {"type": "preset", "preset": "claude_code"}
             if append:
                 preset["append"] = append

@@ -9,12 +9,13 @@ from __future__ import annotations
 
 from .events import AgentEvent, RunResult, RunStatus, StopReason
 from .runtime import gemini, local
-from .spec import AgentSpec, McpServer, SkillSource, SystemPrompt
+from .spec import AgentSpec, McpServer, RepoSource, SkillSource, SystemPrompt
 
 __all__ = [
     "AgentSpec",
     "SystemPrompt",
     "SkillSource",
+    "RepoSource",
     "McpServer",
     "AgentEvent",
     "RunResult",

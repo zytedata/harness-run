@@ -1,4 +1,4 @@
-"""The deployed ADK agent that wraps the (ADK-free) harness — P2.
+"""The deployed ADK agent that wraps the (ADK-free) harness.
 
 Gemini Agent Runtime serves an ADK ``BaseAgent``; this is the gemini-side equivalent of
 ``LocalSession``'s run factory. Its ``_run_async_impl`` resolves the platform bits
@@ -129,6 +129,7 @@ def _prepare_workspace(rc: Any) -> dict:
         except Exception:  # noqa: BLE001 — fall back to a fresh workspace
             restored = False
     names: list[str] = []
+    repos: list[str] = []
     if not restored:
         rc.job_dir.mkdir(parents=True, exist_ok=True)
         baked = _find_baked_skills()
@@ -137,11 +138,19 @@ def _prepare_workspace(rc: Any) -> dict:
         sources = (SkillSource.local(str(baked)),) if baked else rc.spec.skills
         if sources:
             names = provision(sources, str(rc.job_dir))
+        if rc.spec.repos:
+            from ...integrations.git import provision_repos
+
+            repos = provision_repos(rc.job_dir, rc.spec.repos, rc.secrets)
     return {
         "event": "workspace_ready",
         "restored": restored,
         "skills": names,
-        "summary": f"workspace ready (restored={restored}, skills staged={len(names)})",
+        "repos": repos,
+        "summary": (
+            f"workspace ready (restored={restored}, skills staged={len(names)}, "
+            f"repos cloned={len(repos)})"
+        ),
     }
 
 

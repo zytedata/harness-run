@@ -1,4 +1,4 @@
-"""Warm-pool helpers (DESIGN.md §6) — P2b.
+"""Warm-pool helpers (DESIGN.md §6).
 
 The way to get fast *and* long on Gemini Agent Runtime: pre-warmed async jobs blocked on an
 inbound channel. A job submitted with the ``__POOL_WAIT__`` sentinel becomes a worker that

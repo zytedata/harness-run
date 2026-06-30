@@ -142,7 +142,7 @@ def deploy(
 
 def _resolve_resource(client: Any, name: str, version: str | None) -> str:
     if version is not None:
-        raise NotImplementedError("version pinning is P2c; omit `version` to use the latest engine.")
+        raise NotImplementedError("version pinning is not supported yet; omit `version` for the latest engine.")
     if "/reasoningEngines/" in name or "/agentEngines/" in name:
         return name  # already a full resource path
     matches = [
@@ -316,7 +316,9 @@ class GeminiSession:
         return self._session_id
 
     def fork(self) -> GeminiSession:
-        raise NotImplementedError("fork is P2c (copy workspace snapshot + transcript under a new id).")
+        raise NotImplementedError(
+            "fork is not supported yet (would copy the workspace snapshot + transcript under a new id)."
+        )
 
 
 class GeminiEngine:

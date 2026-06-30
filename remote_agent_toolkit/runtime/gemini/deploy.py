@@ -1,4 +1,4 @@
-"""Packaging + deploy contracts for Gemini Agent Runtime — P2.
+"""Packaging + deploy contracts for Gemini Agent Runtime.
 
 Encodes the §6 deploy contracts so consumers inherit them for free:
 
@@ -61,7 +61,7 @@ _BASE_REQUIREMENTS: tuple[str, ...] = (
 
 
 def build_requirements(spec: AgentSpec) -> list[str]:
-    """Compute the runtime ``requirements`` list, applying the §6 build contracts (P2).
+    """Compute the runtime ``requirements`` list, applying the §6 build contracts.
 
     Returns the base third-party deps every engine needs (uv, the a2a-sdk pin,
     claude-agent-sdk, google-adk, the GCP/otel stack) followed by the agent's own declared

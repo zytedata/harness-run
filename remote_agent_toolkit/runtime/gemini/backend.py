@@ -329,6 +329,7 @@ class GeminiEngine:
         self._subscription = subscription
         self._created = time.time()  # readiness-tail watermark (ignore stale pool markers)
         self._sessions: dict[str, GeminiSession] = {}
+        self._pool_jobs: list[str] = []  # tracked pool-worker job names (to cancel on delete)
 
     def _client(self) -> Any:
         import vertexai
@@ -358,7 +359,12 @@ class GeminiEngine:
             # run_query_job requires output_gcs_uri; a worker's job output is never read (we
             # tail Cloud Logging), so a throwaway per-worker path is fine.
             cfg = {"query": query, "output_gcs_uri": f"{bucket}/pool/{uuid.uuid4().hex}.jsonl"}
-            ae.run_query_job(name=self._resource, config=cfg)
+            result = ae.run_query_job(name=self._resource, config=cfg)
+            # Track the worker's job so delete() can cancel it (a waiting worker is a
+            # long-running op that otherwise blocks engine deletion for up to its max-wait).
+            job_name = getattr(result, "job_name", None)
+            if job_name:
+                self._pool_jobs.append(job_name)
 
     def start_session(self) -> GeminiSession:
         if self._warm:
@@ -403,6 +409,45 @@ class GeminiEngine:
             return asyncio.run(asyncio.wait_for(_await(), timeout))
         except (TimeoutError, asyncio.TimeoutError):
             return False
+
+    def delete(self, *, delete_pool_resources: bool = False, timeout: float = 300.0) -> None:
+        """Tear down the engine (ops action). Cancels tracked pool workers first.
+
+        A warm pool's idle workers are long-running jobs that block engine deletion until
+        they expire, so cancel them before deleting. ``delete_pool_resources`` also removes
+        the dispatch topic + subscription. (Workers submitted by *another* process aren't
+        tracked here; deletion still retries past their finalize, just more slowly.)
+        """
+        ae = self._agent_engines()
+        for job_name in self._pool_jobs:
+            try:
+                ae.cancel_query_job(name=self._resource, config={"operation_name": job_name})
+            except Exception:  # noqa: BLE001 — already done / cancelled / unknown
+                pass
+
+        deadline = time.time() + timeout
+        while True:
+            try:
+                ae.delete(name=self._resource, force=True)
+                break
+            except Exception:  # noqa: BLE001 — retry past a still-finalizing operation
+                if time.time() >= deadline:
+                    raise
+                time.sleep(15)
+
+        if delete_pool_resources and self._topic and self._subscription:
+            from google.cloud import pubsub_v1
+
+            try:
+                pubsub_v1.SubscriberClient(credentials=self._credentials).delete_subscription(
+                    subscription=self._subscription
+                )
+            except Exception:  # noqa: BLE001 — best effort (NotFound / perms)
+                pass
+            try:
+                pubsub_v1.PublisherClient(credentials=self._credentials).delete_topic(topic=self._topic)
+            except Exception:  # noqa: BLE001 — best effort (NotFound / perms)
+                pass
 
     def versions(self) -> list[str]:
         return ["latest"]

@@ -64,6 +64,29 @@ def test_warm_session_dispatches_and_tails(monkeypatch):
     assert session.status == RunStatus.IDLE and session.stop_reason == StopReason.END_TURN
 
 
+def test_engine_delete_cancels_pool_jobs_then_deletes(monkeypatch):
+    spec = AgentSpec(name="w", model="m")
+    engine = backend.GeminiEngine(
+        resource="r/reasoningEngines/1", spec=spec, project=None, location=None,
+        warm=True, topic="t", subscription="s",
+    )
+    engine._pool_jobs = ["jobA", "jobB"]
+    calls = {"cancel": [], "delete": 0}
+
+    class FakeAE:
+        def cancel_query_job(self, name, config):
+            calls["cancel"].append(config["operation_name"])
+
+        def delete(self, name, force):
+            calls["delete"] += 1
+
+    monkeypatch.setattr(engine, "_agent_engines", lambda: FakeAE())
+    engine.delete()  # delete_pool_resources defaults False -> no pubsub calls
+    # Both tracked workers cancelled before the engine is deleted.
+    assert calls["cancel"] == ["jobA", "jobB"]
+    assert calls["delete"] == 1
+
+
 def test_pool_worker_claims_and_runs(monkeypatch):
     spec = AgentSpec(name="w", model="m")
     agent = adk_agent.build_agent(spec)

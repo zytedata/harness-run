@@ -7,7 +7,7 @@ checkpoint/resume and warm starts, without re-learning the platform's sharp edge
 
 > **Status: `local` and Gemini Agent Runtime both work — validated live.** Define an `AgentSpec` and run it
 > in-process (`local.deploy`), or deploy + run on Agent Runtime (`gemini.deploy` / `gemini.get_engine`), with
-> skills, structured output, checkpoint/resume, and a **warm pool** (~12 s pickup vs ~2.5 min cold) — all
+> skills, structured output, checkpoint/resume, and a **warm pool** (~10–20 s pickup vs ~2.5 min cold) — all
 > exercised end-to-end on real infrastructure. The two paths share one `Engine`/`Session`/`Run` API. Not yet
 > built (raise `NotImplementedError` or simply absent): session `fork()`, `get_engine(version=…)` pinning, and
 > a sync run path. See [`examples/minimal`](examples/minimal) for a runnable agent and
@@ -294,7 +294,7 @@ deploys — it looks an engine up by name and runs.
 | Path | Start latency | Ceiling | Use for |
 |---|---|---|---|
 | Async (default) | **~2.5 min** per-job worker provisioning | long-running | one-shot / long autonomous jobs |
-| **Warm pool** (`warm_pool=True`) | **~12 s** measured (≈5 s floor with more pre-warm tuning) | long-running | interactive *and* long — best of both |
+| **Warm pool** (`warm_pool=True`) | **~10–20 s** to first *observed* event | long-running | interactive *and* long — best of both |
 | Sync | ~3–9 s | ~600 s (10 min) hard | _not supported yet (see below)_ |
 
 The ~2.5 min async start is **per job, not a one-time cold start** — it's Vertex provisioning a dedicated
@@ -308,9 +308,10 @@ interactive work. We can add sync later if a genuinely short-turn use case needs
 **How `warm_pool=True` works.** `gemini.deploy(spec, warm_pool=True)` keeps a pool of pre-provisioned workers,
 each blocked on a Pub/Sub subscription (a competing-consumers *atomic claim*). A worker warms its Cloud
 Logging + storage channels during its idle wait and reports ready — `engine.wait_until_warm()` blocks on that
-signal. A run is then dispatched to a free worker, so the turn goes nearly straight to the model (**~12 s**
-to first event in testing, vs ~2.5 min cold; the ~5 s floor is reachable with further pre-warm tuning). On
-claim the pool refills, so the next turn is warm too.
+signal. A run is then dispatched to a free worker, so the turn goes nearly straight to the model. The first
+**observed** event lands **~10–20 s** after dispatch (vs ~2.5 min cold) — that window is dominated by **Cloud
+Logging's write→queryable ingestion lag**, which varies run to run and is inherent to a log-tail channel; the
+worker's *actual* pickup is ~5 s. On claim the pool refills, so the next turn is warm too.
 
 > _Keeping the pool full:_ warm workers are themselves long-running jobs and will eventually exit at the
 > platform's max-job-duration limit (whose exact value we haven't pinned down). Topping the pool back up

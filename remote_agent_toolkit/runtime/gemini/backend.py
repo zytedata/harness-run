@@ -90,7 +90,14 @@ def deploy(
     # Warm pool: the workers pull a shared dispatch subscription; the engine env points at it.
     topic = subscription = None
     if warm_pool:
+        from ...ports.dispatch import PubSubDispatch
+
         topic, subscription = pool_paths(project, spec.name)
+        # Ensure the topic/sub FIRST — fail fast on missing pub/sub perms BEFORE the (~4 min,
+        # billable) engine build, so a perms error never leaks a half-provisioned engine.
+        PubSubDispatch(
+            topic=topic, subscription=subscription, project=project, credentials=credentials
+        ).ensure()
 
     stage_dir, extra_packages = stage_agent(spec)
     os.chdir(stage_dir)  # extra_packages are resolved relative to the cwd
@@ -122,8 +129,14 @@ def deploy(
         subscription=subscription,
     )
     if warm_pool:
-        geng._dispatch().ensure()  # idempotently create the topic + subscription
-        geng._fill_pool(pool_size)  # block pool_size workers on the dispatch sub
+        try:
+            geng._fill_pool(pool_size)  # block pool_size workers on the dispatch sub
+        except Exception:  # don't leak the freshly-created engine if filling the pool fails
+            try:
+                client.agent_engines.delete(name=geng.resource, force=True)
+            except Exception:  # noqa: BLE001
+                pass
+            raise
     return geng
 
 

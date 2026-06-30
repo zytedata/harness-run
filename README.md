@@ -212,6 +212,7 @@ project (tighten to your policy):
 | `roles/storage.admin` (or objectAdmin on the buckets) | stage the deploy bundle; read job output |
 | `roles/logging.viewer` | tail the per-step event stream from the client |
 | `roles/cloudbuild.builds.editor` | the deploy builds the engine image |
+| `roles/pubsub.editor` _(warm pool only)_ | create the dispatch topic/subscription + publish turns |
 
 The principal that impersonates it needs `roles/iam.serviceAccountTokenCreator` **on this SA**.
 
@@ -259,7 +260,8 @@ RE="service-$NUM@gcp-sa-aiplatform-re.iam.gserviceaccount.com"     # runtime ide
 OP="agent-runtime@$PROJECT.iam.gserviceaccount.com"                # operator SA you create
 
 gcloud iam service-accounts create agent-runtime --project $PROJECT
-for R in roles/aiplatform.user roles/storage.admin roles/logging.viewer roles/cloudbuild.builds.editor; do
+for R in roles/aiplatform.user roles/storage.admin roles/logging.viewer roles/cloudbuild.builds.editor \
+         roles/pubsub.editor; do  # pubsub.editor only needed for warm pools
   gcloud projects add-iam-policy-binding $PROJECT --member "serviceAccount:$OP" --role $R; done
 gcloud projects add-iam-policy-binding $PROJECT --member "serviceAccount:$RE" --role roles/logging.logWriter
 # grant $RE secretAccessor per-secret and objectAdmin on the output bucket; let yourself impersonate $OP:

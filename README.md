@@ -186,13 +186,75 @@ result = await session.run("/scrape https://books.toscrape.com title, price")   
 **Managing deployed engines** (control plane):
 
 ```python
-gemini.deploy(spec, project=..., location=...)   # create / update; mints a new version
-gemini.get_engine("spider-builder")              # latest version (app code default)
-gemini.get_engine("spider-builder", version=3)   # pin a version
+gemini.deploy(spec, project=..., location=...)   # create; ops/CI only
+gemini.get_engine("spider-builder", project=..., location=...)   # look up by name (app code)
+gemini.get_engine("spider-builder", ..., spec=spec)              # pass spec for structured output
 gemini.list_engines(project=..., location=...)   # discover what's deployed
-engine.versions()                                # list versions of one engine
-engine.name, engine.version, engine.resource     # identity / underlying resource name
+engine.name, engine.resource                     # identity / underlying resource name
 ```
+
+Version pinning (`get_engine(..., version=N)`) is deferred to a later phase; `get_engine` resolves the latest
+engine of that name.
+
+## GCP setup & required permissions _(P2)_
+
+Deploying on Gemini Agent Runtime involves **two identities** — granting roles to the wrong one is the
+single most common setup mistake, so they're called out explicitly. Everything below can be created by a team
+in their own project; the concrete values are the shared `my-project` setup we use for testing.
+
+**1. The operator service account** — you (a human or CI) *impersonate* it to run the control plane:
+`gemini.deploy`, `get_engine`, `list_engines`, submitting runs, and tailing Cloud Logging. Roles on the
+project (tighten to your policy):
+
+| Role | Why |
+|---|---|
+| `roles/aiplatform.user` | create/list engines, run query jobs, create sessions |
+| `roles/storage.admin` (or objectAdmin on the buckets) | stage the deploy bundle; read job output |
+| `roles/logging.viewer` | tail the per-step event stream from the client |
+| `roles/cloudbuild.builds.editor` | the deploy builds the engine image |
+
+The principal that impersonates it needs `roles/iam.serviceAccountTokenCreator` **on this SA**.
+
+**2. The Agent Runtime service agent** — the engine's *runtime* identity, auto-created by Google as
+`service-<PROJECT_NUMBER>@gcp-sa-aiplatform-re.iam.gserviceaccount.com`. **All runtime resource access
+authorizes against this agent, not the operator SA** — granting the operator SA a runtime role does nothing
+for the running job. Grant it:
+
+| Role | Scope | Why |
+|---|---|---|
+| `roles/secretmanager.secretAccessor` | each secret in `spec.secrets` | the platform injects secret_refs, read as this agent |
+| `roles/storage.objectAdmin` | the output/checkpoint bucket | workspace snapshots, artifacts, the session store |
+| `roles/logging.logWriter` | project | the agent emits structured step logs |
+| `roles/pubsub.subscriber` | the dispatch subscription | warm-pool workers pull turns _(P2b)_ |
+
+**Prerequisites** (create with admin creds; `deploy` ensures the buckets it needs):
+
+- A staging bucket `gs://<project>-agent-staging` and an output bucket `gs://<project>-agent-output`.
+- One Secret Manager secret per `spec.secrets` entry, **named exactly the same as the env var** (1:1 — e.g. a
+  secret literally named `ZYTE_API_KEY`).
+- Claude model access: either an `ANTHROPIC_API_KEY` secret, or Vertex Claude enabled in your region.
+- _(P2b, warm pool)_ a Pub/Sub topic + subscription for turn dispatch.
+
+**Concrete shared setup** (`my-project`): location `us-central1` (Claude: `us-central1` + `global`);
+operator SA `agent-runtime@my-project.iam.gserviceaccount.com`; runtime agent
+`service-123456789012@gcp-sa-aiplatform-re.iam.gserviceaccount.com`. Sketch for a fresh project:
+
+```bash
+PROJECT=your-project; NUM=$(gcloud projects describe $PROJECT --format='value(projectNumber)')
+RE="service-$NUM@gcp-sa-aiplatform-re.iam.gserviceaccount.com"     # runtime identity
+OP="agent-runtime@$PROJECT.iam.gserviceaccount.com"                # operator SA you create
+
+gcloud iam service-accounts create agent-runtime --project $PROJECT
+for R in roles/aiplatform.user roles/storage.admin roles/logging.viewer roles/cloudbuild.builds.editor; do
+  gcloud projects add-iam-policy-binding $PROJECT --member "serviceAccount:$OP" --role $R; done
+gcloud projects add-iam-policy-binding $PROJECT --member "serviceAccount:$RE" --role roles/logging.logWriter
+# grant $RE secretAccessor per-secret and objectAdmin on the output bucket; let yourself impersonate $OP:
+gcloud iam service-accounts add-iam-policy-binding $OP --member "user:you@org.com" \
+  --role roles/iam.serviceAccountTokenCreator
+```
+
+Then authenticate impersonating the operator SA (`gcloud auth application-default login
+--impersonate-service-account=$OP`) before running `gemini.deploy`.
 
 ## Latency & cost _(P2 — the `gemini` path)_
 

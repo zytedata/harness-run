@@ -236,18 +236,18 @@ for the running job. Grant it:
 - _(P2b, warm pool)_ a Pub/Sub topic + subscription for turn dispatch.
 
 **Claude model access.** By default the toolkit routes Claude through **Vertex AI** (the engine authenticates
-as its own GCP identity — no API key to manage). For that to work you must, in the deploy project:
+as its own GCP identity — no API key to manage). For that to work:
 
 1. **Enable the Claude models you use in Vertex Model Garden** (accept the Anthropic terms once per project).
-   A deployed run fails with *"model … may not exist or you may not have access to it"* until this is done.
-2. Make sure those models are offered in your region — Claude on Vertex is served from specific locations
-   (e.g. `us-central1`, or the multi-region `global` endpoint).
-3. **Use the Vertex model id** in `spec.model`, which carries a version suffix and differs from the Anthropic
-   API alias — e.g. `claude-haiku-4-5@20251001`, not the bare `claude-haiku-4-5` you'd use locally. Check
-   Model Garden for the exact id available to you.
+   Until a model is enabled, a deployed run fails with *"model … may not exist or you may not have access to
+   it."*
+2. Set `spec.model` to the id shown in Model Garden — for current Claude models that's the family alias (e.g.
+   `claude-opus-4-8`), the same form you use locally. The toolkit defaults `CLOUD_ML_REGION` to `global`,
+   where these models are served; override `vertex_region` at deploy if you need a specific location.
 
-Prefer an API key instead? List `"ANTHROPIC_API_KEY"` in `spec.secrets` (with a matching Secret Manager
-secret) — the toolkit then uses the key and skips Vertex routing, and any model alias the key supports works.
+Prefer an API key (e.g. for models you haven't enabled on Vertex)? List `"ANTHROPIC_API_KEY"` in
+`spec.secrets` (with a matching Secret Manager secret) — the toolkit then uses the key and skips Vertex
+routing, so any model alias the key supports works.
 
 **Concrete shared setup** (`my-project`): location `us-central1` (Claude: `us-central1` + `global`);
 operator SA `agent-runtime@my-project.iam.gserviceaccount.com`; runtime agent

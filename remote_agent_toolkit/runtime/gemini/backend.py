@@ -67,6 +67,7 @@ def deploy(
     returns a :class:`GeminiEngine`. ``warm_pool`` provisioning of pool workers is P2b; for
     now it only flows into the engine config.
     """
+    import dataclasses
     import os
 
     import vertexai
@@ -76,6 +77,10 @@ def deploy(
     from .adk_agent import build_agent
     from .deploy import build_engine_config, stage_agent
 
+    # A model override applies to the harness too: the deployed agent reads spec.model, so
+    # bake the override into the spec (not just the env) before serializing it.
+    if model:
+        spec = dataclasses.replace(spec, model=model)
     staging_bucket = staging_bucket or f"gs://{project}-agent-staging"
     output_bucket = output_bucket or f"gs://{project}-agent-output"
 

@@ -28,9 +28,9 @@ ANTHROPIC_API_KEY=... make parity-shell
 your host and run it inside the parity environment. Claude auth is resolved from the environment exactly as
 the deployed engine resolves it.
 
-## When P2 lands
+## Relation to `gemini.deploy`
 
-`gemini.deploy` will install `AgentSpec.packages` into the engine image via the same uv-requirements path this
+`gemini.deploy` installs `AgentSpec.packages` into the engine image via the same uv-requirements path this
 image uses, so a clean `make parity-check` (and your agent running under `parity-shell`) is a strong signal
 that the deploy's install step will succeed too. See `DESIGN.md` §12 (local parity) for the open design
 questions.

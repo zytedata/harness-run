@@ -5,11 +5,13 @@ declaratively as an `AgentSpec`, then run it both **locally** (in-process, for d
 **Gemini Agent Runtime** (prod) through *one* API — with custom skills, GitHub access, structured outputs,
 checkpoint/resume and warm starts, without re-learning the platform's sharp edges.
 
-> **Status: P1 — the local run plane works.** You can define an `AgentSpec` and run it in-process today
-> (`local.deploy` → `Session`/`Run`, with skills, structured output, and checkpoint/resume). The **`gemini`
-> backend is P2** (deploy / warm pool / lookup are still stubs). See [`examples/minimal`](examples/minimal)
-> for a runnable agent, and [`DESIGN.md`](DESIGN.md) for the architecture, platform contracts (§6), and
-> roadmap (§11). Sections below marked _(P2)_ are the north-star target, not yet runnable.
+> **Status: `local` and Gemini Agent Runtime both work — validated live.** Define an `AgentSpec` and run it
+> in-process (`local.deploy`), or deploy + run on Agent Runtime (`gemini.deploy` / `gemini.get_engine`), with
+> skills, structured output, checkpoint/resume, and a **warm pool** (~12 s pickup vs ~2.5 min cold) — all
+> exercised end-to-end on real infrastructure. The two paths share one `Engine`/`Session`/`Run` API. Not yet
+> built (raise `NotImplementedError` or simply absent): session `fork()`, `get_engine(version=…)` pinning, and
+> a sync run path. See [`examples/minimal`](examples/minimal) for a runnable agent and
+> [`DESIGN.md`](DESIGN.md) for the architecture, platform contracts (§6), and roadmap (§11).
 
 ## Install
 
@@ -87,7 +89,7 @@ result = session.last_result                 # populated once the run completes
 run = session.run("/scrape ...")             # returns immediately
 while not run.done:
     await asyncio.sleep(2)
-    print(run.status)                        # running | idle | terminated
+    print(run.status)                        # pending | running | idle | terminated
 result = run.result
 
 # re-attach later / elsewhere by session id, then poll or continue
@@ -144,9 +146,9 @@ Beyond skills, several `AgentSpec` fields shape what the agent can do and the en
 `PATH`, so it can fetch and run dependencies on the fly — e.g. `uv run --with httpx script.py`, or
 `uv pip install …` inside its working directory. That covers most "use library X" needs with no change to
 the deployment. To pin libraries into the deployed engine instead, see
-[Pre-baked engine dependencies](#pre-baked-engine-dependencies-p2) below.
+[Pre-baked engine dependencies](#pre-baked-engine-dependencies) below.
 
-## Pre-baked engine dependencies _(P2)_
+## Pre-baked engine dependencies
 
 Runtime `uv` (above) is great for experimentation, but for **pinned versions, a private index, or packages
 you don't want re-fetched on every run**, declare them on the spec. `gemini.deploy` bakes them into the
@@ -171,14 +173,18 @@ pin only what genuinely needs to be baked in and lean on runtime `uv` for the re
 > parity-check` (or `parity-shell` to run your agent inside it). It reproduces the *install* environment, not
 > the full managed runtime.
 
-## Prod: deploy once, look up and run _(P2)_
+## Prod: deploy once, look up and run
+
+Requires GCP setup — see [GCP setup & required permissions](#gcp-setup--required-permissions) below.
 
 ```python
 # Ops / CI deploys once (rare):
-gemini.deploy(spec, project="my-project", location="us-central1", warm_pool=True)
+engine = gemini.deploy(spec, project="my-project", location="us-central1", warm_pool=True, pool_size=2)
+engine.wait_until_warm()                          # block until a pool worker reports ready (warm only)
 
-# App code looks the engine up by name (optionally a version) and runs — it never deploys:
-engine = gemini.get_engine("spider-builder")               # latest deployed version
+# App code looks the engine up by name and runs — it never deploys:
+engine = gemini.get_engine("spider-builder", project="my-project", location="us-central1",
+                           spec=spec, warm_pool=True)   # pass spec for structured output; warm_pool to dispatch
 session = engine.start_session()
 result = await session.run("/scrape https://books.toscrape.com title, price")   # default: wait for the result
 ```
@@ -186,17 +192,20 @@ result = await session.run("/scrape https://books.toscrape.com title, price")   
 **Managing deployed engines** (control plane):
 
 ```python
-gemini.deploy(spec, project=..., location=...)   # create; ops/CI only
+gemini.deploy(spec, project=..., location=...)   # create; ops/CI only (warm_pool=True, pool_size=N for a pool)
 gemini.get_engine("spider-builder", project=..., location=...)   # look up by name (app code)
 gemini.get_engine("spider-builder", ..., spec=spec)              # pass spec for structured output
 gemini.list_engines(project=..., location=...)   # discover what's deployed
 engine.name, engine.resource                     # identity / underlying resource name
+engine.wait_until_warm(timeout=300)              # warm pools: wait for a ready worker before dispatching
+engine.delete(delete_pool_resources=True)        # tear down: cancels pool workers, removes engine (+ topic/sub)
 ```
 
-Version pinning (`get_engine(..., version=N)`) is deferred to a later phase; `get_engine` resolves the latest
-engine of that name.
+Note: `engine.delete()` is the correct way to tear a warm pool down — its idle workers are long-running jobs
+that otherwise block deletion until they expire. Version pinning (`get_engine(..., version=N)`) and session
+`fork()` are not built yet; `get_engine` resolves the latest engine of that name.
 
-## GCP setup & required permissions _(P2)_
+## GCP setup & required permissions
 
 Deploying on Gemini Agent Runtime involves **two identities** — granting roles to the wrong one is the
 single most common setup mistake, so they're called out explicitly. Everything below can be created by a team
@@ -234,7 +243,8 @@ for the running job. Grant it:
 - One Secret Manager secret per `spec.secrets` entry, **named exactly the same as the env var** (1:1 — e.g. a
   secret literally named `ZYTE_API_KEY`).
 - **Claude model access** — see the note below; the deployed engine can't run without it.
-- _(P2b, warm pool)_ a Pub/Sub topic + subscription for turn dispatch.
+- _(warm pool)_ a Pub/Sub topic + subscription for turn dispatch — `gemini.deploy(warm_pool=True)` **creates
+  these for you** (given the operator SA's `pubsub.editor`); no manual setup needed.
 
 **Claude model access.** By default the toolkit routes Claude through **Vertex AI** (the engine authenticates
 as its own GCP identity — no API key to manage). For that to work:
@@ -272,7 +282,7 @@ gcloud iam service-accounts add-iam-policy-binding $OP --member "user:you@org.co
 Then authenticate impersonating the operator SA (`gcloud auth application-default login
 --impersonate-service-account=$OP`) before running `gemini.deploy`.
 
-## Latency & cost _(P2 — the `gemini` path)_
+## Latency & cost (the `gemini` path)
 
 Platform realities the toolkit encodes (measured on Agent Runtime; the `local` path has none of them):
 
@@ -284,7 +294,7 @@ deploys — it looks an engine up by name and runs.
 | Path | Start latency | Ceiling | Use for |
 |---|---|---|---|
 | Async (default) | **~2.5 min** per-job worker provisioning | long-running | one-shot / long autonomous jobs |
-| **Warm pool** (`warm_pool=True`) | **~5 s** | long-running | interactive *and* long — best of both |
+| **Warm pool** (`warm_pool=True`) | **~12 s** measured (≈5 s floor with more pre-warm tuning) | long-running | interactive *and* long — best of both |
 | Sync | ~3–9 s | ~600 s (10 min) hard | _not supported yet (see below)_ |
 
 The ~2.5 min async start is **per job, not a one-time cold start** — it's Vertex provisioning a dedicated
@@ -296,10 +306,11 @@ expose it yet** — the run plane is built around the async + warm-pool paths, w
 interactive work. We can add sync later if a genuinely short-turn use case needs the lower start latency.
 
 **How `warm_pool=True` works.** `gemini.deploy(spec, warm_pool=True)` keeps a pool of pre-provisioned workers,
-each blocked on a Pub/Sub subscription (a competing-consumers *atomic claim*). A run is dispatched to a free
-worker that has already provisioned skills and warmed its storage channel during its idle wait, so the turn
-goes nearly straight to the model (**~5 s** dispatch→first step vs ~2.5 min cold). On claim the pool refills,
-so the next turn is warm too.
+each blocked on a Pub/Sub subscription (a competing-consumers *atomic claim*). A worker warms its Cloud
+Logging + storage channels during its idle wait and reports ready — `engine.wait_until_warm()` blocks on that
+signal. A run is then dispatched to a free worker, so the turn goes nearly straight to the model (**~12 s**
+to first event in testing, vs ~2.5 min cold; the ~5 s floor is reachable with further pre-warm tuning). On
+claim the pool refills, so the next turn is warm too.
 
 > _Keeping the pool full:_ warm workers are themselves long-running jobs and will eventually exit at the
 > platform's max-job-duration limit (whose exact value we haven't pinned down). Topping the pool back up
@@ -308,8 +319,9 @@ so the next turn is warm too.
 
 **Cost.** Warm workers are long-running jobs sitting idle waiting for work, so you **pay for that idle compute**
 continuously — `warm_pool=True` trades money for latency. Size the pool to your concurrency, and leave it off
-for batch / non-interactive agents where a ~2.5 min start is fine. Model token cost is the same either way and
-is reported per run as `result.cost_usd`.
+for batch / non-interactive agents where a ~2.5 min start is fine. Tear a pool down with
+`engine.delete(delete_pool_resources=True)` (it cancels the idle workers, which otherwise keep billing until
+they expire). Model token cost is the same either way and is reported per run as `result.cost_usd`.
 
 ## Learn more
 

@@ -40,6 +40,14 @@ def test_to_adk_event_kinds():
     assert err.error_message == "boom"
 
 
+def test_build_agent_sanitizes_node_name():
+    # ADK BaseAgent.name must be a valid Python identifier; spec.name may have hyphens.
+    agent = adk_agent.build_agent(AgentSpec(name="hello-coder", model="m"))
+    assert agent.name == "hello_coder"
+    assert agent.spec_data["name"] == "hello-coder"  # the real name is preserved in the spec
+    assert adk_agent._safe_node_name("9to5") == "a_9to5"
+
+
 def test_split_resume_directive_and_parse_gcs():
     sid, rest = adk_agent._split_resume_directive("AGENT_RESUME=abc123\nplease continue")
     assert sid == "abc123" and rest == "please continue"

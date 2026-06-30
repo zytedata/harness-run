@@ -71,6 +71,22 @@ def test_build_env_model_override() -> None:
     assert env["CLAUDE_AGENT_MODEL"] == "claude-haiku-4-5"
 
 
+def test_build_env_vertex_routing_default_and_api_key_opt_out() -> None:
+    # Default (no ANTHROPIC_API_KEY secret) + a project => route Claude through Vertex.
+    env = deploy.build_env(_spec(), project="proj", vertex_region="global")
+    assert env["CLAUDE_CODE_USE_VERTEX"] == "1"
+    assert env["ANTHROPIC_VERTEX_PROJECT_ID"] == "proj"
+    assert env["CLOUD_ML_REGION"] == "global"
+
+    # Listing ANTHROPIC_API_KEY as a secret opts out of Vertex routing (uses the key).
+    env2 = deploy.build_env(_spec(secrets=["ANTHROPIC_API_KEY"]), project="proj")
+    assert "CLAUDE_CODE_USE_VERTEX" not in env2
+    assert env2["ANTHROPIC_API_KEY"] == {"secret": "ANTHROPIC_API_KEY", "version": "latest"}
+
+    # No project => no Vertex routing env (e.g. a unit context).
+    assert "CLAUDE_CODE_USE_VERTEX" not in deploy.build_env(_spec())
+
+
 def test_stage_skills_local(tmp_path: Path) -> None:
     # Fake local skill dir: one folder with a SKILL.md.
     src = tmp_path / "src"

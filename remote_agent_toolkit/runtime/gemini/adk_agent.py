@@ -165,6 +165,18 @@ class ToolkitAgent(BaseAgent):
             yield to_adk_event(event, self.name)
 
 
+def _safe_node_name(name: str) -> str:
+    """ADK ``BaseAgent.name`` must be a valid Python identifier; ``spec.name`` may not be.
+
+    The engine's *display name* keeps ``spec.name`` verbatim (hyphens fine); only this
+    internal ADK node name is sanitized (e.g. ``"spider-builder"`` -> ``"spider_builder"``).
+    """
+    safe = re.sub(r"\W", "_", name)
+    if not safe or safe[0].isdigit():
+        safe = "a_" + safe
+    return safe
+
+
 def build_agent(spec: Any) -> ToolkitAgent:
     """Build the deployable ADK agent from ``spec`` (carries the spec as a serialized dict)."""
-    return ToolkitAgent(name=spec.name, spec_data=spec.to_dict())
+    return ToolkitAgent(name=_safe_node_name(spec.name), spec_data=spec.to_dict())

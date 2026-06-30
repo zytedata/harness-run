@@ -81,8 +81,10 @@ def build_requirements(spec: AgentSpec) -> list[str]:
 def build_env(
     spec: AgentSpec,
     *,
+    project: str | None = None,
     model: str | None = None,
     output_bucket: str | None = None,
+    vertex_region: str = "global",
     warm_pool: bool = False,
     pool_subscription: str | None = None,
 ) -> dict:
@@ -127,6 +129,15 @@ def build_env(
     # Secrets: env-var name == Secret Manager secret name (1:1), value is a secret_ref dict.
     for name in spec.secrets:
         env[name] = {"secret": name, "version": "latest"}
+
+    # Claude model auth. Default: route Claude through Vertex, so the engine authenticates as
+    # its OWN GCP identity (the RE service agent) — no API key to manage. If the spec opts
+    # into an ANTHROPIC_API_KEY secret (injected above as a secret_ref), use that key instead
+    # and leave Vertex routing off.
+    if "ANTHROPIC_API_KEY" not in spec.secrets and project:
+        env["CLAUDE_CODE_USE_VERTEX"] = "1"
+        env["ANTHROPIC_VERTEX_PROJECT_ID"] = project
+        env["CLOUD_ML_REGION"] = vertex_region
 
     # Warm-pool worker config: a pooled job pulls turn assignments from this subscription.
     if warm_pool and pool_subscription:
@@ -225,6 +236,7 @@ def build_engine_config(
     extra_packages: list[str],
     model: str | None = None,
     output_bucket: str | None = None,
+    vertex_region: str = "global",
     warm_pool: bool = False,
     pool_subscription: str | None = None,
     min_instances: int = 1,
@@ -248,8 +260,10 @@ def build_engine_config(
         "extra_packages": extra_packages,
         "env_vars": build_env(
             spec,
+            project=project,
             model=model,
             output_bucket=output_bucket,
+            vertex_region=vertex_region,
             warm_pool=warm_pool,
             pool_subscription=pool_subscription,
         ),

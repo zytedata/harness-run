@@ -18,10 +18,12 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+import uuid
 from typing import Any, AsyncIterator, TYPE_CHECKING
 
 from ...events import RunResult, RunStatus, StopReason
 from .._run import DrivenRun
+from .pool import POOL_WAIT_SENTINEL, dispatch_payload, pool_paths
 
 if TYPE_CHECKING:
     from ...spec import AgentSpec
@@ -58,14 +60,15 @@ def deploy(
     model: str | None = None,
     min_instances: int = 1,
     max_instances: int = 1,
+    pool_size: int = 2,
     credentials: Any | None = None,
     **_: Any,
 ) -> Engine:
     """Deploy ``spec`` to Gemini Agent Runtime, minting an engine (ops/CI action).
 
-    Bakes the toolkit package + resolved skills, applies the §6 deploy contracts, and
-    returns a :class:`GeminiEngine`. ``warm_pool`` provisioning of pool workers is P2b; for
-    now it only flows into the engine config.
+    Bakes the toolkit package + resolved skills, applies the §6 deploy contracts, and returns
+    a :class:`GeminiEngine`. With ``warm_pool=True`` it also ensures the dispatch topic/sub and
+    fills the pool with ``pool_size`` pre-warmed workers (each a job blocked on ``__POOL_WAIT__``).
     """
     import dataclasses
     import os
@@ -84,6 +87,11 @@ def deploy(
     staging_bucket = staging_bucket or f"gs://{project}-agent-staging"
     output_bucket = output_bucket or f"gs://{project}-agent-output"
 
+    # Warm pool: the workers pull a shared dispatch subscription; the engine env points at it.
+    topic = subscription = None
+    if warm_pool:
+        topic, subscription = pool_paths(project, spec.name)
+
     stage_dir, extra_packages = stage_agent(spec)
     os.chdir(stage_dir)  # extra_packages are resolved relative to the cwd
     app = AdkApp(agent=build_agent(spec), enable_tracing=True)
@@ -96,19 +104,27 @@ def deploy(
         model=model,
         output_bucket=output_bucket,
         warm_pool=warm_pool,
+        pool_subscription=subscription,
         min_instances=min_instances,
         max_instances=max_instances,
     )
     client = vertexai.Client(project=project, location=location, credentials=credentials)
     engine = client.agent_engines.create(agent=app, config=gt.AgentEngineConfig(**config_kwargs))
-    return GeminiEngine(
+    geng = GeminiEngine(
         resource=engine.api_resource.name,
         spec=spec,
         project=project,
         location=location,
         output_bucket=output_bucket,
         credentials=credentials,
+        warm=warm_pool,
+        topic=topic,
+        subscription=subscription,
     )
+    if warm_pool:
+        geng._dispatch().ensure()  # idempotently create the topic + subscription
+        geng._fill_pool(pool_size)  # block pool_size workers on the dispatch sub
+    return geng
 
 
 def _resolve_resource(client: Any, name: str, version: str | None) -> str:
@@ -133,17 +149,22 @@ def get_engine(
     *,
     spec: AgentSpec | None = None,
     output_bucket: str | None = None,
+    warm_pool: bool = False,
     credentials: Any | None = None,
 ) -> Engine:
     """Look up a deployed engine by ``name`` (the app-code hot path; never deploys).
 
-    Pass ``spec=`` (the one you deployed) to enable structured-output parsing and the
-    correct idle stop-reason; otherwise a minimal fallback spec is used.
+    Pass ``spec=`` (the one you deployed) to enable structured-output parsing and the correct
+    idle stop-reason; otherwise a minimal fallback spec is used. Pass ``warm_pool=True`` to
+    address a warm-pool engine (turns are dispatched to its pool instead of cold-started).
     """
     import vertexai
 
     client = vertexai.Client(project=project, location=location, credentials=credentials)
     resource = _resolve_resource(client, name, version)
+    topic = subscription = None
+    if warm_pool:
+        topic, subscription = pool_paths(project, name)
     return GeminiEngine(
         resource=resource,
         spec=spec or _fallback_spec(name),
@@ -151,6 +172,9 @@ def get_engine(
         location=location,
         output_bucket=output_bucket or (f"gs://{project}-agent-output" if project else None),
         credentials=credentials,
+        warm=warm_pool,
+        topic=topic,
+        subscription=subscription,
     )
 
 
@@ -193,19 +217,29 @@ class GeminiSession:
         from ...ports.eventsink import CloudLoggingSink
 
         engine = self._engine
-        prompt = f"AGENT_RESUME={self._session_id}\n{message}" if resume else message
-        payload = {"input": {"session_id": self._session_id, "user_id": _USER_ID, "message": prompt}}
-        cfg: dict[str, Any] = {"query": json.dumps(payload)}
-        if engine._output_bucket:
-            cfg["output_gcs_uri"] = f"{engine._output_bucket}/jobs/{self._session_id}.jsonl"
-        # Watermark the log tail just before submitting (small slack for clock skew).
+        sid = self._session_id
+        # Watermark the log tail just before kicking off (small slack for clock skew).
         since = time.time() - 5
-        self._last_job = engine._agent_engines().run_query_job(name=engine._resource, config=cfg)
+
+        if engine._warm:
+            # Warm path: dispatch the turn to the pool (a warm worker adopts our session_id),
+            # then refill so the next turn stays warm. No cold run_query_job.
+            engine._dispatch().publish(dispatch_payload(sid, message, resume))
+            try:
+                engine._fill_pool(1)
+            except Exception:  # noqa: BLE001 — refill is best-effort; the turn already dispatched
+                pass
+        else:
+            prompt = f"AGENT_RESUME={sid}\n{message}" if resume else message
+            payload = {"input": {"session_id": sid, "user_id": _USER_ID, "message": prompt}}
+            cfg: dict[str, Any] = {"query": json.dumps(payload)}
+            if engine._output_bucket:
+                cfg["output_gcs_uri"] = f"{engine._output_bucket}/jobs/{sid}.jsonl"
+            self._last_job = engine._agent_engines().run_query_job(name=engine._resource, config=cfg)
 
         sink = CloudLoggingSink(
             log_name=_LOG_NAME, project=engine._project, credentials=engine._credentials
         )
-        sid = self._session_id
 
         def factory() -> AsyncIterator:
             return sink.tail(sid, since=since)
@@ -267,6 +301,9 @@ class GeminiEngine:
         location: str | None,
         output_bucket: str | None = None,
         credentials: Any | None = None,
+        warm: bool = False,
+        topic: str | None = None,
+        subscription: str | None = None,
     ) -> None:
         self._resource = resource
         self.spec = spec
@@ -274,6 +311,9 @@ class GeminiEngine:
         self._location = location
         self._output_bucket = output_bucket
         self._credentials = credentials
+        self._warm = warm
+        self._topic = topic
+        self._subscription = subscription
         self._sessions: dict[str, GeminiSession] = {}
 
     def _client(self) -> Any:
@@ -286,9 +326,31 @@ class GeminiEngine:
     def _agent_engines(self) -> Any:
         return self._client().agent_engines
 
+    def _dispatch(self) -> Any:
+        """The control-plane ``DispatchTransport`` (publish + ensure) for the warm pool."""
+        from ...ports.dispatch import PubSubDispatch
+
+        return PubSubDispatch(
+            topic=self._topic, subscription=self._subscription,
+            project=self._project, credentials=self._credentials,
+        )
+
+    def _fill_pool(self, n: int) -> None:
+        """Submit ``n`` pre-warmed workers (each a job blocked on ``__POOL_WAIT__``)."""
+        ae = self._agent_engines()
+        payload = {"input": {"user_id": _USER_ID, "message": POOL_WAIT_SENTINEL}}
+        cfg: dict[str, Any] = {"query": json.dumps(payload)}
+        for _ in range(n):
+            ae.run_query_job(name=self._resource, config=cfg)
+
     def start_session(self) -> GeminiSession:
-        created = self._agent_engines().sessions.create(name=self._resource, user_id=_USER_ID)
-        session_id = created.response.name.rsplit("/", 1)[-1]
+        if self._warm:
+            # Warm turns run in pool workers, not a per-session engine invocation, so the
+            # session id is just a client-chosen token (used for log-tail + checkpoint keying).
+            session_id = uuid.uuid4().hex
+        else:
+            created = self._agent_engines().sessions.create(name=self._resource, user_id=_USER_ID)
+            session_id = created.response.name.rsplit("/", 1)[-1]
         session = GeminiSession(self, session_id)
         self._sessions[session_id] = session
         return session

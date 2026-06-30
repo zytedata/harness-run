@@ -128,18 +128,38 @@ class ToolkitAgent(BaseAgent):
         super().__init__(name=name, description=_AGENT_DESCRIPTION, spec_data=spec_data)
 
     async def _run_async_impl(self, ctx: Any) -> AsyncGenerator[Any, None]:
-        from ...harness.claude_code import ClaudeCodeHarness
-        from ...harness.context import RunContext
-        from ...ports.eventsink import CloudLoggingSink
         from ...spec import AgentSpec
-        from .translate import to_adk_event
+        from .pool import POOL_WAIT_SENTINEL
 
         spec = AgentSpec.from_dict(self.spec_data)
         prompt = _extract_prompt(ctx.user_content)
+
+        # Warm-pool worker: block for a dispatched turn, then process it (under the dispatched
+        # session_id). Cold start was paid at pool-fill time, so pickup is fast.
+        if prompt.strip() == POOL_WAIT_SENTINEL:
+            async for event in self._pool_worker(spec):
+                yield event
+            return
+
         # The ADK session id is the stable token: it tags the Cloud Logging stream the client
-        # tails, and pins the Claude session id for checkpoint keying. (P2b: __POOL_WAIT__.)
+        # tails, and pins the Claude session id for checkpoint keying.
         session_id = getattr(getattr(ctx, "session", None), "id", None) or ctx.invocation_id
         resume_sid, prompt = _split_resume_directive(prompt)
+        async for event in self._run_turn(spec, session_id, prompt, resume_sid):
+            yield event
+
+    async def _run_turn(
+        self, spec: Any, session_id: str, prompt: str, resume_sid: str | None
+    ) -> AsyncGenerator[Any, None]:
+        """Process one turn under ``session_id``: prep workspace, drive the harness, surface events.
+
+        Shared by the cold path and a warm worker's claimed turn — both tag the Cloud Logging
+        stream and checkpoint with ``session_id``, so the client tails identically either way.
+        """
+        from ...harness.claude_code import ClaudeCodeHarness
+        from ...harness.context import RunContext
+        from ...ports.eventsink import CloudLoggingSink
+        from .translate import to_adk_event
 
         sink = CloudLoggingSink(session_id=session_id)
         blobs, session_store = _checkpoint_ports(spec)
@@ -163,6 +183,57 @@ class ToolkitAgent(BaseAgent):
         async for event in ClaudeCodeHarness().run(spec, rc):
             sink.emit(event)  # near-real-time channel (Cloud Logging); finalize is inline in run()
             yield to_adk_event(event, self.name)
+
+    async def _pool_worker(self, spec: Any) -> AsyncGenerator[Any, None]:
+        """Block pulling the dispatch subscription, then process the claimed turn.
+
+        Heartbeats while idle (the async executor finalizes a job that yields no events), then
+        runs the dispatched turn under the *dispatched* ``session_id`` so the waiting client
+        sees it on its own Cloud Logging tail.
+        """
+        import time
+
+        from .pool import resolve_max_wait_s, worker_dispatch_from_env
+        from .translate import to_adk_event
+
+        dispatch = worker_dispatch_from_env()
+        if dispatch is None:
+            ev = AgentEvent(
+                kind="status",
+                summary="pool worker started without AGENT_POOL_SUBSCRIPTION; exiting",
+                raw={"event": "pool_error"},
+            )
+            yield to_adk_event(ev, self.name)
+            return
+
+        deadline = time.monotonic() + resolve_max_wait_s()
+        claimed: dict | None = None
+        beat = 0
+        while time.monotonic() < deadline:
+            claimed = await asyncio.to_thread(dispatch.claim, 10.0)
+            if claimed is not None:
+                break
+            beat += 1
+            hb = AgentEvent(
+                kind="status",
+                summary=f"pool worker waiting for assignment (beat {beat})",
+                raw={"event": "pool_waiting", "beat": beat},
+            )
+            yield to_adk_event(hb, self.name)
+
+        if claimed is None:
+            ev = AgentEvent(
+                kind="status", summary="pool worker idle-expired (no assignment)",
+                raw={"event": "pool_idle_expired"},
+            )
+            yield to_adk_event(ev, self.name)
+            return
+
+        session_id = claimed.get("session_id") or ""
+        message = claimed.get("message", "")
+        resume = bool(claimed.get("resume"))
+        async for event in self._run_turn(spec, session_id, message, resume_sid=session_id if resume else None):
+            yield event
 
 
 def _safe_node_name(name: str) -> str:

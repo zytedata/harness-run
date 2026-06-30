@@ -431,12 +431,14 @@ class GeminiEngine:
             return False
 
     def _cancel_running_operations(self) -> None:
-        """Cancel the engine's still-running long-running operations (e.g. idle pool workers).
+        """Cancel the engine's still-running query jobs (e.g. idle pool workers).
 
-        The genai surface only cancels a job by operation name, with no list — so enumerate
-        the engine's operations over REST (via an auth'd session; no raw token handling) and
-        cancel the unfinished ones. Best-effort; needed to delete a reused warm engine whose
-        worker jobs weren't submitted in this process.
+        The genai surface cancels a query job by operation name but has no list — so enumerate
+        the engine's operations over REST (via an auth'd session; no raw token handling), then
+        cancel each unfinished one with ``cancel_query_job`` (the *generic* operation ``:cancel``
+        does NOT stop a query-job worker — verified). Best-effort; needed to delete a reused
+        warm engine whose worker jobs weren't submitted in this process. Note a cancelled
+        worker takes a few minutes to actually stop, so ``delete`` retries well past this.
         """
         import google.auth
         import google.auth.transport.requests as greq
@@ -445,6 +447,7 @@ class GeminiEngine:
         if creds is None:
             creds, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
         session = greq.AuthorizedSession(creds)
+        ae = self._agent_engines()
         base = f"https://{self._location}-aiplatform.googleapis.com"
         for ver in ("v1beta1", "v1"):
             resp = session.get(f"{base}/{ver}/{self._resource}/operations", timeout=30)
@@ -452,16 +455,20 @@ class GeminiEngine:
                 continue
             for op in resp.json().get("operations", []):
                 if not op.get("done"):
-                    session.post(f"{base}/{ver}/{op['name']}:cancel", timeout=30)
+                    try:
+                        ae.cancel_query_job(name=self._resource, config={"operation_name": op["name"]})
+                    except Exception:  # noqa: BLE001 — not a query job / already done
+                        pass
             return
 
-    def delete(self, *, delete_pool_resources: bool = False, timeout: float = 300.0) -> None:
-        """Tear down the engine (ops action). Cancels tracked pool workers first.
+    def delete(self, *, delete_pool_resources: bool = False, timeout: float = 480.0) -> None:
+        """Tear down the engine (ops action). Cancels its pool workers first.
 
         A warm pool's idle workers are long-running jobs that block engine deletion until
-        they expire, so cancel them before deleting. ``delete_pool_resources`` also removes
-        the dispatch topic + subscription. (Workers submitted by *another* process aren't
-        tracked here; deletion still retries past their finalize, just more slowly.)
+        they stop, so cancel them (both this process's tracked jobs and, for a reused engine,
+        any running ops found via ``_cancel_running_operations``) before deleting. A cancelled
+        worker takes a few minutes to actually stop, so deletion retries up to ``timeout``.
+        ``delete_pool_resources`` also removes the dispatch topic + subscription.
         """
         ae = self._agent_engines()
         for job_name in self._pool_jobs:

@@ -81,6 +81,7 @@ def test_engine_delete_cancels_pool_jobs_then_deletes(monkeypatch):
             calls["delete"] += 1
 
     monkeypatch.setattr(engine, "_agent_engines", lambda: FakeAE())
+    monkeypatch.setattr(engine, "_cancel_running_operations", lambda: None)  # no REST in unit test
     engine.delete()  # delete_pool_resources defaults False -> no pubsub calls
     # Both tracked workers cancelled before the engine is deleted.
     assert calls["cancel"] == ["jobA", "jobB"]

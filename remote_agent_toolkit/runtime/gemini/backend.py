@@ -392,7 +392,10 @@ class GeminiEngine:
         if self._warm:
             # Warm turns run in pool workers, not a per-session engine invocation, so the
             # session id is just a client-chosen token (used for log-tail + checkpoint keying).
-            session_id = uuid.uuid4().hex
+            # Must be a canonical UUID (dashed), NOT uuid4().hex: it reaches the Claude Agent
+            # SDK as session_id / resume, which rejects a non-canonical id at runtime with
+            # "Invalid session ID. Must be a valid UUID".
+            session_id = str(uuid.uuid4())
         else:
             created = self._agent_engines().sessions.create(name=self._resource, user_id=_USER_ID)
             session_id = created.response.name.rsplit("/", 1)[-1]

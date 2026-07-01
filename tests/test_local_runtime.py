@@ -146,3 +146,16 @@ def test_resume_restores_workspace(tmp_path):
 
     asyncio.run(_await(session.send("continue please")))
     assert seen["restored"] is True  # _prepare_workspace restored the snapshot on resume
+
+
+def test_start_session_mints_canonical_uuid(tmp_path):
+    # Regression: the id LocalEngine mints is passed to the Claude Agent SDK as session_id /
+    # resume, which requires a CANONICAL UUID (dashed). uuid4().hex (no dashes) is rejected at
+    # runtime with "Invalid session ID. Must be a valid UUID", breaking the live resume path.
+    import uuid
+
+    engine = local.deploy(AgentSpec(name="demo", model="m", checkpoint=True),
+                          workdir=str(tmp_path / "wd"))
+    sid = engine.start_session().session_id
+    assert "-" in sid                     # dashed, unlike uuid4().hex
+    assert str(uuid.UUID(sid)) == sid     # parses and is already canonical

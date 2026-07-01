@@ -211,7 +211,10 @@ class LocalEngine:
     # -- Engine protocol -------------------------------------------------------
 
     def start_session(self) -> LocalSession:
-        session = LocalSession(self, uuid.uuid4().hex)
+        # Canonical UUID (dashed), NOT uuid4().hex: this id is passed to the Claude Agent
+        # SDK as session_id (checkpoint keying) / resume, and the SDK rejects a non-canonical
+        # id at runtime with "Invalid session ID. Must be a valid UUID".
+        session = LocalSession(self, str(uuid.uuid4()))
         self._sessions[session.session_id] = session
         return session
 

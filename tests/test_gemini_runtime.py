@@ -152,3 +152,17 @@ def test_gemini_session_send_prefixes_resume(monkeypatch):
     assert "AGENT_RESUME=sid-2" in captured["config"]["query"]
     # checkpoint spec => a clean turn end is NEEDS_INPUT (awaiting the next operator message)
     assert session.stop_reason == StopReason.NEEDS_INPUT
+
+
+def test_warm_start_session_mints_canonical_uuid():
+    # Warm-pool sessions get a client-chosen id that reaches the Claude Agent SDK as
+    # session_id / resume; it must be a CANONICAL UUID (dashed), not uuid4().hex, or the SDK
+    # rejects it at runtime ("Invalid session ID. Must be a valid UUID"). No GCP calls here.
+    import uuid
+
+    engine = backend.GeminiEngine(resource="r/reasoningEngines/1",
+                                  spec=AgentSpec(name="s", model="m"),
+                                  project=None, location=None, warm=True)
+    sid = engine.start_session().session_id
+    assert "-" in sid
+    assert str(uuid.UUID(sid)) == sid

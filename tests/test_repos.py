@@ -14,8 +14,9 @@ from remote_agent_toolkit.integrations.git import (
 
 
 def test_reposource_and_spec_roundtrip():
-    r = RepoSource.git("https://github.com/o/r", ref="v1", auth="GH_TOKEN")
-    assert r.url == "https://github.com/o/r" and r.ref == "v1" and r.auth == "GH_TOKEN"
+    r = RepoSource.git("https://bitbucket.org/o/r", ref="v1", auth="BB_TOKEN", auth_user="alice")
+    assert r.url == "https://bitbucket.org/o/r" and r.ref == "v1"
+    assert r.auth == "BB_TOKEN" and r.auth_user == "alice"
     assert RepoSource.from_dict(r.to_dict()) == r
     spec = AgentSpec(name="a", model="m", repos=[RepoSource.git("https://x/y")])
     assert AgentSpec.from_dict(spec.to_dict()) == spec  # repos survive dict round-trip
@@ -28,6 +29,9 @@ def test_auth_url_is_host_aware():
     assert _auth_url("https://gitlab.com/o/r", "T") == "https://oauth2:T@gitlab.com/o/r"
     # Unknown host falls back to the GitHub scheme.
     assert _auth_url("https://git.acme.io/o/r", "T") == "https://x-access-token:T@git.acme.io/o/r"
+    # An explicit user overrides the host default — the Bitbucket API-token scheme
+    # (`https://<account>:<token>@bitbucket.org/...`).
+    assert _auth_url("https://bitbucket.org/o/r", "T", "alice") == "https://alice:T@bitbucket.org/o/r"
 
 
 def _git(cwd, *args):

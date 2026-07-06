@@ -47,11 +47,17 @@ def _auth_user_for(url: str) -> str:
     return _DEFAULT_AUTH_USER
 
 
-def _auth_url(url: str, token: str) -> str:
-    """Embed ``token`` into an https git ``url`` using the host-appropriate userinfo scheme."""
+def _auth_url(url: str, token: str, user: str | None = None) -> str:
+    """Embed ``token`` into an https git ``url`` as ``https://<user>:<token>@host/...``.
+
+    ``user`` overrides the userinfo username; when ``None`` a host-appropriate default is used
+    (GitHub ``x-access-token``, Bitbucket ``x-token-auth``, GitLab ``oauth2``). Set ``user`` for
+    schemes that pair the token with a real account name — e.g. a Bitbucket **API token**, which
+    authenticates as ``https://<account>:<token>@bitbucket.org/...``.
+    """
     if not url.startswith("https://"):
         raise ValueError(f"only https git URLs supported for token auth, got: {url}")
-    user = _auth_user_for(url)
+    user = user or _auth_user_for(url)
     return f"https://{user}:{token}@{url[len('https://'):]}"
 
 
@@ -74,16 +80,17 @@ def clone(
     ref: str | None = None,
     dest: Path | None = None,
     token: str | None = None,
+    auth_user: str | None = None,
 ) -> Path:
     """Plain ``git clone`` of ``url`` (optionally at ``ref``) into ``dest``; return the dir.
 
     If ``dest`` is ``None`` a fresh temp directory is created under the system temp. With
     ``ref`` the clone is shallow (``--depth 1``). No token is needed for public repos; pass
-    ``token`` to inject host-aware token-authenticated HTTPS for private ones. The token is
-    redacted from any error message.
+    ``token`` to inject host-aware token-authenticated HTTPS for private ones (``auth_user``
+    overrides the userinfo username). The token is redacted from any error message.
     """
     dest = Path(dest) if dest is not None else Path(tempfile.mkdtemp(prefix="rat-clone-"))
-    target = _auth_url(url, token) if token else url
+    target = _auth_url(url, token, auth_user) if token else url
     cmd = ["git", "clone"]
     if ref:
         cmd += ["--branch", ref, "--depth", "1"]
@@ -99,6 +106,7 @@ def provision_repo(
     repo_url: str,
     token: str,
     *,
+    auth_user: str | None = None,
     user_name: str = "Agent",
     user_email: str = "agent@example.com",
 ) -> Path:
@@ -107,7 +115,7 @@ def provision_repo(
     Returns the cloned repo directory. Raises on clone failure (token redacted from the error).
     """
     repo_dir = Path(job_dir) / repo_name(repo_url)
-    clone(repo_url, dest=repo_dir, token=token)
+    clone(repo_url, dest=repo_dir, token=token, auth_user=auth_user)
     _set_commit_identity(repo_dir, user_name, user_email)  # embedded-token origin enables push
     return repo_dir
 
@@ -135,7 +143,8 @@ def provision_repos(
         dest = Path(job_dir) / repo_name(repo.url)
         token = secrets.get(repo.auth) if getattr(repo, "auth", None) else None
         use_token = token if (token and repo.url.startswith("https://")) else None
-        clone(repo.url, ref=repo.ref, dest=dest, token=use_token)
+        clone(repo.url, ref=repo.ref, dest=dest, token=use_token,
+              auth_user=getattr(repo, "auth_user", None))
         if use_token:  # configure a commit identity so the agent can commit + push
             _set_commit_identity(dest, user_name, user_email)
         names.append(dest.name)
@@ -161,9 +170,9 @@ def reauth_repos(job_dir: Path, repos, secrets: dict | None = None) -> list[str]
         dest = Path(job_dir) / repo_name(repo.url)
         if not (dest / ".git").is_dir():
             continue
+        authed = _auth_url(repo.url, token, getattr(repo, "auth_user", None))
         subprocess.run(
-            ["git", "remote", "set-url", "origin", _auth_url(repo.url, token)],
-            cwd=str(dest), check=False,
+            ["git", "remote", "set-url", "origin", authed], cwd=str(dest), check=False,
         )
         names.append(dest.name)
     return names

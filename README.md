@@ -169,7 +169,9 @@ spec = AgentSpec(
     model="claude-sonnet-4-6",
     repos=[
         RepoSource.git("https://github.com/zytedata/some-repo", ref="main", auth="GH_TOKEN"),
-        RepoSource.git("https://bitbucket.org/acme/spiders", auth="BITBUCKET_API_TOKEN"),
+        # Bitbucket API token authenticates as <account>:<token> — name the account via auth_user:
+        RepoSource.git("https://bitbucket.org/acme/spiders", auth="BITBUCKET_API_TOKEN",
+                       auth_user="my-bitbucket-account"),
     ],
 )
 
@@ -181,10 +183,12 @@ result = await session.run(
 ```
 
 Each repo is cloned into the agent's cwd before the loop starts. When the `auth` secret is supplied, the
-clone is **authenticated and push-ready**: the token is embedded into `origin` (host-aware —
-`x-access-token` for GitHub, `x-token-auth` for Bitbucket, `oauth2` for GitLab) and a commit identity is
-configured, so the agent can `git push`. Without it (or for a repo with no `auth`) the clone is read-only,
-which is fine for public repos. The push token is **not** placed in the agent's environment, and it is
+clone is **authenticated and push-ready**: the token is embedded into `origin` as
+`https://<user>:<token>@host/...` and a commit identity is configured, so the agent can `git push`. The
+userinfo `<user>` defaults per host (`x-access-token` for GitHub, `x-token-auth` for Bitbucket access tokens,
+`oauth2` for GitLab); set `auth_user` for schemes that pair the token with a real account name — e.g. a
+Bitbucket **API token** (`https://<account>:<token>@bitbucket.org/...`). Without `auth` (or for a repo with no
+`auth`) the clone is read-only, which is fine for public repos. The push token is **not** placed in the agent's environment, and it is
 scrubbed from `.git/config` before any checkpoint snapshot (then re-embedded on resume from the freshly
 supplied secret). To let the agent open PRs, also add `McpServer.github()`.
 

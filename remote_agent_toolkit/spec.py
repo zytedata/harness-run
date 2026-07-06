@@ -182,11 +182,13 @@ class RepoSource:
 
     Auth (for private repos / pushing) is a token *named* by ``auth`` and resolved from the
     per-invocation ``secrets`` passed to ``run``/``send`` — never carried here, never baked
-    into the deployed engine. The token is embedded into the clone's ``origin`` (host-aware:
-    GitHub ``x-access-token``, Bitbucket ``x-token-auth``, GitLab ``oauth2``) so the agent can
-    ``git push`` without handling it, and is *not* placed in the agent's environment. Without
-    ``auth`` (or if the caller doesn't supply that secret) the repo is cloned read-only, which
-    is fine for public repos.
+    into the deployed engine. The token is embedded into the clone's ``origin`` as
+    ``https://<user>:<token>@host/...`` so the agent can ``git push`` without handling it, and
+    is *not* placed in the agent's environment. The userinfo ``<user>`` defaults per host
+    (GitHub ``x-access-token``, Bitbucket ``x-token-auth``, GitLab ``oauth2``); set ``auth_user``
+    for schemes that pair the token with a real account name — e.g. a Bitbucket **API token**,
+    which clones as ``https://<account>:<token>@bitbucket.org/...``. Without ``auth`` (or if the
+    caller doesn't supply that secret) the repo is cloned read-only, which is fine for public repos.
 
     NB: to let the agent push, the token must be reachable by the agent (it can read
     ``.git/config``); the defense is a *scoped, short-lived* token (e.g. a GitHub App
@@ -196,15 +198,24 @@ class RepoSource:
     url: str
     ref: str | None = None
     auth: str | None = None
+    auth_user: str | None = None
 
     @classmethod
-    def git(cls, url: str, ref: str | None = None, auth: str | None = None) -> RepoSource:
+    def git(
+        cls,
+        url: str,
+        ref: str | None = None,
+        auth: str | None = None,
+        auth_user: str | None = None,
+    ) -> RepoSource:
         """Clone ``url`` (optionally at ``ref``) into the agent's cwd before it runs.
 
         ``auth`` names the per-invocation secret holding the token used to authenticate the
-        clone and enable ``git push`` (host-aware). Omit it for public, read-only clones.
+        clone and enable ``git push``. ``auth_user`` overrides the userinfo username (default:
+        host-based) — set it to your account name for a Bitbucket API token. Omit both for
+        public, read-only clones.
         """
-        return cls(url=url, ref=ref, auth=auth)
+        return cls(url=url, ref=ref, auth=auth, auth_user=auth_user)
 
     def to_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {"url": self.url}
@@ -212,11 +223,13 @@ class RepoSource:
             d["ref"] = self.ref
         if self.auth is not None:
             d["auth"] = self.auth
+        if self.auth_user is not None:
+            d["auth_user"] = self.auth_user
         return d
 
     @classmethod
     def from_dict(cls, d: Mapping[str, Any]) -> RepoSource:
-        return cls(url=d["url"], ref=d.get("ref"), auth=d.get("auth"))
+        return cls(url=d["url"], ref=d.get("ref"), auth=d.get("auth"), auth_user=d.get("auth_user"))
 
 
 @dataclass(frozen=True)

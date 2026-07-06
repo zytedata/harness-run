@@ -34,6 +34,29 @@ _LOG_NAME = "remote_agent_toolkit_steps"
 _USER_ID = "ratk"
 
 
+def _run_blocking(make_coro, timeout: float) -> bool:
+    """Run ``make_coro()`` to completion (≤ ``timeout``), from sync OR async context.
+
+    ``make_coro`` is a zero-arg factory returning a fresh coroutine. With no running event loop
+    we drive it directly; inside a running loop we run it on a dedicated thread with its own loop
+    (so a blocking helper like ``wait_until_warm`` works either way). Returns ``False`` on timeout.
+    """
+    def _runner() -> bool:
+        try:
+            return asyncio.run(asyncio.wait_for(make_coro(), timeout))
+        except (TimeoutError, asyncio.TimeoutError):
+            return False
+
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return _runner()  # no ambient loop — safe to drive our own
+    import concurrent.futures
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+        return ex.submit(_runner).result()
+
+
 def _fallback_spec(name: str) -> AgentSpec:
     """A minimal spec for a looked-up engine when the caller didn't pass the real one.
 
@@ -436,7 +459,12 @@ class GeminiEngine:
         Tails Cloud Logging for the pool readiness marker a worker emits once it has finished
         its cold start and pre-warmed. The worker's cold start varies (~2.5–5 min: image pull
         + scheduling), so the default timeout is generous. No-op (returns ``True``) for a
-        non-warm engine. Sync — call it after ``deploy``, before dispatching turns.
+        non-warm engine.
+
+        Blocking, and safe to call from **either** sync code (ops/CI, right after ``deploy``) or
+        from inside a running event loop — in the latter case the wait runs on its own thread so
+        it doesn't clash with the caller's loop. From async code you can also
+        ``await asyncio.to_thread(engine.wait_until_warm)`` to avoid blocking the loop.
         """
         if not self._warm:
             return True
@@ -455,10 +483,7 @@ class GeminiEngine:
                 return True  # first marker since deploy => a worker is warm
             return False
 
-        try:
-            return asyncio.run(asyncio.wait_for(_await(), timeout))
-        except (TimeoutError, asyncio.TimeoutError):
-            return False
+        return _run_blocking(_await, timeout)
 
     def delete(self, *, delete_pool_resources: bool = False, timeout: float = 600.0) -> None:
         """Tear down the engine (ops action), cancelling its pool workers first.

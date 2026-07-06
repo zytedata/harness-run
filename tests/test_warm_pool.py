@@ -71,6 +71,28 @@ def test_warm_session_dispatches_and_tails(monkeypatch):
     assert session.status == RunStatus.IDLE and session.stop_reason == StopReason.END_TURN
 
 
+def test_run_blocking_works_from_sync_and_async_contexts():
+    # wait_until_warm is a blocking helper that must work whether or not the caller is inside a
+    # running event loop (regression: it used asyncio.run() and crashed from async app code).
+    from remote_agent_toolkit.runtime.gemini.backend import _run_blocking
+
+    async def ok():
+        return True
+
+    assert _run_blocking(ok, 5) is True                       # sync context: no ambient loop
+
+    async def driver():
+        return _run_blocking(ok, 5)                           # called from inside a running loop
+
+    assert asyncio.run(driver()) is True
+
+    async def slow():
+        await asyncio.sleep(1)
+        return True
+
+    assert _run_blocking(slow, 0.01) is False                 # timeout -> False
+
+
 def test_engine_delete_cancels_pool_jobs_then_deletes(monkeypatch):
     spec = AgentSpec(name="w", model="m")
     engine = backend.GeminiEngine(

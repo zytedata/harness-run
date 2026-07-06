@@ -105,9 +105,10 @@ class McpServer:
     * ``"remote"`` — a remote MCP server at ``url`` with optional static ``headers``.
     * ``"stdio"``  — a local subprocess MCP server (``command`` + ``args``).
 
-    Credentials are NOT carried here. Reference secret *names* via
-    ``AgentSpec.secrets``; they are resolved from Secret Manager at runtime and
-    injected into the server's environment/headers by the harness.
+    Credentials are NOT carried here. A ``github`` server's token is resolved at runtime
+    from the per-invocation ``secrets`` (conventional names ``GH_TOKEN`` / ``GITHUB_TOKEN``
+    / ``GH_PAT``) and injected into the server's headers by the harness — never into the
+    agent's own environment. A ``remote`` server may carry static ``headers``.
     """
 
     kind: Literal["github", "remote", "stdio"]
@@ -119,7 +120,7 @@ class McpServer:
 
     @classmethod
     def github(cls) -> McpServer:
-        """The GitHub MCP server. Auth token comes from ``AgentSpec.secrets``."""
+        """The GitHub MCP server. Auth token comes from the per-invocation ``secrets``."""
         return cls(kind="github", name="github")
 
     @classmethod
@@ -129,7 +130,7 @@ class McpServer:
         url: str,
         headers: Mapping[str, str] | None = None,
     ) -> McpServer:
-        """A remote MCP server. Secrets are referenced via ``AgentSpec.secrets``."""
+        """A remote MCP server with optional static ``headers``."""
         return cls(
             kind="remote",
             name=name,
@@ -139,7 +140,7 @@ class McpServer:
 
     @classmethod
     def stdio(cls, name: str, command: str, args: list[str] | None = None) -> McpServer:
-        """A local subprocess MCP server. Secrets are referenced via ``AgentSpec.secrets``."""
+        """A local subprocess MCP server (``command`` + ``args``)."""
         return cls(
             kind="stdio",
             name=name,
@@ -178,29 +179,44 @@ class RepoSource:
     """A git repository cloned into the agent's working directory *before* it runs.
 
     A common setup step: clone a repo so the agent can read/modify it, then commit and push.
-    Auth (for private repos / pushing) comes from a GitHub token in ``AgentSpec.secrets``
-    (``GH_TOKEN`` / ``GITHUB_TOKEN`` / ``GH_PAT``) — never carried here; the token is injected
-    into the clone's ``origin`` so the agent can ``git push`` without handling it. Without a
-    token the repo is cloned read-only (fine for public repos).
+
+    Auth (for private repos / pushing) is a token *named* by ``auth`` and resolved from the
+    per-invocation ``secrets`` passed to ``run``/``send`` — never carried here, never baked
+    into the deployed engine. The token is embedded into the clone's ``origin`` (host-aware:
+    GitHub ``x-access-token``, Bitbucket ``x-token-auth``, GitLab ``oauth2``) so the agent can
+    ``git push`` without handling it, and is *not* placed in the agent's environment. Without
+    ``auth`` (or if the caller doesn't supply that secret) the repo is cloned read-only, which
+    is fine for public repos.
+
+    NB: to let the agent push, the token must be reachable by the agent (it can read
+    ``.git/config``); the defense is a *scoped, short-lived* token (e.g. a GitHub App
+    installation token), not hiding. See the README security section.
     """
 
     url: str
     ref: str | None = None
+    auth: str | None = None
 
     @classmethod
-    def git(cls, url: str, ref: str | None = None) -> RepoSource:
-        """Clone ``url`` (optionally checking out ``ref``) into the agent's cwd before it runs."""
-        return cls(url=url, ref=ref)
+    def git(cls, url: str, ref: str | None = None, auth: str | None = None) -> RepoSource:
+        """Clone ``url`` (optionally at ``ref``) into the agent's cwd before it runs.
+
+        ``auth`` names the per-invocation secret holding the token used to authenticate the
+        clone and enable ``git push`` (host-aware). Omit it for public, read-only clones.
+        """
+        return cls(url=url, ref=ref, auth=auth)
 
     def to_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {"url": self.url}
         if self.ref is not None:
             d["ref"] = self.ref
+        if self.auth is not None:
+            d["auth"] = self.auth
         return d
 
     @classmethod
     def from_dict(cls, d: Mapping[str, Any]) -> RepoSource:
-        return cls(url=d["url"], ref=d.get("ref"))
+        return cls(url=d["url"], ref=d.get("ref"), auth=d.get("auth"))
 
 
 @dataclass(frozen=True)
@@ -221,7 +237,6 @@ class AgentSpec:
             from a GitHub token in ``secrets`` when present).
         mcp_servers: MCP servers attached to the agent.
         allowed_tools / disallowed_tools: Tool allow/deny lists, or ``None`` for default.
-        secrets: Secret *names* resolved from Secret Manager at runtime (never pickled).
         permission_mode: Claude Code permission mode. Defaults to ``"bypassPermissions"``
             (unattended runs): these agents run in an isolated, throwaway working
             directory, so there is no human present to answer prompts. Set ``"default"``
@@ -231,7 +246,11 @@ class AgentSpec:
         max_budget_usd: Hard cap on spend.
         checkpoint: Enable checkpoint/resume (interactive pauses).
         output_schema: Optional structured-output schema (pydantic model or JSON schema).
-        env: Extra environment variables for the runtime.
+        env: Extra environment variables for the agent. **Non-secret only** — values live in
+            the spec and are baked into the deployed engine image, so they are visible to
+            anyone who can read the deployment. Secrets are NOT declared here; they are passed
+            per-invocation to ``run``/``send`` (see ``secrets=`` on the run plane) so nothing
+            sensitive is ever baked or shared across runs.
         packages: Python package requirement specifiers (e.g. ``"pandas==2.2.*"``) baked
             into the deployed ``gemini`` engine image at deploy time. The ``local`` runtime
             ignores these — locally the agent uses your environment plus whatever it installs
@@ -246,7 +265,6 @@ class AgentSpec:
     mcp_servers: tuple[McpServer, ...] = ()
     allowed_tools: tuple[str, ...] | None = None
     disallowed_tools: tuple[str, ...] | None = None
-    secrets: tuple[str, ...] = ()
     permission_mode: str = "bypassPermissions"
     max_turns: int = 120
     max_budget_usd: float = 10.0
@@ -260,7 +278,6 @@ class AgentSpec:
         object.__setattr__(self, "skills", tuple(self.skills))
         object.__setattr__(self, "repos", tuple(self.repos))
         object.__setattr__(self, "mcp_servers", tuple(self.mcp_servers))
-        object.__setattr__(self, "secrets", tuple(self.secrets))
         object.__setattr__(self, "packages", tuple(self.packages))
         if self.allowed_tools is not None:
             object.__setattr__(self, "allowed_tools", tuple(self.allowed_tools))
@@ -277,7 +294,6 @@ class AgentSpec:
             "skills": [s.to_dict() for s in self.skills],
             "repos": [r.to_dict() for r in self.repos],
             "mcp_servers": [m.to_dict() for m in self.mcp_servers],
-            "secrets": list(self.secrets),
             "permission_mode": self.permission_mode,
             "max_turns": self.max_turns,
             "max_budget_usd": self.max_budget_usd,
@@ -322,7 +338,6 @@ class AgentSpec:
             mcp_servers=tuple(McpServer.from_dict(m) for m in d.get("mcp_servers", ())),
             allowed_tools=tuple(allowed) if allowed is not None else None,
             disallowed_tools=tuple(disallowed) if disallowed is not None else None,
-            secrets=tuple(d.get("secrets", ())),
             permission_mode=d.get("permission_mode", "bypassPermissions"),
             max_turns=int(d.get("max_turns", 120)),
             max_budget_usd=float(d.get("max_budget_usd", 10.0)),

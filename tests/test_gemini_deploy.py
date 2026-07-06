@@ -38,8 +38,8 @@ def test_build_requirements_includes_base_and_spec_packages() -> None:
     assert not any("remote-agent-toolkit" in r for r in reqs)
 
 
-def test_build_env_secrets_and_buckets() -> None:
-    spec = _spec(secrets=["ZYTE_API_KEY", "GH_TOKEN"], checkpoint=True)
+def test_build_env_no_baked_secrets_and_buckets() -> None:
+    spec = _spec(checkpoint=True, env={"FEATURE_FLAG": "on"})
 
     # No output_bucket, model override None -> uses spec.model, no GCS env.
     env = deploy.build_env(spec, model=None)
@@ -47,13 +47,9 @@ def test_build_env_secrets_and_buckets() -> None:
     assert env["AGENT_JOBS_ROOT"]  # set (non-empty)
     assert env["CLAUDE_AGENT_MODEL"] == spec.model
 
-    # Secrets become secret_ref dicts; env-var name == secret name (1:1).
-    assert env["ZYTE_API_KEY"] == {"secret": "ZYTE_API_KEY", "version": "latest"}
-    assert env["GH_TOKEN"] == {"secret": "GH_TOKEN", "version": "latest"}
-
-    # Plaintext-vs-ref distinction: secrets are dicts, the model env is a plain str.
-    assert isinstance(env["ZYTE_API_KEY"], dict)
-    assert isinstance(env["CLAUDE_AGENT_MODEL"], str)
+    # No secrets are baked into the engine: every value is a plain str (non-secret machinery),
+    # never a Secret Manager secret_ref dict. Secrets travel per-invocation instead.
+    assert all(isinstance(v, str) for v in env.values())
 
     # Without a bucket, checkpoint has nowhere to write -> no checkpoint/artifact env.
     assert "AGENT_CHECKPOINT_GCS" not in env
@@ -72,16 +68,16 @@ def test_build_env_model_override() -> None:
 
 
 def test_build_env_vertex_routing_default_and_api_key_opt_out() -> None:
-    # Default (no ANTHROPIC_API_KEY secret) + a project => route Claude through Vertex.
+    # Default (use_vertex=True) + a project => route Claude through Vertex (no key in env).
     env = deploy.build_env(_spec(), project="proj", vertex_region="global")
     assert env["CLAUDE_CODE_USE_VERTEX"] == "1"
     assert env["ANTHROPIC_VERTEX_PROJECT_ID"] == "proj"
     assert env["CLOUD_ML_REGION"] == "global"
 
-    # Listing ANTHROPIC_API_KEY as a secret opts out of Vertex routing (uses the key).
-    env2 = deploy.build_env(_spec(secrets=["ANTHROPIC_API_KEY"]), project="proj")
+    # use_vertex=False opts out (API-key mode): the key is supplied per-invocation, never baked.
+    env2 = deploy.build_env(_spec(), project="proj", use_vertex=False)
     assert "CLAUDE_CODE_USE_VERTEX" not in env2
-    assert env2["ANTHROPIC_API_KEY"] == {"secret": "ANTHROPIC_API_KEY", "version": "latest"}
+    assert "ANTHROPIC_API_KEY" not in env2  # never baked into the engine
 
     # No project => no Vertex routing env (e.g. a unit context).
     assert "CLAUDE_CODE_USE_VERTEX" not in deploy.build_env(_spec())

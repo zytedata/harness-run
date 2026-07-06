@@ -53,19 +53,27 @@ class LocalSession:
 
     # -- run plane -------------------------------------------------------------
 
-    def run(self, message: str) -> DrivenRun:
-        """Start a fresh turn from ``message``."""
-        return self._start(message, resume_sid=None)
+    def run(self, message: str, *, secrets: dict[str, str] | None = None) -> DrivenRun:
+        """Start a fresh turn from ``message``.
 
-    def send(self, message: str) -> DrivenRun:
+        ``secrets`` is a per-invocation name → value map (the agent's own API keys, any repo
+        ``auth`` / GitHub MCP token). Values live only for this run; they are never baked into
+        the spec and never logged.
+        """
+        return self._start(message, resume_sid=None, secrets=secrets)
+
+    def send(self, message: str, *, secrets: dict[str, str] | None = None) -> DrivenRun:
         """Resume this session with ``message`` (continues the conversation).
 
         Conversation + workspace continuity requires ``spec.checkpoint=True``; without it
-        this runs a fresh turn with no memory of the prior one.
+        this runs a fresh turn with no memory of the prior one. Pass ``secrets`` again (they
+        are not persisted across turns) so repo push auth is re-embedded on resume.
         """
-        return self._start(message, resume_sid=self._session_id)
+        return self._start(message, resume_sid=self._session_id, secrets=secrets)
 
-    def _start(self, message: str, resume_sid: str | None) -> DrivenRun:
+    def _start(
+        self, message: str, resume_sid: str | None, secrets: dict[str, str] | None = None
+    ) -> DrivenRun:
         from ..harness.context import RunContext
 
         spec = self._engine.spec
@@ -74,7 +82,7 @@ class LocalSession:
             prompt=message,
             job_dir=self._job_dir,
             session_id=self._session_id,
-            secrets=self._engine._resolve_secrets(spec),
+            secrets=dict(secrets) if secrets else {},
             resume_sid=resume_sid if self._session_store is not None else None,
             session_store=self._session_store,
             blobs=self._blobs,
@@ -154,22 +162,10 @@ class LocalEngine:
         self._sessions: dict[str, LocalSession] = {}
 
         from ..harness.claude_code import ClaudeCodeHarness
-        from ..ports.secrets import EnvSecretResolver
 
         self._harness = ClaudeCodeHarness()
-        self._secrets = EnvSecretResolver()
 
     # -- helpers used by sessions/runs ----------------------------------------
-
-    def _resolve_secrets(self, spec: AgentSpec) -> dict[str, str]:
-        """Resolve declared secret names to values (missing names skipped, never logged)."""
-        out: dict[str, str] = {}
-        for name in spec.secrets:
-            try:
-                out[name] = self._secrets.resolve(name)
-            except KeyError:
-                continue  # leave unset; never surface the (absent) value
-        return out
 
     def _prepare_workspace(self, ctx: Any, is_resume: bool) -> dict:
         """Restore a prior workspace (resume) or stage skills + clone repos into a fresh cwd.
@@ -187,7 +183,13 @@ class LocalEngine:
                 restored = False
         names: list[str] = []
         repos: list[str] = []
-        if not restored:
+        if restored:
+            # The snapshot was credential-scrubbed; re-embed push tokens from this turn's secrets.
+            if ctx.spec.repos:
+                from ..integrations.git import reauth_repos
+
+                repos = reauth_repos(ctx.job_dir, ctx.spec.repos, ctx.secrets)
+        else:
             ctx.job_dir.mkdir(parents=True, exist_ok=True)
             if ctx.spec.skills:
                 from ..skills import provision
@@ -251,16 +253,24 @@ def deploy(spec: AgentSpec, *, workdir: str | None = None, **_: Any) -> LocalEng
     return LocalEngine(spec, workdir=workdir)
 
 
-def run(spec: AgentSpec, message: str, *, workdir: str | None = None, **_: Any) -> RunResult | None:
+def run(
+    spec: AgentSpec,
+    message: str,
+    *,
+    secrets: dict[str, str] | None = None,
+    workdir: str | None = None,
+    **_: Any,
+) -> RunResult | None:
     """Convenience: ``deploy`` → ``start_session`` → ``await run(message)`` (sync).
 
-    Runs its own event loop, so call it from sync code. For streaming/polling, or from
-    inside an event loop, use ``deploy`` and drive the ``Session``/``Run`` directly.
+    Runs its own event loop, so call it from sync code. ``secrets`` is the per-invocation
+    name → value map (see :meth:`LocalSession.run`). For streaming/polling, or from inside an
+    event loop, use ``deploy`` and drive the ``Session``/``Run`` directly.
     """
     async def _arun() -> RunResult | None:
         engine = deploy(spec, workdir=workdir)
         session = engine.start_session()
-        return await session.run(message)
+        return await session.run(message, secrets=secrets)
 
     try:
         asyncio.get_running_loop()

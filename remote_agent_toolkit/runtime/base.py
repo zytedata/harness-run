@@ -58,14 +58,19 @@ class Session(Protocol):
     :meth:`Engine.get_session` and poll / continue it.
     """
 
-    def run(self, message: str) -> Run:
-        """Start a run from ``message`` (kicks off a fresh turn)."""
+    def run(self, message: str, *, secrets: dict[str, str] | None = None) -> Run:
+        """Start a run from ``message`` (kicks off a fresh turn).
+
+        ``secrets`` is a per-invocation name → value map (the agent's own keys, any repo
+        ``auth`` / GitHub MCP token). Values are never baked into the spec or logged.
+        """
         ...
 
-    def send(self, message: str) -> Run:
+    def send(self, message: str, *, secrets: dict[str, str] | None = None) -> Run:
         """Resume an idle session with ``message`` (e.g. answer a ``needs_input`` pause).
 
-        Resumes via checkpoint on a warm worker (DESIGN.md §3.7).
+        Resumes via checkpoint on a warm worker (DESIGN.md §3.7). Pass ``secrets`` again — they
+        are not persisted across turns, so repo push auth is re-embedded on resume.
         """
         ...
 

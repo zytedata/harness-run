@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from remote_agent_toolkit import AgentSpec, McpServer, SystemPrompt
+from remote_agent_toolkit import AgentSpec, McpServer, RepoSource, SystemPrompt
 from remote_agent_toolkit.harness.claude_code import ClaudeCodeHarness
 from remote_agent_toolkit.harness.context import RunContext
 
@@ -58,10 +58,28 @@ def test_remote_mcp_passthrough():
     assert opts.mcp_servers["zyte"] == {"type": "http", "url": "https://mcp.zyte.com", "headers": {"X-Key": "v"}}
 
 
-def test_secrets_forwarded_to_env_but_never_in_options_elsewhere():
-    spec = AgentSpec(name="a", model="m", secrets=["ZYTE_API_KEY"], env={"FOO": "bar"})
-    opts = ClaudeCodeHarness().build_options(spec, _ctx(spec, secrets={"ZYTE_API_KEY": "sekret"}))
-    assert opts.env["ZYTE_API_KEY"] == "sekret" and opts.env["FOO"] == "bar"
+def test_agent_visible_secrets_forwarded_to_env():
+    # A caller's own API key (per-invocation) plus non-secret spec.env both reach the agent env.
+    spec = AgentSpec(name="a", model="m", env={"FOO": "bar"})
+    opts = ClaudeCodeHarness().build_options(spec, _ctx(spec, secrets={"SH_APIKEY": "sekret"}))
+    assert opts.env["SH_APIKEY"] == "sekret" and opts.env["FOO"] == "bar"
+
+
+def test_harness_consumed_secrets_excluded_from_agent_env():
+    # Repo push token + GitHub MCP token are consumed by git/MCP, so they must NOT appear as
+    # environment variables the agent can read; the caller's own key still does.
+    spec = AgentSpec(
+        name="a", model="m",
+        repos=[RepoSource.git("https://github.com/acme/x", auth="BB_TOKEN")],
+        mcp_servers=[McpServer.github()],
+    )
+    ctx = _ctx(spec, secrets={"BB_TOKEN": "t", "GH_TOKEN": "ghp_x", "SH_APIKEY": "k"})
+    opts = ClaudeCodeHarness().build_options(spec, ctx)
+    assert "BB_TOKEN" not in opts.env  # repo auth -> embedded in origin, not the env
+    assert "GH_TOKEN" not in opts.env  # github MCP -> header, not the env
+    assert opts.env["SH_APIKEY"] == "k"  # the agent's own key is forwarded
+    # ...but the consumers still receive their tokens (routed, not dropped).
+    assert opts.mcp_servers["github"]["headers"]["Authorization"] == "Bearer ghp_x"
 
 
 def test_checkpoint_session_wiring():

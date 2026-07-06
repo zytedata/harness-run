@@ -34,8 +34,11 @@ class RunContext:
         job_dir: Isolated, writable working directory (the agent cwd) for this run.
         session_id: Stable Claude session id, pinned up front so checkpoint keying never
             depends on parsing it out of the message stream.
-        secrets: Resolved secret name → value map (NEVER logged). Forwarded to the agent
-            subprocess env by name and used to build MCP auth headers.
+        secrets: Per-invocation secret name → value map (NEVER logged), supplied by the caller
+            at ``run``/``send`` time — never baked into the spec or the deployed engine. The
+            harness routes them: those consumed by a repo's ``auth`` or a GitHub MCP are used
+            for git/MCP auth and kept OUT of the agent's env; the rest are forwarded to the
+            agent subprocess env (the caller's own API keys the agent's code reads).
         resume_sid: When resuming, the prior session id to continue (else ``None``).
         session_store: A Claude SDK ``SessionStore`` to mirror the transcript to (enables
             cross-worker/cross-cwd resume), or ``None`` to keep the conversation local.

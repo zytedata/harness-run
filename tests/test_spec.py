@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from remote_agent_toolkit import AgentSpec, McpServer, SkillSource, SystemPrompt
+from remote_agent_toolkit import AgentSpec, McpServer, RepoSource, SkillSource, SystemPrompt
 
 
 def _example_spec() -> AgentSpec:
@@ -13,9 +13,9 @@ def _example_spec() -> AgentSpec:
         model="claude-sonnet-4-6",
         system_prompt=SystemPrompt.inherit(append="Prefer the Zyte web-scraping skills."),
         skills=[SkillSource.git("https://github.com/zytedata/claude-skills", ref="0.2.0")],
+        repos=[RepoSource.git("https://github.com/acme/spiders", ref="main", auth="GH_TOKEN")],
         mcp_servers=[McpServer.github(), McpServer.stdio("local", "echo", ["hi"])],
         allowed_tools=["Bash", "Read"],
-        secrets=["ZYTE_API_KEY", "GH_PAT"],
         permission_mode="bypassPermissions",
         max_turns=42,
         max_budget_usd=5.0,
@@ -33,9 +33,20 @@ def test_agentspec_dict_round_trip() -> None:
 def test_agentspec_coerces_lists_to_tuples() -> None:
     spec = _example_spec()
     assert isinstance(spec.skills, tuple)
+    assert isinstance(spec.repos, tuple)
     assert isinstance(spec.mcp_servers, tuple)
-    assert isinstance(spec.secrets, tuple)
     assert isinstance(spec.allowed_tools, tuple)
+
+
+def test_reposource_auth_round_trip() -> None:
+    r = RepoSource.git("https://bitbucket.org/acme/spiders", ref="dev", auth="BITBUCKET_API_TOKEN")
+    assert r.url == "https://bitbucket.org/acme/spiders"
+    assert r.ref == "dev"
+    assert r.auth == "BITBUCKET_API_TOKEN"
+    assert RepoSource.from_dict(r.to_dict()) == r
+    # Public repo: no auth carried.
+    pub = RepoSource.git("https://github.com/acme/pub")
+    assert pub.auth is None and "auth" not in pub.to_dict()
 
 
 def test_agentspec_yaml_round_trip() -> None:

@@ -84,26 +84,25 @@ def build_env(
     project: str | None = None,
     model: str | None = None,
     output_bucket: str | None = None,
+    use_vertex: bool = True,
     vertex_region: str = "global",
     warm_pool: bool = False,
     pool_subscription: str | None = None,
 ) -> dict:
     """Build the engine ``env_vars`` dict from ``spec`` (generalizes the PoC ``_env_vars``).
 
-    Pure: performs no GCP calls. Each entry is either a plaintext value (``str``) or a
-    Secret Manager *secret_ref* (``dict``). The genai ``create()`` handler treats a ``dict``
-    env value as a secret_ref (``{"secret": <name>, "version": ...}``) and a ``str`` value
-    as plaintext.
-
-    **Secret convention (1:1):** the environment variable name *is* the Secret Manager
-    secret name. For each name in ``spec.secrets`` we add
-    ``env[name] = {"secret": name, "version": "latest"}``.
+    Pure: performs no GCP calls. Returns only **non-secret machinery** — model routing, the
+    sandbox/cwd flags, artifact/checkpoint buckets, the pool subscription. **No secrets are
+    baked into the engine**: credentials are passed per-invocation to ``run``/``send`` and
+    travel with the turn, so one deployed engine safely serves many tenants (DESIGN.md §3.5).
 
     Args:
         model: Overrides ``spec.model`` for the embedded harness when given.
         output_bucket: A ``gs://`` base prefix. Required for artifact upload and (when
             ``spec.checkpoint``) for checkpointing; see the body for why checkpointing is
             skipped without it.
+        use_vertex: Route the model through Vertex (the RE service agent's own identity, no API
+            key in the agent env). Set ``False`` for API-key mode (key supplied per-invocation).
         warm_pool / pool_subscription: when both set, the engine acts as a pool worker that
             pulls turn assignments from ``pool_subscription``.
     """
@@ -126,15 +125,10 @@ def build_env(
     if spec.checkpoint and output_bucket:
         env["AGENT_CHECKPOINT_GCS"] = f"{output_bucket}/checkpoints"
 
-    # Secrets: env-var name == Secret Manager secret name (1:1), value is a secret_ref dict.
-    for name in spec.secrets:
-        env[name] = {"secret": name, "version": "latest"}
-
     # Claude model auth. Default: route Claude through Vertex, so the engine authenticates as
-    # its OWN GCP identity (the RE service agent) — no API key to manage. If the spec opts
-    # into an ANTHROPIC_API_KEY secret (injected above as a secret_ref), use that key instead
-    # and leave Vertex routing off.
-    if "ANTHROPIC_API_KEY" not in spec.secrets and project:
+    # its OWN GCP identity (the RE service agent) — no API key in the agent's environment. For
+    # API-key mode (use_vertex=False) the caller passes ANTHROPIC_API_KEY per-invocation.
+    if use_vertex and project:
         env["CLAUDE_CODE_USE_VERTEX"] = "1"
         env["ANTHROPIC_VERTEX_PROJECT_ID"] = project
         env["CLOUD_ML_REGION"] = vertex_region
@@ -236,6 +230,7 @@ def build_engine_config(
     extra_packages: list[str],
     model: str | None = None,
     output_bucket: str | None = None,
+    use_vertex: bool = True,
     vertex_region: str = "global",
     warm_pool: bool = False,
     pool_subscription: str | None = None,
@@ -263,6 +258,7 @@ def build_engine_config(
             project=project,
             model=model,
             output_bucket=output_bucket,
+            use_vertex=use_vertex,
             vertex_region=vertex_region,
             warm_pool=warm_pool,
             pool_subscription=pool_subscription,

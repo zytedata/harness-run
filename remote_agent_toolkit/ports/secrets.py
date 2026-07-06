@@ -1,10 +1,12 @@
 """``SecretResolver`` port + adapters (DESIGN.md §3.5, §6, §7).
 
-Secret *name* → value, resolved at runtime (never pickled into a deployed engine). On
-Gemini Agent Runtime, Secret Manager access authorizes against the RE service agent,
-not the operator SA (DESIGN.md §6). Protocol is stdlib-only; ``GcpSecretResolver``
-imports the Secret Manager client lazily. ``EnvSecretResolver`` is fully implemented
-(stdlib ``os.environ``).
+Secret *name* → value, resolved at the *control plane* (never pickled into a deployed
+engine). These adapters help a caller turn secret names into the per-invocation ``secrets``
+dict passed to ``run``/``send``; the runtime itself no longer resolves secrets (they arrive
+already-resolved with the invocation). ``EnvSecretResolver`` reads ``os.environ`` (handy for
+local dev); ``GcpSecretResolver`` (not implemented yet) would read Secret Manager, authorizing
+against the RE service agent (DESIGN.md §6). Protocol is stdlib-only; the Secret Manager
+client is imported lazily.
 """
 
 from __future__ import annotations
@@ -25,10 +27,9 @@ class SecretResolver(Protocol):
 class GcpSecretResolver:
     """Secret Manager-backed :class:`SecretResolver` (not implemented yet).
 
-    Authorizes against the RE service agent at runtime (DESIGN.md §6). The Secret
-    Manager client is imported lazily inside ``resolve``. Note: on the deployed engine the
-    platform already injects ``spec.secrets`` as env vars, so the runtime path uses
-    ``EnvSecretResolver``; this is only for reading secrets at the control plane.
+    For a caller who keeps secrets in Secret Manager: resolve names to values at the control
+    plane, then hand them to ``run``/``send`` as the per-invocation ``secrets`` dict. The
+    Secret Manager client is imported lazily inside ``resolve``.
     """
 
     def __init__(self, project: str) -> None:

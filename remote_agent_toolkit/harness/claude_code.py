@@ -27,6 +27,22 @@ if TYPE_CHECKING:
 # not listed here (passing "Skill" in allowed_tools is deprecated in the SDK).
 DEFAULT_ALLOWED_TOOLS = ("Read", "Write", "Edit", "Bash", "Glob", "Grep", "TodoWrite")
 
+# Conventional GitHub token names a ``github`` MCP server pulls from the per-invocation secrets.
+_GITHUB_MCP_TOKEN_KEYS = ("GH_TOKEN", "GITHUB_TOKEN", "GH_PAT")
+
+
+def harness_consumed_secret_names(spec: AgentSpec) -> set[str]:
+    """Secret names the *harness* consumes on the agent's behalf, so they stay OUT of its env.
+
+    A repo's ``auth`` token is embedded into ``origin`` (git uses it), and a GitHub MCP's token
+    goes into the server's headers — neither needs to be a plain environment variable the agent
+    (or a prompt-injection) can read. Everything else the caller passes is the agent's own to use.
+    """
+    names: set[str] = {r.auth for r in spec.repos if getattr(r, "auth", None)}
+    if any(m.kind == "github" for m in spec.mcp_servers):
+        names.update(_GITHUB_MCP_TOKEN_KEYS)
+    return names
+
 # Appended to the system prompt in interactive (checkpoint) mode. Turns every "present X
 # and wait for the user" step into "end the turn and await the next message", and steers
 # the agent away from interactive prompt tools that can't work in a one-shot background
@@ -78,11 +94,16 @@ class ClaudeCodeHarness:
         return None
 
     def _runtime_env(self, spec: AgentSpec, ctx: RunContext) -> dict[str, str]:
-        """Env forwarded to the agent subprocess: resolved secrets + spec env + uv PATH.
+        """Env forwarded to the agent subprocess: agent-visible secrets + spec env + uv PATH.
+
+        Only the caller's own per-invocation secrets land here — those consumed by the harness
+        (repo push tokens, GitHub MCP token) are routed to git/MCP and excluded, so they never
+        appear as environment variables the agent can read.
 
         SECURITY: returns secret *values* — callers must never log this dict.
         """
-        env: dict[str, str] = dict(ctx.secrets)
+        consumed = harness_consumed_secret_names(spec)
+        env: dict[str, str] = {k: v for k, v in ctx.secrets.items() if k not in consumed}
         if spec.env:
             env.update(spec.env)
         # Ensure `uv` is on the agent's Bash-tool PATH. uv is a Python dependency, but its
@@ -107,11 +128,7 @@ class ClaudeCodeHarness:
         servers: dict[str, Any] = {}
         for srv in spec.mcp_servers:
             if srv.kind == "github":
-                token = (
-                    ctx.secrets.get("GH_TOKEN")
-                    or ctx.secrets.get("GITHUB_TOKEN")
-                    or ctx.secrets.get("GH_PAT")
-                )
+                token = next((ctx.secrets[k] for k in _GITHUB_MCP_TOKEN_KEYS if ctx.secrets.get(k)), None)
                 if token:
                     servers["github"] = github_mcp_config(token)
                 # else: no token resolved — skip silently (never log the token).
@@ -181,8 +198,12 @@ class ClaudeCodeHarness:
         if not (spec.checkpoint and ctx.blobs is not None and ctx.session_store is not None):
             return None
         from ..checkpoint.workspace import snapshot
+        from ..integrations.git import scrub_repo_tokens
 
         try:
+            # Never persist push tokens to the checkpoint: strip them from every .git/config
+            # before archiving. resume re-embeds from the freshly supplied per-invocation secret.
+            scrub_repo_tokens(str(ctx.job_dir))
             key = snapshot(ctx.blobs, ctx.session_id, str(ctx.job_dir))
             return AgentEvent(
                 kind="status",

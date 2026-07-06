@@ -23,7 +23,7 @@ from typing import Any, AsyncIterator, TYPE_CHECKING
 
 from ...events import RunResult, RunStatus, StopReason
 from .._run import DrivenRun
-from .pool import POOL_WAIT_SENTINEL, dispatch_payload, pool_paths
+from .pool import POOL_WAIT_SENTINEL, dispatch_payload, encode_secrets, pool_paths
 
 if TYPE_CHECKING:
     from ...spec import AgentSpec
@@ -58,6 +58,7 @@ def deploy(
     staging_bucket: str | None = None,
     output_bucket: str | None = None,
     model: str | None = None,
+    use_vertex: bool = True,
     min_instances: int = 1,
     max_instances: int = 1,
     pool_size: int = 2,
@@ -69,6 +70,12 @@ def deploy(
     Bakes the toolkit package + resolved skills, applies the §6 deploy contracts, and returns
     a :class:`GeminiEngine`. With ``warm_pool=True`` it also ensures the dispatch topic/sub and
     fills the pool with ``pool_size`` pre-warmed workers (each a job blocked on ``__POOL_WAIT__``).
+
+    ``use_vertex`` (default) routes the model through Vertex, so the engine authenticates as its
+    own GCP identity and **no LLM API key is ever in the agent's environment** (the recommended,
+    prompt-injection-safe default). Set ``use_vertex=False`` only if the project can't use Vertex
+    Claude; then supply ``ANTHROPIC_API_KEY`` as a per-invocation secret — but note the agent can
+    then read that key (see the README security section). No secrets are ever baked into the engine.
     """
     import dataclasses
     import os
@@ -110,6 +117,7 @@ def deploy(
         extra_packages=extra_packages,
         model=model,
         output_bucket=output_bucket,
+        use_vertex=use_vertex,
         warm_pool=warm_pool,
         pool_subscription=subscription,
         min_instances=min_instances,
@@ -218,15 +226,22 @@ class GeminiSession:
         self._current_run: DrivenRun | None = None
         self._last_job: Any | None = None
 
-    def run(self, message: str) -> DrivenRun:
-        """Start a fresh turn (submits a ``run_query_job``)."""
-        return self._submit(message, resume=False)
+    def run(self, message: str, *, secrets: dict[str, str] | None = None) -> DrivenRun:
+        """Start a fresh turn (submits a ``run_query_job``).
 
-    def send(self, message: str) -> DrivenRun:
-        """Resume this session with ``message`` (prefixes the ``AGENT_RESUME`` directive)."""
-        return self._submit(message, resume=True)
+        ``secrets`` is a per-invocation name → value map (the agent's own keys, any repo
+        ``auth`` / GitHub MCP token). It is transmitted with the turn (Pub/Sub for a warm
+        engine, the job input for a cold one), never baked into the engine, never logged.
+        """
+        return self._submit(message, resume=False, secrets=secrets)
 
-    def _submit(self, message: str, resume: bool) -> DrivenRun:
+    def send(self, message: str, *, secrets: dict[str, str] | None = None) -> DrivenRun:
+        """Resume this session with ``message``. Pass ``secrets`` again (not persisted)."""
+        return self._submit(message, resume=True, secrets=secrets)
+
+    def _submit(
+        self, message: str, resume: bool, secrets: dict[str, str] | None = None
+    ) -> DrivenRun:
         from ...ports.eventsink import CloudLoggingSink
 
         engine = self._engine
@@ -236,14 +251,23 @@ class GeminiSession:
 
         if engine._warm:
             # Warm path: dispatch the turn to the pool (a warm worker adopts our session_id),
-            # then refill so the next turn stays warm. No cold run_query_job.
-            engine._dispatch().publish(dispatch_payload(sid, message, resume))
+            # then refill so the next turn stays warm. No cold run_query_job. Secrets ride the
+            # (Pub/Sub) payload; they are never logged.
+            engine._dispatch().publish(dispatch_payload(sid, message, resume, secrets))
             try:
                 engine.fill_pool(1)
             except Exception:  # noqa: BLE001 — refill is best-effort; the turn already dispatched
                 pass
         else:
-            prompt = f"AGENT_RESUME={sid}\n{message}" if resume else message
+            # Cold path: the prompt is the only reliable channel to the agent, so per-invocation
+            # secrets (and the resume marker) ride leading directive lines the agent strips.
+            directives = ""
+            blob = encode_secrets(secrets)
+            if blob:
+                directives += f"AGENT_SECRETS={blob}\n"
+            if resume:
+                directives += f"AGENT_RESUME={sid}\n"
+            prompt = directives + message
             payload = {"input": {"session_id": sid, "user_id": _USER_ID, "message": prompt}}
             cfg: dict[str, Any] = {"query": json.dumps(payload)}
             if engine._output_bucket:

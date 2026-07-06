@@ -26,6 +26,7 @@ from google.adk.agents import BaseAgent
 from ...events import AgentEvent
 
 _RESUME_DIRECTIVE = re.compile(r"^\s*AGENT_RESUME=(\S+)[ \t]*\r?\n", re.IGNORECASE)
+_SECRETS_DIRECTIVE = re.compile(r"^\s*AGENT_SECRETS=(\S+)[ \t]*\r?\n", re.IGNORECASE)
 _AGENT_DESCRIPTION = "A remote-agent-toolkit agent: a Claude Code session driven by the toolkit harness."
 
 
@@ -44,6 +45,20 @@ def _split_resume_directive(prompt: str) -> tuple[str | None, str]:
     return None, prompt
 
 
+def _split_secrets_directive(prompt: str) -> tuple[dict, str]:
+    """Strip a leading ``AGENT_SECRETS=<base64-json>`` directive (cold-path per-invocation secrets).
+
+    Returns ``(secrets, remaining_prompt)``; ``({}, prompt)`` when absent. The directive is
+    consumed here so the model never sees it.
+    """
+    from .pool import decode_secrets
+
+    m = _SECRETS_DIRECTIVE.match(prompt)
+    if m:
+        return decode_secrets(m.group(1)), prompt[m.end():]
+    return {}, prompt
+
+
 def _parse_gcs_uri(uri: str) -> tuple[str, str]:
     rest = uri[len("gs://"):] if uri.startswith("gs://") else uri
     bucket, _, prefix = rest.partition("/")
@@ -59,20 +74,6 @@ def _find_baked_skills() -> Path | None:
         if cand.is_dir():
             return cand
     return None
-
-
-def _resolve_secrets(spec: Any) -> dict[str, str]:
-    """Resolve declared secret names from the injected env (platform secret_refs)."""
-    from ...ports.secrets import EnvSecretResolver
-
-    resolver = EnvSecretResolver()
-    out: dict[str, str] = {}
-    for name in spec.secrets:
-        try:
-            out[name] = resolver.resolve(name)
-        except KeyError:
-            continue  # absent — never surface the (missing) value
-    return out
 
 
 def _checkpoint_ports(spec: Any) -> tuple[Any | None, Any | None]:
@@ -130,7 +131,13 @@ def _prepare_workspace(rc: Any) -> dict:
             restored = False
     names: list[str] = []
     repos: list[str] = []
-    if not restored:
+    if restored:
+        # The snapshot was credential-scrubbed; re-embed push tokens from this turn's secrets.
+        if rc.spec.repos:
+            from ...integrations.git import reauth_repos
+
+            repos = reauth_repos(rc.job_dir, rc.spec.repos, rc.secrets)
+    else:
         rc.job_dir.mkdir(parents=True, exist_ok=True)
         baked = _find_baked_skills()
         # Provision from the baked dir (a local source) rather than re-resolving spec.skills,
@@ -180,12 +187,15 @@ class ToolkitAgent(BaseAgent):
         # The ADK session id is the stable token: it tags the Cloud Logging stream the client
         # tails, and pins the Claude session id for checkpoint keying.
         session_id = getattr(getattr(ctx, "session", None), "id", None) or ctx.invocation_id
+        # Strip leading control directives (never shown to the model): secrets, then resume.
+        secrets, prompt = _split_secrets_directive(prompt)
         resume_sid, prompt = _split_resume_directive(prompt)
-        async for event in self._run_turn(spec, session_id, prompt, resume_sid):
+        async for event in self._run_turn(spec, session_id, prompt, resume_sid, secrets):
             yield event
 
     async def _run_turn(
-        self, spec: Any, session_id: str, prompt: str, resume_sid: str | None
+        self, spec: Any, session_id: str, prompt: str, resume_sid: str | None,
+        secrets: dict | None = None,
     ) -> AsyncGenerator[Any, None]:
         """Process one turn under ``session_id``: prep workspace, drive the harness, surface events.
 
@@ -204,7 +214,7 @@ class ToolkitAgent(BaseAgent):
             prompt=prompt,
             job_dir=Path(os.environ.get("AGENT_JOBS_ROOT", "/tmp/agent-jobs")) / session_id,
             session_id=session_id,
-            secrets=_resolve_secrets(spec),
+            secrets=dict(secrets) if secrets else {},
             resume_sid=resume_sid if session_store is not None else None,
             session_store=session_store,
             blobs=blobs,
@@ -292,7 +302,10 @@ class ToolkitAgent(BaseAgent):
         session_id = claimed.get("session_id") or ""
         message = claimed.get("message", "")
         resume = bool(claimed.get("resume"))
-        async for event in self._run_turn(spec, session_id, message, resume_sid=session_id if resume else None):
+        secrets = claimed.get("secrets") or {}  # per-invocation; never logged
+        async for event in self._run_turn(
+            spec, session_id, message, resume_sid=session_id if resume else None, secrets=secrets
+        ):
             yield event
 
 

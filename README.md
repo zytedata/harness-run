@@ -36,8 +36,7 @@ spec = AgentSpec(
     model="claude-sonnet-4-6",
     system_prompt=SystemPrompt.inherit(append="Prefer the Zyte web-scraping skills."),
     skills=[SkillSource.git("https://github.com/zytedata/claude-skills", ref="0.2.0")],
-    mcp_servers=[McpServer.github()],
-    secrets=["ZYTE_API_KEY", "GH_PAT"],      # names → resolved from Secret Manager at runtime, never pickled
+    mcp_servers=[McpServer.github()],        # token supplied per-invocation, not here
     permission_mode="bypassPermissions",     # the default — safe because each run gets an isolated cwd
     max_turns=120,
     max_budget_usd=10.0,
@@ -45,6 +44,8 @@ spec = AgentSpec(
 )
 ```
 
+The spec carries **no secrets** — credentials are passed per-invocation to `run`/`send` so nothing sensitive
+is ever baked into the deployment or shared across runs (see [Secrets & security](#secrets--security)).
 Every field except `name` and `model` has a sensible default (see [`spec.py`](remote_agent_toolkit/spec.py));
 a two-line spec (`AgentSpec(name=..., model=...)`) is a valid agent. For **structured output**, see the
 section below.
@@ -77,8 +78,9 @@ For a quick sync script, `local.run(spec, "…")` does `deploy → start_session
 same on `local` and `gemini`:
 
 ```python
-# (a) wait for completion (simplest — the headline default)
-result = await session.run("/scrape ...")
+# (a) wait for completion (simplest — the headline default). Pass any credentials the run
+#     needs as per-invocation secrets (name → value); see "Secrets & security" below.
+result = await session.run("/scrape ...", secrets={"SH_APIKEY": os.environ["SH_APIKEY"]})
 
 # (b) stream events as they happen (UI / live logs)
 async for ev in session.run("/scrape ..."):
@@ -137,10 +139,15 @@ Beyond skills, several `AgentSpec` fields shape what the agent can do and the en
   automatically when skills are present.
 - **`max_turns` / `max_budget_usd`** — hard caps on loop length and spend (the run ends with the matching
   stop reason).
-- **`env`** — extra environment variables exported to the agent's tool subprocess (config flags, etc.).
-- **`secrets`** — secret *names*, resolved at runtime (env locally, Secret Manager on `gemini`) and exported
-  by name. Conventional GitHub token names (`GH_TOKEN` / `GITHUB_TOKEN` / `GH_PAT`) also wire up `McpServer.github()`.
+- **`env`** — extra **non-secret** environment variables for the agent's tool subprocess (config flags,
+  etc.). Values live in the spec and are baked into the deployed engine, so never put secrets here — pass
+  those per-invocation (see [Secrets & security](#secrets--security)).
 - **`mcp_servers`** — `McpServer.github()`, `.remote(name, url, headers=...)`, `.stdio(name, command, args=...)`.
+  A `github()` server's token is supplied per-invocation under a conventional name (`GH_TOKEN` /
+  `GITHUB_TOKEN` / `GH_PAT`) and injected into its headers, not the agent's env.
+
+Credentials (the agent's own API keys, repo push tokens, MCP tokens) are **not** spec fields — they are
+passed at call time to `run`/`send`. See [Secrets & security](#secrets--security).
 
 **Python libraries & CLI tools.** The agent's `Bash` tool runs in a real shell with **`uv`** and **`git`** on
 `PATH`, so it can fetch and run dependencies on the fly — e.g. `uv run --with httpx script.py`, or
@@ -151,7 +158,8 @@ the deployment. To pin libraries into the deployed engine instead, see
 ## Cloning a git repo
 
 A common setup is to clone a repo into the agent's working directory **before it runs** — so it can read and
-modify the code, then commit and push. Declare repos on the spec:
+modify the code, then commit and push. Declare repos on the spec, naming (via `auth`) the per-invocation
+secret that authenticates each one:
 
 ```python
 from remote_agent_toolkit import AgentSpec, RepoSource
@@ -159,16 +167,79 @@ from remote_agent_toolkit import AgentSpec, RepoSource
 spec = AgentSpec(
     name="repo-fixer",
     model="claude-sonnet-4-6",
-    repos=[RepoSource.git("https://github.com/zytedata/some-repo", ref="main")],
-    secrets=["GH_TOKEN"],   # a GitHub token makes the clone push-ready (and clones private repos)
+    repos=[
+        RepoSource.git("https://github.com/zytedata/some-repo", ref="main", auth="GH_TOKEN"),
+        RepoSource.git("https://bitbucket.org/acme/spiders", auth="BITBUCKET_API_TOKEN"),
+    ],
+)
+
+# The token values are supplied at call time, never baked into the spec/engine:
+result = await session.run(
+    "fix the failing test and push a branch",
+    secrets={"GH_TOKEN": gh, "BITBUCKET_API_TOKEN": bb},
 )
 ```
 
-Each repo is cloned into the agent's cwd before the loop starts. If `secrets` carries a GitHub token
-(`GH_TOKEN` / `GITHUB_TOKEN` / `GH_PAT`), the clone is **authenticated and push-ready** — the token is injected
-into `origin` and a commit identity is configured, so the agent can `git push` without handling credentials;
-otherwise it's a read-only clone (fine for public repos). On `gemini` the token comes from Secret Manager, on
-`local` from your environment. (To make the agent open PRs, also add `McpServer.github()`.)
+Each repo is cloned into the agent's cwd before the loop starts. When the `auth` secret is supplied, the
+clone is **authenticated and push-ready**: the token is embedded into `origin` (host-aware —
+`x-access-token` for GitHub, `x-token-auth` for Bitbucket, `oauth2` for GitLab) and a commit identity is
+configured, so the agent can `git push`. Without it (or for a repo with no `auth`) the clone is read-only,
+which is fine for public repos. The push token is **not** placed in the agent's environment, and it is
+scrubbed from `.git/config` before any checkpoint snapshot (then re-embedded on resume from the freshly
+supplied secret). To let the agent open PRs, also add `McpServer.github()`.
+
+> **Push auth is reachable by the agent — scope it, don't rely on hiding it.** To `git push`, the token
+> must be usable by the agent (it can read `.git/config`). The real defense is a **scoped, short-lived**
+> credential — a GitHub App installation token limited to the target repo, a Bitbucket repository/workspace
+> access token — not a broad personal token. See [Secrets & security](#secrets--security).
+
+## Secrets & security
+
+Secrets are **passed per-invocation**, never declared on the spec and never baked into the deployed engine.
+You hand `run`/`send` a `name → value` map; the values live only for that run:
+
+```python
+result = await session.run(
+    "scrape the catalog and push results",
+    secrets={
+        "SH_APIKEY": sh_key,             # the agent's own API key (its code/tools read it)
+        "GH_TOKEN": gh_installation_tok, # a repo's auth= token (git push) — see "Cloning a git repo"
+    },
+)
+```
+
+**How each secret is routed.** The toolkit puts a secret where its *consumer* needs it, and nowhere else:
+
+| Secret | Consumer | Placed in the agent's env? |
+|---|---|---|
+| the agent's own keys (`SH_APIKEY`, …) | the agent's code/tools | **yes** — that's the point |
+| a repo's `auth=` token | embedded in `git` `origin` for clone/push | **no** |
+| a `McpServer.github()` token (`GH_TOKEN`/`GITHUB_TOKEN`/`GH_PAT`) | injected into MCP request headers | **no** |
+
+**The blast-radius model — the honest part.** A background agent can be steered by hostile input (a page it
+scrapes, a file in a repo) into revealing whatever it can reach: environment variables, `.git/config`, a
+token it was handed. The toolkit does **not** pretend to hide credentials from the agent. Instead it shrinks
+the blast radius:
+
+1. **Per-invocation, not baked/shared** — a run only ever has the secrets that *that* call passed. One
+   deployed engine serves many tenants without any of them sharing credentials.
+2. **Scope the credentials** — prefer short-lived, narrowly-scoped tokens (a GitHub **App installation
+   token** for one repo, a Bitbucket **repository access token**) over broad personal tokens. If a run is
+   coerced, the exposure is limited to that one scoped token for that one run.
+3. **Least secrets per run** — pass only what the task needs.
+
+**LLM API key.** By default `gemini` routes the model through **Vertex** (the engine authenticates as its own
+GCP identity — **no LLM key is ever in the agent's environment**). This is the recommended, prompt-injection-
+safe default. `deploy(..., use_vertex=False)` switches to API-key mode, where you pass `ANTHROPIC_API_KEY` as
+a per-invocation secret — but then the agent's process (hence the `Bash` tool) can read it, so use Vertex for
+anything exposed to untrusted input. Locally the agent likewise inherits your shell's environment (including
+your own `ANTHROPIC_API_KEY`); local is a trusted-dev context.
+
+**In transit & at rest.** Secret values ride the invocation, never the spec: on the **warm** path in the
+Pub/Sub dispatch message (Google-encrypted in transit and at rest), on the **cold** path in the `run_query_job`
+input. The toolkit **never** writes secret values to Cloud Logging, to an `AgentEvent`, or to a checkpoint —
+push tokens are scrubbed from `.git/config` before a workspace snapshot and re-embedded on resume. Don't log
+the `secrets` dict yourself.
 
 ## Pre-baked engine dependencies
 
@@ -254,16 +325,17 @@ for the running job. Grant it:
 
 | Role | Scope | Why |
 |---|---|---|
-| `roles/secretmanager.secretAccessor` | each secret in `spec.secrets` | the platform injects secret_refs, read as this agent |
 | `roles/storage.objectAdmin` | the output/checkpoint bucket | workspace snapshots, artifacts, the session store |
 | `roles/logging.logWriter` | project | the agent emits structured step logs |
 | `roles/pubsub.subscriber` | project _(warm pool)_ | warm-pool workers pull turns; project-level since the toolkit auto-creates a per-engine subscription |
 
+No `secretmanager.secretAccessor` is needed for the runtime agent: **secrets are passed per-invocation, not
+resolved from Secret Manager by the engine** (see [Secrets & security](#secrets--security)). If a *caller*
+keeps secret values in Secret Manager, that caller (the operator identity) reads them before the call.
+
 **Prerequisites** (create with admin creds; `deploy` ensures the buckets it needs):
 
 - A staging bucket `gs://<project>-agent-staging` and an output bucket `gs://<project>-agent-output`.
-- One Secret Manager secret per `spec.secrets` entry, **named exactly the same as the env var** (1:1 — e.g. a
-  secret literally named `ZYTE_API_KEY`).
 - **Claude model access** — see the note below; the deployed engine can't run without it.
 - _(warm pool)_ a Pub/Sub topic + subscription for turn dispatch — `gemini.deploy(warm_pool=True)` **creates
   these for you** (given the operator SA's `pubsub.editor`); no manual setup needed.
@@ -278,9 +350,11 @@ as its own GCP identity — no API key to manage). For that to work:
    `claude-opus-4-8`), the same form you use locally. The toolkit defaults `CLOUD_ML_REGION` to `global`,
    where these models are served; override `vertex_region` at deploy if you need a specific location.
 
-Prefer an API key (e.g. for models you haven't enabled on Vertex)? List `"ANTHROPIC_API_KEY"` in
-`spec.secrets` (with a matching Secret Manager secret) — the toolkit then uses the key and skips Vertex
-routing, so any model alias the key supports works.
+Prefer an API key (e.g. for models you haven't enabled on Vertex)? Deploy with `use_vertex=False` and pass
+`ANTHROPIC_API_KEY` as a per-invocation secret — the toolkit then uses the key (no Vertex routing), so any
+model alias the key supports works. Note the security trade-off: in API-key mode the agent's process can read
+the key, so prefer Vertex for anything exposed to untrusted input (see
+[Secrets & security](#secrets--security)).
 
 **Concrete shared setup** (`my-project`): location `us-central1` (Claude: `us-central1` + `global`);
 operator SA `agent-runtime@my-project.iam.gserviceaccount.com`; runtime agent
@@ -296,7 +370,8 @@ for R in roles/aiplatform.user roles/storage.admin roles/logging.viewer roles/cl
          roles/pubsub.editor; do  # pubsub.editor only needed for warm pools
   gcloud projects add-iam-policy-binding $PROJECT --member "serviceAccount:$OP" --role $R; done
 gcloud projects add-iam-policy-binding $PROJECT --member "serviceAccount:$RE" --role roles/logging.logWriter
-# grant $RE secretAccessor per-secret and objectAdmin on the output bucket; let yourself impersonate $OP:
+# grant $RE objectAdmin on the output bucket; let yourself impersonate $OP (no secretAccessor needed —
+# secrets are passed per-invocation, not read from Secret Manager by the engine):
 gcloud iam service-accounts add-iam-policy-binding $OP --member "user:you@org.com" \
   --role roles/iam.serviceAccountTokenCreator
 ```

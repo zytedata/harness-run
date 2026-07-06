@@ -23,7 +23,14 @@ def test_pool_helpers(monkeypatch):
     topic, sub = pool.pool_paths("proj", "Spider-Builder")
     assert topic == "projects/proj/topics/ratk-spider-builder-dispatch"
     assert sub == "projects/proj/subscriptions/ratk-spider-builder-dispatch-sub"
-    assert pool.dispatch_payload("s1", "go", True) == {"session_id": "s1", "message": "go", "resume": True}
+
+    assert pool.dispatch_payload("s1", "go", True) == {
+        "session_id": "s1", "message": "go", "resume": True, "secrets": {},
+    }
+    # Per-invocation secrets ride the payload and round-trip through the cold-path directive.
+    assert pool.dispatch_payload("s1", "go", False, {"K": "v"})["secrets"] == {"K": "v"}
+    assert pool.decode_secrets(pool.encode_secrets({"K": "v"})) == {"K": "v"}
+    assert pool.encode_secrets({}) == "" and pool.decode_secrets("not-base64") == {}
 
     monkeypatch.delenv("AGENT_POOL_SUBSCRIPTION", raising=False)
     assert pool.worker_dispatch_from_env() is None  # not a pool worker without the env
@@ -58,7 +65,7 @@ def test_warm_session_dispatches_and_tails(monkeypatch):
     result = asyncio.run(_await(session.run("go")))
 
     # The turn was dispatched to the pool (not cold-started) and the pool was refilled.
-    assert published == [{"session_id": "warm-sid", "message": "go", "resume": False}]
+    assert published == [{"session_id": "warm-sid", "message": "go", "resume": False, "secrets": {}}]
     assert refilled == [1]
     assert result.text == "done" and result.num_turns == 3
     assert session.status == RunStatus.IDLE and session.stop_reason == StopReason.END_TURN
@@ -120,16 +127,18 @@ def test_pool_worker_claims_and_runs(monkeypatch):
     spec = AgentSpec(name="w", model="m")
     agent = adk_agent.build_agent(spec)
 
-    # A dispatch pre-seeded with one turn assignment (the worker should claim it).
+    # A dispatch pre-seeded with one turn assignment (the worker should claim it), carrying
+    # per-invocation secrets that must flow through to the turn (and never be logged).
     disp = InMemoryDispatch()
-    disp.publish({"session_id": "dispatched-sid", "message": "do it", "resume": False})
+    disp.publish({"session_id": "dispatched-sid", "message": "do it", "resume": False,
+                  "secrets": {"SH_APIKEY": "k"}})
     monkeypatch.setattr(pool, "worker_dispatch_from_env", lambda *a, **k: disp)
 
     # Replace the heavy turn (real harness/model) with a recorder.
     seen = {}
 
-    async def fake_run_turn(spec_, session_id, prompt, resume_sid):
-        seen.update(session_id=session_id, prompt=prompt, resume_sid=resume_sid)
+    async def fake_run_turn(spec_, session_id, prompt, resume_sid, secrets=None):
+        seen.update(session_id=session_id, prompt=prompt, resume_sid=resume_sid, secrets=secrets)
         yield "turn-event"
 
     monkeypatch.setattr(agent, "_run_turn", fake_run_turn)
@@ -138,6 +147,7 @@ def test_pool_worker_claims_and_runs(monkeypatch):
         return [ev async for ev in agent._pool_worker(spec)]
 
     events = asyncio.run(drive())
-    # Claimed immediately (no heartbeat), then handed the dispatched turn to _run_turn.
+    # Claimed immediately (no heartbeat), then handed the dispatched turn (+secrets) to _run_turn.
     assert events == ["turn-event"]
-    assert seen == {"session_id": "dispatched-sid", "prompt": "do it", "resume_sid": None}
+    assert seen == {"session_id": "dispatched-sid", "prompt": "do it", "resume_sid": None,
+                    "secrets": {"SH_APIKEY": "k"}}

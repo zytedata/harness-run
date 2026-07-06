@@ -15,6 +15,8 @@ This module is pure helpers (stdlib only at import). The worker run-loop lives i
 
 from __future__ import annotations
 
+import base64
+import json
 import os
 import re
 from typing import Any
@@ -43,9 +45,41 @@ def pool_paths(project: str, name: str) -> tuple[str, str]:
     )
 
 
-def dispatch_payload(session_id: str, message: str, resume: bool) -> dict:
-    """The turn payload published to the pool: the worker adopts ``session_id`` for the turn."""
-    return {"session_id": session_id, "message": message, "resume": bool(resume)}
+def dispatch_payload(
+    session_id: str, message: str, resume: bool, secrets: dict | None = None
+) -> dict:
+    """The turn payload published to the pool: the worker adopts ``session_id`` for the turn.
+
+    ``secrets`` (per-invocation name → value) rides the payload so the worker can auth git /
+    the agent env for this turn. It travels over Pub/Sub (Google-encrypted in transit and at
+    rest) and is NEVER emitted to Cloud Logging or any AgentEvent — see the README security note.
+    """
+    return {
+        "session_id": session_id,
+        "message": message,
+        "resume": bool(resume),
+        "secrets": dict(secrets) if secrets else {},
+    }
+
+
+def encode_secrets(secrets: dict | None) -> str:
+    """base64(JSON) of the per-invocation secrets, for the cold-path ``AGENT_SECRETS`` directive.
+
+    The cold path has only the prompt text as a reliable channel to the agent (like
+    ``AGENT_RESUME``), so secrets are encoded into a leading directive line the agent strips
+    before running. Empty in → empty string (no directive emitted).
+    """
+    if not secrets:
+        return ""
+    return base64.b64encode(json.dumps(secrets).encode("utf-8")).decode("ascii")
+
+
+def decode_secrets(blob: str) -> dict:
+    """Inverse of :func:`encode_secrets`; returns ``{}`` on any decode error (never raises)."""
+    try:
+        return json.loads(base64.b64decode(blob.encode("ascii")).decode("utf-8"))
+    except Exception:  # noqa: BLE001 — malformed directive → no secrets rather than a crash
+        return {}
 
 
 def pool_log_id(name: str) -> str:

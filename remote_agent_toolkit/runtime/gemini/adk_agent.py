@@ -60,9 +60,9 @@ def _split_secrets_directive(prompt: str) -> tuple[dict, str]:
 
 
 def _parse_gcs_uri(uri: str) -> tuple[str, str]:
-    rest = uri[len("gs://"):] if uri.startswith("gs://") else uri
-    bucket, _, prefix = rest.partition("/")
-    return bucket, prefix.strip("/")
+    from ...ports.blobstore import parse_gcs_uri
+
+    return parse_gcs_uri(uri)
 
 
 def _find_baked_skills() -> Path | None:
@@ -218,7 +218,7 @@ class ToolkitAgent(BaseAgent):
             resume_sid=resume_sid if session_store is not None else None,
             session_store=session_store,
             blobs=blobs,
-            interactive=spec.checkpoint,
+            interactive=spec.checkpoint if spec.interactive is None else spec.interactive,
         )
 
         prep = await asyncio.to_thread(_prepare_workspace, rc)

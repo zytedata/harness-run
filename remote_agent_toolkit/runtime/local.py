@@ -17,6 +17,7 @@ needs no third-party deps.
 from __future__ import annotations
 
 import asyncio
+import os
 import tempfile
 import uuid
 from pathlib import Path
@@ -42,9 +43,19 @@ class LocalSession:
         self._session_store: Any | None = None
         if spec.checkpoint:
             from ..checkpoint.session_store import BlobSessionStore
-            from ..ports.blobstore import LocalBlobStore
 
-            self._blobs = LocalBlobStore(str(engine._blob_root))
+            ckpt_gcs = os.environ.get("AGENT_CHECKPOINT_GCS")
+            if ckpt_gcs:
+                # Same env hook as the gemini runtime: durable checkpoints even for the
+                # in-process engine (a pod-local <workdir>/blobs dies with the pod).
+                from ..ports.blobstore import GcsBlobStore, parse_gcs_uri
+
+                bucket, prefix = parse_gcs_uri(ckpt_gcs)
+                self._blobs = GcsBlobStore(bucket, (prefix + "/") if prefix else "")
+            else:
+                from ..ports.blobstore import LocalBlobStore
+
+                self._blobs = LocalBlobStore(str(engine._blob_root))
             self._session_store = BlobSessionStore(self._blobs)
         self._status = RunStatus.PENDING
         self._stop_reason: StopReason | None = None
@@ -86,7 +97,7 @@ class LocalSession:
             resume_sid=resume_sid if self._session_store is not None else None,
             session_store=self._session_store,
             blobs=self._blobs,
-            interactive=spec.checkpoint,
+            interactive=spec.checkpoint if spec.interactive is None else spec.interactive,
         )
         engine = self._engine
 

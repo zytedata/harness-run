@@ -63,3 +63,15 @@ def test_skillsource_git_smoke() -> None:
     assert s.ref == "0.2.0"
     assert s.subdir == "skills"
     assert SkillSource.from_dict(s.to_dict()) == s
+
+
+def test_agentspec_interactive_round_trip() -> None:
+    # None (default) follows checkpoint, is omitted from the dict, and survives the trip.
+    spec = _example_spec()
+    assert spec.interactive is None
+    assert "interactive" not in spec.to_dict()
+    assert AgentSpec.from_dict(spec.to_dict()).interactive is None
+    # Explicit False (checkpoint WITHOUT the operator-pause guidance) round-trips.
+    explicit = AgentSpec(name="a", model="m", checkpoint=True, interactive=False)
+    restored = AgentSpec.from_dict(explicit.to_dict())
+    assert restored.interactive is False and restored.checkpoint is True

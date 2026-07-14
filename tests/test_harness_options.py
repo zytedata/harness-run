@@ -91,3 +91,9 @@ def test_checkpoint_session_wiring():
     # On resume, `resume` is set instead of a fresh session_id.
     opts2 = ClaudeCodeHarness().build_options(spec, _ctx(spec, session_store=store, resume_sid="old"))
     assert opts2.resume == "old"
+
+
+def test_interactive_false_omits_suffix():
+    spec = AgentSpec(name="a", model="m")  # system_prompt None
+    opts = ClaudeCodeHarness().build_options(spec, _ctx(spec, interactive=False))
+    assert opts.system_prompt is None  # harness default — no INTERACTIVE MODE injection

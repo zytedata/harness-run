@@ -66,3 +66,11 @@ def test_path_traversal_rejected(tmp_path) -> None:
         store.put_bytes("../escape.txt", b"x")
     with pytest.raises(ValueError):
         store.get_bytes("../../etc/passwd")
+
+
+def test_parse_gcs_uri_variants() -> None:
+    from remote_agent_toolkit.ports.blobstore import parse_gcs_uri
+
+    assert parse_gcs_uri("gs://bkt/some/prefix") == ("bkt", "some/prefix")
+    assert parse_gcs_uri("bkt/some/prefix/") == ("bkt", "some/prefix")
+    assert parse_gcs_uri("gs://bkt") == ("bkt", "")

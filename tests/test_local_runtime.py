@@ -159,3 +159,44 @@ def test_start_session_mints_canonical_uuid(tmp_path):
     sid = engine.start_session().session_id
     assert "-" in sid                     # dashed, unlike uuid4().hex
     assert str(uuid.UUID(sid)) == sid     # parses and is already canonical
+
+
+def test_interactive_decoupled_from_checkpoint(tmp_path):
+    # interactive defaults to the checkpoint flag; an explicit spec value overrides it,
+    # so an autonomous loop can checkpoint without the "stop and await operator" guidance.
+    cases = [
+        (dict(checkpoint=True), True),
+        (dict(checkpoint=True, interactive=False), False),
+        (dict(checkpoint=False, interactive=True), True),
+    ]
+    for i, (kw, expected) in enumerate(cases):
+        seen = {}
+        spec = AgentSpec(name="demo", model="m", **kw)
+        engine = local.deploy(spec, workdir=str(tmp_path / f"wd-int-{i}"))
+        engine._harness = FakeHarness(
+            [_result_ev()], on_run=lambda s, c: seen.update(interactive=c.interactive))
+        asyncio.run(_await(engine.start_session().run("go")))
+        assert seen["interactive"] is expected, kw
+
+
+def test_checkpoint_blobstore_gcs_env_selection(tmp_path, monkeypatch):
+    # AGENT_CHECKPOINT_GCS points the local engine's checkpoint blobs at GCS (same env
+    # hook as the gemini runtime); without it the store is the pod-local <workdir>/blobs.
+    from remote_agent_toolkit.ports import blobstore as bs
+
+    created = {}
+
+    class StubGcs:
+        def __init__(self, bucket, prefix=""):
+            created.update(bucket=bucket, prefix=prefix)
+
+    monkeypatch.setattr(bs, "GcsBlobStore", StubGcs)
+    monkeypatch.setenv("AGENT_CHECKPOINT_GCS", "gs://ckpt-bkt/some/prefix")
+    spec = AgentSpec(name="demo", model="m", checkpoint=True)
+    session = local.deploy(spec, workdir=str(tmp_path / "wd-gcs")).start_session()
+    assert isinstance(session._blobs, StubGcs)
+    assert created == {"bucket": "ckpt-bkt", "prefix": "some/prefix/"}
+
+    monkeypatch.delenv("AGENT_CHECKPOINT_GCS")
+    session2 = local.deploy(spec, workdir=str(tmp_path / "wd-local")).start_session()
+    assert isinstance(session2._blobs, bs.LocalBlobStore)

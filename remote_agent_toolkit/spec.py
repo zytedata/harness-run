@@ -258,6 +258,10 @@ class AgentSpec:
         max_turns: Hard cap on agent turns.
         max_budget_usd: Hard cap on spend.
         checkpoint: Enable checkpoint/resume (interactive pauses).
+        interactive: Append the "stop and await the operator" guidance to the system
+            prompt. ``None`` (default) follows ``checkpoint`` — the historical coupling.
+            Set ``False`` to checkpoint an autonomous loop without pause guidance, or
+            ``True`` for the guidance without checkpointing.
         output_schema: Optional structured-output schema (pydantic model or JSON schema).
         env: Extra environment variables for the agent. **Non-secret only** — values live in
             the spec and are baked into the deployed engine image, so they are visible to
@@ -282,6 +286,7 @@ class AgentSpec:
     max_turns: int = 120
     max_budget_usd: float = 10.0
     checkpoint: bool = False
+    interactive: bool | None = None
     output_schema: Any = None
     env: Mapping[str, str] | None = field(default=None)
     packages: tuple[str, ...] = ()
@@ -321,6 +326,8 @@ class AgentSpec:
             d["allowed_tools"] = list(self.allowed_tools)
         if self.disallowed_tools is not None:
             d["disallowed_tools"] = list(self.disallowed_tools)
+        if self.interactive is not None:
+            d["interactive"] = self.interactive
         if self.env is not None:
             d["env"] = dict(self.env)
         if self.output_schema is not None:
@@ -355,6 +362,7 @@ class AgentSpec:
             max_turns=int(d.get("max_turns", 120)),
             max_budget_usd=float(d.get("max_budget_usd", 10.0)),
             checkpoint=bool(d.get("checkpoint", False)),
+            interactive=None if d.get("interactive") is None else bool(d["interactive"]),
             output_schema=d.get("output_schema"),
             env=dict(d["env"]) if d.get("env") is not None else None,
             packages=tuple(d.get("packages", ())),

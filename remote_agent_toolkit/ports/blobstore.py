@@ -54,6 +54,13 @@ class BlobStore(Protocol):
         ...
 
 
+def parse_gcs_uri(uri: str) -> tuple[str, str]:
+    """Split ``gs://bucket/some/prefix`` (scheme optional) into ``(bucket, prefix)``."""
+    rest = uri[len("gs://"):] if uri.startswith("gs://") else uri
+    bucket, _, prefix = rest.partition("/")
+    return bucket, prefix.strip("/")
+
+
 def _normalize_key(root: Path, key: str) -> Path:
     """Resolve ``key`` under ``root``, rejecting traversal that escapes ``root``."""
     # Keys may contain "/" and are treated as relative paths under root.

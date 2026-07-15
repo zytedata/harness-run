@@ -239,11 +239,14 @@ a per-invocation secret — but then the agent's process (hence the `Bash` tool)
 anything exposed to untrusted input. Locally the agent likewise inherits your shell's environment (including
 your own `ANTHROPIC_API_KEY`); local is a trusted-dev context.
 
-**In transit & at rest.** Secret values ride the invocation, never the spec: on the **warm** path in the
-Pub/Sub dispatch message (Google-encrypted in transit and at rest), on the **cold** path in the `run_query_job`
-input. The toolkit **never** writes secret values to Cloud Logging, to an `AgentEvent`, or to a checkpoint —
-push tokens are scrubbed from `.git/config` before a workspace snapshot and re-embedded on resume. Don't log
-the `secrets` dict yourself.
+**In transit & at rest.** Secret values never travel in the invocation payload itself — the platform
+*persists* a job's input verbatim (`jobs/<sid>_input.jsonl` in the output bucket), and a Pub/Sub message is
+retained until acked, so values in either would linger. Instead the values are staged at a **single-use GCS
+object** in the output bucket (readable only by the bucket's principals: your operator identity and the RE
+service agent); the invocation carries just that pointer, and the worker **deletes the object the moment it
+reads it** (the client also cleans it up on run completion as a backstop). The toolkit **never** writes secret
+values to Cloud Logging, to an `AgentEvent`, or to a checkpoint — push tokens are scrubbed from `.git/config`
+before a workspace snapshot and re-embedded on resume. Don't log the `secrets` dict yourself.
 
 ## Pre-baked engine dependencies
 

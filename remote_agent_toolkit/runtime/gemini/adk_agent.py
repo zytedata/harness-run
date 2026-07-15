@@ -27,7 +27,7 @@ from google.adk.agents import BaseAgent
 from ...events import AgentEvent
 
 _RESUME_DIRECTIVE = re.compile(r"^\s*AGENT_RESUME=(\S+)[ \t]*\r?\n", re.IGNORECASE)
-_SECRETS_DIRECTIVE = re.compile(r"^\s*AGENT_SECRETS=(\S+)[ \t]*\r?\n", re.IGNORECASE)
+_SECRETS_DIRECTIVE = re.compile(r"^\s*AGENT_SECRETS_GCS=(\S+)[ \t]*\r?\n", re.IGNORECASE)
 _AGENT_DESCRIPTION = "A remote-agent-toolkit agent: a Claude Code session driven by the toolkit harness."
 
 
@@ -46,18 +46,38 @@ def _split_resume_directive(prompt: str) -> tuple[str | None, str]:
     return None, prompt
 
 
-def _split_secrets_directive(prompt: str) -> tuple[dict, str]:
-    """Strip a leading ``AGENT_SECRETS=<base64-json>`` directive (cold-path per-invocation secrets).
+def _split_secrets_directive(prompt: str) -> tuple[str | None, str]:
+    """Strip a leading ``AGENT_SECRETS_GCS=<gs://...>`` directive (cold-path secrets pointer).
 
-    Returns ``(secrets, remaining_prompt)``; ``({}, prompt)`` when absent. The directive is
-    consumed here so the model never sees it.
+    Returns ``(uri, remaining_prompt)``; ``(None, prompt)`` when absent. The directive is
+    consumed here so the model never sees it. The pointer (not values — the platform persists
+    the job input) targets the single-use staged object; see :func:`_fetch_secrets`.
     """
-    from .pool import decode_secrets
-
     m = _SECRETS_DIRECTIVE.match(prompt)
     if m:
-        return decode_secrets(m.group(1)), prompt[m.end():]
-    return {}, prompt
+        return m.group(1), prompt[m.end():]
+    return None, prompt
+
+
+def _fetch_secrets(secrets_uri: str | None) -> tuple[dict, AgentEvent | None]:
+    """Fetch (and delete) the staged per-invocation secrets; never raises.
+
+    Returns ``(secrets, warning_event)``: on a missing/unreadable staging the run proceeds
+    without secrets and the caller surfaces the (value-free) warning so the failure mode is
+    debuggable instead of a mystery of absent credentials.
+    """
+    if not secrets_uri:
+        return {}, None
+    from .handoff import fetch_and_delete_secrets
+
+    secrets = fetch_and_delete_secrets(secrets_uri)
+    if secrets:
+        return secrets, None
+    return {}, AgentEvent(
+        kind="status",
+        summary="invocation secrets unavailable (staging object missing/unreadable); running without them",
+        raw={"event": "secrets_unavailable"},
+    )
 
 
 def _claude_session_id(session_id: str) -> str:
@@ -205,20 +225,22 @@ class ToolkitAgent(BaseAgent):
         # The ADK session id is the stable token: it tags the Cloud Logging stream the client
         # tails, and pins the Claude session id for checkpoint keying.
         session_id = getattr(getattr(ctx, "session", None), "id", None) or ctx.invocation_id
-        # Strip leading control directives (never shown to the model): secrets, then resume.
-        secrets, prompt = _split_secrets_directive(prompt)
+        # Strip leading control directives (never shown to the model): secrets pointer, resume.
+        secrets_uri, prompt = _split_secrets_directive(prompt)
         resume_sid, prompt = _split_resume_directive(prompt)
-        async for event in self._run_turn(spec, session_id, prompt, resume_sid, secrets):
+        async for event in self._run_turn(spec, session_id, prompt, resume_sid, secrets_uri):
             yield event
 
     async def _run_turn(
         self, spec: Any, session_id: str, prompt: str, resume_sid: str | None,
-        secrets: dict | None = None,
+        secrets_uri: str | None = None,
     ) -> AsyncGenerator[Any, None]:
         """Process one turn under ``session_id``: prep workspace, drive the harness, surface events.
 
         Shared by the cold path and a warm worker's claimed turn — both tag the Cloud Logging
         stream and checkpoint with ``session_id``, so the client tails identically either way.
+        ``secrets_uri`` points at the single-use staged secrets object (fetched + deleted here);
+        values never ride the invocation payload.
         """
         from ...harness.claude_code import ClaudeCodeHarness
         from ...harness.context import RunContext
@@ -229,13 +251,14 @@ class ToolkitAgent(BaseAgent):
         # Claude/checkpoint side needs a canonical UUID, mapped deterministically from it.
         sink = CloudLoggingSink(session_id=session_id)
         claude_sid = _claude_session_id(session_id)
+        secrets, secrets_warning = _fetch_secrets(secrets_uri)
         blobs, session_store = _checkpoint_ports(spec)
         rc = RunContext(
             spec=spec,
             prompt=prompt,
             job_dir=Path(os.environ.get("AGENT_JOBS_ROOT", "/tmp/agent-jobs")) / claude_sid,
             session_id=claude_sid,
-            secrets=dict(secrets) if secrets else {},
+            secrets=secrets,
             resume_sid=(
                 _claude_session_id(resume_sid)
                 if (resume_sid and session_store is not None)
@@ -252,6 +275,9 @@ class ToolkitAgent(BaseAgent):
         # numeric-session-id bug hid). Error strings are truncated and repo tokens are already
         # redacted by the git layer; never put secrets in an event.
         try:
+            if secrets_warning is not None:  # value-free: staged secrets were unavailable
+                sink.emit(secrets_warning)
+                yield to_adk_event(secrets_warning, self.name)
             prep = await asyncio.to_thread(_prepare_workspace, rc)
             prep_ev = AgentEvent(kind="status", summary=prep["summary"], raw=prep)
             sink.emit(prep_ev)
@@ -342,9 +368,10 @@ class ToolkitAgent(BaseAgent):
         session_id = claimed.get("session_id") or ""
         message = claimed.get("message", "")
         resume = bool(claimed.get("resume"))
-        secrets = claimed.get("secrets") or {}  # per-invocation; never logged
+        secrets_uri = claimed.get("secrets_gcs")  # pointer only; values are staged in GCS
         async for event in self._run_turn(
-            spec, session_id, message, resume_sid=session_id if resume else None, secrets=secrets
+            spec, session_id, message,
+            resume_sid=session_id if resume else None, secrets_uri=secrets_uri,
         ):
             yield event
 

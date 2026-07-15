@@ -55,6 +55,67 @@ def test_split_resume_directive_and_parse_gcs():
     assert adk_agent._parse_gcs_uri("gs://bkt/some/prefix") == ("bkt", "some/prefix")
 
 
+def test_split_secrets_directive_strips_pointer():
+    uri = "gs://bkt/invocation-secrets/s-1.json"
+    got, rest = adk_agent._split_secrets_directive(f"AGENT_SECRETS_GCS={uri}\ndo the task")
+    assert got == uri and rest == "do the task"
+    assert adk_agent._split_secrets_directive("no directive") == (None, "no directive")
+
+
+def test_cold_submit_stages_secrets_and_query_carries_only_pointer(monkeypatch):
+    # SECURITY regression: the platform persists a job's input verbatim to GCS
+    # (jobs/<sid>_input.jsonl), so the query must NEVER contain secret values — only the
+    # single-use staged pointer.
+    spec = AgentSpec(name="g", model="m")
+    engine = backend.GeminiEngine(
+        resource="r/reasoningEngines/1", spec=spec,
+        project="p", location="l", output_bucket="gs://out",
+    )
+    captured = {}
+
+    class FakeAE:
+        def run_query_job(self, name, config):
+            captured["config"] = config
+            return {}
+
+    monkeypatch.setattr(engine, "_agent_engines", lambda: FakeAE())
+    staged = {}
+
+    def fake_stage(bucket, sid, secrets):
+        staged.update(bucket=bucket, sid=sid, secrets=secrets)
+        return f"gs://out/invocation-secrets/{sid}-abc.json"
+
+    import remote_agent_toolkit.runtime.gemini.handoff as handoff_mod
+    monkeypatch.setattr(handoff_mod, "stage_secrets", fake_stage)
+
+    seed = _seed_sink("sid-3", [
+        AgentEvent(kind="result", summary="ok", raw={"subtype": "success", "is_error": False,
+                                                     "num_turns": 1, "session_id": "sid-3"}),
+    ])
+    import remote_agent_toolkit.ports.eventsink as eventsink_mod
+    monkeypatch.setattr(eventsink_mod, "CloudLoggingSink", lambda **kw: seed)
+
+    session = backend.GeminiSession(engine, "sid-3")
+    asyncio.run(_await(session.run("go", secrets={"SH_APIKEY": "SUPERSECRET"})))
+
+    query = captured["config"]["query"]
+    assert "SUPERSECRET" not in query                      # never the value
+    assert "AGENT_SECRETS_GCS=gs://out/invocation-secrets/sid-3-abc.json" in query
+    assert staged["secrets"] == {"SH_APIKEY": "SUPERSECRET"}  # staged out-of-band
+    # Completion cleans up the staged object (backstop; the worker deletes on read).
+    assert session._staged_secrets_uri is None
+
+
+def test_submit_with_secrets_requires_output_bucket():
+    spec = AgentSpec(name="g", model="m")
+    engine = backend.GeminiEngine(resource="r/reasoningEngines/1", spec=spec,
+                                  project=None, location=None, output_bucket=None)
+    session = backend.GeminiSession(engine, "sid")
+    import pytest
+    with pytest.raises(ValueError, match="output bucket"):
+        session.run("go", secrets={"K": "v"})
+
+
 def test_find_baked_skills(tmp_path, monkeypatch):
     # No baked skills dir on the candidate paths -> None.
     monkeypatch.chdir(tmp_path)

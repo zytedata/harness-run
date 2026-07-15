@@ -23,7 +23,7 @@ from typing import Any, AsyncIterator, TYPE_CHECKING
 
 from ...events import RunResult, RunStatus, StopReason
 from .._run import DrivenRun
-from .pool import POOL_WAIT_SENTINEL, dispatch_payload, encode_secrets, pool_paths
+from .pool import POOL_WAIT_SENTINEL, dispatch_payload, pool_paths
 
 if TYPE_CHECKING:
     from ...spec import AgentSpec
@@ -252,19 +252,36 @@ class GeminiSession:
         self._last_result: RunResult | None = None
         self._current_run: DrivenRun | None = None
         self._last_job: Any | None = None
+        self._staged_secrets_uri: str | None = None  # single-use handoff object (cleanup on complete)
 
     def run(self, message: str, *, secrets: dict[str, str] | None = None) -> DrivenRun:
         """Start a fresh turn (submits a ``run_query_job``).
 
         ``secrets`` is a per-invocation name → value map (the agent's own keys, any repo
-        ``auth`` / GitHub MCP token). It is transmitted with the turn (Pub/Sub for a warm
-        engine, the job input for a cold one), never baked into the engine, never logged.
+        ``auth`` / GitHub MCP token) — never baked into the engine, never logged. Values are
+        staged at a single-use GCS object the worker fetches and deletes; only that pointer
+        rides the invocation (the platform persists a job's input verbatim, and a Pub/Sub
+        message is retained until acked, so values must never travel in either).
         """
         return self._submit(message, resume=False, secrets=secrets)
 
     def send(self, message: str, *, secrets: dict[str, str] | None = None) -> DrivenRun:
         """Resume this session with ``message``. Pass ``secrets`` again (not persisted)."""
         return self._submit(message, resume=True, secrets=secrets)
+
+    def _stage_secrets(self, secrets: dict[str, str] | None) -> str | None:
+        """Stage per-invocation secrets to a single-use GCS object; return its gs:// URI."""
+        if not secrets:
+            return None
+        engine = self._engine
+        if not engine._output_bucket:
+            raise ValueError(
+                "passing secrets requires the engine's output bucket (the values are staged "
+                "there for the worker); construct the engine with output_bucket/project set."
+            )
+        from .handoff import stage_secrets
+
+        return stage_secrets(engine._output_bucket, self._session_id, secrets)
 
     def _submit(
         self, message: str, resume: bool, secrets: dict[str, str] | None = None
@@ -275,23 +292,25 @@ class GeminiSession:
         sid = self._session_id
         # Watermark the log tail just before kicking off (small slack for clock skew).
         since = time.time() - 5
+        secrets_uri = self._stage_secrets(secrets)
+        self._staged_secrets_uri = secrets_uri  # cleaned up on completion (worker deletes first)
 
         if engine._warm:
             # Warm path: dispatch the turn to the pool (a warm worker adopts our session_id),
-            # then refill so the next turn stays warm. No cold run_query_job. Secrets ride the
-            # (Pub/Sub) payload; they are never logged.
-            engine._dispatch().publish(dispatch_payload(sid, message, resume, secrets))
+            # then refill so the next turn stays warm. No cold run_query_job. The payload
+            # carries only the secrets *pointer*, never values.
+            engine._dispatch().publish(dispatch_payload(sid, message, resume, secrets_uri))
             try:
                 engine.fill_pool(1)
             except Exception:  # noqa: BLE001 — refill is best-effort; the turn already dispatched
                 pass
         else:
-            # Cold path: the prompt is the only reliable channel to the agent, so per-invocation
-            # secrets (and the resume marker) ride leading directive lines the agent strips.
+            # Cold path: the prompt is the only reliable channel to the agent, so the secrets
+            # POINTER (and the resume marker) ride leading directive lines the agent strips.
+            # Never values: the platform persists the job input to jobs/<sid>_input.jsonl.
             directives = ""
-            blob = encode_secrets(secrets)
-            if blob:
-                directives += f"AGENT_SECRETS={blob}\n"
+            if secrets_uri:
+                directives += f"AGENT_SECRETS_GCS={secrets_uri}\n"
             if resume:
                 directives += f"AGENT_RESUME={sid}\n"
             prompt = directives + message
@@ -323,6 +342,13 @@ class GeminiSession:
         self._last_result = result
         self._stop_reason = stop_reason
         self._status = RunStatus.IDLE
+        # Backstop cleanup of the staged secrets object; the worker normally deleted it on
+        # read, but a run that failed before the worker fetched would otherwise leave it.
+        if self._staged_secrets_uri:
+            from .handoff import delete_staged_secrets
+
+            delete_staged_secrets(self._staged_secrets_uri)
+            self._staged_secrets_uri = None
 
     async def interrupt(self) -> None:
         """Interrupt the in-flight run: stop tailing AND cancel the remote job.

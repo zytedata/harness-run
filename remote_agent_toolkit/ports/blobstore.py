@@ -53,6 +53,14 @@ class BlobStore(Protocol):
         """
         ...
 
+    def delete(self, key: str) -> None:
+        """Delete the blob at ``key`` (no error if absent).
+
+        Required by the per-invocation secrets handoff: the worker deletes the
+        staged secrets object the moment it has read it.
+        """
+        ...
+
 
 def parse_gcs_uri(uri: str) -> tuple[str, str]:
     """Split ``gs://bucket/some/prefix`` (scheme optional) into ``(bucket, prefix)``."""
@@ -136,6 +144,14 @@ class GcsBlobStore:
         names = [b.name[strip:] for b in self._client.list_blobs(bucket, prefix=obj_prefix)]
         return sorted(names)
 
+    def delete(self, key: str) -> None:
+        from google.api_core.exceptions import NotFound  # lazy
+
+        try:
+            self._get_bucket().blob(self._object_name(key)).delete()
+        except NotFound:
+            pass  # already gone — deletion is idempotent
+
 
 class LocalBlobStore:
     """Filesystem-backed :class:`BlobStore` for local dev.
@@ -190,3 +206,10 @@ class LocalBlobStore:
                 if rel.startswith(prefix):
                     keys.append(rel)
         return sorted(keys)
+
+    def delete(self, key: str) -> None:
+        path = _normalize_key(self.root, key)
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass  # already gone — deletion is idempotent

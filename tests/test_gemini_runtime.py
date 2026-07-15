@@ -154,6 +154,66 @@ def test_gemini_session_send_prefixes_resume(monkeypatch):
     assert session.stop_reason == StopReason.NEEDS_INPUT
 
 
+def test_claude_session_id_maps_numeric_adk_ids_to_stable_uuid():
+    import uuid
+
+    # Cold-path ADK session ids are numeric; the Claude SDK requires a canonical UUID.
+    adk_sid = "1966652674296250368"  # the exact shape that crashed the CLI live
+    mapped = adk_agent._claude_session_id(adk_sid)
+    assert mapped != adk_sid
+    assert str(uuid.UUID(mapped)) == mapped                        # canonical UUID
+    assert adk_agent._claude_session_id(adk_sid) == mapped         # deterministic (resume-stable)
+    # A sid that is already a canonical UUID (warm path) passes through unchanged.
+    warm = str(uuid.uuid4())
+    assert adk_agent._claude_session_id(warm) == warm
+
+
+def test_run_turn_maps_session_id_and_surfaces_harness_crash(tmp_path, monkeypatch):
+    """Regression for the two silent-death bugs found live (engine 8189…7648):
+
+    (1) the numeric ADK session id must NOT reach the harness verbatim (the claude CLI
+        exits 1 on a non-UUID --session-id), and
+    (2) a harness crash must emit a TERMINAL error result event — without one the client's
+        Cloud Logging tail hangs forever and the failure is invisible.
+    """
+    monkeypatch.setenv("AGENT_JOBS_ROOT", str(tmp_path / "jobs"))
+    monkeypatch.chdir(tmp_path)  # no baked skills dir on the lookup paths
+
+    seen = {}
+
+    class CrashingHarness:
+        async def run(self, spec, rc):
+            seen["session_id"] = rc.session_id
+            raise RuntimeError("Invalid session ID. Must be a valid UUID.")
+            yield  # pragma: no cover — makes this an async generator
+
+    import remote_agent_toolkit.harness.claude_code as harness_mod
+    import remote_agent_toolkit.ports.eventsink as eventsink_mod
+    monkeypatch.setattr(harness_mod, "ClaudeCodeHarness", CrashingHarness)
+    sink = InMemorySink(session_id="1966652674296250368")
+    monkeypatch.setattr(eventsink_mod, "CloudLoggingSink", lambda **kw: sink)
+
+    spec = AgentSpec(name="w", model="m")
+    agent = adk_agent.build_agent(spec)
+
+    async def drive():
+        return [ev async for ev in agent._run_turn(spec, "1966652674296250368", "go", None)]
+
+    events = asyncio.run(drive())
+
+    # (1) the harness received the mapped canonical UUID, not the raw numeric id.
+    import uuid
+    assert str(uuid.UUID(seen["session_id"])) == seen["session_id"]
+    # (2) the stream ends with a terminal error result (workspace_ready + harness_error).
+    terminal = events[-1]
+    assert terminal.custom_metadata["kind"] == "result"
+    assert terminal.custom_metadata["raw"]["is_error"] is True
+    assert "agent harness failed" in terminal.error_message
+    # ...and the same terminal event reached the sink, so a tailing client unblocks too.
+    kinds = [e.kind for e in sink._events["1966652674296250368"]]
+    assert kinds[-1] == "result"
+
+
 def test_warm_start_session_mints_canonical_uuid():
     # Warm-pool sessions get a client-chosen id that reaches the Claude Agent SDK as
     # session_id / resume; it must be a CANONICAL UUID (dashed), not uuid4().hex, or the SDK

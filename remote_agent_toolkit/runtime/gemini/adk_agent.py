@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import os
 import re
+import uuid
 from pathlib import Path
 from typing import Any, AsyncGenerator
 
@@ -57,6 +58,23 @@ def _split_secrets_directive(prompt: str) -> tuple[dict, str]:
     if m:
         return decode_secrets(m.group(1)), prompt[m.end():]
     return {}, prompt
+
+
+def _claude_session_id(session_id: str) -> str:
+    """Map a runtime session id to the canonical UUID the Claude Agent SDK requires.
+
+    The cold path's session id comes from ADK ``sessions.create`` and is NUMERIC (e.g.
+    ``1966652674296250368``); pinning it as the Claude session id makes the ``claude`` CLI
+    exit 1 with "Invalid session ID. Must be a valid UUID" — before emitting any event. A
+    sid that is already a canonical UUID (the warm path's client-chosen id) passes through
+    unchanged; anything else maps via uuid5, which is DETERMINISTIC so checkpoint keying and
+    resume stay stable across turns and workers.
+    """
+    try:
+        uuid.UUID(session_id)
+        return session_id
+    except ValueError:
+        return str(uuid.uuid5(uuid.NAMESPACE_URL, f"ratk-session:{session_id}"))
 
 
 def _parse_gcs_uri(uri: str) -> tuple[str, str]:
@@ -207,15 +225,22 @@ class ToolkitAgent(BaseAgent):
         from ...ports.eventsink import CloudLoggingSink
         from .translate import to_adk_event
 
+        # The RAW session id keys the Cloud Logging stream (what the client tails); the
+        # Claude/checkpoint side needs a canonical UUID, mapped deterministically from it.
         sink = CloudLoggingSink(session_id=session_id)
+        claude_sid = _claude_session_id(session_id)
         blobs, session_store = _checkpoint_ports(spec)
         rc = RunContext(
             spec=spec,
             prompt=prompt,
-            job_dir=Path(os.environ.get("AGENT_JOBS_ROOT", "/tmp/agent-jobs")) / session_id,
-            session_id=session_id,
+            job_dir=Path(os.environ.get("AGENT_JOBS_ROOT", "/tmp/agent-jobs")) / claude_sid,
+            session_id=claude_sid,
             secrets=dict(secrets) if secrets else {},
-            resume_sid=resume_sid if session_store is not None else None,
+            resume_sid=(
+                _claude_session_id(resume_sid)
+                if (resume_sid and session_store is not None)
+                else None
+            ),
             session_store=session_store,
             blobs=blobs,
             interactive=spec.checkpoint if spec.interactive is None else spec.interactive,
@@ -226,9 +251,21 @@ class ToolkitAgent(BaseAgent):
         sink.emit(prep_ev)
         yield to_adk_event(prep_ev, self.name)
 
-        async for event in ClaudeCodeHarness().run(spec, rc):
-            sink.emit(event)  # near-real-time channel (Cloud Logging); finalize is inline in run()
-            yield to_adk_event(event, self.name)
+        try:
+            async for event in ClaudeCodeHarness().run(spec, rc):
+                sink.emit(event)  # near-real-time channel (Cloud Logging); finalize is inline
+                yield to_adk_event(event, self.name)
+        except Exception as exc:  # noqa: BLE001 — a silent server-side death is undebuggable
+            # Surface the crash as a TERMINAL result event: without one the client's tail
+            # hangs forever and the failure is invisible (how the numeric-session-id bug hid).
+            err = AgentEvent(
+                kind="result",
+                summary=f"agent harness failed: {str(exc)[:300]}",
+                raw={"event": "harness_error", "is_error": True, "subtype": "error",
+                     "session_id": session_id},
+            )
+            sink.emit(err)
+            yield to_adk_event(err, self.name)
 
     async def _pool_worker(self, spec: Any) -> AsyncGenerator[Any, None]:
         """Block pulling the dispatch subscription, then process the claimed turn.

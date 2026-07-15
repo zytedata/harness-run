@@ -101,10 +101,12 @@ if session.status == "idle" and session.stop_reason == "needs_input":
 ```
 
 Runs are hang-proofed on `gemini`: every log-tail poll is time-bounded (a dead connection costs a ~30 s
-retry, not a frozen run), and a **cold** run carries a job watchdog — if the remote job terminates without
-ever writing a terminal event (worker OOM, external cancel, engine deleted), the run ends within ~3 minutes
-with an error result explaining the job state instead of waiting out the 1 h tail cap. Warm turns run in a
-pool worker without a per-turn job handle, so they get the bounded polls only.
+retry, not a frozen run), and a **cold** run carries a job watchdog — when the remote job has terminated but
+the tail is still silent, the client first recovers the **real result from the durable GCS event mirror**
+(covers Cloud Logging ingestion lag, which can run several minutes), and only if no terminal record exists
+anywhere (worker OOM, external cancel, engine deleted) ends the run within ~3 minutes with an error result
+explaining the job state — instead of waiting out the 1 h tail cap. Warm turns run in a pool worker without
+a per-turn job handle, so they get the bounded polls only.
 
 ## Structured output
 

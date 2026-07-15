@@ -83,6 +83,57 @@ def test_watchdog_tolerates_flaky_probe_then_fires():
     assert events[-1].raw["job_state"] == "SUCCESS"
 
 
+def test_watchdog_recovers_real_result_from_durable_history():
+    # Observed live: Cloud Logging ingestion lag starved the tail while the job SUCCEEDED and
+    # the worker had already mirrored everything to GCS. The watchdog must deliver the REAL
+    # remainder from the durable record — not a synthetic error.
+    async def tail():
+        yield AgentEvent(kind="status", summary="workspace ready")  # only this got ingested
+        await asyncio.sleep(3600)
+
+    async def probe():
+        return "SUCCESS"
+
+    full_history = [
+        AgentEvent(kind="status", summary="workspace ready"),
+        AgentEvent(kind="message", summary="DONE"),
+        _result("DONE"),
+    ]
+
+    async def history_reader():
+        return full_history
+
+    async def drive():
+        return [e async for e in _watched_tail(tail, probe, "sid", history_reader,
+                                               quiet_s=0.02, grace_s=0.03)]
+
+    events = asyncio.run(drive())
+    # The already-delivered event is not duplicated; the missing remainder arrives verbatim.
+    assert [e.summary for e in events] == ["workspace ready", "DONE", "DONE"]
+    assert events[-1].kind == "result" and not (events[-1].raw or {}).get("is_error")
+
+
+def test_watchdog_synthesizes_error_when_history_has_no_result():
+    # A durable record without a terminal result (worker killed mid-turn) is no recovery —
+    # the synthetic error still fires.
+    async def tail():
+        await asyncio.sleep(3600)
+        yield  # pragma: no cover
+
+    async def probe():
+        return "FAILED"
+
+    async def history_reader():
+        return [AgentEvent(kind="status", summary="workspace ready")]  # partial, no result
+
+    async def drive():
+        return [e async for e in _watched_tail(tail, probe, "sid", history_reader,
+                                               quiet_s=0.02, grace_s=0.03)]
+
+    events = asyncio.run(drive())
+    assert len(events) == 1 and events[0].raw["event"] == "job_terminated_without_result"
+
+
 def test_watchdog_plain_end_of_stream_passes_through():
     async def tail():
         yield AgentEvent(kind="status", summary="only")

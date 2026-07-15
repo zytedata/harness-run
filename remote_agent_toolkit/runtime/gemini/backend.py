@@ -43,19 +43,29 @@ async def _watched_tail(
     tail_factory: Any,
     probe: Any,
     session_id: str,
+    history_reader: Any = None,
     quiet_s: float = _WATCHDOG_QUIET_S,
     grace_s: float = _WATCHDOG_GRACE_S,
 ) -> AsyncIterator[AgentEvent]:
-    """Yield the tail's events, ending the run if the job dies without a terminal event.
+    """Yield the tail's events, ending the run if the job terminates without a terminal event.
 
     The client normally learns a run finished from the terminal ``result`` event on the log
-    tail; a job that dies WITHOUT writing one (OOM, external cancel, engine deleted, logging
-    outage) would leave the tail waiting up to its 1 h cap. So: while events flow this wrapper
-    is pure passthrough (zero probe calls); after ``quiet_s`` of silence it asks ``probe`` for
-    the authoritative job state ("RUNNING"/"SUCCESS"/"FAILED"/None). A terminal state starts a
-    ``grace_s`` window (Cloud Logging ingestion lag) for the event to still arrive; if it
-    doesn't, a synthetic error ``result`` explains what happened instead of hanging. A probe
-    failure (None) is treated as RUNNING — a flaky check must never kill a healthy run.
+    tail; a job that ends WITHOUT the tail seeing one (worker OOM, external cancel, engine
+    deleted, logging outage — or, observed live, multi-minute Cloud Logging ingestion lag)
+    would leave the tail waiting up to its 1 h cap. So: while events flow this wrapper is pure
+    passthrough (zero probe calls); after ``quiet_s`` of silence it asks ``probe`` for the
+    authoritative job state ("RUNNING"/"SUCCESS"/"FAILED"/None). A terminal state starts a
+    ``grace_s`` window for the event to still arrive; after that:
+
+    1. **Recover from the durable record first**: ``history_reader`` reads the GCS-mirrored
+       events (written by the worker at turn end — no ingestion lag). If it holds the terminal
+       result, the not-yet-seen events are delivered — the run ends with its REAL result (this
+       is exactly the ingestion-lag case observed live).
+    2. Only with no durable terminal record either, a synthetic error ``result`` explains what
+       happened instead of hanging.
+
+    A probe/reader failure is treated as RUNNING/absent — flakiness must never kill a healthy
+    run; the tail's own cap remains the backstop.
     """
     queue: asyncio.Queue = asyncio.Queue()
     done = object()
@@ -70,32 +80,51 @@ async def _watched_tail(
     pump_task = asyncio.ensure_future(pump())
     job_terminal_state: str | None = None
     job_terminal_at: float | None = None
+    yielded = 0
     try:
         while True:
             try:
                 item = await asyncio.wait_for(queue.get(), timeout=quiet_s)
             except (TimeoutError, asyncio.TimeoutError):
                 state = await probe()
-                if state in ("SUCCESS", "FAILED"):
-                    now = time.monotonic()
-                    if job_terminal_at is None:
-                        job_terminal_state, job_terminal_at = state, now
-                    elif now - job_terminal_at >= grace_s:
-                        yield AgentEvent(
-                            kind="result",
-                            summary=(
-                                f"job finished (state={job_terminal_state}) but no terminal "
-                                "event was observed — the worker likely died mid-run; see "
-                                "session.history() / Cloud Logging for the last steps"
-                            ),
-                            raw={"event": "job_terminated_without_result", "is_error": True,
-                                 "subtype": "error", "job_state": job_terminal_state,
-                                 "session_id": session_id},
-                        )
-                        return
-                continue
+                if state not in ("SUCCESS", "FAILED"):
+                    continue
+                now = time.monotonic()
+                if job_terminal_at is None:
+                    job_terminal_state, job_terminal_at = state, now
+                    continue
+                if now - job_terminal_at < grace_s:
+                    continue
+                # Job over, grace elapsed, tail still silent. Try the durable record: the
+                # mirror holds the same event stream in the same order, so skip what the
+                # tail already delivered and finish with the real remainder if it's terminal.
+                history: list[AgentEvent] = []
+                if history_reader is not None:
+                    try:
+                        history = await history_reader() or []
+                    except Exception:  # noqa: BLE001 — recovery is best-effort
+                        history = []
+                if any(ev.kind == "result" for ev in history):
+                    for ev in history[yielded:]:
+                        yield ev
+                        if ev.kind == "result":
+                            return
+                    return
+                yield AgentEvent(
+                    kind="result",
+                    summary=(
+                        f"job finished (state={job_terminal_state}) but no terminal "
+                        "event was observed — the worker likely died mid-run; see "
+                        "session.history() / Cloud Logging for the last steps"
+                    ),
+                    raw={"event": "job_terminated_without_result", "is_error": True,
+                         "subtype": "error", "job_state": job_terminal_state,
+                         "session_id": session_id},
+                )
+                return
             if item is done:
                 return
+            yielded += 1
             yield item
             if item.kind == "result":
                 return
@@ -409,8 +438,21 @@ class GeminiSession:
                 except Exception:  # noqa: BLE001 — unreachable probe must not kill a healthy run
                     return None
 
+            async def history_reader() -> list:
+                from .history import read_history
+
+                return await asyncio.wait_for(
+                    asyncio.to_thread(
+                        read_history, engine._output_bucket, sid,
+                        project=engine._project, credentials=engine._credentials,
+                    ),
+                    timeout=60,
+                )
+
             def factory() -> AsyncIterator:
-                return _watched_tail(lambda: sink.tail(sid, since=since), probe, sid)
+                return _watched_tail(
+                    lambda: sink.tail(sid, since=since), probe, sid, history_reader
+                )
         else:
             def factory() -> AsyncIterator:
                 return sink.tail(sid, since=since)

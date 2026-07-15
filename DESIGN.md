@@ -289,9 +289,17 @@ These are facts measured during the PoC. The library encodes them so consumers i
   otherwise wedges `list_entries` forever — observed live). Transient failures ride out; a run of
   consecutive failures surfaces the error.
 - **Cold runs get a job watchdog**: after ~60 s of stream silence the client probes
-  `check_query_job(job_name)`; a job that terminated without writing a terminal event ends the run
-  with an explained synthetic error result (~120 s ingestion-lag grace) instead of hanging. Warm turns
-  have no per-turn job handle (the turn runs in whichever pool worker claimed it) — bounded polls only.
+  `check_query_job(job_name)`; once the job is terminal (+~120 s grace) with the tail still silent, the
+  client first tries to **recover the real result from the GCS event mirror** (written by the worker at
+  turn end, no ingestion lag — this rescued a live run whose log entries took >8 min to become
+  queryable), and only synthesizes an explained error result when no durable terminal record exists.
+  Warm turns have no per-turn job handle (the turn runs in whichever pool worker claimed it) — bounded
+  polls only.
+- **Cloud Logging ingestion lag can exceed several minutes** (observed live) — the mirror, not the log,
+  is the reliable record; the log is the low-latency *usually*-fast channel.
+- **A young query-job operation is not cancellable** (`FAILED_PRECONDITION` for roughly its first
+  minutes); external cancels/interrupts may need retries. The in-cloud **Bash tool default timeout is
+  120 s** — long commands need an explicit timeout or backgrounding.
 
 **Persistence / job history (what survives a run, and where)**
 - **Mirrored events** — the worker buffers every surfaced `AgentEvent` and flushes one

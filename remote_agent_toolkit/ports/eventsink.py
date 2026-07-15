@@ -27,6 +27,9 @@ _SUMMARY_CAP = 60000
 # write→queryable ingestion lag (a few seconds), inherent to a log-tail channel.
 _POLL_INTERVAL_S = 1.0
 _MAX_WAIT_S = 3600.0
+# Per-poll bound + how many consecutive failed polls to ride out before surfacing the error.
+_POLL_TIMEOUT_S = 30.0
+_MAX_POLL_FAILURES = 10
 # RFC3339 with microseconds + trailing Z — the timestamp format Cloud Logging filters accept.
 _RFC3339 = "%Y-%m-%dT%H:%M:%S.%fZ"
 
@@ -113,13 +116,17 @@ class CloudLoggingSink:
         except Exception:  # noqa: BLE001 — best-effort channel; never raise from emit
             pass
 
-    def read(self, session_id: str) -> list[AgentEvent]:
+    def read(self, session_id: str, timeout: float = 60.0) -> list[AgentEvent]:
         """One-shot history read: all logged events for ``session_id``, oldest first.
 
-        Unlike :meth:`tail` this never waits — it lists whatever Cloud Logging has right now
-        (bounded by the log bucket's retention, ~30 days by default) and returns. Used as the
-        history fallback for sessions with no durable GCS record.
+        Unlike :meth:`tail` this never waits for new entries — it lists whatever Cloud Logging
+        has right now (bounded by the log bucket's retention, ~30 days by default) and returns.
+        The whole read is bounded by ``timeout``: the logging client has no per-call timeout of
+        its own, and a dead connection would otherwise block forever (the wedged worker thread
+        is abandoned on timeout).
         """
+        import concurrent.futures
+
         import google.cloud.logging  # lazy
 
         client = self._get_client()
@@ -128,19 +135,29 @@ class CloudLoggingSink:
             f'logName="projects/{project}/logs/{self.log_name}" '
             f'AND labels.session_id="{session_id}"'
         )
-        events: list[AgentEvent] = []
-        for entry in client.list_entries(filter_=filter_str, order_by=google.cloud.logging.ASCENDING):
-            payload = entry.payload or {}
-            if "kind" not in payload:
-                continue  # not a toolkit step entry
-            events.append(AgentEvent(
-                kind=payload["kind"],
-                summary=payload.get("summary", ""),
-                raw=payload.get("raw"),
-                cost_usd=payload.get("cost_usd"),
-                usage=payload.get("usage"),
-            ))
-        return events
+
+        def _list() -> list[AgentEvent]:
+            events: list[AgentEvent] = []
+            for entry in client.list_entries(filter_=filter_str, order_by=google.cloud.logging.ASCENDING):
+                payload = entry.payload or {}
+                if "kind" not in payload:
+                    continue  # not a toolkit step entry
+                events.append(AgentEvent(
+                    kind=payload["kind"],
+                    summary=payload.get("summary", ""),
+                    raw=payload.get("raw"),
+                    cost_usd=payload.get("cost_usd"),
+                    usage=payload.get("usage"),
+                ))
+            return events
+
+        # No `with`: the context manager's shutdown WAITS on the worker, which would block on
+        # the very wedge the timeout exists to escape. shutdown(wait=False) abandons it.
+        ex = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        try:
+            return ex.submit(_list).result(timeout=timeout)
+        finally:
+            ex.shutdown(wait=False)
 
     async def tail(
         self, session_id: str, since: float | None = None
@@ -162,19 +179,35 @@ class CloudLoggingSink:
             ).strftime(_RFC3339)
         seen: set[str] = set()  # insert_ids already yielded, so repeated polls don't duplicate
 
+        failures = 0  # consecutive failed/wedged polls; transient blips ride out, permanent raise
         while time.monotonic() - start < _MAX_WAIT_S:
             filter_str = (
                 f'logName="projects/{project}/logs/{self.log_name}" '
                 f'AND labels.session_id="{session_id}" '
                 f'AND timestamp>="{watermark}"'
             )
-            entries = await asyncio.to_thread(
-                lambda f=filter_str: list(
-                    client.list_entries(
-                        filter_=f, order_by=google.cloud.logging.ASCENDING
-                    )
+            # Bound every poll: the logging client exposes no per-call timeout, and a dead
+            # connection otherwise blocks list_entries FOREVER (observed live — the tail hung
+            # ~1 h past job completion on a dropped network). On timeout the (possibly wedged)
+            # worker thread is abandoned and the next poll uses a fresh call.
+            try:
+                entries = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        lambda f=filter_str: list(
+                            client.list_entries(
+                                filter_=f, order_by=google.cloud.logging.ASCENDING
+                            )
+                        )
+                    ),
+                    timeout=_POLL_TIMEOUT_S,
                 )
-            )
+                failures = 0
+            except Exception:  # noqa: BLE001 — timeout / transient auth / network blip
+                failures += 1
+                if failures >= _MAX_POLL_FAILURES:
+                    raise  # permanent (bad filter, revoked perms): surface, don't spin forever
+                await asyncio.sleep(_POLL_INTERVAL_S)
+                continue
             stop = False
             for entry in entries:
                 insert_id = getattr(entry, "insert_id", None)

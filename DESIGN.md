@@ -285,6 +285,13 @@ These are facts measured during the PoC. The library encodes them so consumers i
 - Async `run_query_job` surfaces **no** stderr, **no** traces, and only coarse (~12 min) GCS flushes.
   **Cloud Logging (`log_struct`) is the only near-real-time channel** — the harness emits a per-step
   structured log; the client tails it filtered by `session_id`. This is the `EventSink` port.
+- **Every tail poll is bounded** (the logging client has no per-call timeout; a dead connection
+  otherwise wedges `list_entries` forever — observed live). Transient failures ride out; a run of
+  consecutive failures surfaces the error.
+- **Cold runs get a job watchdog**: after ~60 s of stream silence the client probes
+  `check_query_job(job_name)`; a job that terminated without writing a terminal event ends the run
+  with an explained synthetic error result (~120 s ingestion-lag grace) instead of hanging. Warm turns
+  have no per-turn job handle (the turn runs in whichever pool worker claimed it) — bounded polls only.
 
 **Persistence / job history (what survives a run, and where)**
 - **Mirrored events** — the worker buffers every surfaced `AgentEvent` and flushes one

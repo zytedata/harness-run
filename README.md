@@ -100,6 +100,12 @@ if session.status == "idle" and session.stop_reason == "needs_input":
     await session.send("yes, that schema looks right")     # resumes the conversation (a fresh turn)
 ```
 
+Runs are hang-proofed on `gemini`: every log-tail poll is time-bounded (a dead connection costs a ~30 s
+retry, not a frozen run), and a **cold** run carries a job watchdog — if the remote job terminates without
+ever writing a terminal event (worker OOM, external cancel, engine deleted), the run ends within ~3 minutes
+with an error result explaining the job state instead of waiting out the 1 h tail cap. Warm turns run in a
+pool worker without a per-turn job handle, so they get the bounded polls only.
+
 ## Structured output
 
 Set `output_schema` to a **pydantic model** (or a JSON-schema `dict`) and `result.structured_output` holds

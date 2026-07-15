@@ -21,7 +21,7 @@ import time
 import uuid
 from typing import Any, AsyncIterator, TYPE_CHECKING
 
-from ...events import RunResult, RunStatus, StopReason
+from ...events import AgentEvent, RunResult, RunStatus, StopReason
 from .._run import DrivenRun
 from .pool import POOL_WAIT_SENTINEL, dispatch_payload, pool_paths
 
@@ -32,6 +32,75 @@ if TYPE_CHECKING:
 # Must match CloudLoggingSink's default log_name (the deployed agent emits here, the client tails it).
 _LOG_NAME = "remote_agent_toolkit_steps"
 _USER_ID = "ratk"
+
+# Cold-run watchdog: probe the job's state after this much stream silence, and end the run
+# this long after the job is seen terminal with still no terminal event (ingestion-lag grace).
+_WATCHDOG_QUIET_S = 60.0
+_WATCHDOG_GRACE_S = 120.0
+
+
+async def _watched_tail(
+    tail_factory: Any,
+    probe: Any,
+    session_id: str,
+    quiet_s: float = _WATCHDOG_QUIET_S,
+    grace_s: float = _WATCHDOG_GRACE_S,
+) -> AsyncIterator[AgentEvent]:
+    """Yield the tail's events, ending the run if the job dies without a terminal event.
+
+    The client normally learns a run finished from the terminal ``result`` event on the log
+    tail; a job that dies WITHOUT writing one (OOM, external cancel, engine deleted, logging
+    outage) would leave the tail waiting up to its 1 h cap. So: while events flow this wrapper
+    is pure passthrough (zero probe calls); after ``quiet_s`` of silence it asks ``probe`` for
+    the authoritative job state ("RUNNING"/"SUCCESS"/"FAILED"/None). A terminal state starts a
+    ``grace_s`` window (Cloud Logging ingestion lag) for the event to still arrive; if it
+    doesn't, a synthetic error ``result`` explains what happened instead of hanging. A probe
+    failure (None) is treated as RUNNING — a flaky check must never kill a healthy run.
+    """
+    queue: asyncio.Queue = asyncio.Queue()
+    done = object()
+
+    async def pump() -> None:
+        try:
+            async for ev in tail_factory():
+                await queue.put(ev)
+        finally:
+            await queue.put(done)
+
+    pump_task = asyncio.ensure_future(pump())
+    job_terminal_state: str | None = None
+    job_terminal_at: float | None = None
+    try:
+        while True:
+            try:
+                item = await asyncio.wait_for(queue.get(), timeout=quiet_s)
+            except (TimeoutError, asyncio.TimeoutError):
+                state = await probe()
+                if state in ("SUCCESS", "FAILED"):
+                    now = time.monotonic()
+                    if job_terminal_at is None:
+                        job_terminal_state, job_terminal_at = state, now
+                    elif now - job_terminal_at >= grace_s:
+                        yield AgentEvent(
+                            kind="result",
+                            summary=(
+                                f"job finished (state={job_terminal_state}) but no terminal "
+                                "event was observed — the worker likely died mid-run; see "
+                                "session.history() / Cloud Logging for the last steps"
+                            ),
+                            raw={"event": "job_terminated_without_result", "is_error": True,
+                                 "subtype": "error", "job_state": job_terminal_state,
+                                 "session_id": session_id},
+                        )
+                        return
+                continue
+            if item is done:
+                return
+            yield item
+            if item.kind == "result":
+                return
+    finally:
+        pump_task.cancel()
 
 
 def _run_blocking(make_coro, timeout: float) -> bool:
@@ -324,8 +393,27 @@ class GeminiSession:
             log_name=_LOG_NAME, project=engine._project, credentials=engine._credentials
         )
 
-        def factory() -> AsyncIterator:
-            return sink.tail(sid, since=since)
+        # Cold runs hold the job's operation name, so the tail gets a watchdog: if the job
+        # terminates without ever writing a terminal event, the run ends with an explained
+        # error instead of hanging. Warm turns have no per-turn job handle (the turn runs in
+        # whichever pool worker claimed it) — plain tail, protected by the per-poll timeouts.
+        job_name = getattr(self._last_job, "job_name", None)
+        if job_name:
+            async def probe() -> str | None:
+                def _check() -> str | None:
+                    result = engine._agent_engines().check_query_job(name=job_name)
+                    return getattr(result, "status", None)
+
+                try:
+                    return await asyncio.wait_for(asyncio.to_thread(_check), timeout=30)
+                except Exception:  # noqa: BLE001 — unreachable probe must not kill a healthy run
+                    return None
+
+            def factory() -> AsyncIterator:
+                return _watched_tail(lambda: sink.tail(sid, since=since), probe, sid)
+        else:
+            def factory() -> AsyncIterator:
+                return sink.tail(sid, since=since)
 
         run = DrivenRun(factory, sid, engine.spec, on_complete=self._on_complete)
         self._current_run = run

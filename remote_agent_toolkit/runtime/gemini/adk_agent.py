@@ -246,21 +246,24 @@ class ToolkitAgent(BaseAgent):
             interactive=spec.checkpoint if spec.interactive is None else spec.interactive,
         )
 
-        prep = await asyncio.to_thread(_prepare_workspace, rc)
-        prep_ev = AgentEvent(kind="status", summary=prep["summary"], raw=prep)
-        sink.emit(prep_ev)
-        yield to_adk_event(prep_ev, self.name)
-
+        # The ENTIRE turn is guarded: workspace prep (clone/skills can fail on bad auth) as
+        # much as the harness itself. Any crash becomes a TERMINAL result event — without one
+        # the client's tail hangs forever and the failure is invisible (how the
+        # numeric-session-id bug hid). Error strings are truncated and repo tokens are already
+        # redacted by the git layer; never put secrets in an event.
         try:
+            prep = await asyncio.to_thread(_prepare_workspace, rc)
+            prep_ev = AgentEvent(kind="status", summary=prep["summary"], raw=prep)
+            sink.emit(prep_ev)
+            yield to_adk_event(prep_ev, self.name)
+
             async for event in ClaudeCodeHarness().run(spec, rc):
                 sink.emit(event)  # near-real-time channel (Cloud Logging); finalize is inline
                 yield to_adk_event(event, self.name)
         except Exception as exc:  # noqa: BLE001 — a silent server-side death is undebuggable
-            # Surface the crash as a TERMINAL result event: without one the client's tail
-            # hangs forever and the failure is invisible (how the numeric-session-id bug hid).
             err = AgentEvent(
                 kind="result",
-                summary=f"agent harness failed: {str(exc)[:300]}",
+                summary=f"agent run failed: {str(exc)[:300]}",
                 raw={"event": "harness_error", "is_error": True, "subtype": "error",
                      "session_id": session_id},
             )

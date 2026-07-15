@@ -117,3 +117,5 @@ def test_build_engine_config_shape() -> None:
     assert isinstance(cfg["requirements"], list) and cfg["requirements"]
     assert isinstance(cfg["env_vars"], dict)
     assert cfg["extra_packages"] == ["remote_agent_toolkit"]
+    # Async-only toolkit: no standing container (an idle engine must not bill for compute).
+    assert cfg["min_instances"] == 0

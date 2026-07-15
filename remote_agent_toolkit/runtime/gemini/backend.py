@@ -82,7 +82,7 @@ def deploy(
     output_bucket: str | None = None,
     model: str | None = None,
     use_vertex: bool = True,
-    min_instances: int = 1,
+    min_instances: int = 0,
     max_instances: int = 1,
     pool_size: int = 2,
     credentials: Any | None = None,
@@ -99,6 +99,10 @@ def deploy(
     prompt-injection-safe default). Set ``use_vertex=False`` only if the project can't use Vertex
     Claude; then supply ``ANTHROPIC_API_KEY`` as a per-invocation secret — but note the agent can
     then read that key (see the README security section). No secrets are ever baked into the engine.
+
+    ``min_instances`` defaults to 0: the toolkit only uses the async ``run_query_job`` path,
+    where every job provisions its own worker, so an idle engine costs (almost) nothing. A
+    min-instances container would serve only the unused sync path while billing continuously.
     """
     import dataclasses
     import os

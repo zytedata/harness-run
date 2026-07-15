@@ -419,11 +419,14 @@ worker's *actual* pickup is ~5 s. On claim the pool refills, so the next turn is
 > across that boundary is a future refinement; in practice the refill-on-claim cadence likely keeps enough
 > workers warm, so it shouldn't bite early on.
 
-**Cost.** Warm workers are long-running jobs sitting idle waiting for work, so you **pay for that idle compute**
-continuously — `warm_pool=True` trades money for latency. Size the pool to your concurrency, and leave it off
-for batch / non-interactive agents where a ~2.5 min start is fine. Tear a pool down with
-`engine.delete(delete_pool_resources=True)` (it cancels the idle workers, which otherwise keep billing until
-they expire). Model token cost is the same either way and is reported per run as `result.cost_usd`.
+**Cost.** A deployed engine itself is (almost) free while idle: the toolkit deploys with `min_instances=0`
+(no standing container — the async path provisions a worker per job, so a min-instances container would serve
+only the unused sync path while billing continuously). Warm workers are the exception: they are long-running
+jobs sitting idle waiting for work, so you **pay for that idle compute** continuously — `warm_pool=True`
+trades money for latency. Size the pool to your concurrency, and leave it off for batch / non-interactive
+agents where a ~2.5 min start is fine. Tear a pool down with `engine.delete(delete_pool_resources=True)` (it
+cancels the idle workers, which otherwise keep billing until they expire). Model token cost is the same either
+way and is reported per run as `result.cost_usd`.
 
 ## Learn more
 

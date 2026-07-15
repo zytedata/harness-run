@@ -9,7 +9,9 @@ Encodes the §6 deploy contracts so consumers inherit them for free:
 * ``a2a-sdk>=0.3.4,<0.4`` (1.x is incompatible with ADK 2.3.0).
 * Only ``/tmp`` is writable → per-job cwd under ``/tmp/agent-jobs/<session-id>``.
 * ``IS_SANDBOX=1`` to allow ``bypassPermissions`` under root.
-* ``min_instances>=1`` for real long sync jobs; min=0 is fine for the async path.
+* ``min_instances=0`` default: the toolkit only uses the async ``run_query_job`` path, where
+  every job provisions its own worker — a min-instances container would serve only the (unused)
+  sync query path while billing continuously for idle compute.
 
 Lifted & generalized from the PoC ``deploy/deploy_agent_engine.py`` (DESIGN.md §8):
 everything is now driven off the declarative :class:`AgentSpec` (Zyte specifics dropped).
@@ -234,7 +236,7 @@ def build_engine_config(
     vertex_region: str = "global",
     warm_pool: bool = False,
     pool_subscription: str | None = None,
-    min_instances: int = 1,
+    min_instances: int = 0,
     max_instances: int = 1,
 ) -> dict:
     """Build the kwargs dict for ``vertexai._genai.types.AgentEngineConfig(**kwargs)``.

@@ -208,10 +208,34 @@ def test_run_turn_maps_session_id_and_surfaces_harness_crash(tmp_path, monkeypat
     terminal = events[-1]
     assert terminal.custom_metadata["kind"] == "result"
     assert terminal.custom_metadata["raw"]["is_error"] is True
-    assert "agent harness failed" in terminal.error_message
+    assert "agent run failed" in terminal.error_message
     # ...and the same terminal event reached the sink, so a tailing client unblocks too.
     kinds = [e.kind for e in sink._events["1966652674296250368"]]
     assert kinds[-1] == "result"
+
+
+def test_run_turn_surfaces_workspace_prep_crash(monkeypatch):
+    # Workspace prep (repo clone / skills staging) runs BEFORE the first emitted event; a
+    # failure there (e.g. a bad repo token) must also yield a terminal error, not silence.
+    def boom(rc):
+        raise RuntimeError("git clone failed: fatal: Authentication failed")
+
+    monkeypatch.setattr(adk_agent, "_prepare_workspace", boom)
+    import remote_agent_toolkit.ports.eventsink as eventsink_mod
+    sink = InMemorySink(session_id="42")
+    monkeypatch.setattr(eventsink_mod, "CloudLoggingSink", lambda **kw: sink)
+
+    spec = AgentSpec(name="w", model="m")
+    agent = adk_agent.build_agent(spec)
+
+    async def drive():
+        return [ev async for ev in agent._run_turn(spec, "42", "go", None)]
+
+    events = asyncio.run(drive())
+    assert len(events) == 1  # no prep event was possible; the error is the only (terminal) one
+    assert events[0].custom_metadata["kind"] == "result"
+    assert events[0].custom_metadata["raw"]["is_error"] is True
+    assert "git clone failed" in events[0].error_message
 
 
 def test_warm_start_session_mints_canonical_uuid():

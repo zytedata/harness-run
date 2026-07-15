@@ -376,6 +376,23 @@ class GeminiSession:
             except Exception:  # noqa: BLE001 — best effort (job may already be done)
                 pass
 
+    def history(self) -> list:
+        """All persisted events of this session, oldest first (see ``history.read_history``).
+
+        Reads the durable record — mirrored ``events/`` files, else the platform job output,
+        else Cloud Logging — so it works for a session re-attached from another process long
+        after the run. Empty when nothing was persisted (or the log entries expired).
+        """
+        from .history import read_history
+
+        engine = self._engine
+        return read_history(
+            engine._output_bucket,
+            self._session_id,
+            project=engine._project,
+            credentials=engine._credentials,
+        )
+
     @property
     def status(self) -> RunStatus:
         return self._status
@@ -386,6 +403,23 @@ class GeminiSession:
 
     @property
     def last_result(self) -> RunResult | None:
+        """The most recent run's result — reconstructed from history for re-attached sessions.
+
+        When this process ran the turn, the completed run fills it directly. Otherwise (a
+        session re-attached by id) accessing this property reads the persisted history and
+        rebuilds the result from its terminal event — one storage/logging round-trip per
+        access until a result exists, so poll ``run.done`` for in-flight runs, not this.
+        """
+        if self._last_result is None and self._current_run is None:
+            events = self.history()
+            result_ev = next((e for e in reversed(events) if e.kind == "result"), None)
+            if result_ev is not None:
+                from .._run import build_result
+
+                self._last_result, self._stop_reason = build_result(
+                    result_ev, self._session_id, self._engine.spec
+                )
+                self._status = RunStatus.IDLE
         return self._last_result
 
     @property
@@ -482,6 +516,27 @@ class GeminiEngine:
 
     def get_session(self, session_id: str) -> GeminiSession:
         return self._sessions.get(session_id) or GeminiSession(self, session_id)
+
+    def list_sessions(self) -> list[dict]:
+        """Enumerate this engine's known past sessions, newest first.
+
+        Merges the durable GCS records under the output bucket (mirrored ``events/`` files,
+        platform ``jobs/`` outputs) with the engine's ADK sessions. Each entry is
+        ``{"session_id", "sources", "last_file"}`` — feed the id to :meth:`get_session` and
+        read its :meth:`GeminiSession.history`. NB: the GCS layers are bucket-wide, so with a
+        shared output bucket, sessions of other engines appear too.
+        """
+        from .history import list_sessions as _list
+
+        try:
+            adk_sessions = self._agent_engines().sessions
+        except Exception:  # noqa: BLE001 — no GCP client available; GCS layers still answer
+            adk_sessions = None
+        return _list(
+            output_bucket=self._output_bucket,
+            resource=self._resource,
+            adk_sessions=adk_sessions,
+        )
 
     def wait_until_warm(self, timeout: float = 600.0) -> bool:
         """Block until a pool worker reports ready (or ``timeout``); ``True`` if warm.

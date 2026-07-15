@@ -151,6 +151,12 @@ class LocalSession:
     def session_id(self) -> str:
         return self._session_id
 
+    def history(self) -> list[AgentEvent]:
+        raise NotImplementedError(
+            "local runs don't persist an event log yet — stream the Run (async for) or use "
+            "the gemini runtime, whose sessions keep a durable GCS/Cloud Logging history."
+        )
+
     def fork(self) -> LocalSession:
         raise NotImplementedError(
             "fork is not supported yet — it would copy this session's workspace snapshot + "
@@ -238,6 +244,20 @@ class LocalEngine:
             session = LocalSession(self, session_id)
             self._sessions[session_id] = session
         return session
+
+    def list_sessions(self) -> list[dict]:
+        """Sessions known to this engine's workdir (each per-session job dir), newest last id.
+
+        Local runs keep no durable event log — this lists the job dirs so a persistent
+        ``workdir`` can be re-attached across processes; ``history()`` stays gemini-only.
+        """
+        if not self._jobs_root.is_dir():
+            return []
+        return [
+            {"session_id": p.name, "sources": ["jobs-dir"], "last_file": None}
+            for p in sorted(self._jobs_root.iterdir())
+            if p.is_dir()
+        ]
 
     def versions(self) -> list[str]:
         return ["local"]

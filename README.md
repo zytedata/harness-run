@@ -305,6 +305,36 @@ Note: `engine.delete()` is the correct way to tear a warm pool down — its idle
 that otherwise block deletion until they expire. Version pinning (`get_engine(..., version=N)`) and session
 `fork()` are not built yet; `get_engine` resolves the latest engine of that name.
 
+## Past jobs: listing sessions & reading history
+
+Every `gemini` run leaves a durable record, and the library reads it back — from any process, long after
+the run:
+
+```python
+engine = gemini.get_engine("spider-builder", project=..., location=..., spec=spec)
+
+for info in engine.list_sessions():            # newest first: {"session_id", "sources", "last_file"}
+    session = engine.get_session(info["session_id"])
+    events = session.history()                 # the persisted AgentEvents, oldest first
+    result = session.last_result               # reconstructed from the terminal event (None if unfinished)
+    print(info["session_id"], result and result.text)
+```
+
+Where the record lives (what `history()` reads, in order of preference):
+
+1. **Mirrored events** — `gs://<output_bucket>/events/<session_id>/<ts>.jsonl`, one file per turn, written
+   by the worker at the end of every turn. The canonical history: it covers **warm-pool turns** (whose
+   platform job output goes to a throwaway path) and keeps **all turns** of a multi-turn session.
+2. **Platform job output** — `gs://<output_bucket>/jobs/<session_id>.jsonl`, the raw ADK event stream the
+   platform writes for a cold job (covers engines deployed before mirroring; a resume overwrites it).
+3. **Cloud Logging** — the `remote_agent_toolkit_steps` per-step log (bounded by log retention, ~30 days by
+   default; also handy interactively: filter by `jsonPayload.session_id`).
+
+`session.last_result` on a re-attached session does one storage/logging round-trip per access until a
+result exists — poll `run.done` for in-flight runs, not this. Caveats: `list_sessions`'s GCS layers are
+bucket-wide, so engines sharing an output bucket see each other's sessions; the `local` runtime keeps no
+durable event log (`list_sessions` shows its workdir's session dirs; `history()` raises).
+
 ## GCP setup & required permissions
 
 Deploying on Gemini Agent Runtime involves **two identities** — granting roles to the wrong one is the

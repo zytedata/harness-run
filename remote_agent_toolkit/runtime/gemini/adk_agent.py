@@ -269,6 +269,19 @@ class ToolkitAgent(BaseAgent):
             interactive=spec.checkpoint if spec.interactive is None else spec.interactive,
         )
 
+        # Every surfaced event is also buffered into `mirror` and flushed to a session-keyed
+        # GCS file when the turn ends (the durable history Session.history() reads — the
+        # platform's own job output isn't session-keyed for warm turns). Events never carry
+        # secret values, so neither does the mirror.
+        from .history import mirror_line, write_turn_mirror
+
+        mirror: list[dict] = []
+
+        def surface(event: AgentEvent) -> Any:
+            sink.emit(event)  # near-real-time channel (Cloud Logging)
+            mirror.append(mirror_line(event))
+            return to_adk_event(event, self.name)
+
         # The ENTIRE turn is guarded: workspace prep (clone/skills can fail on bad auth) as
         # much as the harness itself. Any crash becomes a TERMINAL result event — without one
         # the client's tail hangs forever and the failure is invisible (how the
@@ -276,25 +289,28 @@ class ToolkitAgent(BaseAgent):
         # redacted by the git layer; never put secrets in an event.
         try:
             if secrets_warning is not None:  # value-free: staged secrets were unavailable
-                sink.emit(secrets_warning)
-                yield to_adk_event(secrets_warning, self.name)
+                yield surface(secrets_warning)
             prep = await asyncio.to_thread(_prepare_workspace, rc)
-            prep_ev = AgentEvent(kind="status", summary=prep["summary"], raw=prep)
-            sink.emit(prep_ev)
-            yield to_adk_event(prep_ev, self.name)
+            yield surface(AgentEvent(kind="status", summary=prep["summary"], raw=prep))
 
             async for event in ClaudeCodeHarness().run(spec, rc):
-                sink.emit(event)  # near-real-time channel (Cloud Logging); finalize is inline
-                yield to_adk_event(event, self.name)
+                yield surface(event)  # finalize (checkpoint) is inline in the harness
         except Exception as exc:  # noqa: BLE001 — a silent server-side death is undebuggable
-            err = AgentEvent(
+            yield surface(AgentEvent(
                 kind="result",
                 summary=f"agent run failed: {str(exc)[:300]}",
                 raw={"event": "harness_error", "is_error": True, "subtype": "error",
                      "session_id": session_id},
-            )
-            sink.emit(err)
-            yield to_adk_event(err, self.name)
+            ))
+        finally:
+            # Flush the turn's durable history file — also on early generator close (a
+            # partially-consumed turn still leaves a record). SYNC on purpose: this finally
+            # also runs under GeneratorExit, where awaiting is illegal. Best-effort by design.
+            events_uri = os.environ.get("AGENT_EVENTS_GCS")
+            if events_uri and mirror:
+                import time as _time
+
+                write_turn_mirror(events_uri, session_id, mirror, now_ms=int(_time.time() * 1000))
 
     async def _pool_worker(self, spec: Any) -> AsyncGenerator[Any, None]:
         """Block pulling the dispatch subscription, then process the claimed turn.

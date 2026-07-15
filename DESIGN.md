@@ -81,9 +81,13 @@ in the public surface.
    is an ops/CI action.
 4. **Ports & adapters.** Every platform dependency is a protocol with a concrete adapter. Storage, event
    sink, dispatch transport, secret resolver, session store, harness — all swappable.
-5. **Runtime resolution, never pickle secrets/paths.** Agent Engine cloudpickles the agent; absolute paths
-   and secrets must resolve **at runtime** from env / Secret Manager, not be baked in. (A PoC crash taught
-   this.) The library enforces it: `AgentSpec` carries *references* (secret names, skill sources), not values.
+5. **Secrets are per-invocation; never pickle secrets/paths.** Agent Engine cloudpickles the agent, so
+   `AgentSpec` carries no secrets at all — credentials are passed as a `name → value` map to `run`/`send`,
+   scoped to that one turn (nothing baked, nothing shared across tenants). Values never ride the invocation
+   payload either (the platform persists a job's input verbatim; Pub/Sub retains unacked messages): they are
+   staged at a **single-use GCS object** the worker fetches and deletes; only the pointer travels. The
+   harness routes each secret to its consumer — a repo's `auth` token into git `origin`, a GitHub MCP token
+   into headers, the rest into the agent's env — and checkpoint snapshots are credential-scrubbed.
 6. **Encode the platform contracts as defaults, document the why.** The deploy path applies the known-good
    settings automatically (see §6) and every one is explained.
 7. **Interactive = checkpoint-and-resume, not a blocking call.** No long-lived `ask_human` tool. The agent
@@ -151,8 +155,7 @@ spec = AgentSpec(
     model="claude-sonnet-4-6",
     system_prompt=SystemPrompt.inherit(append="Prefer the Zyte web-scraping skills."),
     skills=[SkillSource.git("https://github.com/zytedata/claude-skills", ref="0.2.0")],
-    mcp_servers=[McpServer.github()],
-    secrets=["ZYTE_API_KEY", "GH_PAT"],      # names → resolved from Secret Manager at runtime, never pickled
+    mcp_servers=[McpServer.github()],        # token supplied per-invocation (run/send secrets=), not here
     permission_mode="bypassPermissions",
     max_turns=120,
     max_budget_usd=10.0,
@@ -202,6 +205,12 @@ result = run.result
 session = engine.get_session(session_id)
 if session.status == "idle" and session.stop_reason == "needs_input":
     await session.send("yes, that schema looks right")     # resumes via checkpoint on a warm worker
+
+# enumerate past sessions and read a finished one's record (gemini)
+for info in engine.list_sessions():                        # newest first
+    past = engine.get_session(info["session_id"])
+    events = past.history()                                # persisted AgentEvents, oldest first
+    result = past.last_result                              # reconstructed from the terminal event
 ```
 
 **Managing deployed engines** (control plane):
@@ -225,9 +234,14 @@ new version. App code pins or takes latest; it does not deploy.
   system prompt and append. A plain `str` replaces it entirely.
 - `SkillSource` — `.git(url, ref=)`, `.local(path)`, `.builtin(name)`; a list allows base + extra sources
   (multi-source skills, §12). Resolved & staged at deploy/run time.
-- `McpServer` — `.github()`, `.remote(name, url)`, `.stdio(...)`; credentials come from `secrets`, not here.
-- `Engine` — `start_session()`, `get_session(id)`, `versions()`, `name`/`version`/`resource`.
-- `Session` — `run()`, `send()`, `interrupt()`, `status`, `stop_reason`, `last_result`, `resume()`, `fork()`.
+- `McpServer` — `.github()`, `.remote(name, url)`, `.stdio(...)`; credentials come from the per-invocation
+  `secrets`, not here.
+- `RepoSource` — `.git(url, ref=, auth=, auth_user=)`; cloned into the cwd before the agent runs, push-ready
+  when the `auth`-named per-invocation secret is supplied (host-aware token injection).
+- `Engine` — `start_session()`, `get_session(id)`, `list_sessions()`, `versions()`,
+  `name`/`version`/`resource`.
+- `Session` — `run(msg, secrets=)`, `send(msg, secrets=)`, `interrupt()`, `status`, `stop_reason`,
+  `last_result`, `history()`, `fork()`.
 - `Run` — `__await__` (→ `RunResult`), `__aiter__` (→ `AgentEvent`s), `done`, `status`, `result`.
 - `AgentEvent` — `kind`, `summary`, `raw`; cost/usage carried on the terminal event.
 - `RunResult` — `text`, `structured_output`, `is_error`, `num_turns`, `cost_usd`, `usage`, `session_id`,
@@ -272,6 +286,24 @@ These are facts measured during the PoC. The library encodes them so consumers i
   **Cloud Logging (`log_struct`) is the only near-real-time channel** — the harness emits a per-step
   structured log; the client tails it filtered by `session_id`. This is the `EventSink` port.
 
+**Persistence / job history (what survives a run, and where)**
+- **Mirrored events** — the worker buffers every surfaced `AgentEvent` and flushes one
+  `events/<sid>/<epoch_ms>.jsonl` per turn to the output bucket. The canonical durable history: the only
+  session-keyed record for **warm** turns (their platform job output goes to a throwaway pool path) and the
+  only layer keeping **all** turns of a multi-turn session. Read via `session.history()`.
+- **Platform job output** — `jobs/<sid>.jsonl` (+ `<sid>_input.jsonl`), written by the platform for each
+  cold job. Per-job: a resume under the same session **overwrites** it. ⚠️ the input file persists the
+  query verbatim — which is why per-invocation secrets never ride the invocation payload (see §3.5): they
+  are staged at a single-use `invocation-secrets/<sid>-<nonce>.json` object the worker fetches + deletes.
+- **Cloud Logging** — the per-step log, bounded by log-bucket retention (~30 days default).
+- **Checkpoints** — transcript + workspace tar under `checkpoints/`, keyed by (mapped) session id.
+- `engine.list_sessions()` merges the GCS layers (bucket-wide) with the engine's ADK sessions;
+  `session.history()` reads mirror → job output → Cloud Logging, first hit wins;
+  `session.last_result` reconstructs from the terminal history event for re-attached sessions.
+- Session ids: cold = ADK `sessions.create` (numeric); warm = client-minted UUID. The Claude/checkpoint
+  side always uses a canonical UUID (`uuid5` of a non-UUID sid — the CLI rejects non-UUID session ids);
+  the raw sid keys Cloud Logging and the GCS records.
+
 **Deploy contracts (applied automatically by `gemini.deploy`)**
 - **uv ships as a Python requirement** + its bin dir prepended to PATH — **build-script filesystem changes
   do NOT persist** into the runtime container (only `git` survives from the base image).
@@ -280,8 +312,9 @@ These are facts measured during the PoC. The library encodes them so consumers i
 - `a2a-sdk>=0.3.4,<0.4` (1.x incompatible with ADK 2.3.0).
 - Only `/tmp` is writable → per-job cwd under `/tmp/agent-jobs/<session-id>`.
 - `IS_SANDBOX=1` to allow `bypassPermissions` under root.
-- `min_instances>=1` for real long sync jobs (min=0 SIGTERM-recycles ~2.5 min); min=0 is fine for the
-  cold-start-per-job async path.
+- `min_instances=0` (the default): the toolkit is async-only, where every job provisions its own worker —
+  a standing container serves only the unused sync path while billing continuously. (`>=1` would matter
+  only for real long *sync* jobs; min=0 SIGTERM-recycles a sync container ~2.5 min.)
 
 **Identity / IAM (two identities — documented in the runbook)**
 - Deploy/operator = the **impersonated SA** (publish, read logs, submit jobs).
@@ -298,14 +331,17 @@ Each is a `typing.Protocol`; concrete adapters ship for prod (GCP) and dev (loca
 
 - **`Harness`** — `build_options(spec, ctx)` + an async run loop yielding `AgentEvent`s. Adapter:
   `ClaudeCodeHarness`.
-- **`BlobStore`** — `put_bytes / get_bytes / put_tree / get_tree / exists`. Adapters: `GcsBlobStore`,
-  `LocalBlobStore`. Backs checkpoint, workspace, artifacts.
-- **`EventSink`** — `emit(event)` (write side, runtime) + `tail(session_id, since)` (read side, client).
-  Adapters: `CloudLoggingSink`, `InMemorySink`.
+- **`BlobStore`** — `put_bytes / get_bytes / put_tree / get_tree / exists / list / delete`. Adapters:
+  `GcsBlobStore`, `LocalBlobStore`. Backs checkpoint, workspace, event mirrors, the secrets handoff,
+  artifacts.
+- **`EventSink`** — `emit(event)` (write side, runtime) + `tail(session_id, since)` (live read side) +
+  `read(session_id)` (one-shot history read). Adapters: `CloudLoggingSink`, `InMemorySink`.
 - **`DispatchTransport`** — `publish(message)` + `claim(timeout)` (competing-consumers pull). Adapters:
   `PubSubDispatch`, `InMemoryDispatch`.
-- **`SecretResolver`** — `resolve(name) -> value`. Adapters: `GcpSecretResolver` (Secret Manager, against
-  the RE service agent), `EnvSecretResolver` (local dev).
+- **`SecretResolver`** — `resolve(name) -> value`, a *control-plane* helper for callers who keep secret
+  values in env/Secret Manager and need to build the per-invocation `secrets` dict (the runtime itself
+  receives values via the single-use GCS handoff, §3.5). Adapters: `EnvSecretResolver` (implemented),
+  `GcpSecretResolver` (stub).
 - **`SessionStore`** — the Claude SDK protocol (`append` / `load` / `list_subkeys`). Adapter:
   `GcsSessionStore` (keyed by `session_id`). A **conformance suite** (`run_session_store_conformance`)
   validates any implementation.

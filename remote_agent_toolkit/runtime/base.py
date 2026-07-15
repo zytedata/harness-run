@@ -98,6 +98,14 @@ class Session(Protocol):
         """Stable id for re-attach / resume."""
         ...
 
+    def history(self) -> list[AgentEvent]:
+        """All persisted events of this session, oldest first.
+
+        Works for re-attached sessions long after the run (``gemini``: mirrored GCS events →
+        platform job output → Cloud Logging). Empty when nothing was persisted.
+        """
+        ...
+
     def fork(self) -> Session:
         """Fork this session into an independent branch sharing prior history."""
         ...
@@ -117,6 +125,14 @@ class Engine(Protocol):
 
     def get_session(self, session_id: str) -> Session:
         """Re-attach to an existing session by id (poll / continue)."""
+        ...
+
+    def list_sessions(self) -> list[dict]:
+        """Enumerate known past sessions, newest first.
+
+        Each entry carries at least ``session_id``; feed it to :meth:`get_session` and read
+        :meth:`Session.history` / ``last_result``.
+        """
         ...
 
     def versions(self) -> list[str]:

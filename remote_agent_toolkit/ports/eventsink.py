@@ -113,6 +113,35 @@ class CloudLoggingSink:
         except Exception:  # noqa: BLE001 — best-effort channel; never raise from emit
             pass
 
+    def read(self, session_id: str) -> list[AgentEvent]:
+        """One-shot history read: all logged events for ``session_id``, oldest first.
+
+        Unlike :meth:`tail` this never waits — it lists whatever Cloud Logging has right now
+        (bounded by the log bucket's retention, ~30 days by default) and returns. Used as the
+        history fallback for sessions with no durable GCS record.
+        """
+        import google.cloud.logging  # lazy
+
+        client = self._get_client()
+        project = self.project or client.project
+        filter_str = (
+            f'logName="projects/{project}/logs/{self.log_name}" '
+            f'AND labels.session_id="{session_id}"'
+        )
+        events: list[AgentEvent] = []
+        for entry in client.list_entries(filter_=filter_str, order_by=google.cloud.logging.ASCENDING):
+            payload = entry.payload or {}
+            if "kind" not in payload:
+                continue  # not a toolkit step entry
+            events.append(AgentEvent(
+                kind=payload["kind"],
+                summary=payload.get("summary", ""),
+                raw=payload.get("raw"),
+                cost_usd=payload.get("cost_usd"),
+                usage=payload.get("usage"),
+            ))
+        return events
+
     async def tail(
         self, session_id: str, since: float | None = None
     ) -> AsyncIterator[AgentEvent]:

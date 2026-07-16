@@ -471,13 +471,15 @@ saving all onboarding docs for the end.
 - **Multi-source skills** — `SkillSource[]` is designed for base + extra sources; the resolver/merge
   (precedence on name collision, per-source ref pinning) is specified in P1 but the merge policy needs a
   decision. (P1 ships **last-source-wins**.)
-- **Baked engine dependencies** — `AgentSpec.packages` (requirement specifiers) is on the spec from P1 but
-  only consumed at P2: `gemini.deploy` will encode them via the uv-via-requirements contract. `local`
-  ignores them.
-- **Local parity with the engine image** — reproducing the deployed engine's environment (base OS, glibc,
-  Python 3.12, system tools, baked `packages`) locally, so install/dependency issues are debugged on the
-  laptop instead of through ~10-min cloud rebuilds. Needs a decision (e.g. a dev Docker image mirroring the
-  deploy contract, or a `local` mode that runs the harness inside that image). **Discuss before building.**
+- **Baked engine dependencies** — `AgentSpec.packages` means "the agent's starting Python packages" on
+  BOTH backends: `gemini.deploy` encodes them via the uv-via-requirements contract; `local.deploy`
+  resolves them into a per-engine venv (uv, engine-contract Python 3.12) activated in the agent env.
+  (Decided after eval-harness feedback: a spec field silently meaning different things per backend broke
+  local/remote parity; a Docker-based local mode was rejected — it would trade away the in-process fast
+  dev loop that `local` exists for, and uv's cache makes the venv path near-instant.)
+- **Local parity with the engine image** — *Python package* parity is handled by the venv above; full
+  OS-level parity (base OS, glibc, system tools) is the `dev/` parity image's job (install/dependency
+  issues debugged on the laptop instead of through ~10-min cloud rebuilds).
 - **Structured outputs** — prefer the SDK's constrained-decoding `structured_output`; keep "parse last
   JSON block" only as a fallback for harnesses that lack it. Confirm Vertex model support per model.
 - **Outcomes / rubrics** — CMA's iterate-until-graded "definition of done" is attractive for autonomous

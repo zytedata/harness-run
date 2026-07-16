@@ -39,6 +39,9 @@ class RunContext:
             harness routes them: those consumed by a repo's ``auth`` or a GitHub MCP are used
             for git/MCP auth and kept OUT of the agent's env; the rest are forwarded to the
             agent subprocess env (the caller's own API keys the agent's code reads).
+        env: Runtime-resolved extra environment for the agent subprocess, applied after
+            ``spec.env`` (e.g. the local runtime's deploy-time packages venv: ``VIRTUAL_ENV``
+            plus a composed ``PATH``). ``None`` when the runtime adds nothing.
         resume_sid: When resuming, the prior session id to continue (else ``None``).
         session_store: A Claude SDK ``SessionStore`` to mirror the transcript to (enables
             cross-worker/cross-cwd resume), or ``None`` to keep the conversation local.
@@ -53,6 +56,7 @@ class RunContext:
     job_dir: Path
     session_id: str
     secrets: dict[str, str] = field(default_factory=dict)
+    env: dict[str, str] | None = None
     resume_sid: str | None = None
     session_store: Any | None = None
     blobs: Any | None = None

@@ -1,0 +1,70 @@
+"""spec.packages on the local runtime: deploy-time venv provisioning + agent-env activation.
+
+The uv subprocess calls are mocked (no network / interpreter downloads in unit tests); the
+composition and wiring are what these lock in. The real `uv venv` + install path is exercised
+manually / by consumers (the eval harness runs it in anger).
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from remote_agent_toolkit import AgentSpec, local
+from remote_agent_toolkit.runtime import venv as venv_mod
+
+
+def test_provision_venv_uses_engine_python_and_surfaces_failure(monkeypatch, tmp_path):
+    calls = []
+
+    def fake_run(cmd, what):
+        calls.append(cmd)
+
+    monkeypatch.setattr(venv_mod, "_run", fake_run)
+    monkeypatch.setattr(venv_mod, "_uv_bin", lambda: "/opt/uv")
+
+    got = venv_mod.provision_venv(tmp_path, ("scrapy>=2.11", "scrapy-zyte-api"))
+    assert got == tmp_path / "venv"
+    assert calls[0] == ["/opt/uv", "venv", str(got), "--python", "3.12"]  # engine-contract Python
+    assert calls[1][:4] == ["/opt/uv", "pip", "install", "--python"]
+    assert calls[1][-2:] == ["scrapy>=2.11", "scrapy-zyte-api"]
+
+    # A failing uv command raises loudly (declared packages are explicit intent).
+    def boom(cmd, what):
+        raise RuntimeError(f"{what} failed: no such package")
+
+    monkeypatch.setattr(venv_mod, "_run", boom)
+    with pytest.raises(RuntimeError, match="failed"):
+        venv_mod.provision_venv(tmp_path, ("nope-does-not-exist",))
+
+
+def test_venv_agent_env_composes_path():
+    env = venv_mod.venv_agent_env(Path("/w/venv"), base_path="/custom:/usr/bin")
+    assert env["VIRTUAL_ENV"] == "/w/venv"
+    assert env["PATH"] == "/w/venv/bin:/custom:/usr/bin"  # caller base kept, venv leads
+    # Without a caller base, the ambient PATH is the base (never empty in practice).
+    env2 = venv_mod.venv_agent_env(Path("/w/venv"), base_path=None)
+    assert env2["PATH"].startswith("/w/venv/bin:")
+
+
+def test_local_deploy_provisions_and_activates_packages_venv(monkeypatch, tmp_path):
+    provisioned = {}
+
+    def fake_provision(root, packages, python="3.12"):
+        provisioned.update(root=Path(root), packages=packages)
+        return Path(root) / "venv"
+
+    monkeypatch.setattr(venv_mod, "provision_venv", fake_provision)
+
+    spec = AgentSpec(name="a", model="m", packages=["scrapy"], env={"PATH": "/spec/bin"})
+    engine = local.deploy(spec, workdir=str(tmp_path))
+
+    assert provisioned["packages"] == ("scrapy",)
+    assert engine._agent_env["VIRTUAL_ENV"] == str(tmp_path / "venv")
+    # venv bin leads; the spec.env PATH survives as the base (issue-2 composition).
+    assert engine._agent_env["PATH"] == f"{tmp_path}/venv/bin:/spec/bin"
+
+    # No packages -> no venv, no runtime env injected (current fast-path behavior unchanged).
+    plain = local.deploy(AgentSpec(name="b", model="m"), workdir=str(tmp_path / "b"))
+    assert plain._agent_env is None

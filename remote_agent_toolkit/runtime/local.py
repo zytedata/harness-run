@@ -94,6 +94,7 @@ class LocalSession:
             job_dir=self._job_dir,
             session_id=self._session_id,
             secrets=dict(secrets) if secrets else {},
+            env=self._engine._agent_env,
             resume_sid=resume_sid if self._session_store is not None else None,
             session_store=self._session_store,
             blobs=self._blobs,
@@ -177,6 +178,16 @@ class LocalEngine:
         self._jobs_root.mkdir(parents=True, exist_ok=True)
         self._blob_root.mkdir(parents=True, exist_ok=True)
         self._sessions: dict[str, LocalSession] = {}
+
+        # spec.packages parity with gemini's baked engine image: resolve the agent's declared
+        # packages into a per-engine venv at deploy time (uv; warm installs take seconds) and
+        # activate it in the agent's env. Its bin leads PATH, composing with any spec.env PATH.
+        self._agent_env: dict[str, str] | None = None
+        if spec.packages:
+            from .venv import provision_venv, venv_agent_env
+
+            venv = provision_venv(root, spec.packages)
+            self._agent_env = venv_agent_env(venv, (spec.env or {}).get("PATH"))
 
         from ..harness.claude_code import ClaudeCodeHarness
 

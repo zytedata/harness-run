@@ -65,6 +65,25 @@ def test_agent_visible_secrets_forwarded_to_env():
     assert opts.env["SH_APIKEY"] == "sekret" and opts.env["FOO"] == "bar"
 
 
+def test_caller_path_is_the_base_not_discarded():
+    # Regression (eval-harness feedback issue 2): the uv-dir prepend rebuilt PATH from
+    # os.environ, silently discarding a caller-supplied spec.env["PATH"].
+    spec = AgentSpec(name="a", model="m", env={"PATH": "/my/venv/bin:/usr/bin"})
+    opts = ClaudeCodeHarness().build_options(spec, _ctx(spec))
+    path = opts.env["PATH"]
+    assert path.endswith(":/my/venv/bin:/usr/bin")  # caller PATH survives as the base
+    assert path != "/my/venv/bin:/usr/bin"          # ...with the uv dir prepended on top
+
+
+def test_ctx_env_layered_after_spec_env():
+    # Runtime-resolved env (e.g. the local packages venv) is applied after spec.env.
+    spec = AgentSpec(name="a", model="m", env={"FOO": "spec", "BAR": "spec"})
+    ctx = _ctx(spec, env={"FOO": "runtime", "VIRTUAL_ENV": "/w/venv"})
+    opts = ClaudeCodeHarness().build_options(spec, ctx)
+    assert opts.env["FOO"] == "runtime" and opts.env["BAR"] == "spec"
+    assert opts.env["VIRTUAL_ENV"] == "/w/venv"
+
+
 def test_harness_consumed_secrets_excluded_from_agent_env():
     # Repo push token + GitHub MCP token are consumed by git/MCP, so they must NOT appear as
     # environment variables the agent can read; the caller's own key still does.

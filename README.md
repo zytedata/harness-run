@@ -287,9 +287,14 @@ spec = AgentSpec(
 )
 ```
 
-The **`local` path ignores `packages`** — locally the agent uses your machine's environment plus whatever it
-installs at runtime, so you iterate without a rebuild. Because building the engine image is slow (~10 min),
-pin only what genuinely needs to be baked in and lean on runtime `uv` for the rest.
+**`local` honors `packages` too**: `local.deploy` resolves them into a per-engine venv (via `uv`, with the
+engine contract's Python 3.12 — uv provisions the interpreter if your machine lacks it) and activates it in
+the agent's environment. Same spec, same starting packages on both backends — and since `uv` hardlinks from
+its global cache, a warm local deploy takes seconds, so iteration stays fast. The venv is per-engine, so an
+agent installing extras mid-run never leaks into other runs. Note this covers *Python package* parity;
+OS-level parity (glibc, system libs) is what the [`dev/` parity image](dev/) is for. Because building the
+gemini engine image is slow (~10 min), pin only what genuinely needs to be pre-installed and lean on runtime
+`uv` for the rest.
 
 > **Troubleshooting install issues locally.** A dev image under [`dev/`](dev/) mirrors the engine's install
 > contract (Debian/glibc, Python 3.12, `uv`, `git`, your `packages`) so dependency failures surface in seconds

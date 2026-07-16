@@ -94,11 +94,13 @@ class ClaudeCodeHarness:
         return None
 
     def _runtime_env(self, spec: AgentSpec, ctx: RunContext) -> dict[str, str]:
-        """Env forwarded to the agent subprocess: agent-visible secrets + spec env + uv PATH.
+        """Env forwarded to the agent subprocess: agent-visible secrets + spec/runtime env + uv PATH.
 
-        Only the caller's own per-invocation secrets land here — those consumed by the harness
-        (repo push tokens, GitHub MCP token) are routed to git/MCP and excluded, so they never
-        appear as environment variables the agent can read.
+        Layering (later wins): per-invocation secrets → ``spec.env`` (caller's static config)
+        → ``ctx.env`` (runtime-resolved, e.g. the local deploy-time packages venv). Only the
+        caller's own secrets land here — those consumed by the harness (repo push tokens,
+        GitHub MCP token) are routed to git/MCP and excluded, so they never appear as
+        environment variables the agent can read.
 
         SECURITY: returns secret *values* — callers must never log this dict.
         """
@@ -106,6 +108,8 @@ class ClaudeCodeHarness:
         env: dict[str, str] = {k: v for k, v in ctx.secrets.items() if k not in consumed}
         if spec.env:
             env.update(spec.env)
+        if ctx.env:
+            env.update(ctx.env)
         # Ensure `uv` is on the agent's Bash-tool PATH. uv is a Python dependency, but its
         # console script often isn't on PATH in serverless runtimes; the wheel exposes the
         # bundled binary's real location, so prepend that dir (harmless if uv is absent).
@@ -117,7 +121,10 @@ class ClaudeCodeHarness:
         except Exception:  # noqa: BLE001 — uv may be absent; harmless
             pass
         if path_dirs:
-            base = os.environ.get("PATH", "")
+            # A PATH supplied by the caller/runtime (spec.env / ctx.env) is the BASE, not
+            # discarded — prepending onto os.environ silently threw caller intent away
+            # (eval-harness feedback issue 2). Ambient PATH is only the fallback base.
+            base = env.get("PATH") or os.environ.get("PATH", "")
             env["PATH"] = ":".join(path_dirs) + (f":{base}" if base else "")
         return env
 

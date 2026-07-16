@@ -163,6 +163,22 @@ passed at call time to `run`/`send`. See [Secrets & security](#secrets--security
 the deployment. To pin libraries into the deployed engine instead, see
 [Pre-baked engine dependencies](#pre-baked-engine-dependencies) below.
 
+**Long-running commands.** The Bash tool's timeouts are Claude Code defaults, not platform limits: a command
+is killed after **120 s** unless the agent passes a per-call `timeout`, which is itself capped at **10 min**.
+For agents that legitimately run long commands (crawls, builds), raise the caps via `env` — they are ordinary
+Claude Code environment settings:
+
+```python
+spec = AgentSpec(
+    name="crawler",
+    model="claude-sonnet-4-6",
+    env={"BASH_DEFAULT_TIMEOUT_MS": "600000", "BASH_MAX_TIMEOUT_MS": "3600000"},  # 10 min / 1 h
+)
+```
+
+(Alternatively the agent can start long work with the Bash tool's `run_in_background` and poll it.) Also
+tunable: `BASH_MAX_OUTPUT_LENGTH` for commands with very large output.
+
 ## Cloning a git repo
 
 A common setup is to clone a repo into the agent's working directory **before it runs** — so it can read and

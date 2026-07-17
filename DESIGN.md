@@ -315,6 +315,16 @@ These are facts measured during the PoC. The library encodes them so consumers i
   gap): the turn span carries `rat.prompt`/`rat.final_text` and message clipping widens 400→4000. No
   new exposure class: secret values never ride prompts/payloads, and the text already persists to the
   log/mirror.
+- **Known residual Traces-UI gaps (2026-07-17, platform-side; parked — revisit with Google support).**
+  (1) *"(Missing span ID …)" placeholder node*: ADK's outermost runner span is never exported — the
+  platform tears the one-turn job worker down before that span ends/flushes (our turn-end
+  `force_flush` only covers spans we own). Cosmetic: our turn/tool spans are complete underneath.
+  (2) *Session conversation tab shows "No chat conversation data"*: the panel reads the gen-ai content
+  logs emitted by the platform's capture instrumentation, which never initializes in query-job workers
+  (the `set_up()` gap again) — and for warm turns the ADK session's user event is the `__POOL_WAIT__`
+  sentinel anyway (the real prompt rides the dispatch payload). Emitting their undocumented content-log
+  format ourselves was judged too brittle; the conversation is available on our span attributes and via
+  `session.history()`.
 - **ADK events must carry `invocation_id`** (`ctx.invocation_id`, threaded through `to_adk_event`): the
   runner appends every non-partial event (our terminal result) to the platform session service, whose
   API rejects events without it (400, surfaced as an exception on the job's trace — invisible before

@@ -381,11 +381,13 @@ failed turn or failed tool call marks its span with error status, so a trace of 
 it broke at a glance. Span values are truncated one-line summaries — the same text that already flows to
 Cloud Logging and the event mirror (never secret values), so tracing adds no new exposure surface.
 
-There's nothing to turn on: the worker installs the export pipe itself (the platform's own
-`enable_tracing` setup never takes effect on the async job path the toolkit uses), the runtime's default
-service-agent role already includes `telemetry.traces.write`, and spans are flushed at the end of every
-turn. The only prerequisites are the `telemetry.googleapis.com` + `cloudtrace.googleapis.com` APIs on the
-project, and `roles/cloudtrace.user` for whoever wants to *view* traces.
+There's nothing to turn on: the runtime's default service-agent role already includes
+`telemetry.traces.write`, and the toolkit force-flushes OpenTelemetry at the end of every turn — which is
+the load-bearing part: the platform initializes telemetry in job workers but never flushes it on the
+async job path the toolkit uses, so without that flush no span would ever leave the worker (verified with
+a standalone repro; raised with Google). The only prerequisites are the `telemetry.googleapis.com` +
+`cloudtrace.googleapis.com` APIs on the project, and `roles/cloudtrace.user` for whoever wants to *view*
+traces.
 
 **Known gaps** (platform-side, as of 2026-07, raised with Google): the console's *session conversation*
 panel stays empty ("No chat conversation data") — it is fed by platform instrumentation that doesn't run

@@ -109,56 +109,6 @@ def test_never_raises_on_malformed_events_or_after_close():
     t.observe(AgentEvent(kind="message", summary="after close"))  # no-op, no crash
 
 
-def test_ensure_export_pipe_noop_off_platform_and_respects_real_provider(monkeypatch):
-    from remote_agent_toolkit.runtime.gemini import tracing as tracing_mod
-
-    # Off the platform (no engine id): never installs anything.
-    monkeypatch.setattr(tracing_mod, "_pipe_ready", False)
-    monkeypatch.delenv("GOOGLE_CLOUD_AGENT_ENGINE_ID", raising=False)
-    tracing_mod.ensure_export_pipe()
-    assert trace.get_tracer_provider() is _PROVIDER
-
-    # On the platform but a real provider is already active: left untouched.
-    monkeypatch.setattr(tracing_mod, "_pipe_ready", False)
-    monkeypatch.setenv("GOOGLE_CLOUD_AGENT_ENGINE_ID", "123")
-    tracing_mod.ensure_export_pipe()
-    assert trace.get_tracer_provider() is _PROVIDER
-
-
-def test_ensure_export_pipe_installs_over_proxy_provider(monkeypatch):
-    # The observed job-worker state: engine id set, ambient provider is the proxy.
-    from opentelemetry.trace import ProxyTracerProvider
-
-    from remote_agent_toolkit.runtime.gemini import tracing as tracing_mod
-
-    monkeypatch.setattr(tracing_mod, "_pipe_ready", False)
-    monkeypatch.setenv("GOOGLE_CLOUD_AGENT_ENGINE_ID", "eng-1")
-    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "proj-1")
-    monkeypatch.setenv("GOOGLE_CLOUD_AGENT_ENGINE_LOCATION", "us-central1")
-    monkeypatch.setattr(trace, "get_tracer_provider", lambda: ProxyTracerProvider())
-    installed = {}
-    monkeypatch.setattr(trace, "set_tracer_provider", lambda p: installed.update(p=p))
-
-    import google.auth
-
-    monkeypatch.setattr(google.auth, "default", lambda: (object(), "proj-1"))
-    # AuthorizedSession would try to use the fake credentials lazily — fine for a unit test.
-    tracing_mod.ensure_export_pipe()
-
-    provider = installed.get("p")
-    assert provider is not None
-    attrs = provider.resource.attributes
-    assert attrs["cloud.resource_id"] == (
-        "//aiplatform.googleapis.com/projects/proj-1/locations/us-central1/reasoningEngines/eng-1"
-    )
-    assert attrs["service.name"] == "eng-1"
-    assert attrs["cloud.platform"] == "gcp.agent_engine"
-    # One-shot: a second call doesn't build another provider.
-    installed.clear()
-    tracing_mod.ensure_export_pipe()
-    assert not installed
-
-
 def test_disabled_when_otel_unusable(monkeypatch):
     # Simulate a broken/missing provider path: constructor failure → permanent no-op.
     monkeypatch.setattr(trace, "get_tracer", lambda *a, **k: (_ for _ in ()).throw(RuntimeError))

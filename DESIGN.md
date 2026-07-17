@@ -291,14 +291,17 @@ These are facts measured during the PoC. The library encodes them so consumers i
   under ADK's `invocation` span; result status/usage/cost, `gen_ai.conversation.id` = session id — what
   groups turns in the console's session view) + one `execute_tool` child per tool call with real
   durations (opened on `tool_use`, closed on the paired `tool_result`); messages/thinking are span
-  events. The export pipe is the toolkit's own: **`AdkApp.set_up()` (and with it the
-  `enable_tracing=True` telemetry setup) does not run in query-job workers** — observed live: the only
-  traces any engine ever exported were deploy-time validation queries on the sync path, and the job
-  worker env lacks the markers `set_up()` sets (`GOOGLE_GENAI_USE_ENTERPRISE`). So `ensure_export_pipe`
-  installs the same provider shape itself when the ambient provider is a no-op: OTLP →
-  `telemetry.googleapis.com`, resource-tagged with the engine's `cloud.resource_id` (built from the
-  `GOOGLE_CLOUD_AGENT_ENGINE_ID`/`_LOCATION` env the platform does set in workers), bounded
-  `force_flush` at turn end (a cold worker can die right after the terminal event). The default RE
+  events. The load-bearing platform fact (pinned by a standalone repro,
+  `~/zyte/agent-runtime-tracing-repro/`, shared with Google): **the platform initializes OTel in
+  query-job workers — a real `TracerProvider` with exporter and `cloud.resource_id` resource — but never
+  flushes it on the job path**; the sync serving path force-flushes per query stream, while a job worker
+  is torn down with the batch buffer unexported (identical stock-ADK engine: sync span exports, job span
+  never). So `TurnTracer.close()` does a bounded `force_flush` at the end of every turn — that flush is
+  the whole workaround; without it no toolkit span ever reaches Cloud Trace. History: an initial
+  `ensure_export_pipe` (self-installed OTLP provider for a no-op ambient provider) was REMOVED after the
+  probe evidence — exported spans carry the platform's `service.instance.id=<hex>-<pid>` resource stamp,
+  not ours, so every cloud worker already has the platform's provider and the pipe never fired;
+  resurrect from git history only if the platform ever ships job workers without one. The default RE
   service-agent role already includes `telemetry.traces.write`. Strictly best-effort: `TurnTracer` never
   raises — a tracing failure must not take a run down. Span values are truncated summaries (same text as
   the log/mirror; no new exposure surface). Traces are diagnostics; `history()` is the record.
@@ -314,18 +317,19 @@ These are facts measured during the PoC. The library encodes them so consumers i
   `OTEL_SEMCONV_STABILITY_OPT_IN=gen_ai_latest_experimental` — a per-ENGINE setting, patchable on a live
   engine via REST `updateMask=spec.deployment_spec.env`) and had `TurnTracer` put `rat.prompt` /
   `rat.final_text` on the turn span (that part worked, live-verified). Removed because the headline
-  purpose failed: the console's *session conversation* panel is fed by the platform's capture
-  instrumentation, which never initializes for query jobs (the `set_up()` gap), so it stayed "No chat
-  conversation data" and the feature over-promised. Security review stands for a future revisit: no new
+  purpose failed: the console's *session conversation* panel is fed by the platform capture
+  instrumentation's content logs, which never materialize for query-job executions (the job-path
+  telemetry gap above), so it stayed "No chat conversation data" and the feature over-promised. Security review stands for a future revisit: no new
   exposure class (secret values never ride prompts/payloads; the text already persists to the
   log/mirror), but Google's setting also logs `user.id` (consent caveat).
 - **Known residual Traces-UI gaps (2026-07-17, platform-side; parked — revisit with Google support).**
-  (1) *"(Missing span ID …)" placeholder node*: ADK's outermost runner span is never exported — the
-  platform tears the one-turn job worker down before that span ends/flushes (our turn-end
-  `force_flush` only covers spans we own). Cosmetic: our turn/tool spans are complete underneath.
+  (1) *"(Missing span ID …)" placeholder node*: ADK's outermost runner span is never exported — it only
+  ends after our turn-end `force_flush` has already run (a flush exports ended spans only), and the
+  platform tears the worker down before any later export. Cosmetic: our turn/tool spans are complete
+  underneath.
   (2) *Session conversation tab shows "No chat conversation data"*: see the content-capture entry above
-  — platform instrumentation absent on the job path; for warm turns the ADK session's user event is the
-  `__POOL_WAIT__` sentinel anyway (the real prompt rides the dispatch payload). Emitting their
+  — the platform's content logs never materialize on the job path; for warm turns the ADK session's
+  user event is the `__POOL_WAIT__` sentinel anyway (the real prompt rides the dispatch payload). Emitting their
   undocumented content-log format ourselves was judged too brittle; full prompts/outputs live in
   `session.history()`.
 - **ADK events must carry `invocation_id`** (`ctx.invocation_id`, threaded through `to_adk_event`): the

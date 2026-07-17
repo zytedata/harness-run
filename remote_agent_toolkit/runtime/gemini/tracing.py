@@ -2,14 +2,20 @@
 
 Two halves, both needed because the platform provides neither where it matters:
 
-**The pipe.** ``AdkApp(enable_tracing=True)`` is supposed to register a global OTel
-``TracerProvider`` exporting OTLP → ``telemetry.googleapis.com``, resource-tagged with the
-engine's ``cloud.resource_id`` (what the console's Agent Platform **Traces** tab filters
-on). Observed live: that setup only takes effect on the *sync* serving path — the only
-traces ever exported by any engine were the deploy-time validation queries; **query-job
-workers (every run the toolkit does, cold and warm) never exported a span**. So
-:func:`ensure_export_pipe` installs the same provider/exporter/resource shape ourselves
-whenever the ambient provider is a no-op/proxy.
+**The flush.** The platform initializes OpenTelemetry in query-job workers (a real global
+``TracerProvider`` exporting to ``telemetry.googleapis.com``, resource-tagged with the
+engine's ``cloud.resource_id`` — what the console's Traces tab filters on), **but never
+flushes it on the job path**: the sync serving path force-flushes after each query stream,
+while a job worker is torn down with the batch processor's buffer unexported. Verified by
+a standalone repro (identical stock-ADK engine: sync span exports, job span — recorded on
+a live provider — never does). So :meth:`TurnTracer.close` force-flushes at the end of
+every turn; that flush is what makes toolkit traces exist at all. Spans that end *after*
+it (the platform's own outermost runner span) may still be lost to teardown — the
+"(Missing span ID …)" placeholder the console then shows is cosmetic and theirs to fix.
+An earlier belt-and-braces ``ensure_export_pipe`` (self-installed provider for the case
+where the ambient one is a no-op) was removed once live evidence showed every cloud
+worker already has the platform's provider — see DESIGN §6 and git history if a platform
+regression ever brings that case back.
 
 **The spans.** ADK only auto-instruments its own LLM/tool calls, and this agent's real
 work happens inside the Claude Code subprocess where ADK can't see it. :class:`TurnTracer`
@@ -39,81 +45,9 @@ from ...events import AgentEvent
 
 _ATTR_MAX = 400  # span attribute / event values are summaries, not transcripts
 
-_TELEMETRY_ENDPOINT = "https://telemetry.googleapis.com/v1/traces"
-_pipe_ready = False  # process-wide: ensure_export_pipe is one-shot
-
 
 def _clip(text: str) -> str:
     return text[:_ATTR_MAX]
-
-
-def ensure_export_pipe() -> None:
-    """Install an OTLP → Cloud Trace ``TracerProvider`` if none is active. Never raises.
-
-    Mirrors what ``AdkApp(enable_tracing=True)`` builds for the sync serving path (same
-    endpoint, auth, and resource attributes — the ``cloud.resource_id`` is what associates
-    spans with the engine in the console), because query-job workers don't get that setup
-    (observed live; see the module docstring). One-shot per process; a real provider
-    already registered (e.g. the AdkApp's, or a consumer's own) is left untouched. Off the
-    platform (no ``GOOGLE_CLOUD_AGENT_ENGINE_ID``) this is a no-op, so local/unit runs
-    never grow an exporter.
-    """
-    global _pipe_ready
-    if _pipe_ready:
-        return
-    _pipe_ready = True  # even on failure: don't retry (and re-fail) every turn
-    try:
-        import os
-
-        engine_id = os.environ.get("GOOGLE_CLOUD_AGENT_ENGINE_ID")
-        if not engine_id:
-            return
-
-        from opentelemetry import trace
-        from opentelemetry.trace import NoOpTracerProvider, ProxyTracerProvider
-
-        current = trace.get_tracer_provider()
-        if not isinstance(current, (NoOpTracerProvider, ProxyTracerProvider)):
-            return  # a real provider is already exporting; don't fight it
-
-        import google.auth
-        from google.auth.transport.requests import AuthorizedSession
-        from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
-        from opentelemetry.sdk.resources import Resource
-        from opentelemetry.sdk.trace import TracerProvider
-        from opentelemetry.sdk.trace.export import BatchSpanProcessor
-
-        credentials, adc_project = google.auth.default()
-        project = os.environ.get("GOOGLE_CLOUD_PROJECT") or adc_project
-        location = os.environ.get("GOOGLE_CLOUD_AGENT_ENGINE_LOCATION") or os.environ.get(
-            "GOOGLE_CLOUD_LOCATION", ""
-        )
-        resource = Resource.create(
-            {
-                "gcp.project_id": project or "",
-                "cloud.account.id": project or "",
-                "cloud.provider": "gcp",
-                "cloud.platform": "gcp.agent_engine",
-                "cloud.region": location,
-                "service.name": engine_id,
-                "cloud.resource_id": (
-                    f"//aiplatform.googleapis.com/projects/{project}"
-                    f"/locations/{location}/reasoningEngines/{engine_id}"
-                ),
-            }
-        )
-        provider = TracerProvider(resource=resource)
-        provider.add_span_processor(
-            BatchSpanProcessor(
-                OTLPSpanExporter(
-                    session=AuthorizedSession(credentials=credentials),
-                    endpoint=_TELEMETRY_ENDPOINT,
-                )
-            )
-        )
-        trace.set_tracer_provider(provider)
-    except Exception:  # noqa: BLE001 — tracing must never take a worker down
-        pass
 
 
 class TurnTracer:
@@ -122,7 +56,6 @@ class TurnTracer:
     def __init__(self, agent_name: str, model: str, session_id: str) -> None:
         self._turn: Any = None
         self._tools: dict[str, Any] = {}
-        ensure_export_pipe()  # job workers don't get the AdkApp's provider; bring our own
         try:
             from opentelemetry import trace
 
@@ -182,7 +115,14 @@ class TurnTracer:
             self._turn.add_event(event.kind, {"summary": _clip(event.summary)})
 
     def close(self) -> None:
-        """End the turn: close orphaned tool spans (crash mid-tool), then the root."""
+        """End the turn: close orphaned tool spans, end the root, and FLUSH.
+
+        The flush is load-bearing, not hygiene: the platform never flushes OTel on the
+        query-job path and tears the worker down with the batch buffer unexported (see
+        the module docstring) — without this call no toolkit span would ever reach Cloud
+        Trace. Sync on purpose (reached from an async generator's finally, where awaiting
+        is illegal); bounded so telemetry can never wedge a worker.
+        """
         if self._turn is None:
             return
         try:
@@ -191,13 +131,10 @@ class TurnTracer:
                 span.end()
             self._tools.clear()
             self._turn.end()
-            # A cold job's worker can be torn down right after the terminal event; flush
-            # so the turn's spans aren't lost in a batch buffer. Sync on purpose (this is
-            # reached from an async generator's finally, where awaiting is illegal).
             provider = self._otel.get_tracer_provider()
             flush = getattr(provider, "force_flush", None)
             if flush is not None:
-                flush(10_000)  # ms; bounded — never wedge a worker on telemetry
+                flush(10_000)  # ms
         except Exception:  # noqa: BLE001
             pass
         self._turn = None

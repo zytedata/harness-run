@@ -245,6 +245,7 @@ class ToolkitAgent(BaseAgent):
         from ...harness.claude_code import ClaudeCodeHarness
         from ...harness.context import RunContext
         from ...ports.eventsink import CloudLoggingSink
+        from .tracing import TurnTracer
         from .translate import to_adk_event
 
         # The RAW session id keys the Cloud Logging stream (what the client tails); the
@@ -276,10 +277,14 @@ class ToolkitAgent(BaseAgent):
         from .history import mirror_line, write_turn_mirror
 
         mirror: list[dict] = []
+        # Cloud Trace spans rebuilt from the same stream (the console's Traces tab); the
+        # export pipe is the AdkApp's enable_tracing provider. Best-effort by construction.
+        tracer = TurnTracer(agent_name=self.name, model=spec.model, session_id=session_id)
 
         def surface(event: AgentEvent) -> Any:
             sink.emit(event)  # near-real-time channel (Cloud Logging)
             mirror.append(mirror_line(event))
+            tracer.observe(event)  # span open/close + annotations (never raises)
             return to_adk_event(event, self.name)
 
         # The ENTIRE turn is guarded: workspace prep (clone/skills can fail on bad auth) as
@@ -303,6 +308,7 @@ class ToolkitAgent(BaseAgent):
                      "session_id": session_id},
             ))
         finally:
+            tracer.close()  # end the turn span (+ any tool span orphaned by a crash)
             # Flush the turn's durable history file — also on early generator close (a
             # partially-consumed turn still leaves a record). SYNC on purpose: this finally
             # also runs under GeneratorExit, where awaiting is illegal. Best-effort by design.

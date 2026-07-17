@@ -282,9 +282,30 @@ These are facts measured during the PoC. The library encodes them so consumers i
   side-effect at the terminal event, with Cloud Logging as the reliable emit channel.
 
 **Observability**
-- Async `run_query_job` surfaces **no** stderr, **no** traces, and only coarse (~12 min) GCS flushes.
+- Async `run_query_job` surfaces **no** stderr, **no** stack traces, and only coarse (~12 min) GCS flushes.
   **Cloud Logging (`log_struct`) is the only near-real-time channel** — the harness emits a per-step
   structured log; the client tails it filtered by `session_id`. This is the `EventSink` port.
+- **Cloud Trace spans per turn** (the console's Agent Platform *Traces* tab). The platform's ADK
+  auto-instrumentation can't see inside the Claude subprocess, so the worker rebuilds the structure from
+  the `AgentEvent` stream (`gemini/tracing.TurnTracer`): a root `invoke_agent` span per turn (parented
+  under ADK's `invocation` span; result status/usage/cost, `gen_ai.conversation.id` = session id — what
+  groups turns in the console's session view) + one `execute_tool` child per tool call with real
+  durations (opened on `tool_use`, closed on the paired `tool_result`); messages/thinking are span
+  events. The export pipe is the toolkit's own: **`AdkApp.set_up()` (and with it the
+  `enable_tracing=True` telemetry setup) does not run in query-job workers** — observed live: the only
+  traces any engine ever exported were deploy-time validation queries on the sync path, and the job
+  worker env lacks the markers `set_up()` sets (`GOOGLE_GENAI_USE_ENTERPRISE`). So `ensure_export_pipe`
+  installs the same provider shape itself when the ambient provider is a no-op: OTLP →
+  `telemetry.googleapis.com`, resource-tagged with the engine's `cloud.resource_id` (built from the
+  `GOOGLE_CLOUD_AGENT_ENGINE_ID`/`_LOCATION` env the platform does set in workers), bounded
+  `force_flush` at turn end (a cold worker can die right after the terminal event). The default RE
+  service-agent role already includes `telemetry.traces.write`. Strictly best-effort: `TurnTracer` never
+  raises — a tracing failure must not take a run down. Span values are truncated summaries (same text as
+  the log/mirror; no new exposure surface). Traces are diagnostics; `history()` is the record.
+  Live-validated facts: **Cloud Trace ingestion lag ~5–10 min** (poll patiently before declaring spans
+  lost); a warm worker's turns nest under that worker's ADK wrapper spans, so turns of *different
+  sessions* served by one worker share a trace — the per-turn `gen_ai.conversation.id` is what keys the
+  console's session view either way.
 - **Every tail poll is bounded** (the logging client has no per-call timeout; a dead connection
   otherwise wedges `list_entries` forever — observed live). Transient failures ride out; a run of
   consecutive failures surfaces the error.
@@ -418,9 +439,15 @@ remote-agent-toolkit/
 │   ├── runtime/
 │   │   ├── base.py                # Engine + Session protocol + state machine + Run handle
 │   │   ├── local.py               # local.deploy / local.run -> LocalEngine
+│   │   ├── venv.py                # per-engine uv venv for spec.packages on local
 │   │   └── gemini/
 │   │       ├── backend.py         # deploy(), get_engine(), list_engines(), GeminiEngine
 │   │       ├── deploy.py          # packaging + contracts (uv/glibc/IS_SANDBOX/...)
+│   │       ├── adk_agent.py       # the deployed ADK BaseAgent wrapping the harness
+│   │       ├── translate.py       # AgentEvent → ADK Event
+│   │       ├── handoff.py         # single-use GCS staging of per-invocation secrets
+│   │       ├── history.py         # durable event mirror + history/list_sessions readers
+│   │       ├── tracing.py         # AgentEvent stream → Cloud Trace spans (TurnTracer)
 │   │       └── pool.py            # WarmPool worker side
 │   ├── ports/
 │   │   ├── blobstore.py           # BlobStore + GcsBlobStore + LocalBlobStore

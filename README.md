@@ -364,6 +364,33 @@ result exists — poll `run.done` for in-flight runs, not this. Caveats: `list_s
 bucket-wide, so engines sharing an output bucket see each other's sessions; the `local` runtime keeps no
 durable event log (`list_sessions` shows its workdir's session dirs; `history()` raises).
 
+## Tracing: see what the agent did, span by span
+
+Every `gemini` turn is exported to **Cloud Trace** as a span tree — one root span per turn
+(`invoke_agent <name>`) with a child span per tool call (`execute_tool Bash`, …) whose durations are real
+(opened at the tool call, closed at its result), plus the assistant's messages/thinking as point-in-time
+annotations on the root. Where to look:
+
+- **Console → Agent Platform → your deployment → Traces tab**: pick *session view* to group turns of one
+  conversation (spans carry `gen_ai.conversation.id` = the session id), or *span view* for the flat list.
+- **Cloud Trace explorer** works too (filter on span name `invoke_agent` or the label
+  `gen_ai.conversation.id:<session_id>`).
+
+The root span carries the model, agent name, token usage and cost (`rat.cost_usd`, `rat.num_turns`); a
+failed turn or failed tool call marks its span with error status, so a trace of a broken run shows *where*
+it broke at a glance. Span values are truncated one-line summaries — the same text that already flows to
+Cloud Logging and the event mirror (never secret values), so tracing adds no new exposure surface.
+
+There's nothing to turn on: the worker installs the export pipe itself (the platform's own
+`enable_tracing` setup never takes effect on the async job path the toolkit uses), the runtime's default
+service-agent role already includes `telemetry.traces.write`, and spans are flushed at the end of every
+turn. The only prerequisites are the `telemetry.googleapis.com` + `cloudtrace.googleapis.com` APIs on the
+project, and `roles/cloudtrace.user` for whoever wants to *view* traces. Traces are diagnostics, not the
+record of a run — for programmatic history use [`session.history()`](#past-jobs-listing-sessions--reading-history).
+Cloud Trace has a free monthly span quota; a Claude-agent turn produces tens of spans, not thousands.
+Tracing is a `gemini`-runtime feature — the `local` runtime emits no spans (its event stream is already
+in-process).
+
 ## GCP setup & required permissions
 
 Deploying on Gemini Agent Runtime involves **two identities** — granting roles to the wrong one is the
@@ -436,6 +463,7 @@ for R in roles/aiplatform.user roles/storage.admin roles/logging.viewer roles/cl
          roles/pubsub.editor; do  # pubsub.editor only needed for warm pools
   gcloud projects add-iam-policy-binding $PROJECT --member "serviceAccount:$OP" --role $R; done
 gcloud projects add-iam-policy-binding $PROJECT --member "serviceAccount:$RE" --role roles/logging.logWriter
+gcloud services enable telemetry.googleapis.com cloudtrace.googleapis.com --project $PROJECT  # tracing
 # grant $RE objectAdmin on the output bucket; let yourself impersonate $OP (no secretAccessor needed —
 # secrets are passed per-invocation, not read from Secret Manager by the engine):
 gcloud iam service-accounts add-iam-policy-binding $OP --member "user:you@org.com" \

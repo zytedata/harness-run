@@ -180,7 +180,6 @@ def deploy(
     output_bucket: str | None = None,
     model: str | None = None,
     use_vertex: bool = True,
-    capture_content: bool = True,
     min_instances: int = 0,
     max_instances: int = 1,
     pool_size: int = 2,
@@ -202,10 +201,6 @@ def deploy(
     ``min_instances`` defaults to 0: the toolkit only uses the async ``run_query_job`` path,
     where every job provisions its own worker, so an idle engine costs (almost) nothing. A
     min-instances container would serve only the unused sync path while billing continuously.
-
-    ``capture_content`` (default on) opts the engine into the console's "prompt-response
-    collection" setting so the Traces UI can display conversation content — no new exposure
-    class (see ``deploy.build_env``); set ``False`` for summary-only telemetry.
     """
     import dataclasses
     import os
@@ -250,7 +245,6 @@ def deploy(
         use_vertex=use_vertex,
         warm_pool=warm_pool,
         pool_subscription=subscription,
-        capture_content=capture_content,
         min_instances=min_instances,
         max_instances=max_instances,
     )

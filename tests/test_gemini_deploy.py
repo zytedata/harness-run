@@ -61,17 +61,6 @@ def test_build_env_no_baked_secrets_and_buckets() -> None:
     assert env2["AGENT_ARTIFACTS_GCS"] == "gs://bkt/artifacts"
 
 
-def test_build_env_capture_content_default_on_and_opt_out() -> None:
-    # Default: engine opts into the console's prompt-response collection setting.
-    env = deploy.build_env(_spec())
-    assert env["OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT"] == "EVENT_ONLY"
-    assert env["OTEL_SEMCONV_STABILITY_OPT_IN"] == "gen_ai_latest_experimental"
-    # capture_content=False keeps telemetry summary-only.
-    env2 = deploy.build_env(_spec(), capture_content=False)
-    assert "OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT" not in env2
-    assert "OTEL_SEMCONV_STABILITY_OPT_IN" not in env2
-
-
 def test_build_env_model_override() -> None:
     spec = _spec(model="claude-sonnet-4-6")
     env = deploy.build_env(spec, model="claude-haiku-4-5")

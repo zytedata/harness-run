@@ -90,7 +90,6 @@ def build_env(
     vertex_region: str = "global",
     warm_pool: bool = False,
     pool_subscription: str | None = None,
-    capture_content: bool = True,
 ) -> dict:
     """Build the engine ``env_vars`` dict from ``spec`` (generalizes the PoC ``_env_vars``).
 
@@ -108,11 +107,6 @@ def build_env(
             key in the agent env). Set ``False`` for API-key mode (key supplied per-invocation).
         warm_pool / pool_subscription: when both set, the engine acts as a pool worker that
             pulls turn assignments from ``pool_subscription``.
-        capture_content: Opt the engine into prompt/response content collection (the console's
-            "prompt-response collection" setting — same env vars its Enable button sets). Safe
-            by design here: per-invocation secret *values* never ride prompts/payloads, and the
-            surfaced text already persists to Cloud Logging + the GCS event mirror, so this adds
-            no new exposure class. Set ``False`` to keep trace/telemetry content summary-only.
     """
     env: dict = {
         # The engine refuses bypassPermissions under root; Agent Runtime may run as root.
@@ -122,14 +116,6 @@ def build_env(
         # Model the embedded Claude Code harness uses (resolved at runtime by the agent).
         "CLAUDE_AGENT_MODEL": model or spec.model,
     }
-
-    # Prompt/response content collection (the console Traces UI gates its session
-    # conversation display on this engine setting). The platform's own capture
-    # instrumentation only runs on the sync path (see tracing.py), so the toolkit's
-    # TurnTracer also honors this flag for the spans it emits on job runs.
-    if capture_content:
-        env["OTEL_SEMCONV_STABILITY_OPT_IN"] = "gen_ai_latest_experimental"
-        env["OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT"] = "EVENT_ONLY"
 
     # Produced files are uploaded under the output bucket after each run.
     if output_bucket:
@@ -254,7 +240,6 @@ def build_engine_config(
     vertex_region: str = "global",
     warm_pool: bool = False,
     pool_subscription: str | None = None,
-    capture_content: bool = True,
     min_instances: int = 0,
     max_instances: int = 1,
 ) -> dict:
@@ -283,7 +268,6 @@ def build_engine_config(
             vertex_region=vertex_region,
             warm_pool=warm_pool,
             pool_subscription=pool_subscription,
-            capture_content=capture_content,
         ),
         "min_instances": min_instances,
         "max_instances": max_instances,

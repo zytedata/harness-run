@@ -283,11 +283,8 @@ class ToolkitAgent(BaseAgent):
 
         mirror: list[dict] = []
         # Cloud Trace spans rebuilt from the same stream (the console's Traces tab).
-        # Best-effort by construction; the prompt lands on the span only when the engine
-        # opted into content capture.
-        tracer = TurnTracer(
-            agent_name=self.name, model=spec.model, session_id=session_id, prompt=prompt
-        )
+        # Best-effort by construction.
+        tracer = TurnTracer(agent_name=self.name, model=spec.model, session_id=session_id)
 
         def surface(event: AgentEvent) -> Any:
             sink.emit(event)  # near-real-time channel (Cloud Logging)

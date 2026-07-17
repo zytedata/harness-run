@@ -303,9 +303,10 @@ These are facts measured during the PoC. The library encodes them so consumers i
   raises — a tracing failure must not take a run down. Span values are truncated summaries (same text as
   the log/mirror; no new exposure surface). Traces are diagnostics; `history()` is the record.
   Live-validated facts: **Cloud Trace ingestion lag ~5–10 min** (poll patiently before declaring spans
-  lost); a warm worker's turns nest under that worker's ADK wrapper spans, so turns of *different
-  sessions* served by one worker share a trace — the per-turn `gen_ai.conversation.id` is what keys the
-  console's session view either way.
+  lost); **one trace per turn** — every turn runs in its own query job (cold submits one; a warm pool
+  worker claims exactly one turn, processes it, exits), so a turn's spans nest under that job's ADK
+  wrapper spans and a multi-turn session spans several traces, stitched by `gen_ai.conversation.id`
+  (what keys the console's session view).
 - **Every tail poll is bounded** (the logging client has no per-call timeout; a dead connection
   otherwise wedges `list_entries` forever — observed live). Transient failures ride out; a run of
   consecutive failures surfaces the error.

@@ -385,7 +385,16 @@ There's nothing to turn on: the worker installs the export pipe itself (the plat
 `enable_tracing` setup never takes effect on the async job path the toolkit uses), the runtime's default
 service-agent role already includes `telemetry.traces.write`, and spans are flushed at the end of every
 turn. The only prerequisites are the `telemetry.googleapis.com` + `cloudtrace.googleapis.com` APIs on the
-project, and `roles/cloudtrace.user` for whoever wants to *view* traces. Traces are diagnostics, not the
+project, and `roles/cloudtrace.user` for whoever wants to *view* traces.
+
+**Conversation content.** `deploy(capture_content=True)` (the default) opts the engine into the console's
+*prompt-response collection* setting (the same env vars its Enable button sets), and the toolkit's turn
+span then carries the user prompt and the final response (`rat.prompt` / `rat.final_text`) plus fuller
+message/thinking text instead of 400-char summaries. This is safe by design here: per-invocation secret
+*values* never ride prompts or payloads, and the captured text is the same content already persisted to
+Cloud Logging and the GCS event mirror — no new exposure class. Pass `capture_content=False` for
+summary-only telemetry (note: Google's setting also logs `user.id` where set — have end-user consent
+policies in place if you attach user identities). Traces are diagnostics, not the
 record of a run — for programmatic history use [`session.history()`](#past-jobs-listing-sessions--reading-history).
 Cloud Trace has a free monthly span quota; a Claude-agent turn produces tens of spans, not thousands.
 Tracing is a `gemini`-runtime feature — the `local` runtime emits no spans (its event stream is already

@@ -99,6 +99,29 @@ def test_messages_become_span_events_and_long_text_is_clipped():
     assert len(events["message"].attributes["summary"]) == 400  # clipped, not a transcript
 
 
+def test_capture_content_flag_lifts_clipping_and_adds_conversation(monkeypatch):
+    # Default (no capture env): summaries clipped at 400, no prompt/final text attrs.
+    monkeypatch.delenv("OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT", raising=False)
+    t = TurnTracer(agent_name="a", model="m", session_id="s", prompt="do the thing")
+    t.observe(AgentEvent(kind="result", summary="y" * 5000))
+    t.close()
+    turn = _spans()["invoke_agent a"]
+    assert "rat.prompt" not in turn.attributes and "rat.final_text" not in turn.attributes
+
+    # Opted in (the engine setting deploy(capture_content=True) bakes): fuller content.
+    _EXPORTER.clear()
+    monkeypatch.setenv("OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT", "EVENT_ONLY")
+    t = TurnTracer(agent_name="a", model="m", session_id="s", prompt="do the thing")
+    t.observe(AgentEvent(kind="message", summary="x" * 5000))
+    t.observe(AgentEvent(kind="result", summary="y" * 5000))
+    t.close()
+    turn = _spans()["invoke_agent a"]
+    assert turn.attributes["rat.prompt"] == "do the thing"
+    assert len(turn.attributes["rat.final_text"]) == 4000  # capture limit, still bounded
+    events = {e.name: e for e in turn.events}
+    assert len(events["message"].attributes["summary"]) == 4000
+
+
 def test_never_raises_on_malformed_events_or_after_close():
     t = TurnTracer(agent_name="a", model="m", session_id="s")
     t.observe(AgentEvent(kind="tool_result", summary="no matching use", raw={"id": "??"}))

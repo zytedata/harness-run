@@ -38,13 +38,25 @@ from typing import Any
 from ...events import AgentEvent
 
 _ATTR_MAX = 400  # span attribute / event values are summaries, not transcripts
+# With content capture opted in (the console's "prompt-response collection" engine setting,
+# baked by deploy(capture_content=True)), spans carry much fuller text. The platform's own
+# capture instrumentation never runs on the job path (the set_up() gap above), so honoring
+# the flag here is what actually materializes content for toolkit runs. Bounded still —
+# Cloud Trace truncates oversized attribute values.
+_ATTR_MAX_CAPTURE = 4000
 
 _TELEMETRY_ENDPOINT = "https://telemetry.googleapis.com/v1/traces"
 _pipe_ready = False  # process-wide: ensure_export_pipe is one-shot
 
 
+def _capture_content() -> bool:
+    import os
+
+    return bool(os.environ.get("OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT"))
+
+
 def _clip(text: str) -> str:
-    return text[:_ATTR_MAX]
+    return text[: _ATTR_MAX_CAPTURE if _capture_content() else _ATTR_MAX]
 
 
 def ensure_export_pipe() -> None:
@@ -119,7 +131,7 @@ def ensure_export_pipe() -> None:
 class TurnTracer:
     """Bridge one turn's ``AgentEvent`` stream into OTel spans. Never raises."""
 
-    def __init__(self, agent_name: str, model: str, session_id: str) -> None:
+    def __init__(self, agent_name: str, model: str, session_id: str, prompt: str = "") -> None:
         self._turn: Any = None
         self._tools: dict[str, Any] = {}
         ensure_export_pipe()  # job workers don't get the AdkApp's provider; bring our own
@@ -137,6 +149,8 @@ class TurnTracer:
             self._turn.set_attribute("gen_ai.agent.name", agent_name)
             self._turn.set_attribute("gen_ai.request.model", model)
             self._turn.set_attribute("gen_ai.conversation.id", session_id)
+            if prompt and _capture_content():  # opted-in engines carry the conversation
+                self._turn.set_attribute("rat.prompt", _clip(prompt))
             self._ctx = trace.set_span_in_context(self._turn)
             self._tracer = tracer
         except Exception:  # noqa: BLE001 — no provider / no otel: tracing silently off
@@ -176,6 +190,8 @@ class TurnTracer:
                 self._turn.set_attribute("rat.cost_usd", event.cost_usd)
             if isinstance(raw.get("num_turns"), int):
                 self._turn.set_attribute("rat.num_turns", raw["num_turns"])
+            if _capture_content():  # opted-in engines carry the conversation
+                self._turn.set_attribute("rat.final_text", _clip(event.summary))
             if raw.get("is_error"):
                 self._turn.set_status(self._otel.StatusCode.ERROR, _clip(event.summary))
         else:  # message / thinking / status → point-in-time annotations on the turn

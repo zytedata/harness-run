@@ -18,8 +18,15 @@ from typing import Any
 from ...events import AgentEvent
 
 
-def to_adk_event(event: AgentEvent, author: str) -> Any:
-    """Build an ADK ``Event`` from a generic :class:`AgentEvent`."""
+def to_adk_event(event: AgentEvent, author: str, invocation_id: str = "") -> Any:
+    """Build an ADK ``Event`` from a generic :class:`AgentEvent`.
+
+    ``invocation_id`` must be the ADK ``ctx.invocation_id`` of the serving invocation: the
+    runner appends every non-partial event (for us: the terminal ``result``) to the
+    platform's session service, whose API **rejects events without one** (400
+    ``event.invocation_id: Required field is not set`` — ADK defaults it to ``''`` and
+    expects the agent to stamp it; surfaced as an exception on the job's trace).
+    """
     from google.adk.events import Event
     from google.genai import types
 
@@ -34,6 +41,7 @@ def to_adk_event(event: AgentEvent, author: str) -> Any:
     part = types.Part(text=event.summary, thought=True if event.kind == "thinking" else None)
     ev = Event(
         author=author,
+        invocation_id=invocation_id,
         content=types.Content(role="model", parts=[part]),
         partial=not is_result,
         turn_complete=True if is_result else None,

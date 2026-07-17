@@ -214,11 +214,14 @@ class ToolkitAgent(BaseAgent):
 
         spec = AgentSpec.from_dict(self.spec_data)
         prompt = _extract_prompt(ctx.user_content)
+        # Stamped on every surfaced ADK event: the platform session-append API rejects
+        # events without it (see translate.to_adk_event).
+        invocation_id = ctx.invocation_id
 
         # Warm-pool worker: block for a dispatched turn, then process it (under the dispatched
         # session_id). Cold start was paid at pool-fill time, so pickup is fast.
         if prompt.strip() == POOL_WAIT_SENTINEL:
-            async for event in self._pool_worker(spec):
+            async for event in self._pool_worker(spec, invocation_id):
                 yield event
             return
 
@@ -228,12 +231,14 @@ class ToolkitAgent(BaseAgent):
         # Strip leading control directives (never shown to the model): secrets pointer, resume.
         secrets_uri, prompt = _split_secrets_directive(prompt)
         resume_sid, prompt = _split_resume_directive(prompt)
-        async for event in self._run_turn(spec, session_id, prompt, resume_sid, secrets_uri):
+        async for event in self._run_turn(
+            spec, session_id, prompt, resume_sid, secrets_uri, invocation_id
+        ):
             yield event
 
     async def _run_turn(
         self, spec: Any, session_id: str, prompt: str, resume_sid: str | None,
-        secrets_uri: str | None = None,
+        secrets_uri: str | None = None, invocation_id: str = "",
     ) -> AsyncGenerator[Any, None]:
         """Process one turn under ``session_id``: prep workspace, drive the harness, surface events.
 
@@ -277,15 +282,18 @@ class ToolkitAgent(BaseAgent):
         from .history import mirror_line, write_turn_mirror
 
         mirror: list[dict] = []
-        # Cloud Trace spans rebuilt from the same stream (the console's Traces tab); the
-        # export pipe is the AdkApp's enable_tracing provider. Best-effort by construction.
-        tracer = TurnTracer(agent_name=self.name, model=spec.model, session_id=session_id)
+        # Cloud Trace spans rebuilt from the same stream (the console's Traces tab).
+        # Best-effort by construction; the prompt lands on the span only when the engine
+        # opted into content capture.
+        tracer = TurnTracer(
+            agent_name=self.name, model=spec.model, session_id=session_id, prompt=prompt
+        )
 
         def surface(event: AgentEvent) -> Any:
             sink.emit(event)  # near-real-time channel (Cloud Logging)
             mirror.append(mirror_line(event))
             tracer.observe(event)  # span open/close + annotations (never raises)
-            return to_adk_event(event, self.name)
+            return to_adk_event(event, self.name, invocation_id)
 
         # The ENTIRE turn is guarded: workspace prep (clone/skills can fail on bad auth) as
         # much as the harness itself. Any crash becomes a TERMINAL result event — without one
@@ -318,7 +326,7 @@ class ToolkitAgent(BaseAgent):
 
                 write_turn_mirror(events_uri, session_id, mirror, now_ms=int(_time.time() * 1000))
 
-    async def _pool_worker(self, spec: Any) -> AsyncGenerator[Any, None]:
+    async def _pool_worker(self, spec: Any, invocation_id: str = "") -> AsyncGenerator[Any, None]:
         """Block pulling the dispatch subscription, then process the claimed turn.
 
         Heartbeats while idle (the async executor finalizes a job that yields no events), then
@@ -340,7 +348,7 @@ class ToolkitAgent(BaseAgent):
                 summary="pool worker started without AGENT_POOL_SUBSCRIPTION; exiting",
                 raw={"event": "pool_error"},
             )
-            yield to_adk_event(ev, self.name)
+            yield to_adk_event(ev, self.name, invocation_id)
             return
 
         # Pre-warm during the idle wait (the dominant post-claim cost in-cloud is the first
@@ -367,7 +375,7 @@ class ToolkitAgent(BaseAgent):
                     CloudLoggingSink(session_id=pool_id).emit(err)
                 except Exception:  # noqa: BLE001
                     pass
-                yield to_adk_event(err, self.name)
+                yield to_adk_event(err, self.name, invocation_id)
                 return
             if claimed is not None:
                 break
@@ -377,14 +385,14 @@ class ToolkitAgent(BaseAgent):
                 summary=f"pool worker waiting for assignment (beat {beat})",
                 raw={"event": "pool_waiting", "beat": beat},
             )
-            yield to_adk_event(hb, self.name)
+            yield to_adk_event(hb, self.name, invocation_id)
 
         if claimed is None:
             ev = AgentEvent(
                 kind="status", summary="pool worker idle-expired (no assignment)",
                 raw={"event": "pool_idle_expired"},
             )
-            yield to_adk_event(ev, self.name)
+            yield to_adk_event(ev, self.name, invocation_id)
             return
 
         session_id = claimed.get("session_id") or ""
@@ -394,6 +402,7 @@ class ToolkitAgent(BaseAgent):
         async for event in self._run_turn(
             spec, session_id, message,
             resume_sid=session_id if resume else None, secrets_uri=secrets_uri,
+            invocation_id=invocation_id,
         ):
             yield event
 

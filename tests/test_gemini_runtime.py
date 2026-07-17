@@ -40,6 +40,14 @@ def test_to_adk_event_kinds():
     assert err.error_message == "boom"
 
 
+def test_to_adk_event_stamps_invocation_id():
+    # Regression: the platform's session-append API 400s on events without invocation_id
+    # ("event.invocation_id: Required field is not set") — ADK defaults it to '' and the
+    # runner appends every non-partial event (our terminal result) to the session service.
+    ev = to_adk_event(AgentEvent(kind="result", summary="done"), "agent", "e-inv-123")
+    assert ev.invocation_id == "e-inv-123"
+
+
 def test_build_agent_sanitizes_node_name():
     # ADK BaseAgent.name must be a valid Python identifier; spec.name may have hyphens.
     agent = adk_agent.build_agent(AgentSpec(name="hello-coder", model="m"))
@@ -258,13 +266,17 @@ def test_run_turn_maps_session_id_and_surfaces_harness_crash(tmp_path, monkeypat
     agent = adk_agent.build_agent(spec)
 
     async def drive():
-        return [ev async for ev in agent._run_turn(spec, "1966652674296250368", "go", None)]
+        return [ev async for ev in agent._run_turn(
+            spec, "1966652674296250368", "go", None, invocation_id="e-inv-9")]
 
     events = asyncio.run(drive())
 
     # (1) the harness received the mapped canonical UUID, not the raw numeric id.
     import uuid
     assert str(uuid.UUID(seen["session_id"])) == seen["session_id"]
+    # Every surfaced ADK event carries the invocation id — the platform session-append API
+    # rejects events without one (400) and the runner appends each non-partial event.
+    assert all(ev.invocation_id == "e-inv-9" for ev in events)
     # (2) the stream ends with a terminal error result (workspace_ready + harness_error).
     terminal = events[-1]
     assert terminal.custom_metadata["kind"] == "result"

@@ -160,18 +160,22 @@ def test_pool_worker_claims_and_runs(monkeypatch):
     # Replace the heavy turn (real harness/model) with a recorder.
     seen = {}
 
-    async def fake_run_turn(spec_, session_id, prompt, resume_sid, secrets_uri=None):
+    async def fake_run_turn(spec_, session_id, prompt, resume_sid, secrets_uri=None,
+                            invocation_id=""):
         seen.update(session_id=session_id, prompt=prompt, resume_sid=resume_sid,
-                    secrets_uri=secrets_uri)
+                    secrets_uri=secrets_uri, invocation_id=invocation_id)
         yield "turn-event"
 
     monkeypatch.setattr(agent, "_run_turn", fake_run_turn)
 
     async def drive():
-        return [ev async for ev in agent._pool_worker(spec)]
+        return [ev async for ev in agent._pool_worker(spec, "e-inv-77")]
 
     events = asyncio.run(drive())
     # Claimed immediately (no heartbeat), then handed the dispatched turn (+pointer) to _run_turn.
+    # invocation_id must flow through: the warm path missed it at first and every session
+    # append kept 400ing on live engines while the cold path was fixed.
     assert events == ["turn-event"]
     assert seen == {"session_id": "dispatched-sid", "prompt": "do it", "resume_sid": None,
-                    "secrets_uri": "gs://bkt/invocation-secrets/dispatched-sid-x.json"}
+                    "secrets_uri": "gs://bkt/invocation-secrets/dispatched-sid-x.json",
+                    "invocation_id": "e-inv-77"}

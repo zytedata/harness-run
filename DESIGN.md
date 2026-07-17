@@ -303,10 +303,22 @@ These are facts measured during the PoC. The library encodes them so consumers i
   raises — a tracing failure must not take a run down. Span values are truncated summaries (same text as
   the log/mirror; no new exposure surface). Traces are diagnostics; `history()` is the record.
   Live-validated facts: **Cloud Trace ingestion lag ~5–10 min** (poll patiently before declaring spans
-  lost); **one trace per turn** — every turn runs in its own query job (cold submits one; a warm pool
+  lost; the v1 read API also does NOT expose span exception records — only the console shows them);
+  **one trace per turn** — every turn runs in its own query job (cold submits one; a warm pool
   worker claims exactly one turn, processes it, exits), so a turn's spans nest under that job's ADK
   wrapper spans and a multi-turn session spans several traces, stitched by `gen_ai.conversation.id`
   (what keys the console's session view).
+- **Content capture** (`deploy(capture_content=True)`, default): bakes the console's "prompt-response
+  collection" env vars (`OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=EVENT_ONLY` +
+  `OTEL_SEMCONV_STABILITY_OPT_IN`) so the Traces UI banner/gating is satisfied, and `TurnTracer` honors
+  the same flag for job runs (where the platform's capture instrumentation never runs — same set_up()
+  gap): the turn span carries `rat.prompt`/`rat.final_text` and message clipping widens 400→4000. No
+  new exposure class: secret values never ride prompts/payloads, and the text already persists to the
+  log/mirror.
+- **ADK events must carry `invocation_id`** (`ctx.invocation_id`, threaded through `to_adk_event`): the
+  runner appends every non-partial event (our terminal result) to the platform session service, whose
+  API rejects events without it (400, surfaced as an exception on the job's trace — invisible before
+  tracing existed; it fired on every turn ever, after the client already had its result).
 - **Every tail poll is bounded** (the logging client has no per-call timeout; a dead connection
   otherwise wedges `list_entries` forever — observed live). Transient failures ride out; a run of
   consecutive failures surfaces the error.

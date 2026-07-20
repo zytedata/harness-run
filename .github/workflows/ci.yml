@@ -1,19 +1,37 @@
 name: CI
 
+# All tests are offline unit tests (fake harness, mocked GCP/uv/git-over-network) — CI
+# needs no cloud credentials or API keys and bills nothing beyond the runner. Keep it
+# that way: anything that talks to Vertex/Anthropic belongs in a manually-run script,
+# not under `pytest -q`.
+
 on:
   push:
+    branches: [main]  # PRs are covered by the pull_request trigger — no double runs
   pull_request:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]  # full requires-python range (>=3.12,<3.14)
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python-version }}
       - name: Install uv
         uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: pyproject.toml  # no lockfile — key the cache off deps
       - name: Install (runtime + dev group)
         run: uv pip install --system -e . --group dev
       - name: Lint

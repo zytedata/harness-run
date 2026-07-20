@@ -49,7 +49,7 @@ def test_await_returns_result_and_stages_skills(tmp_path):
     engine._harness = FakeHarness(
         [AgentEvent(kind="message", summary="working"), _result_ev(text="final")],
         on_run=lambda s, c: seen.update(
-            staged=(c.job_dir / ".claude" / "skills" / "demo" / "SKILL.md").is_file()
+            staged=(c.workspace / ".claude" / "skills" / "demo" / "SKILL.md").is_file()
         ),
     )
     session = engine.start_session()
@@ -140,12 +140,42 @@ def test_resume_restores_workspace(tmp_path):
     seen = {}
     engine._harness = FakeHarness(
         [_result_ev()],
-        on_run=lambda s, c: seen.update(restored=(c.job_dir / "restored.txt").is_file()),
+        on_run=lambda s, c: seen.update(restored=(c.workspace / "restored.txt").is_file()),
     )
     session = engine.get_session("fixedsid")  # re-attach to the checkpointed session
 
     asyncio.run(_await(session.send("continue please")))
     assert seen["restored"] is True  # _prepare_workspace restored the snapshot on resume
+
+
+def test_workspace_accessor_seed_and_collect(tmp_path):
+    # The agent cwd is a leaf literally named "workspace" (an anonymous jobs/<uuid> cwd
+    # reads as disposable temp and weaker models cd away from it), and Session.workspace
+    # is the caller-facing accessor: seed inputs before run(), collect artifacts after —
+    # no deriving <workdir>/jobs/<sid> by hand.
+    spec = AgentSpec(name="demo", model="m")
+    engine = local.deploy(spec, workdir=str(tmp_path / "wd"))
+    session = engine.start_session()
+
+    ws = session.workspace
+    assert ws.is_dir()  # created on access, ready for seeding
+    assert ws == engine._jobs_root / session.session_id / "workspace"
+    (ws / "input.txt").write_text("seeded")
+
+    seen = {}
+
+    def on_run(s, c):
+        seen.update(
+            cwd_name=c.workspace.name,
+            same_dir=(c.workspace == ws),
+            seeded=(c.workspace / "input.txt").read_text(),
+        )
+        (c.workspace / "artifact.txt").write_text("produced")
+
+    engine._harness = FakeHarness([_result_ev()], on_run=on_run)
+    asyncio.run(_await(session.run("go")))
+    assert seen == {"cwd_name": "workspace", "same_dir": True, "seeded": "seeded"}
+    assert (session.workspace / "artifact.txt").read_text() == "produced"
 
 
 def test_start_session_mints_canonical_uuid(tmp_path):

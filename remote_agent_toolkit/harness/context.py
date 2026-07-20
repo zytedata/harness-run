@@ -31,7 +31,9 @@ class RunContext:
     Attributes:
         spec: The agent definition being run.
         prompt: The user message for this turn (resume/repo directives already stripped).
-        job_dir: Isolated, writable working directory (the agent cwd) for this run.
+        job_dir: Isolated, writable per-session root for this run. The agent does NOT run
+            here — it runs in the ``workspace`` leaf below — leaving this level free for
+            session bookkeeping the agent shouldn't see.
         session_id: Stable Claude session id, pinned up front so checkpoint keying never
             depends on parsing it out of the message stream.
         secrets: Per-invocation secret name → value map (NEVER logged), supplied by the caller
@@ -61,3 +63,16 @@ class RunContext:
     session_store: Any | None = None
     blobs: Any | None = None
     interactive: bool = False
+
+    @property
+    def workspace(self) -> Path:
+        """The agent's working directory: ``job_dir/workspace``.
+
+        The agent cwd is a leaf literally named ``workspace`` — a bare ``jobs/<uuid>``
+        cwd reads as a disposable temp location, and models have been observed taking
+        that hint (``cd /tmp`` as their first command) and building the deliverable
+        outside the directory callers collect artifacts from. Everything agent-visible
+        (skills, cloned repos, checkpoint snapshot/restore) targets this path; callers
+        seed inputs into and collect outputs from it (``Session.workspace``).
+        """
+        return self.job_dir / "workspace"

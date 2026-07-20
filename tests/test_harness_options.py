@@ -18,7 +18,8 @@ def test_system_prompt_inherit_appends_to_preset():
                      system_prompt=SystemPrompt.inherit(append="Be terse."))
     opts = ClaudeCodeHarness().build_options(spec, _ctx(spec))
     assert opts.system_prompt == {"type": "preset", "preset": "claude_code", "append": "Be terse."}
-    assert opts.cwd == "/tmp/x" and opts.model == "claude-sonnet-4-6"
+    # cwd is the "workspace" leaf under the job dir, not the anonymous job dir itself.
+    assert opts.cwd == "/tmp/x/workspace" and opts.model == "claude-sonnet-4-6"
 
 
 def test_system_prompt_plain_string_replaces():

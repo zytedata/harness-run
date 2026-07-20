@@ -556,6 +556,14 @@ class GeminiSession:
     def session_id(self) -> str:
         return self._session_id
 
+    @property
+    def workspace(self):
+        raise NotImplementedError(
+            "the agent's workspace lives on the remote worker's filesystem "
+            "($AGENT_JOBS_ROOT/<claude-sid>/workspace) — seed inputs via the prompt or "
+            "spec.repos, and collect outputs via events/history or a repo push."
+        )
+
     def fork(self) -> GeminiSession:
         raise NotImplementedError(
             "fork is not supported yet (would copy the workspace snapshot + transcript under a new id)."

@@ -275,8 +275,17 @@ These are facts measured during the PoC. The library encodes them so consumers i
 - Conversation: the Claude SDK `SessionStore` (append/load) + `resume=session_id`. Our `GcsSessionStore`
   keys by **`session_id` alone** (ignores `project_key`) so **any worker, any cwd** can resume — the
   default cwd-keyed local store is fatal for serverless.
-- Workspace: tar the job dir to GCS; restore on resume. Pin the Claude session id up front via
+- Workspace: tar the agent workspace to GCS; restore on resume. Pin the Claude session id up front via
   `options.session_id` (the cloud binary doesn't surface it on messages otherwise).
+- **The agent cwd is a leaf literally named `workspace`** (`.../jobs/<session-id>/workspace/`), on every
+  backend. An anonymous `jobs/<uuid>` cwd — typically under `/tmp` — reads as a disposable temp location,
+  and weaker models act on that hint: observed with claude-haiku-4.5, whose *first* command was `cd /tmp`;
+  it built a perfectly working deliverable in `/tmp/spider_project` and the run was scored `no_deliverable`
+  because callers collect artifacts from the job dir. Prompt disclaimers ("stay in your current directory")
+  fight the path instead of fixing it. The leaf also keeps `jobs/<sid>/` itself free for session
+  bookkeeping the agent shouldn't see. Derived in ONE place (`RunContext.workspace`); callers use the
+  `Session.workspace` accessor (local: host `Path`, created on access, seed-before/collect-after; gemini:
+  raises — the filesystem is remote) instead of hand-building `workdir/jobs/<sid>`.
 - **Finalize inline at the terminal `result` event.** The async executor **stops draining the generator
   after the result event**, so post-loop checkpoint/artifact code is dead in-cloud — it must run as a
   side-effect at the terminal event, with Cloud Logging as the reliable emit channel.
@@ -376,7 +385,8 @@ These are facts measured during the PoC. The library encodes them so consumers i
 - **glibc base, Python 3.12** — the `claude-agent-sdk` wheel ships a self-contained glibc ELF `claude`
   binary; no Alpine/musl; SDK supports Python ≤3.13.
 - `a2a-sdk>=0.3.4,<0.4` (1.x incompatible with ADK 2.3.0).
-- Only `/tmp` is writable → per-job cwd under `/tmp/agent-jobs/<session-id>`.
+- Only `/tmp` is writable → agent cwd under `/tmp/agent-jobs/<session-id>/workspace` (see the
+  workspace-leaf contract below).
 - `IS_SANDBOX=1` to allow `bypassPermissions` under root.
 - `min_instances=0` (the default): the toolkit is async-only, where every job provisions its own worker —
   a standing container serves only the unused sync path while billing continuously. (`>=1` would matter

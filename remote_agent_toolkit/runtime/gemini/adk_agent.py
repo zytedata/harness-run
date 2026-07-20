@@ -164,7 +164,7 @@ def _prepare_workspace(rc: Any) -> dict:
         from ...checkpoint.workspace import restore
 
         try:
-            restored = restore(rc.blobs, rc.resume_sid, str(rc.job_dir))
+            restored = restore(rc.blobs, rc.resume_sid, str(rc.workspace))
         except Exception:  # noqa: BLE001 — fall back to a fresh workspace
             restored = False
     names: list[str] = []
@@ -174,19 +174,19 @@ def _prepare_workspace(rc: Any) -> dict:
         if rc.spec.repos:
             from ...integrations.git import reauth_repos
 
-            repos = reauth_repos(rc.job_dir, rc.spec.repos, rc.secrets)
+            repos = reauth_repos(rc.workspace, rc.spec.repos, rc.secrets)
     else:
-        rc.job_dir.mkdir(parents=True, exist_ok=True)
+        rc.workspace.mkdir(parents=True, exist_ok=True)
         baked = _find_baked_skills()
         # Provision from the baked dir (a local source) rather than re-resolving spec.skills,
         # which could re-clone a git source at runtime (slow / no network in the engine).
         sources = (SkillSource.local(str(baked)),) if baked else rc.spec.skills
         if sources:
-            names = provision(sources, str(rc.job_dir))
+            names = provision(sources, str(rc.workspace))
         if rc.spec.repos:
             from ...integrations.git import provision_repos
 
-            repos = provision_repos(rc.job_dir, rc.spec.repos, rc.secrets)
+            repos = provision_repos(rc.workspace, rc.spec.repos, rc.secrets)
     return {
         "event": "workspace_ready",
         "restored": restored,

@@ -72,6 +72,15 @@ asyncio.run(main())
 For a quick sync script, `local.run(spec, "…")` does `deploy → start_session → await run` and returns the
 `RunResult`.
 
+**Seeding inputs / collecting artifacts.** `session.workspace` is the agent's working directory on the
+host — a `Path` you can drop input files into before `run()` and read the agent's output files from after
+(it's created on first access). Use the accessor rather than deriving the path yourself: the layout is
+`<workdir>/jobs/<session-id>/workspace/`, where the `workspace/` leaf is deliberate — the agent runs in a
+directory whose own name says "this is your workspace", not in the anonymous `jobs/<uuid>` dir (which reads
+as disposable temp and tempts weaker models into `cd`-ing away, leaving deliverables outside the collected
+dir). The same `workspace/` cwd convention applies on `gemini`, but there the filesystem is remote, so
+`session.workspace` raises — seed via the prompt or `spec.repos`, collect via events or a repo push.
+
 ## Consuming a run: wait, stream, or poll
 
 `session.run(msg)` (and `session.send(msg)` to resume) returns a `Run` handle, consumable three ways — the

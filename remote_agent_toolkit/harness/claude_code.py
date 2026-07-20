@@ -177,7 +177,7 @@ class ClaudeCodeHarness:
             extra["disallowed_tools"] = list(spec.disallowed_tools)
 
         return ClaudeAgentOptions(
-            cwd=str(ctx.job_dir),
+            cwd=str(ctx.workspace),
             model=spec.model or None,
             allowed_tools=allowed,
             # Load project-level settings (.claude/ in the job cwd) so staged skills are
@@ -210,8 +210,8 @@ class ClaudeCodeHarness:
         try:
             # Never persist push tokens to the checkpoint: strip them from every .git/config
             # before archiving. resume re-embeds from the freshly supplied per-invocation secret.
-            scrub_repo_tokens(str(ctx.job_dir))
-            key = snapshot(ctx.blobs, ctx.session_id, str(ctx.job_dir))
+            scrub_repo_tokens(str(ctx.workspace))
+            key = snapshot(ctx.blobs, ctx.session_id, str(ctx.workspace))
             return AgentEvent(
                 kind="status",
                 summary=f"checkpoint saved ({ctx.session_id})",

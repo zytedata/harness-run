@@ -7,7 +7,8 @@ Encodes the §6 deploy contracts so consumers inherit them for free:
 * glibc base, Python 3.12 (the ``claude-agent-sdk`` wheel ships a self-contained glibc
   ELF ``claude`` binary; no Alpine/musl).
 * ``a2a-sdk>=0.3.4,<0.4`` (1.x is incompatible with ADK 2.3.0).
-* Only ``/tmp`` is writable → per-job cwd under ``/tmp/agent-jobs/<session-id>``.
+* Only ``/tmp`` is writable → agent cwd under ``/tmp/agent-jobs/<session-id>/workspace``
+  (the ``workspace`` leaf is the cross-backend cwd contract; see ``RunContext.workspace``).
 * ``IS_SANDBOX=1`` to allow ``bypassPermissions`` under root.
 * ``min_instances=0`` default: the toolkit only uses the async ``run_query_job`` path, where
   every job provisions its own worker — a min-instances container would serve only the (unused)

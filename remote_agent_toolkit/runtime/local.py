@@ -152,6 +152,19 @@ class LocalSession:
     def session_id(self) -> str:
         return self._session_id
 
+    @property
+    def workspace(self) -> Path:
+        """The agent's working directory on the host: ``<workdir>/jobs/<sid>/workspace``.
+
+        Created on first access, so callers can seed input files into it before ``run()``
+        and collect artifacts from it after — without deriving the layout themselves.
+        The agent runs in this ``workspace`` leaf (not the anonymous ``jobs/<uuid>``
+        session dir above it) so the cwd's own name says "this is your workspace".
+        """
+        ws = self._job_dir / "workspace"
+        ws.mkdir(parents=True, exist_ok=True)
+        return ws
+
     def history(self) -> list[AgentEvent]:
         raise NotImplementedError(
             "local runs don't persist an event log yet — stream the Run (async for) or use "
@@ -206,7 +219,7 @@ class LocalEngine:
             from ..checkpoint.workspace import restore
 
             try:
-                restored = restore(ctx.blobs, ctx.resume_sid, str(ctx.job_dir))
+                restored = restore(ctx.blobs, ctx.resume_sid, str(ctx.workspace))
             except Exception:  # noqa: BLE001 — fall back to a fresh workspace
                 restored = False
         names: list[str] = []
@@ -216,17 +229,17 @@ class LocalEngine:
             if ctx.spec.repos:
                 from ..integrations.git import reauth_repos
 
-                repos = reauth_repos(ctx.job_dir, ctx.spec.repos, ctx.secrets)
+                repos = reauth_repos(ctx.workspace, ctx.spec.repos, ctx.secrets)
         else:
-            ctx.job_dir.mkdir(parents=True, exist_ok=True)
+            ctx.workspace.mkdir(parents=True, exist_ok=True)
             if ctx.spec.skills:
                 from ..skills import provision
 
-                names = provision(ctx.spec.skills, str(ctx.job_dir))
+                names = provision(ctx.spec.skills, str(ctx.workspace))
             if ctx.spec.repos:
                 from ..integrations.git import provision_repos
 
-                repos = provision_repos(ctx.job_dir, ctx.spec.repos, ctx.secrets)
+                repos = provision_repos(ctx.workspace, ctx.spec.repos, ctx.secrets)
         return {
             "event": "workspace_ready",
             "restored": restored,

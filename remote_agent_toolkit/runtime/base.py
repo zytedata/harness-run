@@ -98,6 +98,19 @@ class Session(Protocol):
         """Stable id for re-attach / resume."""
         ...
 
+    @property
+    def workspace(self):  # -> pathlib.Path
+        """The agent's working directory — always a leaf named ``workspace``.
+
+        Cross-backend contract: the agent runs in ``.../<session>/workspace`` (never a
+        bare ``jobs/<uuid>`` dir, whose anonymous-temp look invites weaker models to
+        ``cd`` away), with session bookkeeping kept outside the visible cwd. On ``local``
+        this is a host :class:`~pathlib.Path` — seed input files into it before
+        :meth:`run`, collect artifacts from it after. Backends whose filesystem is
+        remote (``gemini``) raise ``NotImplementedError``.
+        """
+        ...
+
     def history(self) -> list[AgentEvent]:
         """All persisted events of this session, oldest first.
 

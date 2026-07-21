@@ -74,7 +74,10 @@ def build_requirements(spec: AgentSpec) -> list[str]:
     """
     seen: set[str] = set()
     out: list[str] = []
-    for req in (*_BASE_REQUIREMENTS, *spec.packages):
+    # The Codex SDK bundles a pinned codex CLI binary (tens of MB): baked only for
+    # codex-harness engines. Keep in lockstep with pyproject.
+    extra = ("openai-codex>=0.144.4",) if spec.harness == "codex" else ()
+    for req in (*_BASE_REQUIREMENTS, *extra, *spec.packages):
         if req not in seen:
             seen.add(req)
             out.append(req)
@@ -135,7 +138,9 @@ def build_env(
     # Claude model auth. Default: route Claude through Vertex, so the engine authenticates as
     # its OWN GCP identity (the RE service agent) — no API key in the agent's environment. For
     # API-key mode (use_vertex=False) the caller passes ANTHROPIC_API_KEY per-invocation.
-    if use_vertex and project:
+    # The Codex harness calls the OpenAI API directly (no Vertex path for OpenAI models);
+    # its OPENAI_API_KEY travels per-invocation, so the vertex routing vars are omitted.
+    if use_vertex and project and spec.harness != "codex":
         env["CLAUDE_CODE_USE_VERTEX"] = "1"
         env["ANTHROPIC_VERTEX_PROJECT_ID"] = project
         env["CLOUD_ML_REGION"] = vertex_region

@@ -233,9 +233,11 @@ class LocalEngine:
         else:
             ctx.workspace.mkdir(parents=True, exist_ok=True)
             if ctx.spec.skills:
-                from ..skills import provision
+                from ..skills import provision, skills_subdir
 
-                names = provision(ctx.spec.skills, str(ctx.workspace))
+                names = provision(
+                    ctx.spec.skills, str(ctx.workspace), skills_subdir(ctx.spec.harness)
+                )
             if ctx.spec.repos:
                 from ..integrations.git import provision_repos
 

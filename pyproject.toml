@@ -13,6 +13,7 @@ requires-python = ">=3.12,<3.14"
 # extra they need. Backend imports stay lazy, so `import remote_agent_toolkit` is still fast.
 dependencies = [
     "claude-agent-sdk>=0.2.110",  # ClaudeSDKClient task-lifecycle messages + stderr callback
+    "openai-codex>=0.144.4",  # Codex harness; bundles a pinned codex CLI (openai-codex-cli-bin)
     "google-adk>=1.0",
     "google-cloud-aiplatform[adk,agent-engines]>=1.110",
     "google-cloud-storage",

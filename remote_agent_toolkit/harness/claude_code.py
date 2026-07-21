@@ -13,13 +13,21 @@ third-party deps.
 from __future__ import annotations
 
 import asyncio
-import os
 from collections import deque
 from pathlib import Path
 from typing import Any, AsyncIterator, TYPE_CHECKING
 
 from ..events import AgentEvent
 from ..spec import SystemPrompt
+from ._shared import (
+    GITHUB_MCP_TOKEN_KEYS as _GITHUB_MCP_TOKEN_KEYS,
+    INTERACTIVE_SUFFIX as _INTERACTIVE_SUFFIX,
+    finalize_checkpoint,
+    harness_consumed_secret_names,
+    runtime_env,
+)
+
+__all__ = ["ClaudeCodeHarness", "DEFAULT_ALLOWED_TOOLS", "harness_consumed_secret_names"]
 
 if TYPE_CHECKING:
     from ..spec import AgentSpec
@@ -29,44 +37,6 @@ if TYPE_CHECKING:
 # tools skills depend on. The Skill tool is enabled separately via the ``skills`` option,
 # not listed here (passing "Skill" in allowed_tools is deprecated in the SDK).
 DEFAULT_ALLOWED_TOOLS = ("Read", "Write", "Edit", "Bash", "Glob", "Grep", "TodoWrite")
-
-# Conventional GitHub token names a ``github`` MCP server pulls from the per-invocation secrets.
-_GITHUB_MCP_TOKEN_KEYS = ("GH_TOKEN", "GITHUB_TOKEN", "GH_PAT")
-
-
-def harness_consumed_secret_names(spec: AgentSpec) -> set[str]:
-    """Secret names the *harness* consumes on the agent's behalf, so they stay OUT of its env.
-
-    A repo's ``auth`` token is embedded into ``origin`` (git uses it), and a GitHub MCP's token
-    goes into the server's headers — neither needs to be a plain environment variable the agent
-    (or a prompt-injection) can read. Everything else the caller passes is the agent's own to use.
-    """
-    names: set[str] = {r.auth for r in spec.repos if getattr(r, "auth", None)}
-    if any(m.kind == "github" for m in spec.mcp_servers):
-        names.update(_GITHUB_MCP_TOKEN_KEYS)
-    return names
-
-# Appended to the system prompt in interactive (checkpoint) mode. Turns every "present X
-# and wait for the user" step into "end the turn and await the next message", and steers
-# the agent away from interactive prompt tools that can't work in a one-shot background
-# job. The operator's reply arrives as the next turn (a resume). Generalized from the PoC
-# (no Zyte/spider specifics).
-_INTERACTIVE_SUFFIX = (
-    "\n\nINTERACTIVE MODE: You are in a multi-turn conversation with a human operator who "
-    "can reply between your turns. A step that would normally prompt the operator must be "
-    "handled one of two ways:\n"
-    "- Genuine decision (the operator's input actually changes what you do): present it "
-    "clearly, then STOP — end your turn and wait. Do NOT call interactive prompt tools and "
-    "do NOT block in-process; just finish your message with a specific question. The "
-    "operator's reply arrives as your next message and you continue where you left off "
-    "(workspace and conversation are preserved).\n"
-    "- Trivial setup choice with an obvious default: pick the sensible default and proceed "
-    "WITHOUT stopping.\n"
-    "CRITICAL: do NOT end your turn at intermediate stage boundaries, and never stop merely "
-    "to 'continue later'. Once the operator has given the go-ahead, run ALL remaining steps "
-    "to completion in the SAME turn. End your turn ONLY when you genuinely need an operator "
-    "decision, or when the entire task is complete — and then say so explicitly."
-)
 
 
 class _StderrCapture:
@@ -183,41 +153,6 @@ class ClaudeCodeHarness:
             return {"type": "preset", "preset": "claude_code", "append": suffix}
         return None
 
-    def _runtime_env(self, spec: AgentSpec, ctx: RunContext) -> dict[str, str]:
-        """Env forwarded to the agent subprocess: agent-visible secrets + spec/runtime env + uv PATH.
-
-        Layering (later wins): per-invocation secrets → ``spec.env`` (caller's static config)
-        → ``ctx.env`` (runtime-resolved, e.g. the local deploy-time packages venv). Only the
-        caller's own secrets land here — those consumed by the harness (repo push tokens,
-        GitHub MCP token) are routed to git/MCP and excluded, so they never appear as
-        environment variables the agent can read.
-
-        SECURITY: returns secret *values* — callers must never log this dict.
-        """
-        consumed = harness_consumed_secret_names(spec)
-        env: dict[str, str] = {k: v for k, v in ctx.secrets.items() if k not in consumed}
-        if spec.env:
-            env.update(spec.env)
-        if ctx.env:
-            env.update(ctx.env)
-        # Ensure `uv` is on the agent's Bash-tool PATH. uv is a Python dependency, but its
-        # console script often isn't on PATH in serverless runtimes; the wheel exposes the
-        # bundled binary's real location, so prepend that dir (harmless if uv is absent).
-        path_dirs: list[str] = []
-        try:
-            from uv import find_uv_bin
-
-            path_dirs.append(os.path.dirname(find_uv_bin()))
-        except Exception:  # noqa: BLE001 — uv may be absent; harmless
-            pass
-        if path_dirs:
-            # A PATH supplied by the caller/runtime (spec.env / ctx.env) is the BASE, not
-            # discarded — prepending onto os.environ silently threw caller intent away
-            # (eval-harness feedback issue 2). Ambient PATH is only the fallback base.
-            base = env.get("PATH") or os.environ.get("PATH", "")
-            env["PATH"] = ":".join(path_dirs) + (f":{base}" if base else "")
-        return env
-
     def _mcp_servers(self, spec: AgentSpec, ctx: RunContext) -> dict:
         """Translate ``spec.mcp_servers`` into SDK MCP config, pulling tokens from secrets."""
         from ..integrations.github import github_mcp_config
@@ -277,7 +212,7 @@ class ClaudeCodeHarness:
             permission_mode=spec.permission_mode,
             max_turns=spec.max_turns,
             max_budget_usd=spec.max_budget_usd,
-            env=self._runtime_env(spec, ctx),
+            env=runtime_env(spec, ctx),
             mcp_servers=self._mcp_servers(spec, ctx),
             system_prompt=self._system_prompt(spec, ctx.interactive),
             **extra,
@@ -286,33 +221,8 @@ class ClaudeCodeHarness:
     # -- run loop --------------------------------------------------------------
 
     def _finalize(self, spec: AgentSpec, ctx: RunContext) -> AgentEvent | None:
-        """Checkpoint the workspace inline at the terminal result event (DESIGN.md §6).
-
-        Done as a direct side-effect (not post-loop): the async Agent Engine executor
-        stops draining the generator after the final event, so post-loop work is dead
-        code in-cloud. Best-effort — a checkpoint failure never fails the run.
-        """
-        if not (spec.checkpoint and ctx.blobs is not None and ctx.session_store is not None):
-            return None
-        from ..checkpoint.workspace import snapshot
-        from ..integrations.git import scrub_repo_tokens
-
-        try:
-            # Never persist push tokens to the checkpoint: strip them from every .git/config
-            # before archiving. resume re-embeds from the freshly supplied per-invocation secret.
-            scrub_repo_tokens(str(ctx.workspace))
-            key = snapshot(ctx.blobs, ctx.session_id, str(ctx.workspace))
-            return AgentEvent(
-                kind="status",
-                summary=f"checkpoint saved ({ctx.session_id})",
-                raw={"event": "checkpoint_saved", "workspace_key": key, "session_id": ctx.session_id},
-            )
-        except Exception as exc:  # noqa: BLE001 — checkpoint is best-effort
-            return AgentEvent(
-                kind="status",
-                summary=f"checkpoint failed: {str(exc)[:120]}",
-                raw={"event": "checkpoint_error", "session_id": ctx.session_id},
-            )
+        """Checkpoint the workspace inline at the terminal result event (see ``_shared``)."""
+        return finalize_checkpoint(spec, ctx)
 
     def _final_result(self, event: AgentEvent, turns_total: int) -> AgentEvent:
         """Stamp the cumulative turn count onto the turn's final result event."""

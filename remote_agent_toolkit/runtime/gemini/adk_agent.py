@@ -156,7 +156,7 @@ def _prewarm(spec: Any) -> None:
 
 def _prepare_workspace(rc: Any) -> dict:
     """Restore a prior workspace (resume) or stage the baked skills into a fresh cwd. Sync."""
-    from ...skills import provision
+    from ...skills import provision, skills_subdir
     from ...spec import SkillSource
 
     restored = False
@@ -182,7 +182,7 @@ def _prepare_workspace(rc: Any) -> dict:
         # which could re-clone a git source at runtime (slow / no network in the engine).
         sources = (SkillSource.local(str(baked)),) if baked else rc.spec.skills
         if sources:
-            names = provision(sources, str(rc.workspace))
+            names = provision(sources, str(rc.workspace), skills_subdir(rc.spec.harness))
         if rc.spec.repos:
             from ...integrations.git import provision_repos
 

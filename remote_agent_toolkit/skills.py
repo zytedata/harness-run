@@ -1,10 +1,12 @@
 """Discover + provision skills from ``SkillSource[]`` (DESIGN.md §8, §12).
 
-The Claude Agent SDK discovers Agent Skills from ``<cwd>/.claude/skills/<name>/SKILL.md``
-when ``setting_sources`` includes ``"project"``. We therefore resolve each ``SkillSource``
-(git clone / local path / builtin) to a directory of skill folders and copy each folder into
-the per-job cwd before starting the engine. Lifted from the PoC ``skills.py``; git is used
-via ``integrations.git`` lazily.
+Both harnesses discover Agent Skills from ``<name>/SKILL.md`` folders under a per-harness
+project path in the cwd — ``.claude/skills`` for Claude Code (with ``setting_sources``
+including ``"project"``), ``.agents/skills`` for Codex (its repo-level discovery path;
+the same SKILL.md format). We therefore resolve each ``SkillSource`` (git clone / local
+path / builtin) to a directory of skill folders and copy each folder into the per-job cwd
+before starting the engine. Lifted from the PoC ``skills.py``; git is used via
+``integrations.git`` lazily.
 
 Merge policy for name collisions across sources (the open DESIGN.md §12 question): **last
 wins**. Sources are processed in order, and a later source's skill of the same name
@@ -20,6 +22,14 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .spec import SkillSource
+
+# Where each harness discovers project-level skills, relative to the agent cwd.
+_SKILLS_SUBDIR = {"claude-code": ".claude/skills", "codex": ".agents/skills"}
+
+
+def skills_subdir(harness: str) -> str:
+    """The cwd-relative skills directory for ``harness`` (Claude's layout is the default)."""
+    return _SKILLS_SUBDIR.get(harness, _SKILLS_SUBDIR["claude-code"])
 
 
 def discover_skill_names(src: Path) -> list[str]:
@@ -51,17 +61,20 @@ def _resolve_source_dir(source: SkillSource) -> Path:
     raise ValueError(f"unknown SkillSource kind: {source.kind!r}")
 
 
-def provision(sources: tuple[SkillSource, ...], dest: str) -> list[str]:
-    """Resolve & stage ``sources`` into ``dest/.claude/skills/``; return the staged names.
+def provision(
+    sources: tuple[SkillSource, ...], dest: str, subdir: str = ".claude/skills"
+) -> list[str]:
+    """Resolve & stage ``sources`` into ``dest/<subdir>/``; return the staged names.
 
-    For each source, every skill folder (a dir containing ``SKILL.md``) is copied to
-    ``dest/.claude/skills/<name>/`` (overwriting any existing). On name collision across
+    ``subdir`` is the harness's discovery path (see :func:`skills_subdir`). For each
+    source, every skill folder (a dir containing ``SKILL.md``) is copied to
+    ``dest/<subdir>/<name>/`` (overwriting any existing). On name collision across
     sources, later sources win (see module docstring). Raises ``FileNotFoundError`` if a
     source stages zero skills — a source that yields nothing is a config error.
 
     Returns the merged, sorted list of provisioned skill names.
     """
-    dest_root = Path(dest) / ".claude" / "skills"
+    dest_root = Path(dest) / subdir
     dest_root.mkdir(parents=True, exist_ok=True)
 
     provisioned: set[str] = set()

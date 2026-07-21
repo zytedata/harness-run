@@ -3,7 +3,9 @@
 A Python library for **defining and running remote/background AI agents** at Zyte. Define an agent
 declaratively as an `AgentSpec`, then run it both **locally** (in-process, for dev) and **remotely** on
 **Gemini Agent Runtime** (prod) through *one* API — with custom skills, GitHub access, structured outputs,
-checkpoint/resume and warm starts, without re-learning the platform's sharp edges.
+checkpoint/resume and warm starts, without re-learning the platform's sharp edges. Two agent harnesses
+ship behind the same API: **Claude Code** (the default) and **Codex** (OpenAI models; see
+[Choosing the harness](#choosing-the-harness-claude-code-or-codex)).
 
 > **Status: `local` and Gemini Agent Runtime both work — validated live.** Define an `AgentSpec` and run it
 > in-process (`local.deploy`), or deploy + run on Agent Runtime (`gemini.deploy` / `gemini.get_engine`), with
@@ -49,6 +51,46 @@ is ever baked into the deployment or shared across runs (see [Secrets & security
 Every field except `name` and `model` has a sensible default (see [`spec.py`](remote_agent_toolkit/spec.py));
 a two-line spec (`AgentSpec(name=..., model=...)`) is a valid agent. For **structured output**, see the
 section below.
+
+## Choosing the harness: Claude Code or Codex
+
+`harness="claude-code"` (the default) runs the Claude Code loop via the Claude Agent SDK.
+`harness="codex"` runs OpenAI's Codex instead — same spec, same Engine/Session/Run surface,
+both backends:
+
+```python
+spec = AgentSpec(
+    name="codex-agent",
+    model="gpt-5.6-luna",                    # cheapest of the 5.6 family; sol/terra for heavier work
+    harness="codex",
+    skills=[SkillSource.git("https://github.com/zytedata/codex-skills")],
+)
+result = await engine.start_session().run(
+    "scrape https://books.toscrape.com for title, price",
+    secrets={"OPENAI_API_KEY": os.environ["OPENAI_API_KEY"]},
+)
+```
+
+What to know when running Codex:
+
+- **Model auth**: OpenAI models are called directly (they have no Vertex path), so every run —
+  local or remote — needs an `OPENAI_API_KEY` per-invocation secret (local runs fall back to the
+  ambient env var). The harness routes it to `codex login` inside an isolated per-job `CODEX_HOME`;
+  it never appears in the agent's shell environment.
+- **Skills** use the same `<name>/SKILL.md` format and the same `SkillSource` list — they are staged
+  into `<cwd>/.agents/skills`, Codex's discovery path (that's the layout of
+  [zytedata/codex-skills](https://github.com/zytedata/codex-skills)).
+- **Cost & caps**: Codex reports token counts but no dollars, and enforces no turn/budget caps of
+  its own — the harness computes `cost_usd` from a built-in price table for the GPT-5.6 family and
+  interrupts the run at `max_turns` / `max_budget_usd`. For a model missing from the table you get
+  `cost_usd=None`, a `cost_unknown` status event, and no budget enforcement.
+- **Checkpoint/resume** works cross-worker: the Codex conversation (a local rollout file) is
+  persisted to the blob store alongside the workspace snapshot and restored on `send()`.
+- **Gaps**: `allowed_tools`/`disallowed_tools` have no Codex equivalent (ignored with a status
+  warning), and Codex has no background-task re-invocation, so `background_task_timeout` is inert.
+  `permission_mode` maps onto Codex's sandbox+approval pairs (`bypassPermissions` → full access,
+  never ask; `default` → workspace-write with Codex's auto-reviewer).
+- Other model providers for Codex (e.g. OpenRouter) are planned as a follow-up.
 
 ## Dev: run locally, in-process
 

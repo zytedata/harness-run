@@ -118,6 +118,17 @@ error. For post-mortems, the CLI's stderr is captured to `<workdir>/jobs/<sessio
 not inside, the workspace); on a CLI-exit failure its tail is also surfaced as a `claude_stderr` status
 event and embedded in the error text.
 
+**Background tasks are honored.** If the agent starts a background job (Bash `run_in_background`) or arms
+the Monitor tool and then ends its turn — the trained, efficient behavior for waiting on long processes
+like a verification crawl — the run does **not** end there: the harness holds the session open and the
+model is re-invoked when the task completes, exactly as in interactive Claude Code. Interim turn ends
+surface as `awaiting_tasks` status events; the run's single `result` comes when no work is pending.
+`spec.background_task_timeout` (seconds, default 3600) bounds how long a turn waits on still-running
+tasks — size it to the longest job the agent legitimately waits on. Two accounting notes: `num_turns` is
+cumulative across these re-invocations, and `max_turns` caps each invocation segment rather than the
+whole run (`max_budget_usd` remains a global cap). Event-driven waiting instead of poll-loops is exactly
+what keeps long crawls nearly free in turns.
+
 Runs are hang-proofed on `gemini`: every log-tail poll is time-bounded (a dead connection costs a ~30 s
 retry, not a frozen run), and a **cold** run carries a job watchdog — when the remote job has terminated but
 the tail is still silent, the client first recovers the **real result from the durable GCS event mirror**

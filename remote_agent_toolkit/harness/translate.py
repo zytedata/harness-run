@@ -12,7 +12,13 @@ Mapping (SDK message type → ``AgentEvent.kind``):
 * thinking         → ``thinking``
 * tool use         → ``tool_use``   (raw: tool name, id, input)
 * tool result      → ``tool_result`` (raw: tool name, id, is_error, content)
-* system ``init``  → ``status``
+* system ``init``  → ``status``     (raw carries ``subtype: init`` — also marks each
+                                      re-invocation after a background-task notification)
+* task started     → ``status``     (raw: ``event: task_started``, task_id, description)
+* task terminal    → ``status``     (raw: ``event: task_terminal``, task_id, status —
+                                      from a ``task_notification`` OR a ``task_updated``
+                                      whose patch status is terminal; the harness's
+                                      task tracker keys off these)
 * final result     → ``result``     (cost_usd/usage on the event; raw: subtype,
                                       is_error, num_turns, duration_ms, session_id)
 
@@ -63,12 +69,16 @@ class EventTranslator:
             AssistantMessage,
             ResultMessage,
             SystemMessage,
+            TaskNotificationMessage,
+            TaskStartedMessage,
+            TaskUpdatedMessage,
             TextBlock,
             ThinkingBlock,
             ToolResultBlock,
             ToolUseBlock,
             UserMessage,
         )
+        from claude_agent_sdk.types import TERMINAL_TASK_STATUSES
 
         if isinstance(message, AssistantMessage):
             for block in message.content:
@@ -104,6 +114,33 @@ class EventTranslator:
                                 "content": _coerce(block.content),
                             },
                         )
+        # Task lifecycle (background Bash / Monitor): typed SystemMessage SUBCLASSES, so
+        # they must match before the generic SystemMessage branch. A terminal state can
+        # arrive as a task_notification OR as a task_updated patch only (SDK contract) —
+        # both map to one "task_terminal" event the harness's task tracker keys off.
+        elif isinstance(message, TaskStartedMessage):
+            yield AgentEvent(
+                kind="status",
+                summary=f"background task started: {message.description}"[:200],
+                raw={"event": "task_started", "task_id": message.task_id,
+                     "description": message.description},
+            )
+        elif isinstance(message, TaskNotificationMessage):
+            if message.status in TERMINAL_TASK_STATUSES:
+                yield AgentEvent(
+                    kind="status",
+                    summary=f"background task {message.status}: {message.summary or ''}"[:200],
+                    raw={"event": "task_terminal", "task_id": message.task_id,
+                         "status": message.status, "summary": message.summary},
+                )
+        elif isinstance(message, TaskUpdatedMessage):
+            if (message.status or "") in TERMINAL_TASK_STATUSES:
+                yield AgentEvent(
+                    kind="status",
+                    summary=f"background task {message.status}",
+                    raw={"event": "task_terminal", "task_id": message.task_id,
+                         "status": message.status},
+                )
         elif isinstance(message, SystemMessage):
             if message.subtype == "init":
                 data = message.data or {}

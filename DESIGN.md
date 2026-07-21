@@ -418,6 +418,22 @@ Each is a `typing.Protocol`; concrete adapters ship for prod (GCP) and dev (loca
 
 - **`Harness`** — `build_options(spec, ctx)` + an async run loop yielding `AgentEvent`s. Adapter:
   `ClaudeCodeHarness`.
+- **Background-task semantics are honored** (eval feedback: a model armed the Monitor tool and ended its
+  turn — correct, trained behavior — and the one-shot `query()` tore the CLI down, firing the advertised
+  notification into the void; the run was scored no-deliverable). The CLI itself re-invokes the model when
+  a background task (Bash `run_in_background`, Monitor) reaches a terminal state — **but only while the
+  message stream stays open** (proven live: model ends turn → `task_notification` arrives → CLI re-invokes,
+  zero messages injected by us). The harness therefore drives a `ClaudeSDKClient` stream instead of
+  `query()`, tracks the task lifecycle (`task_started` / terminal-via-`task_notification`-OR-`task_updated`
+  — the SDK warns terminal state can arrive as an update patch only), and treats a result event with
+  pending or just-terminal-undelivered tasks as a *segment boundary* (demoted to an `awaiting_tasks`
+  status), ending the turn only at a result with no pending work. `spec.background_task_timeout` (default
+  1 h) bounds the pending wait; a 20 s grace covers notifications delivered mid-turn (no re-invocation
+  follows). Accounting: the CLI's `total_cost_usd` is cumulative across re-invocations (take the last);
+  `num_turns` resets per re-invocation (the harness sums — and `spec.max_turns` therefore caps each
+  invocation, not the whole run; `max_budget_usd` stays a global cap). An error result finalizes
+  immediately — never wait on tasks a dead conversation can't consume. This also kills the poll tax:
+  a well-behaved agent no longer burns a turn per `sleep 60; tail crawl.log` poll during a long crawl.
 - **`BlobStore`** — `put_bytes / get_bytes / put_tree / get_tree / exists / list / delete`. Adapters:
   `GcsBlobStore`, `LocalBlobStore`. Backs checkpoint, workspace, event mirrors, the secrets handoff,
   artifacts.

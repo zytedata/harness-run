@@ -12,6 +12,7 @@ third-party deps.
 
 from __future__ import annotations
 
+import asyncio
 import os
 from collections import deque
 from pathlib import Path
@@ -108,8 +109,55 @@ class _StderrCapture:
         return "\n".join(self._tail)[-max_chars:]
 
 
+class _TaskTracker:
+    """Tracks the CLI's background tasks (Bash ``run_in_background``, Monitor) in a turn.
+
+    The CLI honors those tools' semantics itself — it re-invokes the model when a task
+    reaches a terminal state — but only while the message stream stays open. The tracker
+    tells the run loop when a ``result`` is a *segment boundary* rather than the end of
+    the turn: either tasks are still ``pending`` (running), or one just went terminal and
+    its notification hasn't been ``delivered`` yet (no re-invocation observed since — the
+    CLI is about to re-invoke). Driven by translated events, not raw SDK messages.
+    """
+
+    def __init__(self) -> None:
+        self._pending: dict[str, str] = {}  # task_id -> description
+        self._undelivered: set[str] = set()
+
+    def observe(self, event: AgentEvent) -> None:
+        raw = event.raw or {}
+        kind = raw.get("event")
+        if kind == "task_started":
+            self._pending[raw["task_id"]] = raw.get("description") or ""
+        elif kind == "task_terminal":
+            if raw.get("task_id") in self._pending:
+                del self._pending[raw["task_id"]]
+                self._undelivered.add(raw["task_id"])
+        elif raw.get("subtype") == "init":
+            # A (re-)invocation started: terminal notifications so far were delivered.
+            self._undelivered.clear()
+
+    @property
+    def pending(self) -> dict[str, str]:
+        return dict(self._pending)
+
+    def waiting(self) -> str | None:
+        """Why the turn must stay open at a result event (``None`` = truly done)."""
+        if self._pending:
+            return "pending"
+        if self._undelivered:
+            return "undelivered"
+        return None
+
+
 class ClaudeCodeHarness:
     """The Claude Agent SDK harness (implements ``harness.base.Harness``)."""
+
+    # After a task went terminal but before the CLI's re-invocation: how long to wait for
+    # that re-invocation. Short — the CLI re-invokes within moments; the fallback exists
+    # because a task that completed *mid-turn* is delivered inside the current invocation
+    # (no re-invoke follows) and must not hang the run.
+    _UNDELIVERED_GRACE_S = 20.0
 
     # -- option building -------------------------------------------------------
 
@@ -266,13 +314,28 @@ class ClaudeCodeHarness:
                 raw={"event": "checkpoint_error", "session_id": ctx.session_id},
             )
 
-    async def run(self, spec: AgentSpec, ctx: RunContext) -> AsyncIterator[AgentEvent]:
-        """Drive the Agent SDK ``query()`` loop, yielding ``AgentEvent``s.
+    def _final_result(self, event: AgentEvent, turns_total: int) -> AgentEvent:
+        """Stamp the cumulative turn count onto the turn's final result event."""
+        if event.raw is not None:
+            event.raw["num_turns"] = turns_total
+        return event
 
-        Finalizes (checkpoint) inline at the terminal ``result`` event, before the
-        trailing checkpoint status event, so the snapshot happens while a non-draining
-        executor is still pulling.
+    async def run(self, spec: AgentSpec, ctx: RunContext) -> AsyncIterator[AgentEvent]:
+        """Drive one turn over a ``ClaudeSDKClient`` stream, yielding ``AgentEvent``s.
+
+        Background-task semantics are HONORED (DESIGN.md §7): when the model ends its
+        turn with background tasks (Bash ``run_in_background``, Monitor) still running,
+        the stream stays open — the CLI re-invokes the model itself when a task reaches
+        a terminal state (proven live; the SDK's one-shot ``query()`` instead tears the
+        CLI down at the first result, firing those advertised notifications into the
+        void). Interim results are demoted to ``awaiting_tasks`` status events; the turn
+        ends at a result with no pending work, where the checkpoint finalizes inline
+        (before the trailing checkpoint status event, so the snapshot happens while a
+        non-draining executor is still pulling). ``spec.background_task_timeout`` bounds
+        the wait; on expiry the last produced result stands.
         """
+        from claude_agent_sdk import ClaudeSDKClient
+
         from .translate import EventTranslator
 
         options = self.build_options(spec, ctx)
@@ -282,40 +345,114 @@ class ClaudeCodeHarness:
         stderr_log = _StderrCapture(ctx.job_dir / "stderr.log")
         options.stderr = stderr_log
         translator = EventTranslator()
+        tracker = _TaskTracker()
         finalized = False
+        stashed: AgentEvent | None = None  # newest demoted (segment-boundary) result
+        turns_total = 0  # num_turns resets per re-invocation; RunResult reports the sum
+        wait_deadline: float | None = None
 
-        from claude_agent_sdk import query
-
+        client = ClaudeSDKClient(options=options)
         try:
-            async for message in query(prompt=ctx.prompt, options=options):
+            await client.connect()
+            await client.query(ctx.prompt)
+            stream = client.receive_messages()
+            while True:
+                if stashed is None:
+                    timeout = None  # model working; a foreground tool call may run long
+                elif tracker.waiting() == "pending":
+                    timeout = max(1.0, wait_deadline - asyncio.get_running_loop().time())
+                else:  # terminal notification observed; re-invocation due momentarily
+                    timeout = self._UNDELIVERED_GRACE_S
+                try:
+                    message = await asyncio.wait_for(anext(stream), timeout)
+                except StopAsyncIteration:
+                    break
+                except asyncio.TimeoutError:
+                    yield AgentEvent(
+                        kind="status",
+                        summary=(
+                            "gave up waiting on background tasks "
+                            f"({len(tracker.pending)} still pending); finalizing with the "
+                            "result already produced"
+                        ),
+                        raw={"event": "task_wait_timeout", "pending": tracker.pending},
+                    )
+                    break
                 for event in translator.translate(message):
-                    if not finalized and event.kind == "result":
+                    tracker.observe(event)
+                    if event.kind != "result":
+                        yield event
+                        continue
+                    turns_total += int((event.raw or {}).get("num_turns") or 0)
+                    reason = None if (event.raw or {}).get("is_error") else tracker.waiting()
+                    if reason is None:
                         fin = self._finalize(spec, ctx)
                         finalized = True
-                        yield event
+                        yield self._final_result(event, turns_total)
                         if fin is not None:
                             yield fin
-                    else:
-                        yield event
+                        return
+                    # Segment boundary, not the end of the turn: hold the stream open
+                    # for the CLI's task-completion re-invocation.
+                    stashed = event
+                    if wait_deadline is None:
+                        wait_deadline = (
+                            asyncio.get_running_loop().time() + spec.background_task_timeout
+                        )
+                    yield AgentEvent(
+                        kind="status",
+                        summary=(
+                            f"turn paused awaiting background tasks ({reason}: "
+                            f"{len(tracker.pending) or len(tracker._undelivered)})"
+                        ),
+                        raw={"event": "awaiting_tasks", "reason": reason,
+                             "pending": tracker.pending},
+                    )
         except Exception as exc:
             # Surface the captured stderr with the failure: as a status event (reaches the
             # stream / Cloud Logging on gemini) and embedded in the raised error, so a
             # non-zero CLI exit is classifiable post-mortem instead of "check stderr".
             tail = stderr_log.tail()
+            if tail:
+                yield AgentEvent(
+                    kind="status",
+                    summary=f"claude stderr (tail): {tail}",
+                    raw={"event": "claude_stderr", "log": str(stderr_log.path)},
+                )
+            if stashed is not None and not finalized:
+                # A real result exists — the crash while waiting on tasks must not void
+                # it (same principle as the runtimes' late-harness-death handling).
+                yield AgentEvent(
+                    kind="status",
+                    summary=f"harness failed while awaiting background tasks: {str(exc)[:200]}",
+                    raw={"event": "late_harness_error"},
+                )
+                fin = self._finalize(spec, ctx)
+                finalized = True
+                yield self._final_result(stashed, turns_total)
+                if fin is not None:
+                    yield fin
+                return
             if not tail:
                 raise
-            yield AgentEvent(
-                kind="status",
-                summary=f"claude stderr (tail): {tail}",
-                raw={"event": "claude_stderr", "log": str(stderr_log.path)},
-            )
             raise RuntimeError(
                 f"{exc} [claude stderr tail: {tail[-500:]}] (full log: {stderr_log.path})"
             ) from exc
+        finally:
+            try:
+                await client.disconnect()
+            except Exception:  # noqa: BLE001 — teardown must not mask the run's outcome
+                pass
 
-        # Fallback for runners that fully drain the generator, or if no terminal event
-        # was observed (defensive — query() normally always ends with a ResultMessage).
-        if not finalized:
+        # Stream ended / wait timed out without a clean final result: the last produced
+        # result stands (then the defensive no-result fallback, as before).
+        if stashed is not None and not finalized:
+            fin = self._finalize(spec, ctx)
+            finalized = True
+            yield self._final_result(stashed, turns_total)
+            if fin is not None:
+                yield fin
+        elif not finalized:
             fin = self._finalize(spec, ctx)
             if fin is not None:
                 yield fin

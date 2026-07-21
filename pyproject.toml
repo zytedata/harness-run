@@ -12,7 +12,7 @@ requires-python = ">=3.12,<3.14"
 # of these are hard to install, so keeping the surface flat beats making teams guess which
 # extra they need. Backend imports stay lazy, so `import remote_agent_toolkit` is still fast.
 dependencies = [
-    "claude-agent-sdk>=0.2",
+    "claude-agent-sdk>=0.2.110",  # ClaudeSDKClient task-lifecycle messages + stderr callback
     "google-adk>=1.0",
     "google-cloud-aiplatform[adk,agent-engines]>=1.110",
     "google-cloud-storage",

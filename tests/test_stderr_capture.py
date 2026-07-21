@@ -3,7 +3,7 @@
 The SDK pipes the CLI's stderr ONLY when a callback is registered; without one it is
 inherited/lost, while ProcessError still says "Check stderr output for details". The
 harness registers ``_StderrCapture``: append-to-file beside the workspace + in-memory
-tail surfaced with the failure. ``query()`` is monkeypatched — no live model calls.
+tail surfaced with the failure. The SDK client is faked — no live model calls.
 """
 
 from __future__ import annotations
@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 
 import pytest
+from fakes import make_sdk_client, result_msg
 
 from remote_agent_toolkit import AgentSpec
 from remote_agent_toolkit.harness.claude_code import ClaudeCodeHarness, _StderrCapture
@@ -38,40 +39,34 @@ def test_capture_file_is_capped_but_tail_survives(tmp_path):
     assert "line 0029" in cap.tail()  # the LAST lines (what diagnoses an exit) are kept
 
 
-def _ctx(tmp_path, spec):
-    return RunContext(spec=spec, prompt="hi", job_dir=tmp_path / "job", session_id="sid")
-
-
-async def _collect(agen):
-    events = []
-    async for ev in agen:
-        events.append(ev)
-    return events
-
-
-def test_cli_crash_surfaces_stderr_tail(tmp_path, monkeypatch):
-    # A non-zero CLI exit raises out of query(); the harness must surface what the CLI
-    # said: a status event with the tail (reaches the stream / Cloud Logging on gemini)
-    # and the tail + log path embedded in the raised error.
+def _drive(script, tmp_path, monkeypatch):
     import claude_agent_sdk
 
-    async def fake_query(*, prompt, options):
-        options.stderr("node: something went wrong")
-        options.stderr("Error: ENOMEM at finish line")
-        raise RuntimeError("Command failed with exit code 1")
-        yield  # pragma: no cover — makes this an async generator
-
-    monkeypatch.setattr(claude_agent_sdk, "query", fake_query)
+    monkeypatch.setattr(claude_agent_sdk, "ClaudeSDKClient", make_sdk_client(script))
     spec = AgentSpec(name="a", model="m")
-    ctx = _ctx(tmp_path, spec)
+    ctx = RunContext(spec=spec, prompt="hi", job_dir=tmp_path / "job", session_id="sid")
     events = []
 
-    async def drive():
+    async def collect():
         async for ev in ClaudeCodeHarness().run(spec, ctx):
             events.append(ev)
 
+    return ctx, events, collect
+
+
+def test_cli_crash_surfaces_stderr_tail(tmp_path, monkeypatch):
+    # A non-zero CLI exit raises out of the stream; the harness must surface what the
+    # CLI said: a status event with the tail (reaches the stream / Cloud Logging on
+    # gemini) and the tail + log path embedded in the raised error.
+    script = [
+        lambda c: c.options.stderr("node: something went wrong"),
+        lambda c: c.options.stderr("Error: ENOMEM at finish line"),
+        RuntimeError("Command failed with exit code 1"),
+    ]
+    ctx, events, collect = _drive(script, tmp_path, monkeypatch)
+
     with pytest.raises(RuntimeError) as ei:
-        asyncio.run(drive())
+        asyncio.run(collect())
 
     assert "ENOMEM at finish line" in str(ei.value)  # actual stderr, not a placeholder
     assert str(ctx.job_dir / "stderr.log") in str(ei.value)
@@ -85,40 +80,20 @@ def test_cli_crash_surfaces_stderr_tail(tmp_path, monkeypatch):
 
 def test_quiet_crash_raises_unwrapped(tmp_path, monkeypatch):
     # Nothing on stderr → nothing to add: the original exception propagates untouched.
-    import claude_agent_sdk
-
-    async def fake_query(*, prompt, options):
-        raise ValueError("plain failure")
-        yield  # pragma: no cover
-
-    monkeypatch.setattr(claude_agent_sdk, "query", fake_query)
-    spec = AgentSpec(name="a", model="m")
-    ctx = _ctx(tmp_path, spec)
+    ctx, events, collect = _drive([ValueError("plain failure")], tmp_path, monkeypatch)
     with pytest.raises(ValueError, match="plain failure"):
-        asyncio.run(_collect(ClaudeCodeHarness().run(spec, ctx)))
+        asyncio.run(collect())
     assert not (ctx.job_dir / "stderr.log").exists()
 
 
 def test_healthy_run_registers_callback_without_side_effects(tmp_path, monkeypatch):
     # The callback is always registered (options.stderr), but a clean run creates no file
     # and emits no stderr event — capture is free unless the CLI actually speaks.
-    import claude_agent_sdk
-    from claude_agent_sdk import ResultMessage
+    seen = {}
+    script = [lambda c: seen.update(stderr=c.options.stderr), result_msg(result="done")]
+    ctx, events, collect = _drive(script, tmp_path, monkeypatch)
+    asyncio.run(collect())
 
-    seen_options = {}
-
-    async def fake_query(*, prompt, options):
-        seen_options["stderr"] = options.stderr
-        yield ResultMessage(
-            subtype="success", duration_ms=10, duration_api_ms=8, is_error=False,
-            num_turns=1, session_id="claude-sid", total_cost_usd=0.01, result="done",
-        )
-
-    monkeypatch.setattr(claude_agent_sdk, "query", fake_query)
-    spec = AgentSpec(name="a", model="m")
-    ctx = _ctx(tmp_path, spec)
-    events = asyncio.run(_collect(ClaudeCodeHarness().run(spec, ctx)))
-
-    assert isinstance(seen_options["stderr"], _StderrCapture)
+    assert isinstance(seen["stderr"], _StderrCapture)
     assert [e.kind for e in events] == ["result"]
     assert not (ctx.job_dir / "stderr.log").exists()

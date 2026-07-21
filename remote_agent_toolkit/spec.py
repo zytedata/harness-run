@@ -255,8 +255,18 @@ class AgentSpec:
             directory, so there is no human present to answer prompts. Set ``"default"``
             (or ``"acceptEdits"``) when running somewhere a prompt could actually be
             answered, or when the cwd is not disposable.
-        max_turns: Hard cap on agent turns.
+        max_turns: Hard cap on agent turns. Applies to each model invocation: when a
+            background task (Bash ``run_in_background``, Monitor) completes, the CLI
+            re-invokes the model with a fresh turn count, so a run that waits on
+            background tasks may consume more turns in total — ``RunResult.num_turns``
+            reports the cumulative count. ``max_budget_usd`` is cumulative regardless.
         max_budget_usd: Hard cap on spend.
+        background_task_timeout: Seconds to keep a turn open waiting for the agent's
+            still-running background tasks after the model ends its turn (event-driven
+            waiting: the harness holds the stream open and the CLI re-invokes the model
+            when a task completes). On expiry the turn finalizes with the result already
+            produced, plus a ``task_wait_timeout`` status event. Size it to the longest
+            background job the agent legitimately waits on (e.g. a verification crawl).
         checkpoint: Enable checkpoint/resume (interactive pauses).
         interactive: Append the "stop and await the operator" guidance to the system
             prompt. ``None`` (default) follows ``checkpoint`` — the historical coupling.
@@ -286,6 +296,7 @@ class AgentSpec:
     permission_mode: str = "bypassPermissions"
     max_turns: int = 120
     max_budget_usd: float = 10.0
+    background_task_timeout: float = 3600.0
     checkpoint: bool = False
     interactive: bool | None = None
     output_schema: Any = None
@@ -316,6 +327,7 @@ class AgentSpec:
             "permission_mode": self.permission_mode,
             "max_turns": self.max_turns,
             "max_budget_usd": self.max_budget_usd,
+            "background_task_timeout": self.background_task_timeout,
             "checkpoint": self.checkpoint,
             "packages": list(self.packages),
         }
@@ -362,6 +374,7 @@ class AgentSpec:
             permission_mode=d.get("permission_mode", "bypassPermissions"),
             max_turns=int(d.get("max_turns", 120)),
             max_budget_usd=float(d.get("max_budget_usd", 10.0)),
+            background_task_timeout=float(d.get("background_task_timeout", 3600.0)),
             checkpoint=bool(d.get("checkpoint", False)),
             interactive=None if d.get("interactive") is None else bool(d["interactive"]),
             output_schema=d.get("output_schema"),

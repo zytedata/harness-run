@@ -119,3 +119,20 @@ def test_build_engine_config_shape() -> None:
     assert cfg["extra_packages"] == ["remote_agent_toolkit"]
     # Async-only toolkit: no standing container (an idle engine must not bill for compute).
     assert cfg["min_instances"] == 0
+
+
+def test_build_requirements_codex_bakes_sdk() -> None:
+    reqs = deploy.build_requirements(_spec(model="gpt-5.6-luna", harness="codex"))
+    assert any(r.startswith("openai-codex") for r in reqs)
+    # A claude-harness engine doesn't carry the codex CLI binary.
+    assert not any(r.startswith("openai-codex") for r in deploy.build_requirements(_spec()))
+
+
+def test_build_env_codex_skips_vertex_routing() -> None:
+    env = deploy.build_env(
+        _spec(model="gpt-5.6-luna", harness="codex"), project="p", use_vertex=True
+    )
+    # OpenAI models have no Vertex path; the key travels per-invocation instead.
+    assert "CLAUDE_CODE_USE_VERTEX" not in env
+    assert "ANTHROPIC_VERTEX_PROJECT_ID" not in env
+    assert "OPENAI_API_KEY" not in env  # never baked

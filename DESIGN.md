@@ -23,8 +23,10 @@ without re-learning the platform's sharp edges.
 - Be a **source of knowledge**, not just code: the README + design docs explain *why*.
 
 **Non-goals (for now)**
-- Multi-harness / multi-LLM implementations. We design the **seam** (a `Harness` protocol) but ship
-  only the **Claude Code (Agent SDK)** binding. Codex / custom-LLM harnesses come later, behind it.
+- Custom-LLM harnesses beyond the two that ship. We design the **seam** (a `Harness` protocol) and ship
+  the **Claude Code (Agent SDK)** binding (default) and the **Codex (openai-codex SDK)** binding
+  (`spec.harness="codex"`, OpenAI models called directly). Other providers for Codex (e.g. OpenRouter
+  via a `model_provider` config override) are a later, separate step.
 - Non-GCP backends. We design the **ports** (storage, events, dispatch, secrets) as protocols, but ship
   GCP adapters (GCS, Cloud Logging, Pub/Sub, Secret Manager) plus local/in-memory adapters for dev.
 - Replacing Scrapy-Cloud / monitoring logic — that stays in `gemini-agent-runtime` behind the seam.
@@ -416,8 +418,37 @@ These are facts measured during the PoC. The library encodes them so consumers i
 
 Each is a `typing.Protocol`; concrete adapters ship for prod (GCP) and dev (local/in-memory).
 
-- **`Harness`** — `build_options(spec, ctx)` + an async run loop yielding `AgentEvent`s. Adapter:
-  `ClaudeCodeHarness`.
+- **`Harness`** — `build_options(spec, ctx)` + an async run loop yielding `AgentEvent`s. Adapters:
+  `ClaudeCodeHarness` (default) and `CodexHarness`, selected by `spec.harness` via `resolve_harness`
+  (the single seam both runtimes use). Shared policy — secret routing, agent-env layering, the
+  interactive suffix, the inline workspace checkpoint — lives in `harness/_shared.py` so the bindings
+  can't drift where the spec doesn't distinguish them.
+- **`CodexHarness`** (OpenAI Codex binding, `openai-codex` SDK) — one `AsyncCodex` app-server per run,
+  against a per-job `CODEX_HOME` (auth.json, rollouts — bookkeeping level, beside the workspace).
+  OpenAI models are called **directly** (no Vertex path): the `OPENAI_API_KEY` travels as a
+  per-invocation secret, is routed to `codex login` and excluded from the agent's env/shell. Spec
+  translation: `permission_mode` → sandbox+approval (bypassPermissions = full access + never ask;
+  default = workspace-write + Codex's auto-reviewer so headless runs never block); `system_prompt`
+  str → `base_instructions`, `SystemPrompt.append` → `developer_instructions`; skills → staged into
+  `<cwd>/.agents/skills` (same SKILL.md format, Codex's repo-level discovery — verified live: the
+  model reads a staged SKILL.md unprompted); MCP servers → `--config mcp_servers.*` overrides (a
+  github server's token rides `bearer_token_env_var` + process env, never argv); `output_schema` →
+  per-turn `output_schema`. Codex's shell-env policy default (filter `*KEY*`/`*TOKEN*` names from the
+  shell) is the opposite of the toolkit's contract, so the default excludes are lifted with the two
+  harness-consumed names explicitly re-excluded. **Parity gaps handled adapter-side**: Codex reports
+  token counts but no USD and enforces no caps — the harness prices tokens via LiteLLM's live
+  pricing dataset (`harness/pricing.py`; the same upstream `ccusage` uses, fetched once per process,
+  baked 5.6-family fallback for offline; models unknown to both: cost `None` + a `cost_unknown`
+  status, budget unenforceable; the result raw carries `price_source`), counts
+  `thread/tokenUsage/updated` notifications as model calls (= `num_turns`; verified live: one per
+  call), and interrupts the turn at `max_turns` / `max_budget_usd` (`error_max_turns` /
+  `error_budget_exceeded` result subtypes, accounting kept). **Checkpoint/resume**: the workspace
+  snapshot is the shared machinery; the conversation is Codex's local rollout file
+  (`CODEX_HOME/sessions/**/rollout-*-<thread_id>.jsonl`) — worthless across serverless workers — so
+  the harness copies it to the BlobStore keyed by OUR session id at the terminal result and restores
+  it before `thread_resume` on any worker. No Codex equivalent of Claude Code's background-task
+  re-invocation exists (`spec.background_task_timeout` is inert); `allowed_tools`/`disallowed_tools`
+  have no mapping and are ignored with a status warning.
 - **Background-task semantics are honored** (eval feedback: a model armed the Monitor tool and ended its
   turn — correct, trained behavior — and the one-shot `query()` tore the CLI down, firing the advertised
   notification into the void; the run was scored no-deliverable). The CLI itself re-invokes the model when
@@ -473,8 +504,9 @@ Each is a `typing.Protocol`; concrete adapters ship for prod (GCP) and dev (loca
 
 ## 9. Decided design choices (2026-06-29)
 
-1. **Harness scope** — seams now, **Claude-only** implementation. Harness-agnostic `AgentSpec` + a
-   `Harness` protocol; only the Claude Code binding ships. No speculative second-harness code.
+1. **Harness scope** — seams now, Claude-first implementation. Harness-agnostic `AgentSpec` + a
+   `Harness` protocol. (Superseded 2026-07: the seam paid off — a second binding, `CodexHarness`,
+   now ships behind `spec.harness`; see §7.)
 2. **Definition API** — **declarative `AgentSpec` + `deploy()`** (control-plane / data-plane split), not an
    imperative builder or thin functions.
 3. **First milestone** — a **minimal generic (non-Zyte) example agent** run local + on Gemini Agent Runtime,
@@ -500,9 +532,11 @@ remote-agent-toolkit/
 │   ├── spec.py                    # AgentSpec + value types (serializable)
 │   ├── events.py                  # AgentEvent, RunResult, RunStatus, StopReason, Run handle
 │   ├── harness/
-│   │   ├── base.py                # Harness protocol
-│   │   ├── claude_code.py         # ClaudeCodeHarness (drives the Agent SDK query(); ADK-free)
-│   │   └── translate.py           # Claude SDK message → AgentEvent
+│   │   ├── base.py                # Harness protocol (+ resolve_harness in __init__)
+│   │   ├── claude_code.py         # ClaudeCodeHarness (drives a ClaudeSDKClient stream; ADK-free)
+│   │   ├── codex.py               # CodexHarness (drives an openai-codex AsyncCodex app-server)
+│   │   ├── _shared.py             # policy shared by the bindings (secret routing, env, checkpoint)
+│   │   └── translate.py           # Claude SDK message → AgentEvent (codex's lives in codex.py)
 │   ├── runtime/
 │   │   ├── base.py                # Engine + Session protocol + state machine + Run handle
 │   │   ├── local.py               # local.deploy / local.run -> LocalEngine

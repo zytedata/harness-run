@@ -1,11 +1,32 @@
 """The harness seam (DESIGN.md §1, §7): the abstraction over "a coding agent loop".
 
-Only the Claude Code (Agent SDK) binding ships (``claude_code``); the protocol
-(``base.Harness``) exists so a second harness can slot in behind it later.
+Two bindings ship: Claude Code (``claude_code``, the default) and Codex (``codex``).
+``resolve_harness`` is the single selection point — both runtimes call it instead of
+hardcoding a binding, so ``AgentSpec.harness`` picks the loop on either backend.
+Bindings are imported lazily inside the factory to keep the package import zero-dep.
 """
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from .base import Harness
 
-__all__ = ["Harness"]
+if TYPE_CHECKING:
+    from ..spec import AgentSpec
+
+__all__ = ["Harness", "resolve_harness"]
+
+
+def resolve_harness(spec: AgentSpec) -> Harness:
+    """Instantiate the harness named by ``spec.harness`` (both runtimes' single seam)."""
+    name = getattr(spec, "harness", None) or "claude-code"
+    if name == "claude-code":
+        from .claude_code import ClaudeCodeHarness
+
+        return ClaudeCodeHarness()
+    if name == "codex":
+        from .codex import CodexHarness
+
+        return CodexHarness()
+    raise ValueError(f"unknown harness: {name!r} (expected 'claude-code' or 'codex')")

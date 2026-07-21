@@ -202,9 +202,9 @@ class LocalEngine:
             venv = provision_venv(root, spec.packages)
             self._agent_env = venv_agent_env(venv, (spec.env or {}).get("PATH"))
 
-        from ..harness.claude_code import ClaudeCodeHarness
+        from ..harness import resolve_harness
 
-        self._harness = ClaudeCodeHarness()
+        self._harness = resolve_harness(spec)
 
     # -- helpers used by sessions/runs ----------------------------------------
 
@@ -233,9 +233,11 @@ class LocalEngine:
         else:
             ctx.workspace.mkdir(parents=True, exist_ok=True)
             if ctx.spec.skills:
-                from ..skills import provision
+                from ..skills import provision, skills_subdir
 
-                names = provision(ctx.spec.skills, str(ctx.workspace))
+                names = provision(
+                    ctx.spec.skills, str(ctx.workspace), skills_subdir(ctx.spec.harness)
+                )
             if ctx.spec.repos:
                 from ..integrations.git import provision_repos
 

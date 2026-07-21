@@ -242,7 +242,12 @@ class AgentSpec:
 
     Attributes:
         name: Stable agent name. Maps to a deployed engine's display name (§5).
-        model: Model id, e.g. ``"claude-sonnet-4-6"``.
+        model: Model id the harness runs, e.g. ``"claude-sonnet-4-6"`` (Claude Code) or
+            a GPT model id (Codex).
+        harness: The coding-agent loop to run: ``"claude-code"`` (default) or ``"codex"``.
+            The spec's harness-shaped fields (``permission_mode``, tool lists, skills)
+            are translated by each binding; see the harness module docstrings for the
+            mapping and any parity caveats.
         system_prompt: A ``SystemPrompt`` (inherit + append) or a plain ``str``
             (replace entirely) or ``None`` (harness default).
         skills: Skill sources, resolved & staged at deploy/run time.
@@ -287,6 +292,7 @@ class AgentSpec:
 
     name: str
     model: str
+    harness: str = "claude-code"
     system_prompt: str | SystemPrompt | None = None
     skills: tuple[SkillSource, ...] = ()
     repos: tuple[RepoSource, ...] = ()
@@ -321,6 +327,7 @@ class AgentSpec:
         d: dict[str, Any] = {
             "name": self.name,
             "model": self.model,
+            "harness": self.harness,
             "skills": [s.to_dict() for s in self.skills],
             "repos": [r.to_dict() for r in self.repos],
             "mcp_servers": [m.to_dict() for m in self.mcp_servers],
@@ -365,6 +372,7 @@ class AgentSpec:
         return cls(
             name=d["name"],
             model=d["model"],
+            harness=d.get("harness", "claude-code"),
             system_prompt=system_prompt,
             skills=tuple(SkillSource.from_dict(s) for s in d.get("skills", ())),
             repos=tuple(RepoSource.from_dict(r) for r in d.get("repos", ())),

@@ -247,7 +247,7 @@ class ToolkitAgent(BaseAgent):
         ``secrets_uri`` points at the single-use staged secrets object (fetched + deleted here);
         values never ride the invocation payload.
         """
-        from ...harness.claude_code import ClaudeCodeHarness
+        from ...harness import resolve_harness
         from ...harness.context import RunContext
         from ...ports.eventsink import CloudLoggingSink
         from .tracing import TurnTracer
@@ -304,7 +304,7 @@ class ToolkitAgent(BaseAgent):
             prep = await asyncio.to_thread(_prepare_workspace, rc)
             yield surface(AgentEvent(kind="status", summary=prep["summary"], raw=prep))
 
-            async for event in ClaudeCodeHarness().run(spec, rc):
+            async for event in resolve_harness(spec).run(spec, rc):
                 saw_result = saw_result or event.kind == "result"
                 yield surface(event)  # finalize (checkpoint) is inline in the harness
         except Exception as exc:  # noqa: BLE001 — a silent server-side death is undebuggable

@@ -178,7 +178,7 @@ class CodexEventTranslator:
 
     def _remember_final(self, item: Any) -> None:
         phase = getattr(item, "phase", None)
-        is_final = getattr(phase, "value", phase) == "finalAnswer"
+        is_final = getattr(phase, "value", phase) == "final_answer"
         # Prefer the last explicit final-answer message; else the last plain message.
         if is_final or not self._final_is_final_phase:
             self.final_text = item.text or ""

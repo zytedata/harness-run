@@ -109,6 +109,15 @@ if session.status == "idle" and session.stop_reason == "needs_input":
     await session.send("yes, that schema looks right")     # resumes the conversation (a fresh turn)
 ```
 
+**Results are kept honest.** `RunResult` keeps its accounting on *error* results too — an
+`error_max_turns` run reports its real `cost_usd`/`num_turns`/`usage` (it spent right up to its limit;
+treating it as free corrupts budget bookkeeping). And the terminal result is authoritative: if the
+underlying `claude` CLI exits non-zero *after* the final result was streamed (it happens transiently even
+on finished runs), the run keeps its result and gets `result.warning` set instead of being voided into an
+error. For post-mortems, the CLI's stderr is captured to `<workdir>/jobs/<session-id>/stderr.log` (beside,
+not inside, the workspace); on a CLI-exit failure its tail is also surfaced as a `claude_stderr` status
+event and embedded in the error text.
+
 Runs are hang-proofed on `gemini`: every log-tail poll is time-bounded (a dead connection costs a ~30 s
 retry, not a frozen run), and a **cold** run carries a job watchdog — when the remote job has terminated but
 the tail is still silent, the client first recovers the **real result from the durable GCS event mirror**

@@ -62,6 +62,9 @@ class RunResult:
         usage: Raw token/usage accounting from the harness.
         session_id: The session this result belongs to (for re-attach/resume).
         artifacts: Blob keys/URIs of artifacts produced by the run.
+        warning: Non-fatal anomaly note — e.g. the harness process exited abnormally
+            *after* emitting this result. The result (text, spend, usage) is real and
+            kept; the warning records that the run didn't shut down cleanly.
     """
 
     text: str | None
@@ -72,3 +75,4 @@ class RunResult:
     usage: dict | None = None
     session_id: str | None = None
     artifacts: tuple[str, ...] = field(default=())
+    warning: str | None = None

@@ -22,17 +22,24 @@ def _result_ev(text="done", subtype="success", is_error=False, num_turns=3):
 
 
 class FakeHarness:
-    """Yields canned events; optional on_run hook to assert the prepared workspace."""
+    """Yields canned events; optional on_run hook to assert the prepared workspace.
 
-    def __init__(self, events, on_run=None):
+    ``raise_after`` raises once all events are out — models the claude CLI exiting
+    non-zero during shutdown, after the terminal result was already streamed.
+    """
+
+    def __init__(self, events, on_run=None, raise_after=None):
         self._events = events
         self._on_run = on_run
+        self._raise_after = raise_after
 
     async def run(self, spec, ctx) -> AsyncIterator[AgentEvent]:
         if self._on_run is not None:
             self._on_run(spec, ctx)
         for ev in self._events:
             yield ev
+        if self._raise_after is not None:
+            raise self._raise_after
 
 
 def _skill_src(tmp_path):
@@ -176,6 +183,64 @@ def test_workspace_accessor_seed_and_collect(tmp_path):
     asyncio.run(_await(session.run("go")))
     assert seen == {"cwd_name": "workspace", "same_dir": True, "seeded": "seeded"}
     assert (session.workspace / "artifact.txt").read_text() == "produced"
+
+
+def test_error_result_keeps_accounting(tmp_path):
+    # Eval feedback: error results (error_max_turns) reported cost_usd=0.0 / num_turns=0 /
+    # usage=None on last_result although the backend result event carried them — exactly the
+    # runs that burn the most read as free. An errored run is still a fully accounted run.
+    ev = AgentEvent(
+        kind="result", summary="(run errored)", cost_usd=6.2966,
+        usage={"input_tokens": 240, "cache_creation_input_tokens": 182975},
+        raw={"subtype": "error_max_turns", "is_error": True, "num_turns": 121,
+             "session_id": "claude-sid"},
+    )
+    engine = local.deploy(AgentSpec(name="demo", model="m"), workdir=str(tmp_path / "wd"))
+    engine._harness = FakeHarness([ev])
+    session = engine.start_session()
+    asyncio.run(_await(session.run("go")))
+
+    r = session.last_result
+    assert r.is_error is True and session.stop_reason == StopReason.MAX_TURNS
+    assert r.cost_usd == 6.2966 and r.num_turns == 121
+    assert r.usage == {"input_tokens": 240, "cache_creation_input_tokens": 182975}
+
+
+def test_late_harness_crash_keeps_finished_result(tmp_path):
+    # Eval feedback (Fable hims_com run): the run finished — terminal result streamed —
+    # then the claude CLI exited 1 during shutdown and the whole run (deliverable text,
+    # ~$10 of spend, usage) was reported as an errored, free run. The terminal result is
+    # authoritative: keep it, and record the late death as a warning, not an error.
+    engine = local.deploy(AgentSpec(name="demo", model="m"), workdir=str(tmp_path / "wd"))
+    engine._harness = FakeHarness(
+        [_result_ev(text="all done")],
+        raise_after=RuntimeError("Command failed with exit code 1"),
+    )
+    session = engine.start_session()
+
+    async def collect():
+        return [ev async for ev in session.run("go")]
+
+    events = asyncio.run(collect())
+    r = session.last_result
+    assert r.text == "all done" and r.is_error is False
+    assert r.cost_usd == 0.1 and r.num_turns == 3 and r.usage == {"input_tokens": 5}
+    assert "exit code 1" in r.warning
+    assert session.stop_reason == StopReason.END_TURN  # from the result, not the late crash
+    # The stream carries the anomaly as a status event, after the terminal result.
+    assert [e.kind for e in events][-1] == "status"
+    assert "result kept" in events[-1].summary
+
+
+def test_crash_before_result_is_still_an_error(tmp_path):
+    # No terminal result → the exception is the outcome (unchanged semantics).
+    engine = local.deploy(AgentSpec(name="demo", model="m"), workdir=str(tmp_path / "wd"))
+    engine._harness = FakeHarness([], raise_after=RuntimeError("boom"))
+    session = engine.start_session()
+    asyncio.run(_await(session.run("go")))
+    r = session.last_result
+    assert r.is_error is True and "boom" in r.text and r.warning is None
+    assert session.stop_reason == StopReason.ERROR
 
 
 def test_start_session_mints_canonical_uuid(tmp_path):

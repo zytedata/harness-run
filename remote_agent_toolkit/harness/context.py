@@ -33,7 +33,7 @@ class RunContext:
         prompt: The user message for this turn (resume/repo directives already stripped).
         job_dir: Isolated, writable per-session root for this run. The agent does NOT run
             here — it runs in the ``workspace`` leaf below — leaving this level free for
-            session bookkeeping the agent shouldn't see.
+            session bookkeeping the agent shouldn't see (e.g. the captured ``stderr.log``).
         session_id: Stable Claude session id, pinned up front so checkpoint keying never
             depends on parsing it out of the message stream.
         secrets: Per-invocation secret name → value map (NEVER logged), supplied by the caller

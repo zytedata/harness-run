@@ -245,7 +245,18 @@ new version. App code pins or takes latest; it does not deploy.
 - `Run` — `__await__` (→ `RunResult`), `__aiter__` (→ `AgentEvent`s), `done`, `status`, `result`.
 - `AgentEvent` — `kind`, `summary`, `raw`; cost/usage carried on the terminal event.
 - `RunResult` — `text`, `structured_output`, `is_error`, `num_turns`, `cost_usd`, `usage`, `session_id`,
-  `artifacts`.
+  `artifacts`, `warning`. Error results keep their accounting (`cost_usd`/`num_turns`/`usage`): an
+  `error_max_turns` run spends right up to its limit, so zeroing them under-reports exactly the most
+  expensive runs (eval feedback).
+- **The terminal result event is authoritative — even if the harness dies afterwards.** The claude CLI
+  can exit non-zero *after* the final `ResultMessage` (it does so on error results, and transiently even
+  on finished runs — observed: a completed ~$10 run voided by an exit-1 during result delivery). Both
+  runtimes keep the already-received result and record the late death as `RunResult.warning` + a
+  `late_harness_error` status event, instead of overwriting a finished run with an empty error result.
+- **Claude CLI stderr is captured** (`jobs/<sid>/stderr.log`, capped, beside — not inside — the agent
+  workspace). The SDK pipes stderr only when a callback is registered; without one, `ProcessError`'s
+  "Check stderr output for details" promises output nobody captured. On a CLI-exit failure the tail is
+  surfaced as a `claude_stderr` status event (reaches Cloud Logging on gemini) and embedded in the error.
 
 ---
 

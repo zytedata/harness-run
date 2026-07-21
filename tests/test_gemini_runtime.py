@@ -287,6 +287,46 @@ def test_run_turn_maps_session_id_and_surfaces_harness_crash(tmp_path, monkeypat
     assert kinds[-1] == "result"
 
 
+def test_run_turn_late_crash_keeps_terminal_result(tmp_path, monkeypatch):
+    # Same late-death hardening as local: if the harness dies AFTER the terminal result
+    # was surfaced (e.g. the claude CLI exiting non-zero during shutdown), the finished
+    # result is authoritative — a second, error result here would overwrite a finished
+    # run (deliverable + spend) in the tailing client and the durable history.
+    monkeypatch.setenv("AGENT_JOBS_ROOT", str(tmp_path / "jobs"))
+    monkeypatch.chdir(tmp_path)  # no baked skills dir on the lookup paths
+
+    class DyingHarness:
+        async def run(self, spec, rc):
+            yield AgentEvent(
+                kind="result", summary="all done", cost_usd=9.8,
+                raw={"subtype": "success", "is_error": False, "num_turns": 40,
+                     "session_id": "claude-sid"},
+            )
+            raise RuntimeError("Command failed with exit code 1")
+
+    import remote_agent_toolkit.harness.claude_code as harness_mod
+    import remote_agent_toolkit.ports.eventsink as eventsink_mod
+    monkeypatch.setattr(harness_mod, "ClaudeCodeHarness", DyingHarness)
+    sink = InMemorySink(session_id="77")
+    monkeypatch.setattr(eventsink_mod, "CloudLoggingSink", lambda **kw: sink)
+
+    spec = AgentSpec(name="w", model="m")
+    agent = adk_agent.build_agent(spec)
+
+    async def drive():
+        return [ev async for ev in agent._run_turn(spec, "77", "go", None)]
+
+    events = asyncio.run(drive())
+    kinds = [ev.custom_metadata["kind"] for ev in events]
+    assert kinds.count("result") == 1  # the finished result, never a second error result
+    assert events[-1].custom_metadata["kind"] == "status"
+    assert "result kept" in events[-1].content.parts[0].text
+    # The sink stream (what the client tails / history records) agrees.
+    sunk = sink._events["77"]
+    assert [e.kind for e in sunk].count("result") == 1
+    assert next(e for e in sunk if e.kind == "result").cost_usd == 9.8
+
+
 def test_run_turn_surfaces_workspace_prep_crash(monkeypatch):
     # Workspace prep (repo clone / skills staging) runs BEFORE the first emitted event; a
     # failure there (e.g. a bad repo token) must also yield a terminal error, not silence.

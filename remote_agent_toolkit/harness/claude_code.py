@@ -13,6 +13,8 @@ third-party deps.
 from __future__ import annotations
 
 import os
+from collections import deque
+from pathlib import Path
 from typing import Any, AsyncIterator, TYPE_CHECKING
 
 from ..events import AgentEvent
@@ -64,6 +66,46 @@ _INTERACTIVE_SUFFIX = (
     "to completion in the SAME turn. End your turn ONLY when you genuinely need an operator "
     "decision, or when the entire task is complete — and then say so explicitly."
 )
+
+
+class _StderrCapture:
+    """Captures the claude CLI's stderr — the SDK pipes it ONLY when a callback is set.
+
+    Without a callback the CLI inherits the parent's stderr (interleaved unattributed, or
+    lost), yet on a non-zero exit the SDK's ``ProcessError`` says "Check stderr output for
+    details" — promising output nobody captured, making CLI-level failures undiagnosable
+    (eval feedback). Each line is appended to ``<job_dir>/stderr.log`` — beside, not inside,
+    the agent workspace, so it is never agent-visible or snapshotted — and an in-memory
+    tail is kept for embedding into the failure event/error. Zero cost on healthy runs:
+    the file is only created when the CLI actually writes a line. Never raises.
+    """
+
+    _FILE_CAP = 2_000_000  # bytes appended per run; beyond it only the in-memory tail grows
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self._written = 0
+        self._capped = False
+        self._tail: deque[str] = deque(maxlen=60)
+
+    def __call__(self, line: str) -> None:
+        try:
+            self._tail.append(line[-2000:])
+            if self._capped:
+                return
+            data = line + "\n"
+            if self._written + len(data) > self._FILE_CAP:
+                data = "... [stderr.log capped; the failure event carries the tail]\n"
+                self._capped = True
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            with self.path.open("a", encoding="utf-8") as f:
+                f.write(data)
+            self._written += len(data)
+        except Exception:  # noqa: BLE001 — diagnostics must never break the run
+            pass
+
+    def tail(self, max_chars: int = 2000) -> str:
+        return "\n".join(self._tail)[-max_chars:]
 
 
 class ClaudeCodeHarness:
@@ -234,21 +276,42 @@ class ClaudeCodeHarness:
         from .translate import EventTranslator
 
         options = self.build_options(spec, ctx)
+        # Capture the CLI's stderr to <job_dir>/stderr.log + an in-memory tail; without a
+        # registered callback the SDK doesn't pipe it at all and CLI-exit failures are
+        # undiagnosable by construction (the ProcessError text promises stderr details).
+        stderr_log = _StderrCapture(ctx.job_dir / "stderr.log")
+        options.stderr = stderr_log
         translator = EventTranslator()
         finalized = False
 
         from claude_agent_sdk import query
 
-        async for message in query(prompt=ctx.prompt, options=options):
-            for event in translator.translate(message):
-                if not finalized and event.kind == "result":
-                    fin = self._finalize(spec, ctx)
-                    finalized = True
-                    yield event
-                    if fin is not None:
-                        yield fin
-                else:
-                    yield event
+        try:
+            async for message in query(prompt=ctx.prompt, options=options):
+                for event in translator.translate(message):
+                    if not finalized and event.kind == "result":
+                        fin = self._finalize(spec, ctx)
+                        finalized = True
+                        yield event
+                        if fin is not None:
+                            yield fin
+                    else:
+                        yield event
+        except Exception as exc:
+            # Surface the captured stderr with the failure: as a status event (reaches the
+            # stream / Cloud Logging on gemini) and embedded in the raised error, so a
+            # non-zero CLI exit is classifiable post-mortem instead of "check stderr".
+            tail = stderr_log.tail()
+            if not tail:
+                raise
+            yield AgentEvent(
+                kind="status",
+                summary=f"claude stderr (tail): {tail}",
+                raw={"event": "claude_stderr", "log": str(stderr_log.path)},
+            )
+            raise RuntimeError(
+                f"{exc} [claude stderr tail: {tail[-500:]}] (full log: {stderr_log.path})"
+            ) from exc
 
         # Fallback for runners that fully drain the generator, or if no terminal event
         # was observed (defensive — query() normally always ends with a ResultMessage).

@@ -99,8 +99,16 @@ class DrivenRun:
             await self._queue.put(_SENTINEL)
             raise
         except Exception as exc:  # noqa: BLE001 — surface as an error result, don't crash callers
+            summary = (
+                f"harness exited abnormally after the terminal result (result kept): {str(exc)[:200]}"
+                if result_ev is not None
+                else f"run failed: {str(exc)[:200]}"
+            )
             await self._queue.put(
-                AgentEvent(kind="status", summary=f"run failed: {str(exc)[:200]}", raw={"event": "error"})
+                AgentEvent(
+                    kind="status", summary=summary,
+                    raw={"event": "late_harness_error" if result_ev is not None else "error"},
+                )
             )
             self._finalize(result_ev, error=str(exc))
             await self._queue.put(_SENTINEL)
@@ -109,12 +117,19 @@ class DrivenRun:
         await self._queue.put(_SENTINEL)
 
     def _finalize(self, result_ev: AgentEvent | None, error: str | None) -> None:
-        if error is not None:
+        if result_ev is not None:
+            # A terminal result event is authoritative even if the harness died afterwards
+            # (e.g. the claude CLI exiting non-zero while shutting down — which it also does
+            # on error results like error_max_turns). The run's text, cost_usd, usage and
+            # turn count are all real; discarding them turned a flaky exit at the finish
+            # line into a total loss and made failed runs read as free (eval feedback).
+            self._result, self._stop_reason = build_result(result_ev, self._session_id, self._spec)
+            if error is not None and error != "interrupted":
+                self._result.warning = f"harness exited abnormally after the result: {error[:500]}"
+        elif error is not None:
             text = None if error == "interrupted" else f"run failed: {error}"
             self._result = RunResult(text=text, is_error=True, session_id=self._session_id)
             self._stop_reason = StopReason.ERROR
-        elif result_ev is not None:
-            self._result, self._stop_reason = build_result(result_ev, self._session_id, self._spec)
         else:
             self._result = RunResult(text=None, is_error=True, session_id=self._session_id)
             self._stop_reason = StopReason.ERROR

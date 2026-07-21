@@ -297,6 +297,7 @@ class ToolkitAgent(BaseAgent):
         # the client's tail hangs forever and the failure is invisible (how the
         # numeric-session-id bug hid). Error strings are truncated and repo tokens are already
         # redacted by the git layer; never put secrets in an event.
+        saw_result = False
         try:
             if secrets_warning is not None:  # value-free: staged secrets were unavailable
                 yield surface(secrets_warning)
@@ -304,14 +305,29 @@ class ToolkitAgent(BaseAgent):
             yield surface(AgentEvent(kind="status", summary=prep["summary"], raw=prep))
 
             async for event in ClaudeCodeHarness().run(spec, rc):
+                saw_result = saw_result or event.kind == "result"
                 yield surface(event)  # finalize (checkpoint) is inline in the harness
         except Exception as exc:  # noqa: BLE001 — a silent server-side death is undebuggable
-            yield surface(AgentEvent(
-                kind="result",
-                summary=f"agent run failed: {str(exc)[:300]}",
-                raw={"event": "harness_error", "is_error": True, "subtype": "error",
-                     "session_id": session_id},
-            ))
+            if saw_result:
+                # The terminal result already went out — it is authoritative (the run's
+                # text/cost/usage are real; the checkpoint was taken inline at that event).
+                # A harness death during shutdown is a warning, NOT a second result: an
+                # error result here would overwrite a finished run in the durable history.
+                yield surface(AgentEvent(
+                    kind="status",
+                    summary=(
+                        "harness exited abnormally after the terminal result "
+                        f"(result kept): {str(exc)[:300]}"
+                    ),
+                    raw={"event": "late_harness_error", "session_id": session_id},
+                ))
+            else:
+                yield surface(AgentEvent(
+                    kind="result",
+                    summary=f"agent run failed: {str(exc)[:300]}",
+                    raw={"event": "harness_error", "is_error": True, "subtype": "error",
+                         "session_id": session_id},
+                ))
         finally:
             tracer.close()  # end the turn span (+ any tool span orphaned by a crash)
             # Flush the turn's durable history file — also on early generator close (a

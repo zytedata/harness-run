@@ -23,8 +23,9 @@ Spec translation (parity notes):
                          notification is one model call; the turn is interrupted at the
                          cap (Codex has no native turn cap).
 * ``max_budget_usd``   → enforced by the harness from token usage × the model's price
-                         table (Codex reports no USD); unknown models run uncapped with
-                         a status warning.
+                         (Codex reports no USD). Prices resolve via :mod:`pricing` —
+                         LiteLLM's live dataset first, a baked fallback offline; a model
+                         unknown to both runs uncapped with a status warning.
 * ``output_schema``    → per-turn ``output_schema`` (the final message is the JSON).
 * ``allowed_tools`` / ``disallowed_tools`` → no Codex equivalent; ignored with a status
                          warning.
@@ -38,6 +39,7 @@ Spec translation (parity notes):
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from dataclasses import dataclass, field
@@ -46,6 +48,7 @@ from typing import Any, AsyncIterator, Iterator, TYPE_CHECKING
 
 from ..events import AgentEvent
 from ..spec import SystemPrompt
+from . import pricing
 from ._shared import (
     GITHUB_MCP_TOKEN_KEYS,
     INTERACTIVE_SUFFIX,
@@ -74,32 +77,12 @@ _PERMISSION_MAP = {
 _GITHUB_MCP_TOKEN_ENV = "RATK_GITHUB_MCP_TOKEN"
 _GITHUB_MCP_URL = "https://api.githubcopilot.com/mcp/"
 
-# USD per 1M tokens: (input, cached input, output). Codex reports token counts only —
-# cost and budget enforcement need a price table. Cache *writes* (billed at 1.25x input
-# since 5.6) are not distinguishable in the usage breakdown, so cost is a slight
-# undercount. Update alongside model launches; unknown models yield cost None.
-_MODEL_PRICES_PER_MTOK: dict[str, tuple[float, float, float]] = {
-    "gpt-5.6-sol": (5.00, 0.50, 30.00),
-    "gpt-5.6": (5.00, 0.50, 30.00),  # bare alias routes to sol
-    "gpt-5.6-terra": (2.50, 0.25, 15.00),
-    "gpt-5.6-luna": (1.00, 0.10, 6.00),
-    "gpt-5.3-codex": (1.75, 0.175, 14.00),
-}
-
 # Tool-result content kept in events is truncated: command output can be megabytes, and
 # events ride Cloud Logging on gemini (per-entry size limits).
 _CONTENT_CAP = 4000
 
 # Blob-key prefix for persisted Codex conversations (the rollout file + thread id).
 _THREADS_PREFIX = "codex-threads"
-
-
-def _usage_cost_usd(model: str, in_tok: int, cached_tok: int, out_tok: int) -> float | None:
-    price = _MODEL_PRICES_PER_MTOK.get(model)
-    if price is None:
-        return None
-    fresh = max(in_tok - cached_tok, 0)
-    return (fresh * price[0] + cached_tok * price[1] + out_tok * price[2]) / 1_000_000
 
 
 @dataclass
@@ -120,17 +103,19 @@ class _RunAccounting:
     Each notification is one model call (verified live), so their count is the Codex
     equivalent of Claude's ``num_turns``. Per-run token sums come from the ``last``
     breakdown of each call — the ``total`` breakdown is *thread*-cumulative and would
-    double-bill resumed sessions.
+    double-bill resumed sessions. ``price`` comes from :mod:`pricing` (LiteLLM live
+    dataset, baked fallback); ``None`` means cost is unreportable and the budget cap
+    unenforceable.
     """
 
-    def __init__(self, model: str) -> None:
+    def __init__(self, model: str, price: pricing.ModelPrice | None) -> None:
         self.model = model
+        self.price = price
         self.model_calls = 0
         self.input_tokens = 0
         self.cached_input_tokens = 0
         self.output_tokens = 0
         self.reasoning_output_tokens = 0
-        self.cost_known = model in _MODEL_PRICES_PER_MTOK
 
     def observe(self, last: Any) -> None:
         self.model_calls += 1
@@ -141,8 +126,10 @@ class _RunAccounting:
 
     @property
     def cost_usd(self) -> float | None:
-        return _usage_cost_usd(
-            self.model, self.input_tokens, self.cached_input_tokens, self.output_tokens
+        if self.price is None:
+            return None
+        return self.price.cost_usd(
+            self.input_tokens, self.cached_input_tokens, self.output_tokens
         )
 
     def usage(self) -> dict[str, int]:
@@ -536,6 +523,7 @@ class CodexHarness:
                 "session_id": ctx.session_id,
                 "thread_id": thread_id,
                 "model": acct.model,
+                "price_source": acct.price.source if acct.price else None,
             },
         )
 
@@ -552,19 +540,23 @@ class CodexHarness:
 
         options = self.build_options(spec, ctx)
         translator = CodexEventTranslator()
-        acct = _RunAccounting(spec.model)
+        # Price via the LiteLLM live dataset (baked fallback) — one fetch per process,
+        # off the loop; needed up front because budget enforcement runs mid-stream.
+        price = await asyncio.to_thread(pricing.model_price, spec.model)
+        acct = _RunAccounting(spec.model, price)
         limit: str | None = None  # which cap tripped, if any
         thread_id = ""
 
         async with AsyncCodex(config=options.codex_config) as codex:
             for w in options.warnings:
                 yield AgentEvent(kind="status", summary=w, raw={"event": "spec_warning"})
-            if not acct.cost_known:
+            if price is None:
                 yield AgentEvent(
                     kind="status",
                     summary=(
-                        f"no price table for model {spec.model!r}: cost_usd will be unknown "
-                        "and max_budget_usd cannot be enforced"
+                        f"no price data for model {spec.model!r} (LiteLLM dataset "
+                        "unreachable or model unknown): cost_usd will be unknown and "
+                        "max_budget_usd cannot be enforced"
                     ),
                     raw={"event": "cost_unknown", "model": spec.model},
                 )

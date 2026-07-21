@@ -81,9 +81,11 @@ What to know when running Codex:
   into `<cwd>/.agents/skills`, Codex's discovery path (that's the layout of
   [zytedata/codex-skills](https://github.com/zytedata/codex-skills)).
 - **Cost & caps**: Codex reports token counts but no dollars, and enforces no turn/budget caps of
-  its own — the harness computes `cost_usd` from a built-in price table for the GPT-5.6 family and
-  interrupts the run at `max_turns` / `max_budget_usd`. For a model missing from the table you get
-  `cost_usd=None`, a `cost_unknown` status event, and no budget enforcement.
+  its own — the harness prices tokens via [LiteLLM's pricing dataset](https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json)
+  (fetched once per process, so new models are priced without a toolkit release; a small baked table
+  covers the GPT-5.6 family offline) and interrupts the run at `max_turns` / `max_budget_usd`. For a
+  model neither source knows you get `cost_usd=None`, a `cost_unknown` status event, and no budget
+  enforcement; the result event records which source priced the run (`price_source`).
 - **Checkpoint/resume** works cross-worker: the Codex conversation (a local rollout file) is
   persisted to the blob store alongside the workspace snapshot and restored on `send()`.
 - **Gaps**: `allowed_tools`/`disallowed_tools` have no Codex equivalent (ignored with a status

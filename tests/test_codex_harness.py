@@ -20,11 +20,8 @@ from codex_fakes import (
 )
 
 from remote_agent_toolkit import AgentSpec, local
-from remote_agent_toolkit.harness.codex import (
-    CodexEventTranslator,
-    CodexHarness,
-    _usage_cost_usd,
-)
+from remote_agent_toolkit.harness import pricing
+from remote_agent_toolkit.harness.codex import CodexEventTranslator, CodexHarness
 from remote_agent_toolkit.harness.context import RunContext
 from remote_agent_toolkit.spec import McpServer, SystemPrompt
 
@@ -141,13 +138,51 @@ def test_build_options_output_schema(tmp_path):
 
 
 # -- pricing ------------------------------------------------------------------
+# The autouse conftest fixture keeps the LiteLLM fetch off the network; the baked
+# table is the fallback under test unless a test stubs the dataset itself.
 
 
-def test_cost_table():
+def test_builtin_price_fallback():
     # luna: $1/M in, $0.10/M cached, $6/M out
-    cost = _usage_cost_usd("gpt-5.6-luna", 1_000_000, 500_000, 100_000)
+    price = pricing.model_price("gpt-5.6-luna")
+    assert price is not None and price.source == "builtin"
+    cost = price.cost_usd(1_000_000, 500_000, 100_000)
     assert cost == pytest.approx(0.5 * 1.0 + 0.5 * 0.10 + 0.1 * 6.0)
-    assert _usage_cost_usd("some-future-model", 1000, 0, 10) is None
+    assert pricing.model_price("some-future-model") is None
+
+
+def test_litellm_price_wins_over_builtin(monkeypatch):
+    dataset = {
+        # A model the baked table doesn't know — priced anyway.
+        "openai/gpt-9-hyperion": {
+            "input_cost_per_token": 2e-06,
+            "cache_read_input_token_cost": 2e-07,
+            "output_cost_per_token": 8e-06,
+        },
+        # A baked model with a (hypothetically) updated live price — litellm wins.
+        "gpt-5.6-luna": {
+            "input_cost_per_token": 9e-06,
+            "output_cost_per_token": 9e-06,
+            # no cache_read price listed → cached tokens bill as fresh input
+        },
+    }
+    monkeypatch.setattr(pricing, "_litellm_prices", lambda: dataset)
+
+    p = pricing.model_price("gpt-9-hyperion")  # found via the openai/ prefix
+    assert p is not None and p.source == "litellm"
+    assert p.cost_usd(1_000_000, 0, 0) == pytest.approx(2.0)
+
+    p2 = pricing.model_price("gpt-5.6-luna")
+    assert p2 is not None and p2.source == "litellm"
+    assert p2.input_per_token == pytest.approx(9e-06)
+    assert p2.cached_input_per_token == pytest.approx(9e-06)  # falls back to input price
+
+
+def test_litellm_fetch_failure_is_cached_and_falls_back():
+    # conftest stubbed the fetch to fail; resolution still succeeds via the baked table
+    # and the failed fetch is attempted only once per process.
+    assert pricing._litellm_prices() is None
+    assert pricing.model_price("gpt-5.6-terra").source == "builtin"
 
 
 # -- translator ---------------------------------------------------------------

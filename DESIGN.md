@@ -436,8 +436,10 @@ Each is a `typing.Protocol`; concrete adapters ship for prod (GCP) and dev (loca
   per-turn `output_schema`. Codex's shell-env policy default (filter `*KEY*`/`*TOKEN*` names from the
   shell) is the opposite of the toolkit's contract, so the default excludes are lifted with the two
   harness-consumed names explicitly re-excluded. **Parity gaps handled adapter-side**: Codex reports
-  token counts but no USD and enforces no caps — the harness computes `cost_usd` from a 5.6-family
-  price table (unknown models: cost `None` + a `cost_unknown` status, budget unenforceable), counts
+  token counts but no USD and enforces no caps — the harness prices tokens via LiteLLM's live
+  pricing dataset (`harness/pricing.py`; the same upstream `ccusage` uses, fetched once per process,
+  baked 5.6-family fallback for offline; models unknown to both: cost `None` + a `cost_unknown`
+  status, budget unenforceable; the result raw carries `price_source`), counts
   `thread/tokenUsage/updated` notifications as model calls (= `num_turns`; verified live: one per
   call), and interrupts the turn at `max_turns` / `max_budget_usd` (`error_max_turns` /
   `error_budget_exceeded` result subtypes, accounting kept). **Checkpoint/resume**: the workspace

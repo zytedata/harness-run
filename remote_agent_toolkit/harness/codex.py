@@ -27,6 +27,9 @@ Spec translation (parity notes):
                          LiteLLM's live dataset first, a baked fallback offline; a model
                          unknown to both runs uncapped with a status warning.
 * ``output_schema``    → per-turn ``output_schema`` (the final message is the JSON).
+* ``reasoning_effort`` → per-turn ``effort`` (thread-sticky server-side, and re-applied
+                         on every turn, so resume keeps it). Codex has no ``max`` level;
+                         it is mapped to ``xhigh`` with a status warning.
 * ``allowed_tools`` / ``disallowed_tools`` → no Codex equivalent; ignored with a status
                          warning.
 * background tasks     → no Codex equivalent of Claude Code's task re-invocation
@@ -414,6 +417,15 @@ class CodexHarness:
             **self._instructions(spec, ctx.interactive),
         }
         run_args: dict[str, Any] = {}
+        if spec.reasoning_effort is not None:
+            effort = spec.reasoning_effort
+            if effort == "max":  # Claude-only level; xhigh is Codex's ceiling
+                warnings.append("reasoning_effort 'max' has no codex level; using 'xhigh'")
+                effort = "xhigh"
+            # A plain str, not openai_codex.types.ReasoningEffort: the enum is a str
+            # subclass whose validation accepts arbitrary strings, so unknown levels
+            # pass through to the SDK/CLI to reject in one place.
+            run_args["effort"] = effort
         if spec.output_schema is not None:
             from ..spec import _output_schema_to_dict
 

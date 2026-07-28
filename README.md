@@ -88,6 +88,9 @@ What to know when running Codex:
   enforcement; the result event records which source priced the run (`price_source`).
 - **Checkpoint/resume** works cross-worker: the Codex conversation (a local rollout file) is
   persisted to the blob store alongside the workspace snapshot and restored on `send()`.
+- **Reasoning effort**: `spec.reasoning_effort` becomes the SDK's per-turn `effort`, re-applied on
+  every turn so resumed conversations keep it. Codex has no `max` level; it maps to `xhigh` with a
+  status warning.
 - **Gaps**: `allowed_tools`/`disallowed_tools` have no Codex equivalent (ignored with a status
   warning), and Codex has no background-task re-invocation, so `background_task_timeout` is inert.
   `permission_mode` maps onto Codex's sandbox+approval pairs (`bypassPermissions` → full access,
@@ -220,6 +223,10 @@ Beyond skills, several `AgentSpec` fields shape what the agent can do and the en
   automatically when skills are present.
 - **`max_turns` / `max_budget_usd`** — hard caps on loop length and spend (the run ends with the matching
   stop reason).
+- **`reasoning_effort`** — how much reasoning the model spends per response
+  (`"none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"`; unset = harness default). The
+  vocabulary is the union of both harnesses'; each maps levels only the other supports to its nearest
+  own (Claude: `minimal`/`none` → `low`; Codex: `max` → `xhigh`, with a status warning).
 - **`env`** — extra **non-secret** environment variables for the agent's tool subprocess (config flags,
   etc.). Values live in the spec and are baked into the deployed engine, so never put secrets here — pass
   those per-invocation (see [Secrets & security](#secrets--security)).

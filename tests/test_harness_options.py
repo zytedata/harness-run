@@ -42,6 +42,17 @@ def test_default_allowed_tools_when_unset_and_disallowed_passthrough():
     assert opts.disallowed_tools == ["WebSearch"]
 
 
+def test_reasoning_effort_passthrough_and_floor():
+    spec = AgentSpec(name="a", model="m", reasoning_effort="high")
+    assert ClaudeCodeHarness().build_options(spec, _ctx(spec)).effort == "high"
+    # Codex-only levels floor to Claude's lowest; unset leaves the SDK default.
+    for codex_only in ("minimal", "none"):
+        low = AgentSpec(name="a", model="m", reasoning_effort=codex_only)
+        assert ClaudeCodeHarness().build_options(low, _ctx(low)).effort == "low"
+    unset = AgentSpec(name="a", model="m")
+    assert ClaudeCodeHarness().build_options(unset, _ctx(unset)).effort is None
+
+
 def test_github_mcp_built_from_resolved_secret_only():
     spec = AgentSpec(name="a", model="m", mcp_servers=[McpServer.github()])
     # No token resolved → server skipped (never errors, never logs a token).

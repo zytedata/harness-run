@@ -32,7 +32,9 @@ dependencies = [
 dev = [
     "pytest",
     "pytest-asyncio",
-    "ruff",
+    # Pinned to the CI-green series: 0.16 added rules (RUF022, UP035/41, S110, ...)
+    # that flag ~76 pre-existing spots. Bump together with that cleanup.
+    "ruff<0.16",
     "mypy",
 ]
 

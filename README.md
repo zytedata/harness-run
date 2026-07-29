@@ -444,6 +444,25 @@ result exists — poll `run.done` for in-flight runs, not this. Caveats: `list_s
 bucket-wide, so engines sharing an output bucket see each other's sessions; the `local` runtime keeps no
 durable event log (`list_sessions` shows its workdir's session dirs; `history()` raises).
 
+## Monitoring job CPU/RAM (OOM forensics)
+
+The platform gives you **no** resource metrics for agent jobs: query-job containers run in a Google tenant
+project, so their Cloud Run metrics and OOM-kill events never reach your project. The worker therefore
+samples **itself** (its cgroup) and ships the record to your Cloud Logging, where it survives a mid-turn
+kill:
+
+- **Per-session samples** — every ~20s to the `remote_agent_toolkit_resources` log (not the event stream, so
+  no noise). After a crash, the last sample sits at most one interval before death:
+  `logName="projects/<project>/logs/remote_agent_toolkit_resources" AND labels.session_id="<sid>"`.
+- **A visible warning** — the first time memory crosses 85% of the limit, a `memory pressure: …` status
+  event lands on the normal event stream, so a watcher sees trouble before the platform kills the worker at
+  the limit (the fix: deploy with higher `resource_limits`, see above).
+- **Peak in every result** — the terminal result's `raw` carries `memory_peak_bytes` /
+  `memory_limit_bytes` / `cpu_usec`, so completed turns report their high-water mark for free.
+
+Default on; tune or disable with the `AGENT_RESOURCE_SAMPLE_S` env var on the engine (seconds; `0`
+disables).
+
 ## Tracing: see what the agent did, span by span
 
 Every `gemini` turn is exported to **Cloud Trace** as a span tree — one root span per turn

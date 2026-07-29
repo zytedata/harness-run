@@ -233,7 +233,16 @@ def deploy(
 
     stage_dir, extra_packages = stage_agent(spec)
     os.chdir(stage_dir)  # extra_packages are resolved relative to the cwd
-    app = AdkApp(agent=build_agent(spec), enable_tracing=True)
+    # session_service_builder pins the app to in-memory ADK sessions: the toolkit keys
+    # everything by its own session id (AGENT_SESSION directive + GCS mirror), and the
+    # 2026-07-28 platform runner's managed-session wiring is broken on new engines.
+    from .adk_agent import in_memory_session_service
+
+    app = AdkApp(
+        agent=build_agent(spec),
+        enable_tracing=True,
+        session_service_builder=in_memory_session_service,
+    )
     config_kwargs = build_engine_config(
         spec,
         project=project,
@@ -403,16 +412,30 @@ class GeminiSession:
             except Exception:  # noqa: BLE001 — refill is best-effort; the turn already dispatched
                 pass
         else:
-            # Cold path: the prompt is the only reliable channel to the agent, so the secrets
-            # POINTER (and the resume marker) ride leading directive lines the agent strips.
-            # Never values: the platform persists the job input to jobs/<sid>_input.jsonl.
-            directives = ""
+            # Cold path: the prompt is the only reliable channel to the agent, so the
+            # session id, secrets POINTER, and resume marker ride leading directive lines
+            # the agent strips. Never secret values: the platform persists the job input
+            # to jobs/<sid>_input.jsonl.
+            directives = f"AGENT_SESSION={sid}\n"
             if secrets_uri:
                 directives += f"AGENT_SECRETS_GCS={secrets_uri}\n"
             if resume:
                 directives += f"AGENT_RESUME={sid}\n"
             prompt = directives + message
-            payload = {"input": {"session_id": sid, "user_id": _USER_ID, "message": prompt}}
+            # Two platform-runner regressions of 2026-07-28 shape this payload (engines
+            # created before still work the old way; this form works on both):
+            # * class_method must be EXPLICIT — the runner no longer resolves a default
+            #   method for newly created engines; a job without it completes SUCCESS
+            #   having invoked nothing (empty output, no events, no logs).
+            # * session_id must be OMITTED — new engines' job workers lose the managed
+            #   session service (no GOOGLE_CLOUD_AGENT_ENGINE_ID), so a supplied id 498s
+            #   against the in-memory fallback. Omitted, the app auto-creates a throwaway
+            #   ADK session; OUR session id rides the AGENT_SESSION directive instead and
+            #   keys the event stream/mirror/checkpoints exactly as before.
+            payload = {
+                "class_method": "async_stream_query",
+                "input": {"user_id": _USER_ID, "message": prompt},
+            }
             cfg: dict[str, Any] = {"query": json.dumps(payload)}
             if engine._output_bucket:
                 cfg["output_gcs_uri"] = f"{engine._output_bucket}/jobs/{sid}.jsonl"

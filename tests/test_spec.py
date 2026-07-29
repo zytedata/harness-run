@@ -19,6 +19,7 @@ def _example_spec() -> AgentSpec:
         permission_mode="bypassPermissions",
         max_turns=42,
         max_budget_usd=5.0,
+        reasoning_effort="high",
         checkpoint=True,
         env={"FOO": "bar"},
     )
@@ -63,6 +64,16 @@ def test_skillsource_git_smoke() -> None:
     assert s.ref == "0.2.0"
     assert s.subdir == "skills"
     assert SkillSource.from_dict(s.to_dict()) == s
+
+
+def test_agentspec_reasoning_effort_round_trip() -> None:
+    # None (default) is omitted from the dict and survives the trip.
+    spec = AgentSpec(name="a", model="m")
+    assert spec.reasoning_effort is None
+    assert "reasoning_effort" not in spec.to_dict()
+    assert AgentSpec.from_dict(spec.to_dict()).reasoning_effort is None
+    explicit = AgentSpec(name="a", model="m", reasoning_effort="xhigh")
+    assert AgentSpec.from_dict(explicit.to_dict()).reasoning_effort == "xhigh"
 
 
 def test_agentspec_interactive_round_trip() -> None:

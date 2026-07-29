@@ -433,7 +433,8 @@ Each is a `typing.Protocol`; concrete adapters ship for prod (GCP) and dev (loca
   `<cwd>/.agents/skills` (same SKILL.md format, Codex's repo-level discovery — verified live: the
   model reads a staged SKILL.md unprompted); MCP servers → `--config mcp_servers.*` overrides (a
   github server's token rides `bearer_token_env_var` + process env, never argv); `output_schema` →
-  per-turn `output_schema`. Codex's shell-env policy default (filter `*KEY*`/`*TOKEN*` names from the
+  per-turn `output_schema`; `reasoning_effort` → per-turn `effort` (re-applied every turn, so resume
+  keeps it; the Claude-only `max` maps to `xhigh` with a status warning). Codex's shell-env policy default (filter `*KEY*`/`*TOKEN*` names from the
   shell) is the opposite of the toolkit's contract, so the default excludes are lifted with the two
   harness-consumed names explicitly re-excluded. **Parity gaps handled adapter-side**: Codex reports
   token counts but no USD and enforces no caps — the harness prices tokens via LiteLLM's live

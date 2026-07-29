@@ -200,6 +200,12 @@ class ClaudeCodeHarness:
         )
         if spec.disallowed_tools:
             extra["disallowed_tools"] = list(spec.disallowed_tools)
+        if spec.reasoning_effort is not None:
+            # Claude's scale has no minimal/none (Codex-only levels); low is the floor.
+            # Set via `extra` so None never reaches an SDK without the kwarg.
+            extra["effort"] = {"minimal": "low", "none": "low"}.get(
+                spec.reasoning_effort, spec.reasoning_effort
+            )
 
         return ClaudeAgentOptions(
             cwd=str(ctx.workspace),

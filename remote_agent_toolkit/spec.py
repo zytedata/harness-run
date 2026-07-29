@@ -266,6 +266,13 @@ class AgentSpec:
             background tasks may consume more turns in total — ``RunResult.num_turns``
             reports the cumulative count. ``max_budget_usd`` is cumulative regardless.
         max_budget_usd: Hard cap on spend.
+        reasoning_effort: How much reasoning the model spends per response, or ``None``
+            for the harness default. The union of both harnesses' vocabularies is
+            accepted — ``"none" | "minimal" | "low" | "medium" | "high" | "xhigh" |
+            "max"`` — and each harness maps levels only the other side supports to its
+            nearest own: Codex maps ``max → xhigh`` (with a ``spec_warning`` status);
+            Claude Code maps ``minimal``/``none`` ``→ low``. Unknown strings pass
+            through to the SDK untouched.
         background_task_timeout: Seconds to keep a turn open waiting for the agent's
             still-running background tasks after the model ends its turn (event-driven
             waiting: the harness holds the stream open and the CLI re-invokes the model
@@ -302,6 +309,7 @@ class AgentSpec:
     permission_mode: str = "bypassPermissions"
     max_turns: int = 120
     max_budget_usd: float = 10.0
+    reasoning_effort: str | None = None
     background_task_timeout: float = 3600.0
     checkpoint: bool = False
     interactive: bool | None = None
@@ -346,6 +354,8 @@ class AgentSpec:
             d["allowed_tools"] = list(self.allowed_tools)
         if self.disallowed_tools is not None:
             d["disallowed_tools"] = list(self.disallowed_tools)
+        if self.reasoning_effort is not None:
+            d["reasoning_effort"] = self.reasoning_effort
         if self.interactive is not None:
             d["interactive"] = self.interactive
         if self.env is not None:
@@ -382,6 +392,7 @@ class AgentSpec:
             permission_mode=d.get("permission_mode", "bypassPermissions"),
             max_turns=int(d.get("max_turns", 120)),
             max_budget_usd=float(d.get("max_budget_usd", 10.0)),
+            reasoning_effort=d.get("reasoning_effort"),
             background_task_timeout=float(d.get("background_task_timeout", 3600.0)),
             checkpoint=bool(d.get("checkpoint", False)),
             interactive=None if d.get("interactive") is None else bool(d["interactive"]),

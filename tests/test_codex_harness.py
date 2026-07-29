@@ -137,6 +137,29 @@ def test_build_options_output_schema(tmp_path):
     assert opts.run_args["output_schema"] == schema
 
 
+def test_build_options_reasoning_effort(tmp_path):
+    spec = AgentSpec(name="a", model="gpt-5.6-luna", harness="codex", reasoning_effort="high")
+    opts = CodexHarness().build_options(spec, _ctx(tmp_path, spec))
+    assert opts.run_args["effort"] == "high"
+    assert not opts.warnings
+    # The Claude-only "max" maps to codex's ceiling, with a warning.
+    spec2 = AgentSpec(name="a", model="gpt-5.6-luna", harness="codex", reasoning_effort="max")
+    opts2 = CodexHarness().build_options(spec2, _ctx(tmp_path / "b", spec2))
+    assert opts2.run_args["effort"] == "xhigh"
+    assert any("reasoning_effort" in w for w in opts2.warnings)
+    # Unset sends nothing (SDK/thread default).
+    spec3 = AgentSpec(name="a", model="gpt-5.6-luna", harness="codex")
+    opts3 = CodexHarness().build_options(spec3, _ctx(tmp_path / "c", spec3))
+    assert "effort" not in opts3.run_args
+
+
+async def test_run_passes_effort_to_turn(tmp_path, monkeypatch):
+    script = [turn_started(), agent_message("ok"), turn_completed("completed")]
+    spec = AgentSpec(name="a", model="gpt-5.6-luna", harness="codex", reasoning_effort="high")
+    _events, client = await _events_of(script, tmp_path, monkeypatch, spec=spec)
+    assert client.turns[0][1]["effort"] == "high"
+
+
 # -- pricing ------------------------------------------------------------------
 # The autouse conftest fixture keeps the LiteLLM fetch off the network; the baked
 # table is the fallback under test unless a test stubs the dataset itself.

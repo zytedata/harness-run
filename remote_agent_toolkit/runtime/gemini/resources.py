@@ -225,3 +225,45 @@ def start_sampler(
     return ResourceSampler(
         session_id, side_emit=side_sink.emit, on_event=on_event, sample_s=sample_s, root=root
     ).start()
+
+
+def _sample_rows(entries: Any) -> list[dict]:
+    """Map raw Cloud Logging entries to sample rows (pure; separated for offline tests).
+
+    Each row: ``{"time": <datetime>, **usage keys}`` — e.g. ``memory_current_bytes``,
+    ``memory_limit_bytes``, ``cpu_usec``. Malformed entries are skipped.
+    """
+    rows: list[dict] = []
+    for entry in entries:
+        payload = entry.payload if isinstance(entry.payload, dict) else {}
+        raw = payload.get("raw") or {}
+        if raw.get("event") != "resource_sample":
+            continue
+        rows.append({"time": entry.timestamp,
+                     **{k: v for k, v in raw.items() if k != "event"}})
+    return rows
+
+
+def read_samples(
+    session_id: str,
+    project: str | None = None,
+    credentials: Any | None = None,
+) -> list[dict]:
+    """All persisted resource samples for ``session_id``, oldest first.
+
+    Reads the :data:`RESOURCES_LOG` side log (bounded by log retention, ~30 days default),
+    so it works long after the run — including for a worker the platform killed mid-turn,
+    whose last sample landed at most one interval before death. Each row carries ``time``
+    (an aware datetime) plus the usage keys of :func:`read_usage`.
+    """
+    import google.cloud.logging  # lazy: client-side helper, engine never calls this
+
+    client = google.cloud.logging.Client(project=project, credentials=credentials)
+    filter_str = (
+        f'logName="projects/{client.project}/logs/{RESOURCES_LOG}" '
+        f'AND labels.session_id="{session_id}"'
+    )
+    entries = client.list_entries(
+        filter_=filter_str, order_by=google.cloud.logging.ASCENDING, page_size=1000
+    )
+    return _sample_rows(entries)

@@ -461,7 +461,13 @@ kill:
   `memory_limit_bytes` / `cpu_usec`, so completed turns report their high-water mark for free.
 
 Default on; tune or disable with the `AGENT_RESOURCE_SAMPLE_S` env var on the engine (seconds; `0`
-disables).
+disables). Read a session's samples back with:
+
+```python
+session = engine.get_session("<session-id>")      # or any session you already hold
+for row in session.resource_samples():            # oldest first; ~30-day log retention
+    print(row["time"], row.get("memory_current_bytes"), row.get("memory_limit_bytes"))
+```
 
 ## Tracing: see what the agent did, span by span
 

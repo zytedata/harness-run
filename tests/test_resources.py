@@ -161,3 +161,40 @@ def test_run_turn_stamps_peak_into_result(tmp_path, monkeypatch):
     assert raw["memory_peak_bytes"] == 3 << 30
     assert raw["memory_limit_bytes"] == 4 << 30
     assert side_events and side_events[0].raw["event"] == "resource_sample"
+
+
+def test_sample_rows_maps_entries_and_skips_noise():
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+
+    t0 = datetime(2026, 7, 29, 11, 46, 56, tzinfo=timezone.utc)
+    entries = [
+        SimpleNamespace(timestamp=t0, payload={
+            "raw": {"event": "resource_sample", "memory_current_bytes": 2 << 30,
+                    "memory_limit_bytes": 4 << 30, "cpu_usec": 76_200_000},
+        }),
+        SimpleNamespace(timestamp=t0, payload={"raw": {"event": "memory_pressure"}}),  # not a sample
+        SimpleNamespace(timestamp=t0, payload="plain text"),  # malformed -> skipped
+    ]
+    rows = resources._sample_rows(entries)
+    assert rows == [{
+        "time": t0, "memory_current_bytes": 2 << 30,
+        "memory_limit_bytes": 4 << 30, "cpu_usec": 76_200_000,
+    }]
+
+
+def test_session_resource_samples_delegates(monkeypatch):
+    from remote_agent_toolkit.runtime.gemini import backend
+
+    calls = {}
+
+    def fake_read_samples(session_id, project=None, credentials=None):
+        calls.update(session_id=session_id, project=project)
+        return [{"time": "t", "memory_current_bytes": 1}]
+
+    monkeypatch.setattr(resources, "read_samples", fake_read_samples)
+    engine = backend.GeminiEngine(resource="r/reasoningEngines/1", spec=AgentSpec(name="a", model="m"),
+                                  project="proj-x", location="us-central1")
+    session = backend.GeminiSession(engine, "sid-7")  # re-attach by id: no GCP calls
+    assert session.resource_samples() == [{"time": "t", "memory_current_bytes": 1}]
+    assert calls == {"session_id": "sid-7", "project": "proj-x"}

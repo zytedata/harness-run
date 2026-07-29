@@ -87,7 +87,9 @@ in the public surface.
    `AgentSpec` carries no secrets at all — credentials are passed as a `name → value` map to `run`/`send`,
    scoped to that one turn (nothing baked, nothing shared across tenants). Values never ride the invocation
    payload either (the platform persists a job's input verbatim; Pub/Sub retains unacked messages): they are
-   staged at a **single-use GCS object** the worker fetches and deletes; only the pointer travels. The
+   staged at a **per-invocation GCS object** the worker fetches (and deletes only at the end of a completed
+   turn — the platform re-runs a crashed attempt with the same payload, so the object must survive for the
+   retry; a client completion-cleanup and a 1-day lifecycle rule back it up); only the pointer travels. The
    harness routes each secret to its consumer — a repo's `auth` token into git `origin`, a GitHub MCP token
    into headers, the rest into the agent's env — and checkpoint snapshots are credential-scrubbed.
 6. **Encode the platform contracts as defaults, document the why.** The deploy path applies the known-good
@@ -382,7 +384,8 @@ These are facts measured during the PoC. The library encodes them so consumers i
 - **Platform job output** — `jobs/<sid>.jsonl` (+ `<sid>_input.jsonl`), written by the platform for each
   cold job. Per-job: a resume under the same session **overwrites** it. ⚠️ the input file persists the
   query verbatim — which is why per-invocation secrets never ride the invocation payload (see §3.5): they
-  are staged at a single-use `invocation-secrets/<sid>-<nonce>.json` object the worker fetches + deletes.
+  are staged at a per-invocation `invocation-secrets/<sid>-<nonce>.json` object the worker fetches and
+  deletes at the end of a completed turn (retry-safe; a 1-day lifecycle rule reaps orphans).
 - **Cloud Logging** — the per-step log, bounded by log-bucket retention (~30 days default).
 - **Checkpoints** — transcript + workspace tar under `checkpoints/`, keyed by (mapped) session id.
 - `engine.list_sessions()` merges the GCS layers (bucket-wide) with the engine's ADK sessions;
@@ -475,7 +478,7 @@ Each is a `typing.Protocol`; concrete adapters ship for prod (GCP) and dev (loca
   `PubSubDispatch`, `InMemoryDispatch`.
 - **`SecretResolver`** — `resolve(name) -> value`, a *control-plane* helper for callers who keep secret
   values in env/Secret Manager and need to build the per-invocation `secrets` dict (the runtime itself
-  receives values via the single-use GCS handoff, §3.5). Adapters: `EnvSecretResolver` (implemented),
+  receives values via the staged GCS handoff, §3.5). Adapters: `EnvSecretResolver` (implemented),
   `GcpSecretResolver` (stub).
 - **`SessionStore`** — the Claude SDK protocol (`append` / `load` / `list_subkeys`). Adapter:
   `GcsSessionStore` (keyed by `session_id`). A **conformance suite** (`run_session_store_conformance`)
@@ -547,7 +550,7 @@ remote-agent-toolkit/
 │   │       ├── deploy.py          # packaging + contracts (uv/glibc/IS_SANDBOX/...)
 │   │       ├── adk_agent.py       # the deployed ADK BaseAgent wrapping the harness
 │   │       ├── translate.py       # AgentEvent → ADK Event
-│   │       ├── handoff.py         # single-use GCS staging of per-invocation secrets
+│   │       ├── handoff.py         # GCS staging of per-invocation secrets (retry-safe cleanup)
 │   │       ├── history.py         # durable event mirror + history/list_sessions readers
 │   │       ├── tracing.py         # AgentEvent stream → Cloud Trace spans (TurnTracer)
 │   │       └── pool.py            # WarmPool worker side

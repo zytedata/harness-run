@@ -66,7 +66,7 @@ def _split_secrets_directive(prompt: str) -> tuple[str | None, str]:
 
     Returns ``(uri, remaining_prompt)``; ``(None, prompt)`` when absent. The directive is
     consumed here so the model never sees it. The pointer (not values — the platform persists
-    the job input) targets the single-use staged object; see :func:`_fetch_secrets`.
+    the job input) targets the staged secrets object; see :func:`_fetch_secrets`.
     """
     m = _SECRETS_DIRECTIVE.match(prompt)
     if m:
@@ -75,7 +75,11 @@ def _split_secrets_directive(prompt: str) -> tuple[str | None, str]:
 
 
 def _fetch_secrets(secrets_uri: str | None) -> tuple[dict, AgentEvent | None]:
-    """Fetch (and delete) the staged per-invocation secrets; never raises.
+    """Fetch the staged per-invocation secrets; never raises.
+
+    The staging object is NOT deleted here: the platform re-runs a killed attempt with the
+    same payload (same pointer), so the object must survive until the turn reaches its
+    terminal result — ``_run_turn`` deletes it then (see the handoff module docstring).
 
     Returns ``(secrets, warning_event)``: on a missing/unreadable staging the run proceeds
     without secrets and the caller surfaces the (value-free) warning so the failure mode is
@@ -83,9 +87,9 @@ def _fetch_secrets(secrets_uri: str | None) -> tuple[dict, AgentEvent | None]:
     """
     if not secrets_uri:
         return {}, None
-    from .handoff import fetch_and_delete_secrets
+    from .handoff import fetch_secrets
 
-    secrets = fetch_and_delete_secrets(secrets_uri)
+    secrets = fetch_secrets(secrets_uri)
     if secrets:
         return secrets, None
     return {}, AgentEvent(
@@ -267,8 +271,9 @@ class ToolkitAgent(BaseAgent):
 
         Shared by the cold path and a warm worker's claimed turn — both tag the Cloud Logging
         stream and checkpoint with ``session_id``, so the client tails identically either way.
-        ``secrets_uri`` points at the single-use staged secrets object (fetched + deleted here);
-        values never ride the invocation payload.
+        ``secrets_uri`` points at the staged secrets object (fetched here; deleted only once
+        the turn's terminal result went out, so a platform retry of a killed attempt still
+        finds it); values never ride the invocation payload.
         """
         from ...harness import resolve_harness
         from ...harness.context import RunContext
@@ -351,6 +356,7 @@ class ToolkitAgent(BaseAgent):
                     raw={"event": "harness_error", "is_error": True, "subtype": "error",
                          "session_id": session_id},
                 ))
+                saw_result = True  # the error result IS the turn's terminal result
         finally:
             tracer.close()  # end the turn span (+ any tool span orphaned by a crash)
             # Flush the turn's durable history file — also on early generator close (a
@@ -361,6 +367,16 @@ class ToolkitAgent(BaseAgent):
                 import time as _time
 
                 write_turn_mirror(events_uri, session_id, mirror, now_ms=int(_time.time() * 1000))
+        # The terminal result went out, so no platform retry of this attempt can follow —
+        # NOW the staged secrets can go. A killed attempt never reaches this line, leaving
+        # the object for the platform's automatic re-run of the same payload (the client's
+        # completion cleanup and the bucket lifecycle rule back this up; see handoff docs).
+        # Deliberately after `finally`, not in it: `finally` also runs under GeneratorExit
+        # (a half-consumed turn), where the run may still be retried/resumed elsewhere.
+        if saw_result and secrets_uri:
+            from .handoff import delete_staged_secrets
+
+            await asyncio.to_thread(delete_staged_secrets, secrets_uri)
 
     async def _pool_worker(self, spec: Any, invocation_id: str = "") -> AsyncGenerator[Any, None]:
         """Block pulling the dispatch subscription, then process the claimed turn.

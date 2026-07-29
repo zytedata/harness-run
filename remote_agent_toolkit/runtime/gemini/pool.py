@@ -49,8 +49,9 @@ def dispatch_payload(
     """The turn payload published to the pool: the worker adopts ``session_id`` for the turn.
 
     SECURITY: the payload never carries secret *values* — only ``secrets_gcs``, the gs://
-    pointer to the single-use staged object the worker fetches and deletes (``handoff.py``).
-    A Pub/Sub message is retained until acked, so values in it would persist.
+    pointer to the staged object the worker fetches (and deletes once the turn completes —
+    a redelivered dispatch must still find it; ``handoff.py``). A Pub/Sub message is
+    retained until acked, so values in it would persist.
     """
     payload = {"session_id": session_id, "message": message, "resume": bool(resume)}
     if secrets_gcs:

@@ -345,10 +345,13 @@ your own `ANTHROPIC_API_KEY`); local is a trusted-dev context.
 
 **In transit & at rest.** Secret values never travel in the invocation payload itself — the platform
 *persists* a job's input verbatim (`jobs/<sid>_input.jsonl` in the output bucket), and a Pub/Sub message is
-retained until acked, so values in either would linger. Instead the values are staged at a **single-use GCS
-object** in the output bucket (readable only by the bucket's principals: your operator identity and the RE
-service agent); the invocation carries just that pointer, and the worker **deletes the object the moment it
-reads it** (the client also cleans it up on run completion as a backstop). The toolkit **never** writes secret
+retained until acked, so values in either would linger. Instead the values are staged at a **per-invocation
+GCS object** in the output bucket (readable only by the bucket's principals: your operator identity and the RE
+service agent); the invocation carries just that pointer, and the worker **deletes the object once the turn's
+terminal result is out** — not on read, because the platform automatically re-runs a crashed job attempt with
+the same payload, and that retry must still find its credentials. The client also cleans the object up on run
+completion, and deploy installs a 1-day GCS lifecycle rule on the `invocation-secrets/` prefix as the
+last-resort reaper for objects orphaned by a crash on both sides. The toolkit **never** writes secret
 values to Cloud Logging, to an `AgentEvent`, or to a checkpoint — push tokens are scrubbed from `.git/config`
 before a workspace snapshot and re-embedded on resume. Don't log the `secrets` dict yourself.
 

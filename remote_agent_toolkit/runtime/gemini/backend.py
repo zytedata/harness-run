@@ -219,6 +219,22 @@ def deploy(
     staging_bucket = staging_bucket or f"gs://{project}-agent-staging"
     output_bucket = output_bucket or f"gs://{project}-agent-output"
 
+    # Backstop reaper for staged invocation secrets orphaned by a crash on both sides
+    # (worker delete at turn end + client delete on completion are the main lines).
+    # Best-effort: the rule is the third cleanup layer and the operator may lack
+    # storage.buckets.update — warn, never fail the deploy.
+    from .handoff import ensure_secrets_lifecycle
+
+    if not ensure_secrets_lifecycle(output_bucket):
+        import warnings
+
+        warnings.warn(
+            f"could not ensure the invocation-secrets lifecycle rule on {output_bucket}; "
+            "staged secrets orphaned by crashed jobs will not be auto-reaped "
+            "(needs storage.buckets.update on the bucket)",
+            stacklevel=2,
+        )
+
     # Warm pool: the workers pull a shared dispatch subscription; the engine env points at it.
     topic = subscription = None
     if warm_pool:
@@ -359,14 +375,15 @@ class GeminiSession:
         self._last_result: RunResult | None = None
         self._current_run: DrivenRun | None = None
         self._last_job: Any | None = None
-        self._staged_secrets_uri: str | None = None  # single-use handoff object (cleanup on complete)
+        self._staged_secrets_uri: str | None = None  # staged handoff object (cleanup on complete)
 
     def run(self, message: str, *, secrets: dict[str, str] | None = None) -> DrivenRun:
         """Start a fresh turn (submits a ``run_query_job``).
 
         ``secrets`` is a per-invocation name → value map (the agent's own keys, any repo
         ``auth`` / GitHub MCP token) — never baked into the engine, never logged. Values are
-        staged at a single-use GCS object the worker fetches and deletes; only that pointer
+        staged at a per-invocation GCS object the worker fetches (and deletes once the turn
+        completes — a platform retry of a killed attempt must still find it); only that pointer
         rides the invocation (the platform persists a job's input verbatim, and a Pub/Sub
         message is retained until acked, so values must never travel in either).
         """
@@ -377,7 +394,7 @@ class GeminiSession:
         return self._submit(message, resume=True, secrets=secrets)
 
     def _stage_secrets(self, secrets: dict[str, str] | None) -> str | None:
-        """Stage per-invocation secrets to a single-use GCS object; return its gs:// URI."""
+        """Stage per-invocation secrets to a nonce-keyed GCS object; return its gs:// URI."""
         if not secrets:
             return None
         engine = self._engine
@@ -400,7 +417,7 @@ class GeminiSession:
         # Watermark the log tail just before kicking off (small slack for clock skew).
         since = time.time() - 5
         secrets_uri = self._stage_secrets(secrets)
-        self._staged_secrets_uri = secrets_uri  # cleaned up on completion (worker deletes first)
+        self._staged_secrets_uri = secrets_uri  # cleaned up on completion (worker deletes at turn end)
 
         if engine._warm:
             # Warm path: dispatch the turn to the pool (a warm worker adopts our session_id),

@@ -122,7 +122,7 @@ def test_cold_submit_stages_secrets_and_query_carries_only_pointer(monkeypatch):
     assert "SUPERSECRET" not in query                      # never the value
     assert "AGENT_SECRETS_GCS=gs://out/invocation-secrets/sid-3-abc.json" in query
     assert staged["secrets"] == {"SH_APIKEY": "SUPERSECRET"}  # staged out-of-band
-    # Completion cleans up the staged object (backstop; the worker deletes on read).
+    # Completion cleans up the staged object (backstop; the worker deletes at turn end).
     assert session._staged_secrets_uri is None
     # 2026-07-28 platform-runner regressions: the invoked method must be named
     # explicitly (an unnamed one silently runs nothing on new engines), and the ADK
@@ -370,6 +370,137 @@ def test_run_turn_surfaces_workspace_prep_crash(monkeypatch):
     assert events[0].custom_metadata["kind"] == "result"
     assert events[0].custom_metadata["raw"]["is_error"] is True
     assert "git clone failed" in events[0].error_message
+
+
+def _patched_local_handoff_store(tmp_path, monkeypatch):
+    """Route the worker-side handoff (fetch/delete, normally GCS) to a LocalBlobStore."""
+    from remote_agent_toolkit.ports.blobstore import LocalBlobStore
+    from remote_agent_toolkit.runtime.gemini import handoff
+
+    store = LocalBlobStore(str(tmp_path / "blobs"))
+    monkeypatch.setattr(handoff, "GcsBlobStore", lambda bucket, *a, **kw: store)
+    return store, handoff
+
+
+def test_run_turn_deletes_staged_secrets_only_at_terminal_result(tmp_path, monkeypatch):
+    """Regression for the 2026-07-28/29 live failures (engines 9871…6672, 8563…8240).
+
+    The platform's job runner re-runs a killed attempt with the SAME payload, so the staged
+    secrets must survive the read and go only once the turn's terminal result is out — the
+    old fetch-and-delete-on-read stranded every retry credential-less (its repo clone died
+    with "could not read Username for 'https://bitbucket.org'").
+    """
+    monkeypatch.setenv("AGENT_JOBS_ROOT", str(tmp_path / "jobs"))
+    monkeypatch.chdir(tmp_path)  # no baked skills dir on the lookup paths
+    store, handoff = _patched_local_handoff_store(tmp_path, monkeypatch)
+    uri = handoff.stage_secrets("gs://bkt", "77", {"REPO_TOKEN": "tok"}, store=store)
+    key = uri[len("gs://bkt/"):]
+
+    seen = {}
+
+    class DoneHarness:
+        async def run(self, spec, rc):
+            seen["secrets"] = dict(rc.secrets)
+            seen["staged_mid_run"] = store.exists(key)
+            yield AgentEvent(kind="result", summary="done",
+                             raw={"subtype": "success", "is_error": False})
+
+    import remote_agent_toolkit.harness.claude_code as harness_mod
+    import remote_agent_toolkit.ports.eventsink as eventsink_mod
+    monkeypatch.setattr(harness_mod, "ClaudeCodeHarness", DoneHarness)
+    monkeypatch.setattr(eventsink_mod, "CloudLoggingSink",
+                        lambda **kw: InMemorySink(session_id="77"))
+
+    spec = AgentSpec(name="w", model="m")
+    agent = adk_agent.build_agent(spec)
+
+    async def drive():
+        return [ev async for ev in agent._run_turn(spec, "77", "go", None, secrets_uri=uri)]
+
+    events = asyncio.run(drive())
+    assert events[-1].custom_metadata["kind"] == "result"
+    assert seen["secrets"] == {"REPO_TOKEN": "tok"}  # values reached the harness
+    assert seen["staged_mid_run"] is True  # fetch did NOT consume (a retry must find it)
+    assert not store.exists(key)  # ...but the completed turn reaped it
+
+
+def test_run_turn_killed_attempt_leaves_secrets_for_the_retry(tmp_path, monkeypatch):
+    # Attempt 1 dies mid-turn (generator closed without a terminal result — the in-process
+    # analogue of the platform killing the worker): the staged object must remain, so the
+    # platform's automatic re-run of the same payload (attempt 2) still gets credentials.
+    monkeypatch.setenv("AGENT_JOBS_ROOT", str(tmp_path / "jobs"))
+    monkeypatch.chdir(tmp_path)  # no baked skills dir on the lookup paths
+    store, handoff = _patched_local_handoff_store(tmp_path, monkeypatch)
+    uri = handoff.stage_secrets("gs://bkt", "77", {"REPO_TOKEN": "tok"}, store=store)
+    key = uri[len("gs://bkt/"):]
+
+    fetched = []
+
+    class TwoEventHarness:
+        async def run(self, spec, rc):
+            fetched.append(dict(rc.secrets))
+            yield AgentEvent(kind="status", summary="working")
+            yield AgentEvent(kind="result", summary="done",
+                             raw={"subtype": "success", "is_error": False})
+
+    import remote_agent_toolkit.harness.claude_code as harness_mod
+    import remote_agent_toolkit.ports.eventsink as eventsink_mod
+    monkeypatch.setattr(harness_mod, "ClaudeCodeHarness", TwoEventHarness)
+    monkeypatch.setattr(eventsink_mod, "CloudLoggingSink",
+                        lambda **kw: InMemorySink(session_id="77"))
+
+    spec = AgentSpec(name="w", model="m")
+    agent = adk_agent.build_agent(spec)
+
+    async def attempt_1_killed():
+        gen = agent._run_turn(spec, "77", "go", None, secrets_uri=uri)
+        async for ev in gen:
+            if ev.custom_metadata["kind"] == "status" and "working" in ev.content.parts[0].text:
+                break  # die mid-turn
+        await gen.aclose()
+
+    asyncio.run(attempt_1_killed())
+    assert store.exists(key)  # no terminal result -> the object survives for the retry
+
+    async def attempt_2():
+        return [ev async for ev in agent._run_turn(spec, "77", "go", None, secrets_uri=uri)]
+
+    events = asyncio.run(attempt_2())
+    assert fetched[-1] == {"REPO_TOKEN": "tok"}  # the retry got the credentials
+    assert events[-1].custom_metadata["kind"] == "result"
+    assert not store.exists(key)  # the completed retry reaped it
+
+
+def test_run_turn_reaps_staged_secrets_on_application_failure_too(tmp_path, monkeypatch):
+    # An application-level failure still emits a terminal result and exits cleanly — the
+    # platform never retries it, so the staged object is reaped just like on success.
+    monkeypatch.setenv("AGENT_JOBS_ROOT", str(tmp_path / "jobs"))
+    monkeypatch.chdir(tmp_path)  # no baked skills dir on the lookup paths
+    store, handoff = _patched_local_handoff_store(tmp_path, monkeypatch)
+    uri = handoff.stage_secrets("gs://bkt", "77", {"K": "v"}, store=store)
+    key = uri[len("gs://bkt/"):]
+
+    class CrashingHarness:
+        async def run(self, spec, rc):
+            raise RuntimeError("boom")
+            yield  # pragma: no cover — makes this an async generator
+
+    import remote_agent_toolkit.harness.claude_code as harness_mod
+    import remote_agent_toolkit.ports.eventsink as eventsink_mod
+    monkeypatch.setattr(harness_mod, "ClaudeCodeHarness", CrashingHarness)
+    monkeypatch.setattr(eventsink_mod, "CloudLoggingSink",
+                        lambda **kw: InMemorySink(session_id="77"))
+
+    spec = AgentSpec(name="w", model="m")
+    agent = adk_agent.build_agent(spec)
+
+    async def drive():
+        return [ev async for ev in agent._run_turn(spec, "77", "go", None, secrets_uri=uri)]
+
+    events = asyncio.run(drive())
+    assert events[-1].custom_metadata["kind"] == "result"
+    assert events[-1].custom_metadata["raw"]["is_error"] is True
+    assert not store.exists(key)
 
 
 def test_warm_start_session_mints_canonical_uuid():

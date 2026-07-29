@@ -233,7 +233,16 @@ def deploy(
 
     stage_dir, extra_packages = stage_agent(spec)
     os.chdir(stage_dir)  # extra_packages are resolved relative to the cwd
-    app = AdkApp(agent=build_agent(spec), enable_tracing=True)
+    # session_service_builder pins the app to in-memory ADK sessions: the toolkit keys
+    # everything by its own session id (AGENT_SESSION directive + GCS mirror), and the
+    # 2026-07-28 platform runner's managed-session wiring is broken on new engines.
+    from .adk_agent import in_memory_session_service
+
+    app = AdkApp(
+        agent=build_agent(spec),
+        enable_tracing=True,
+        session_service_builder=in_memory_session_service,
+    )
     config_kwargs = build_engine_config(
         spec,
         project=project,

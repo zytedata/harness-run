@@ -458,3 +458,18 @@ def _safe_node_name(name: str) -> str:
 def build_agent(spec: Any) -> ToolkitAgent:
     """Build the deployable ADK agent from ``spec`` (carries the spec as a serialized dict)."""
     return ToolkitAgent(name=_safe_node_name(spec.name), spec_data=spec.to_dict())
+
+
+def in_memory_session_service() -> Any:
+    """Session-service builder pinned at deploy: always in-memory, never managed.
+
+    The toolkit has no use for managed ADK sessions — the session id rides the
+    AGENT_SESSION directive and durable history lives in the GCS event mirror — and the
+    2026-07-28 platform runner ships job workers whose managed-session wiring is broken
+    (create/get fail with "ReasoningEngine does not exist" / "Session not found").
+    Pinning in-memory makes the worker self-contained either way. Module-level (not a
+    lambda) so the pickled AdkApp references it importably from the staged package.
+    """
+    from google.adk.sessions.in_memory_session_service import InMemorySessionService
+
+    return InMemorySessionService()

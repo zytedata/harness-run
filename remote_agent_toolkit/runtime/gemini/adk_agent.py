@@ -28,6 +28,7 @@ from ...events import AgentEvent
 
 _RESUME_DIRECTIVE = re.compile(r"^\s*AGENT_RESUME=(\S+)[ \t]*\r?\n", re.IGNORECASE)
 _SECRETS_DIRECTIVE = re.compile(r"^\s*AGENT_SECRETS_GCS=(\S+)[ \t]*\r?\n", re.IGNORECASE)
+_SESSION_DIRECTIVE = re.compile(r"^\s*AGENT_SESSION=(\S+)[ \t]*\r?\n", re.IGNORECASE)
 _AGENT_DESCRIPTION = "A remote-agent-toolkit agent: a Claude Code session driven by the toolkit harness."
 
 
@@ -41,6 +42,20 @@ def _extract_prompt(content: Any) -> str:
 def _split_resume_directive(prompt: str) -> tuple[str | None, str]:
     """Strip a leading ``AGENT_RESUME=<session_id>`` directive (resume an existing turn)."""
     m = _RESUME_DIRECTIVE.match(prompt)
+    if m:
+        return m.group(1), prompt[m.end():]
+    return None, prompt
+
+
+def _split_session_directive(prompt: str) -> tuple[str | None, str]:
+    """Strip a leading ``AGENT_SESSION=<session_id>`` directive (the toolkit's session id).
+
+    Cold jobs omit ``session_id`` from the query input (the platform's job runner lost the
+    managed session service for new engines, so a supplied id fails; omitted, the app
+    auto-creates a throwaway ADK session) — the toolkit's own session id arrives here and
+    keys the event stream, mirror, and checkpoints instead of the ADK ctx id.
+    """
+    m = _SESSION_DIRECTIVE.match(prompt)
     if m:
         return m.group(1), prompt[m.end():]
     return None, prompt
@@ -225,12 +240,20 @@ class ToolkitAgent(BaseAgent):
                 yield event
             return
 
-        # The ADK session id is the stable token: it tags the Cloud Logging stream the client
-        # tails, and pins the Claude session id for checkpoint keying.
-        session_id = getattr(getattr(ctx, "session", None), "id", None) or ctx.invocation_id
-        # Strip leading control directives (never shown to the model): secrets pointer, resume.
+        # Strip leading control directives (never shown to the model): the toolkit session
+        # id, secrets pointer, resume marker.
+        directive_sid, prompt = _split_session_directive(prompt)
         secrets_uri, prompt = _split_secrets_directive(prompt)
         resume_sid, prompt = _split_resume_directive(prompt)
+        # The toolkit session id is the stable token: it tags the Cloud Logging stream the
+        # client tails, and pins the Claude session id for checkpoint keying. It rides the
+        # AGENT_SESSION directive (cold jobs run under a throwaway auto-created ADK
+        # session); pre-directive clients fall back to the ADK ctx id as before.
+        session_id = (
+            directive_sid
+            or getattr(getattr(ctx, "session", None), "id", None)
+            or ctx.invocation_id
+        )
         async for event in self._run_turn(
             spec, session_id, prompt, resume_sid, secrets_uri, invocation_id
         ):

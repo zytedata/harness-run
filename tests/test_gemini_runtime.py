@@ -70,6 +70,18 @@ def test_split_secrets_directive_strips_pointer():
     assert adk_agent._split_secrets_directive("no directive") == (None, "no directive")
 
 
+def test_split_session_directive():
+    sid, rest = adk_agent._split_session_directive("AGENT_SESSION=sid-9\ndo the task")
+    assert sid == "sid-9" and rest == "do the task"
+    assert adk_agent._split_session_directive("no directive") == (None, "no directive")
+    # Stacked directives strip in write order: session, then secrets, then resume.
+    prompt = "AGENT_SESSION=s1\nAGENT_SECRETS_GCS=gs://b/k.json\nAGENT_RESUME=s1\ngo"
+    sid, prompt = adk_agent._split_session_directive(prompt)
+    uri, prompt = adk_agent._split_secrets_directive(prompt)
+    resume, prompt = adk_agent._split_resume_directive(prompt)
+    assert (sid, uri, resume, prompt) == ("s1", "gs://b/k.json", "s1", "go")
+
+
 def test_cold_submit_stages_secrets_and_query_carries_only_pointer(monkeypatch):
     # SECURITY regression: the platform persists a job's input verbatim to GCS
     # (jobs/<sid>_input.jsonl), so the query must NEVER contain secret values — only the
@@ -112,6 +124,15 @@ def test_cold_submit_stages_secrets_and_query_carries_only_pointer(monkeypatch):
     assert staged["secrets"] == {"SH_APIKEY": "SUPERSECRET"}  # staged out-of-band
     # Completion cleans up the staged object (backstop; the worker deletes on read).
     assert session._staged_secrets_uri is None
+    # 2026-07-28 platform-runner regressions: the invoked method must be named
+    # explicitly (an unnamed one silently runs nothing on new engines), and the ADK
+    # session_id must be omitted (new engines' job workers lost the managed session
+    # service; the toolkit sid rides the AGENT_SESSION directive instead).
+    import json
+    parsed = json.loads(query)
+    assert parsed["class_method"] == "async_stream_query"
+    assert "session_id" not in parsed["input"]
+    assert query.count("AGENT_SESSION=sid-3") == 1
 
 
 def test_submit_with_secrets_requires_output_bucket():

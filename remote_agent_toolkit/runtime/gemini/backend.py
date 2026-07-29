@@ -182,6 +182,7 @@ def deploy(
     use_vertex: bool = True,
     min_instances: int = 0,
     max_instances: int = 1,
+    resource_limits: dict[str, str] | None = None,
     pool_size: int = 2,
     credentials: Any | None = None,
     **_: Any,
@@ -201,6 +202,12 @@ def deploy(
     ``min_instances`` defaults to 0: the toolkit only uses the async ``run_query_job`` path,
     where every job provisions its own worker, so an idle engine costs (almost) nothing. A
     min-instances container would serve only the unused sync path while billing continuously.
+
+    ``resource_limits`` sets the container CPU/memory, e.g. ``{"cpu": "4", "memory": "16Gi"}``
+    (platform default ``4``/``4Gi``). Raise the memory for agents whose turns do memory-heavy
+    work (dependency builds, whole-project imports) — under the default 4Gi the platform's
+    job runner can OOM-kill a worker mid-turn, losing the attempt's work and spend even
+    though the retry (see the handoff docs) picks the turn up from scratch.
     """
     import dataclasses
     import os
@@ -210,8 +217,11 @@ def deploy(
     from vertexai.preview.reasoning_engines import AdkApp
 
     from .adk_agent import build_agent
-    from .deploy import build_engine_config, stage_agent
+    from .deploy import build_engine_config, stage_agent, validate_resource_limits
 
+    # Fail fast BEFORE any side effect (pub/sub ensure, staging, the ~4 min billable build).
+    if resource_limits is not None:
+        validate_resource_limits(resource_limits)
     # A model override applies to the harness too: the deployed agent reads spec.model, so
     # bake the override into the spec (not just the env) before serializing it.
     if model:
@@ -256,6 +266,7 @@ def deploy(
         pool_subscription=subscription,
         min_instances=min_instances,
         max_instances=max_instances,
+        resource_limits=resource_limits,
     )
     client = vertexai.Client(project=project, location=location, credentials=credentials)
     engine = client.agent_engines.create(agent=app, config=gt.AgentEngineConfig(**config_kwargs))

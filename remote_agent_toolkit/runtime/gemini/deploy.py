@@ -13,6 +13,10 @@ Encodes the §6 deploy contracts so consumers inherit them for free:
 * ``min_instances=0`` default: the toolkit only uses the async ``run_query_job`` path, where
   every job provisions its own worker — a min-instances container would serve only the (unused)
   sync query path while billing continuously for idle compute.
+* ``resource_limits`` optional passthrough (platform default ``{"cpu": "4", "memory": "4Gi"}``):
+  raise the memory for agents whose turns build dependencies or import big projects — under the
+  4Gi default the platform's job runner can OOM-kill the worker mid-turn (observed live
+  2026-07-28/29), and its automatic retry replays the turn from scratch.
 
 Lifted & generalized from the PoC ``deploy/deploy_agent_engine.py`` (DESIGN.md §8):
 everything is now driven off the declarative :class:`AgentSpec` (Zyte specifics dropped).
@@ -233,6 +237,25 @@ def stage_agent(spec: AgentSpec) -> tuple[str, list[str]]:
     return str(stage), extra_packages
 
 
+def validate_resource_limits(resource_limits: dict[str, str]) -> None:
+    """Fail fast on a malformed ``resource_limits`` (BEFORE the ~4 min billable build).
+
+    Mirrors the platform contract (``ReasoningEngineSpec.deploymentSpec.resourceLimits``):
+    exactly the keys ``cpu`` and ``memory``, cpu in 1/2/4/6/8, memory ``<n>Gi`` up to 32.
+    Values are strings (Cloud Run quantity syntax), e.g. ``{"cpu": "4", "memory": "16Gi"}``.
+    """
+    if set(resource_limits) != {"cpu", "memory"}:
+        raise ValueError(
+            f"resource_limits must have exactly the keys 'cpu' and 'memory'; "
+            f"got {sorted(resource_limits)}"
+        )
+    cpu, memory = str(resource_limits["cpu"]), str(resource_limits["memory"])
+    if cpu not in ("1", "2", "4", "6", "8"):
+        raise ValueError(f"resource_limits cpu must be one of '1','2','4','6','8'; got {cpu!r}")
+    if not (memory.endswith("Gi") and memory[:-2].isdigit() and 1 <= int(memory[:-2]) <= 32):
+        raise ValueError(f"resource_limits memory must be '1Gi'..'32Gi'; got {memory!r}")
+
+
 def build_engine_config(
     spec: AgentSpec,
     *,
@@ -248,6 +271,7 @@ def build_engine_config(
     pool_subscription: str | None = None,
     min_instances: int = 0,
     max_instances: int = 1,
+    resource_limits: dict[str, str] | None = None,
 ) -> dict:
     """Build the kwargs dict for ``vertexai._genai.types.AgentEngineConfig(**kwargs)``.
 
@@ -255,8 +279,19 @@ def build_engine_config(
     lazily. ``project`` / ``location`` are accepted for caller symmetry (the genai client
     carries them); the staged ``extra_packages`` (from :func:`stage_agent`) are passed in.
     No ``build_options`` / install scripts — the toolkit needs no node (uv is a requirement).
+
+    ``resource_limits`` sets the engine container's CPU/memory (query-job workers run with
+    it too). Omitted → the platform default, ``{"cpu": "4", "memory": "4Gi"}`` — 4Gi is
+    shared by the harness CLI, the ADK app, and everything the agent's tools spawn, and
+    memory-heavy agent work (dependency builds, big imports) can OOM-kill the worker
+    mid-turn; raise it (up to ``"32Gi"``) for such agents. The kwarg is omitted from the
+    config when None so the platform default stays authoritative.
     """
+    if resource_limits is not None:
+        validate_resource_limits(resource_limits)
+    extra: dict = {"resource_limits": dict(resource_limits)} if resource_limits else {}
     return {
+        **extra,
         "display_name": spec.name,
         "description": f"remote-agent-toolkit agent: {spec.name}",
         "staging_bucket": staging_bucket,

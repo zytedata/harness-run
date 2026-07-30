@@ -546,6 +546,22 @@ class GeminiSession:
             credentials=engine._credentials,
         )
 
+    def resource_samples(self) -> list[dict]:
+        """This session's worker CPU/RAM samples, oldest first (OOM forensics).
+
+        Each row: ``time`` (aware datetime) + ``memory_current_bytes`` /
+        ``memory_limit_bytes`` / ``memory_peak_bytes`` / ``cpu_usec`` as available. Read
+        from the ``remote_agent_toolkit_resources`` Cloud Logging side log (~30 day
+        retention), so it works for re-attached sessions — and for a worker the platform
+        killed mid-turn, whose last sample landed at most one sample interval before death.
+        """
+        from .resources import read_samples
+
+        engine = self._engine
+        return read_samples(
+            self._session_id, project=engine._project, credentials=engine._credentials
+        )
+
     @property
     def status(self) -> RunStatus:
         return self._status

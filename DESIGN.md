@@ -550,6 +550,7 @@ remote-agent-toolkit/
 │   │       ├── handoff.py         # single-use GCS staging of per-invocation secrets
 │   │       ├── history.py         # durable event mirror + history/list_sessions readers
 │   │       ├── tracing.py         # AgentEvent stream → Cloud Trace spans (TurnTracer)
+│   │       ├── resources.py       # worker CPU/RAM self-sampling (OOM forensics)
 │   │       └── pool.py            # WarmPool worker side
 │   ├── ports/
 │   │   ├── blobstore.py           # BlobStore + GcsBlobStore + LocalBlobStore

@@ -309,7 +309,22 @@ class ToolkitAgent(BaseAgent):
         # Best-effort by construction.
         tracer = TurnTracer(agent_name=self.name, model=spec.model, session_id=session_id)
 
+        # CPU/RAM self-sampling (OOM forensics; see resources.py): periodic samples go to a
+        # side log, a first memory-pressure crossing lands on the MAIN stream (emitted from
+        # the sampler thread: straight to the sink + mirror — the generator can't be driven
+        # from a thread, so it skips the ADK event surface), and the terminal result's raw
+        # is stamped with the observed peak in surface() below.
+        from .resources import start_sampler
+
+        sampler = start_sampler(
+            session_id,
+            on_event=lambda ev: (sink.emit(ev), mirror.append(mirror_line(ev))),
+        )
+
         def surface(event: AgentEvent) -> Any:
+            if event.kind == "result" and sampler is not None:
+                event.raw = event.raw or {}
+                sampler.enrich_result(event.raw)
             sink.emit(event)  # near-real-time channel (Cloud Logging)
             mirror.append(mirror_line(event))
             tracer.observe(event)  # span open/close + annotations (never raises)
@@ -352,6 +367,8 @@ class ToolkitAgent(BaseAgent):
                          "session_id": session_id},
                 ))
         finally:
+            if sampler is not None:
+                sampler.stop()
             tracer.close()  # end the turn span (+ any tool span orphaned by a crash)
             # Flush the turn's durable history file — also on early generator close (a
             # partially-consumed turn still leaves a record). SYNC on purpose: this finally

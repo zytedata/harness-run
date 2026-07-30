@@ -39,6 +39,23 @@ _WATCHDOG_QUIET_S = 60.0
 _WATCHDOG_GRACE_S = 120.0
 
 
+def _event_fingerprint(event: AgentEvent) -> tuple:
+    """A stable content key for reconciling Cloud Logging with durable history.
+
+    Cloud Logging can ingest entries out of order, so the events already yielded by the
+    live tail are not necessarily a prefix of the GCS mirror. Both channels carry the
+    same logical :class:`AgentEvent`; canonical JSON makes its nested payload hashable
+    while preserving duplicate counts during recovery.
+    """
+    return (
+        event.kind,
+        event.summary,
+        json.dumps(event.raw, sort_keys=True, default=str),
+        event.cost_usd,
+        json.dumps(event.usage, sort_keys=True, default=str),
+    )
+
+
 async def _watched_tail(
     tail_factory: Any,
     probe: Any,
@@ -80,7 +97,7 @@ async def _watched_tail(
     pump_task = asyncio.ensure_future(pump())
     job_terminal_state: str | None = None
     job_terminal_at: float | None = None
-    yielded = 0
+    yielded: list[AgentEvent] = []
     try:
         while True:
             try:
@@ -95,9 +112,10 @@ async def _watched_tail(
                     continue
                 if now - job_terminal_at < grace_s:
                     continue
-                # Job over, grace elapsed, tail still silent. Try the durable record: the
-                # mirror holds the same event stream in the same order, so skip what the
-                # tail already delivered and finish with the real remainder if it's terminal.
+                # Job over, grace elapsed, tail still silent. Try the durable record. Cloud
+                # Logging can ingest out of order, so its delivered events are NOT necessarily
+                # a prefix of the mirror: subtract them by content (as a multiset) instead of
+                # slicing by count, then deliver the genuinely missing events in mirror order.
                 history: list[AgentEvent] = []
                 if history_reader is not None:
                     try:
@@ -105,7 +123,15 @@ async def _watched_tail(
                     except Exception:  # noqa: BLE001 — recovery is best-effort
                         history = []
                 if any(ev.kind == "result" for ev in history):
-                    for ev in history[yielded:]:
+                    seen: dict[tuple, int] = {}
+                    for ev in yielded:
+                        key = _event_fingerprint(ev)
+                        seen[key] = seen.get(key, 0) + 1
+                    for ev in history:
+                        key = _event_fingerprint(ev)
+                        if seen.get(key, 0):
+                            seen[key] -= 1
+                            continue
                         yield ev
                         if ev.kind == "result":
                             return
@@ -124,7 +150,7 @@ async def _watched_tail(
                 return
             if item is done:
                 return
-            yielded += 1
+            yielded.append(item)
             yield item
             if item.kind == "result":
                 return

@@ -113,6 +113,63 @@ def test_watchdog_recovers_real_result_from_durable_history():
     assert events[-1].kind == "result" and not (events[-1].raw or {}).get("is_error")
 
 
+def test_watchdog_recovers_result_when_tail_arrives_out_of_order():
+    # Live regression: Cloud Logging delivered checkpoint before result. Four tail events
+    # had arrived, but the result was history item 4 (index 3), so count-based prefix slicing
+    # skipped it and the client finalized a successful run as an error.
+    workspace = AgentEvent(kind="status", summary="workspace ready")
+    started = AgentEvent(kind="status", summary="session started")
+    message = AgentEvent(kind="message", summary="ok")
+    result = _result("ok")
+    checkpoint = AgentEvent(kind="status", summary="checkpoint saved")
+
+    async def tail():
+        for event in (workspace, started, message, checkpoint):
+            yield event
+        await asyncio.sleep(3600)
+
+    async def probe():
+        return "SUCCESS"
+
+    async def history_reader():
+        return [workspace, started, message, result, checkpoint]
+
+    async def drive():
+        return [e async for e in _watched_tail(
+            tail, probe, "sid", history_reader, quiet_s=0.02, grace_s=0.03
+        )]
+
+    events = asyncio.run(drive())
+    assert [e.summary for e in events] == [
+        "workspace ready", "session started", "ok", "checkpoint saved", "ok"
+    ]
+    assert events[-1].kind == "result"
+
+
+def test_watchdog_history_reconciliation_preserves_duplicate_counts():
+    # Two identical status events in history are legitimate. If the tail delivered one,
+    # multiset subtraction must recover exactly the other one, not drop both.
+    repeated = AgentEvent(kind="status", summary="still working")
+
+    async def tail():
+        yield repeated
+        await asyncio.sleep(3600)
+
+    async def probe():
+        return "SUCCESS"
+
+    async def history_reader():
+        return [repeated, repeated, _result()]
+
+    async def drive():
+        return [e async for e in _watched_tail(
+            tail, probe, "sid", history_reader, quiet_s=0.02, grace_s=0.03
+        )]
+
+    events = asyncio.run(drive())
+    assert [e.kind for e in events] == ["status", "status", "result"]
+
+
 def test_watchdog_synthesizes_error_when_history_has_no_result():
     # A durable record without a terminal result (worker killed mid-turn) is no recovery —
     # the synthetic error still fires.

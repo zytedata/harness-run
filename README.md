@@ -402,6 +402,7 @@ result = await session.run("/scrape https://books.toscrape.com title, price")   
 
 ```python
 gemini.deploy(spec, project=..., location=...)   # create; ops/CI only (warm_pool=True, pool_size=N for a pool)
+gemini.deploy(spec, ..., resource_limits={"cpu": "4", "memory": "16Gi"})  # container CPU/RAM (default 4 / 4Gi)
 gemini.get_engine("spider-builder", project=..., location=...)   # look up by name (app code)
 gemini.get_engine("spider-builder", ..., spec=spec)              # pass spec for structured output
 gemini.list_engines(project=..., location=...)   # discover what's deployed

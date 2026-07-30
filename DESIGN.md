@@ -404,6 +404,12 @@ These are facts measured during the PoC. The library encodes them so consumers i
 - `min_instances=0` (the default): the toolkit is async-only, where every job provisions its own worker —
   a standing container serves only the unused sync path while billing continuously. (`>=1` would matter
   only for real long *sync* jobs; min=0 SIGTERM-recycles a sync container ~2.5 min.)
+- `resource_limits` (deploy kwarg, optional): container CPU/memory; the platform default is
+  `{"cpu": "4", "memory": "4Gi"}` — that 4Gi is shared by the harness CLI, the ADK app, subagents, and
+  everything the agent's tools spawn, and memory-heavy turn work (dependency builds, whole-project
+  imports) can OOM-kill the worker mid-turn (observed live 2026-07-28/29; the job runner then replays
+  the turn from scratch). Deploy memory-heavy agents with e.g. `{"cpu": "4", "memory": "16Gi"}`
+  (memory max `32Gi`; cpu one of 1/2/4/6/8).
 
 **Identity / IAM (two identities — documented in the runbook)**
 - Deploy/operator = the **impersonated SA** (publish, read logs, submit jobs).

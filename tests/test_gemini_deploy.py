@@ -121,6 +121,37 @@ def test_build_engine_config_shape() -> None:
     assert cfg["min_instances"] == 0
 
 
+def test_build_engine_config_resource_limits() -> None:
+    """resource_limits passthrough (2026-07-29 OOM mitigation): set → forwarded verbatim;
+    omitted → absent from the config so the platform default (4 cpu / 4Gi) stays
+    authoritative."""
+    kw = dict(project="proj", location="us-central1", staging_bucket="gs://staging",
+              extra_packages=[])
+    cfg = deploy.build_engine_config(_spec(), **kw)
+    assert "resource_limits" not in cfg
+
+    limits = {"cpu": "8", "memory": "16Gi"}
+    cfg = deploy.build_engine_config(_spec(), resource_limits=limits, **kw)
+    assert cfg["resource_limits"] == {"cpu": "8", "memory": "16Gi"}
+    assert cfg["resource_limits"] is not limits  # defensive copy
+
+
+def test_validate_resource_limits_rejects_malformed() -> None:
+    import pytest
+
+    deploy.validate_resource_limits({"cpu": "4", "memory": "32Gi"})  # max memory OK
+    for bad in (
+        {"cpu": "4"},  # missing memory
+        {"cpu": "4", "memory": "16Gi", "gpu": "1"},  # unknown key
+        {"cpu": "3", "memory": "16Gi"},  # unsupported cpu value
+        {"cpu": "4", "memory": "16G"},  # not Gi syntax
+        {"cpu": "4", "memory": "64Gi"},  # above the 32Gi cap
+        {"cpu": "4", "memory": "4096Mi"},  # Mi not supported by the platform contract
+    ):
+        with pytest.raises(ValueError):
+            deploy.validate_resource_limits(bad)
+
+
 def test_build_requirements_codex_bakes_sdk() -> None:
     reqs = deploy.build_requirements(_spec(model="gpt-5.6-luna", harness="codex"))
     assert any(r.startswith("openai-codex") for r in reqs)

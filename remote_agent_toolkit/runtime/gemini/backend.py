@@ -647,7 +647,12 @@ class GeminiEngine:
         ``get_engine`` whose workers have idle-expired, or to grow the pool.
         """
         ae = self._agent_engines()
-        query = json.dumps({"input": {"user_id": _USER_ID, "message": POOL_WAIT_SENTINEL}})
+        # Pool workers are query jobs too. The current Agent Runtime runner silently
+        # invokes nothing unless the class method is named explicitly.
+        query = json.dumps({
+            "class_method": "async_stream_query",
+            "input": {"user_id": _USER_ID, "message": POOL_WAIT_SENTINEL},
+        })
         bucket = self._output_bucket or f"gs://{self._project}-agent-output"
         for _ in range(n):
             # run_query_job requires output_gcs_uri; a worker's job output is never read (we

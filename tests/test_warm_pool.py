@@ -7,6 +7,7 @@ validated separately on real infra.
 from __future__ import annotations
 
 import asyncio
+import json
 
 from remote_agent_toolkit import AgentSpec
 from remote_agent_toolkit.events import AgentEvent, RunStatus, StopReason
@@ -70,6 +71,31 @@ def test_warm_session_dispatches_and_tails(monkeypatch):
     assert refilled == [1]
     assert result.text == "done" and result.num_turns == 3
     assert session.status == RunStatus.IDLE and session.stop_reason == StopReason.END_TURN
+
+
+def test_fill_pool_names_query_job_method(monkeypatch):
+    captured = []
+
+    class FakeAE:
+        def run_query_job(self, name, config):
+            captured.append((name, config))
+            return {}
+
+    engine = backend.GeminiEngine(
+        resource="r/reasoningEngines/1",
+        spec=AgentSpec(name="w", model="m"),
+        project="p",
+        location="l",
+        output_bucket="gs://out",
+        warm=True,
+    )
+    monkeypatch.setattr(engine, "_agent_engines", lambda: FakeAE())
+
+    engine.fill_pool(1)
+
+    payload = json.loads(captured[0][1]["query"])
+    assert payload["class_method"] == "async_stream_query"
+    assert payload["input"] == {"user_id": "ratk", "message": pool.POOL_WAIT_SENTINEL}
 
 
 def test_run_blocking_works_from_sync_and_async_contexts():

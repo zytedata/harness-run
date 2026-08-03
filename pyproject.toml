@@ -14,8 +14,8 @@ requires-python = ">=3.12,<3.14"
 dependencies = [
     "claude-agent-sdk>=0.2.119",  # task-lifecycle messages + stderr callback + effort option
     "openai-codex>=0.144.4",  # Codex harness; bundles a pinned codex CLI (openai-codex-cli-bin)
-    "google-adk>=1.0",
-    "google-cloud-aiplatform[adk,agent-engines]>=1.110",
+    "google-adk>=1.5",  # floor of the agentplatform AdkApp template (it raises below 1.5.0)
+    "google-cloud-aiplatform[adk,agent-engines]>=1.154",
     "google-cloud-storage",
     "google-cloud-logging",
     "google-cloud-pubsub",

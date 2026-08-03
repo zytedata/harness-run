@@ -7,14 +7,10 @@ copytrees the whole installed package, which is slow and irrelevant to these con
 
 from __future__ import annotations
 
-import importlib
 from pathlib import Path
 
+from remote_agent_toolkit.runtime.gemini import _deploy as deploy
 from remote_agent_toolkit.spec import AgentSpec, SkillSource
-
-# ``gemini.__init__`` binds the name ``deploy`` to ``backend.deploy`` (a function), which
-# shadows the submodule on the package object — import the module by its full path instead.
-deploy = importlib.import_module("remote_agent_toolkit.runtime.gemini.deploy")
 
 
 def _spec(**overrides) -> AgentSpec:
@@ -167,3 +163,25 @@ def test_build_env_codex_skips_vertex_routing() -> None:
     assert "CLAUDE_CODE_USE_VERTEX" not in env
     assert "ANTHROPIC_VERTEX_PROJECT_ID" not in env
     assert "OPENAI_API_KEY" not in env  # never baked
+
+
+def test_deploy_submodule_import_does_not_shadow_the_deploy_function() -> None:
+    """``gemini.deploy`` must stay callable after any submodule import.
+
+    Importing a submodule binds it as an attribute of its parent package, so a module
+    named ``gemini/deploy.py`` would overwrite the ``deploy`` *function* that
+    ``gemini/__init__.py`` re-exports — making the second ``gemini.deploy(...)`` call
+    (the first triggers the packaging module's lazy import) fail with
+    ``TypeError: 'module' object is not callable``. Hence ``_deploy``.
+    """
+    import pkgutil
+
+    from remote_agent_toolkit import gemini
+
+    # Name check, not an import check: the submodules pull in google-adk/agentplatform, which
+    # these offline tests deliberately don't have. A collision is decidable from names alone.
+    submodules = {m.name for m in pkgutil.iter_modules(gemini.__path__)}
+    assert not submodules & set(gemini.__all__), (
+        f"submodule(s) {sorted(submodules & set(gemini.__all__))} collide with gemini.__all__"
+    )
+    assert callable(gemini.deploy)

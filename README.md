@@ -119,6 +119,45 @@ asyncio.run(main())
 For a quick sync script, `local.run(spec, "…")` does `deploy → start_session → await run` and returns the
 `RunResult`.
 
+**Which credential pays for a local run.** The Agent SDK inherits your whole shell environment (it only
+*adds* what the toolkit passes), and `HOME` isn't isolated, so the `claude` CLI sees your own login. It picks
+the first of these that is configured — the toolkit does not choose for you:
+
+| # | Source | Notes |
+|---|---|---|
+| 1 | `CLAUDE_CODE_USE_VERTEX` / `_USE_BEDROCK` / `_USE_FOUNDRY` (truthy) | routes to that cloud; auth is the cloud's own (ADC for Vertex) and steps 2–6 are not consulted |
+| 2 | `ANTHROPIC_AUTH_TOKEN` | bearer-token override |
+| 3 | `CLAUDE_CODE_OAUTH_TOKEN` | long-lived subscription token from `claude setup-token` (the CI-friendly way to use a subscription) |
+| 4 | `ANTHROPIC_API_KEY` | metered API spend |
+| 5 | `apiKeyHelper` (settings) | |
+| 6 | **your `claude.ai` login** (`~/.claude/.credentials.json`) | **the fallback** — a Pro/Max/Team seat's quota, no API bill |
+
+So on a dev box with `claude` logged in and no key exported, local runs quietly consume **your subscription
+seat** — usually the cheaper option on Team, but worth knowing, because it also means two developers running
+the same code can be billed differently. Note that step 4 beats step 6: an `ANTHROPIC_API_KEY` sitting in your
+shell silently turns subscription runs into metered ones (the CLI warns about this on startup).
+
+**Forcing the API key** (or any other source) for local runs — either of these beats an ambient login,
+because both land in the environment the toolkit hands the CLI:
+
+```python
+# per run — scoped to this invocation, and the only form that is safe remotely too
+await session.run("…", secrets={"ANTHROPIC_API_KEY": os.environ["MY_KEY"]})
+
+# every run of a locally-deployed spec
+spec = AgentSpec(name="…", model="…", env={"ANTHROPIC_API_KEY": os.environ["MY_KEY"]})
+```
+
+> Keep keys out of `spec.env` for anything you `gemini.deploy` — the spec is serialized *into* the deployed
+> engine, so a value there is baked into the deployment and shared by every run. Per-invocation `secrets` (or
+> Vertex routing, which needs no key at all) is the deployable answer.
+
+To force the **subscription** instead, unset `ANTHROPIC_API_KEY` (and the other higher-priority variables) in
+the shell you launch from — the toolkit cannot unset an inherited variable for you. To mirror **prod** locally,
+set `CLAUDE_CODE_USE_VERTEX=1` with `ANTHROPIC_VERTEX_PROJECT_ID` and `CLOUD_ML_REGION`, which is what
+`gemini.deploy` bakes by default (see [Prod](#prod-deploy-once-look-up-and-run)); a deployed engine therefore
+never touches anyone's subscription.
+
 **Seeding inputs / collecting artifacts.** `session.workspace` is the agent's working directory on the
 host — a `Path` you can drop input files into before `run()` and read the agent's output files from after
 (it's created on first access). Use the accessor rather than deriving the path yourself: the layout is
@@ -341,7 +380,8 @@ GCP identity — **no LLM key is ever in the agent's environment**). This is the
 safe default. `deploy(..., use_vertex=False)` switches to API-key mode, where you pass `ANTHROPIC_API_KEY` as
 a per-invocation secret — but then the agent's process (hence the `Bash` tool) can read it, so use Vertex for
 anything exposed to untrusted input. Locally the agent likewise inherits your shell's environment (including
-your own `ANTHROPIC_API_KEY`); local is a trusted-dev context.
+your own `ANTHROPIC_API_KEY`, or — with no key set — your `claude.ai` subscription login: see
+[which credential pays for a local run](#dev-run-locally-in-process)); local is a trusted-dev context.
 
 **In transit & at rest.** Secret values never travel in the invocation payload itself — the platform
 *persists* a job's input verbatim (`jobs/<sid>_input.jsonl` in the output bucket), and a Pub/Sub message is

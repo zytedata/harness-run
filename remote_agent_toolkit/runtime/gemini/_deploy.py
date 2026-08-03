@@ -47,7 +47,7 @@ _BASE_REQUIREMENTS: tuple[str, ...] = (
     "google-cloud-aiplatform[adk,agent_engines]>=1.154",
     "cloudpickle",
     "pydantic",
-    "claude-agent-sdk>=0.2.110",  # keep in lockstep with pyproject (task messages + stderr cb)
+    "claude-agent-sdk>=0.2.119",  # keep in lockstep with pyproject (task messages + stderr cb)
     "google-adk>=1.5",  # floor of the agentplatform AdkApp template
     # uv as a PYTHON dependency, not via an install script: build-script filesystem changes
     # don't persist into the runtime container, but requirements always do. The uv console

@@ -36,7 +36,6 @@ dev = [
     # that flag ~76 pre-existing spots. Bump together with that cleanup.
     "ruff<0.16",
     "mypy",
-    "taskipy>=1.14.1",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -47,6 +46,3 @@ line-length = 100
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
-
-[tool.taskipy.tasks]
-test = { cmd = "ENV_FOR_DYNACONF=testing pytest -vv" }

@@ -639,3 +639,7 @@ way and is reported per run as `result.cost_usd`.
 
 See [`DESIGN.md`](DESIGN.md) — the agreed architecture, the hard-won platform contracts (§6), the ports &
 adapters seam (§7), and the phased roadmap (§11). The README grows with the code, phase by phase.
+
+Contributing? [`TESTING.md`](TESTING.md) covers the testing ladder — the offline suite (`make test`), the
+install-parity image ([`dev/`](dev/)), and **live validation** on real Agent Runtime (`make live-smoke`):
+when each is required and how to debug a live run.

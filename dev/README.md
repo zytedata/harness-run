@@ -34,3 +34,10 @@ the deployed engine resolves it.
 image uses, so a clean `make parity-check` (and your agent running under `parity-shell`) is a strong signal
 that the deploy's install step will succeed too. See `DESIGN.md` §12 (local parity) for the open design
 questions.
+
+## Live smoke test (`live_smoke.py`)
+
+This directory also holds [`live_smoke.py`](live_smoke.py) — the standard **live validation** run
+(`make live-smoke`): throwaway engines deployed from your checkout, one turn through the cold and warm
+dispatch paths, teardown in `finally`. It's the opposite end of the ladder from the parity image — real
+platform, real money. See [`TESTING.md`](../TESTING.md) for when it's required.

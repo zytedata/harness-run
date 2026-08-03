@@ -6,13 +6,18 @@ VENV ?= .venv
 IMAGE ?= ratk-dev
 PACKAGES ?=
 
-.PHONY: test lint parity-build parity-shell parity-check
+.PHONY: test lint live-smoke parity-build parity-shell parity-check
 
 test:
 	$(VENV)/bin/python -m pytest -q
 
 lint:
 	$(VENV)/bin/ruff check .
+
+# Live validation on real Gemini Agent Runtime (throwaway engines, torn down after).
+# Costs real money + ~10 min; see TESTING.md for when it's required and how to configure.
+live-smoke:
+	$(VENV)/bin/python dev/live_smoke.py
 
 # Build the parity image. Pass the agent's spec.packages so they install exactly as on the
 # engine, e.g.:  make parity-build PACKAGES="pandas==2.2.* httpx>=0.27"

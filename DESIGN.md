@@ -50,8 +50,9 @@ We cannot host *on* CMA.
 
 > **Naming.** We call the platform **Gemini Agent Runtime** — Google's recent rename of what was
 > "Vertex AI Agent Engine". The public namespace is **`gemini.*`** (`gemini.deploy`, `gemini.get_engine`).
-> The underlying Google Python SDK is still imported as `vertexai` / `google-cloud-aiplatform`; that's
-> an internal detail, not part of our surface.
+> The underlying Google Python SDK is imported as `agentplatform` / `google-cloud-aiplatform` — the
+> `vertexai` namespace was renamed to `agentplatform` in aiplatform 1.154 and now emits a
+> `FutureWarning` on `Client()`; that's an internal detail, not part of our surface.
 
 What we borrow from CMA / the SDK (things our PoC did implicitly or not at all):
 - **Versioned agent-definition vs. run** split → control plane / data plane.
@@ -274,7 +275,7 @@ These are facts measured during the PoC. The library encodes them so consumers i
   it** — image size, `container_concurrency`, `min_instances` were all ruled out. The genai
   `Client().agent_engines` surface exposes only `run_query_job` / `check_query_job` / `cancel_query_job`.
 - **Sync `stream_query`** — a warm instance returns in **~3–9 s**, but has a **~600 s per-request ceiling**
-  and lives only on the classic `vertexai.agent_engines.get(name)` surface.
+  and lives only on the classic `agentplatform.agent_engines.get(name)` surface.
 - **Warm pool** — the way to get fast *and* long: pre-warmed jobs blocked on an inbound channel.
   Dispatch→result measured **~5.4 s** with pre-warm. See below.
 
@@ -505,7 +506,7 @@ Each is a `typing.Protocol`; concrete adapters ship for prod (GCP) and dev (loca
 | Artifacts | `artifacts.py` | → over `BlobStore` |
 | Cost tracking | result metadata passthrough | → `RunResult` |
 | Config / runtime resolution | `config.py` | → `AgentSpec` + resolvers |
-| Deploy | `deploy/deploy_agent_engine.py` | → `runtime/gemini/deploy.py` (contracts encoded) |
+| Deploy | `deploy/deploy_agent_engine.py` | → `runtime/gemini/_deploy.py` (contracts encoded) |
 | Control-plane dispatch + log tail | `scrape_cli.py` | → `Session` / `EventSink.tail` |
 | **Scrapy Cloud, monitoring, scrape prompts** | `selfheal/`, `_INTERACTIVE_SUFFIX` | **stay in gemini-agent-runtime** behind the seam |
 | Probes, scratch, `gh_pat.txt` | `scratch_minimal/`, probes | **dropped** |
@@ -553,7 +554,8 @@ remote-agent-toolkit/
 │   │   ├── venv.py                # per-engine uv venv for spec.packages on local
 │   │   └── gemini/
 │   │       ├── backend.py         # deploy(), get_engine(), list_engines(), GeminiEngine
-│   │       ├── deploy.py          # packaging + contracts (uv/glibc/IS_SANDBOX/...)
+│   │       ├── _deploy.py         # packaging + contracts (uv/glibc/IS_SANDBOX/...)
+│   │       │                      #   (underscored: `deploy.py` would shadow gemini.deploy)
 │   │       ├── adk_agent.py       # the deployed ADK BaseAgent wrapping the harness
 │   │       ├── translate.py       # AgentEvent → ADK Event
 │   │       ├── handoff.py         # GCS staging of per-invocation secrets (retry-safe cleanup)

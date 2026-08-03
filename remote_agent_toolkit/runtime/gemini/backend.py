@@ -1,6 +1,6 @@
 """Gemini Agent Runtime control plane: deploy / get_engine / list_engines + Engine/Session/Run.
 
-Encodes the §6 platform contracts. ``deploy`` packages the agent (``deploy.py``), wraps it
+Encodes the §6 platform contracts. ``deploy`` packages the agent (``_deploy.py``), wraps it
 in an ``AdkApp``, and creates a reasoningEngine; app code addresses engines by name via
 ``get_engine`` and never deploys (DESIGN.md §3.3).
 
@@ -9,8 +9,11 @@ submits a ``run_query_job`` and the ``Run`` is driven by tailing the ``CloudLogg
 that session — so **stream** = tail, **await** = wait for the terminal ``result`` log event,
 **poll** = read the latest status. Same awaitable/iterable/pollable handle as local.
 
-The Google SDK (``vertexai`` / ``google-cloud-aiplatform``) and the sink are imported lazily
-inside the bodies, so importing this module needs no third-party deps.
+The Google SDK (``agentplatform`` / ``google-cloud-aiplatform``) and the sink are imported
+lazily inside the bodies, so importing this module needs no third-party deps. ``agentplatform``
+is the renamed successor of the ``vertexai`` namespace (aiplatform 1.154+); the old one still
+works but warns on every ``Client`` instantiation, and its config types are not interchangeable
+with the new client's.
 """
 
 from __future__ import annotations
@@ -238,12 +241,12 @@ def deploy(
     import dataclasses
     import os
 
-    import vertexai
-    from vertexai._genai import types as gt
-    from vertexai.preview.reasoning_engines import AdkApp
+    import agentplatform
+    from agentplatform import types as gt
+    from agentplatform.agent_engines import AdkApp
 
     from .adk_agent import build_agent
-    from .deploy import build_engine_config, stage_agent, validate_resource_limits
+    from ._deploy import build_engine_config, stage_agent, validate_resource_limits
 
     # Fail fast BEFORE any side effect (pub/sub ensure, staging, the ~4 min billable build).
     if resource_limits is not None:
@@ -310,7 +313,7 @@ def deploy(
         max_instances=max_instances,
         resource_limits=resource_limits,
     )
-    client = vertexai.Client(project=project, location=location, credentials=credentials)
+    client = agentplatform.Client(project=project, location=location, credentials=credentials)
     engine = client.agent_engines.create(agent=app, config=gt.AgentEngineConfig(**config_kwargs))
     geng = GeminiEngine(
         resource=engine.api_resource.name,
@@ -366,9 +369,9 @@ def get_engine(
     idle stop-reason; otherwise a minimal fallback spec is used. Pass ``warm_pool=True`` to
     address a warm-pool engine (turns are dispatched to its pool instead of cold-started).
     """
-    import vertexai
+    import agentplatform
 
-    client = vertexai.Client(project=project, location=location, credentials=credentials)
+    client = agentplatform.Client(project=project, location=location, credentials=credentials)
     resource = _resolve_resource(client, name, version)
     topic = subscription = None
     if warm_pool:
@@ -388,9 +391,9 @@ def get_engine(
 
 def list_engines(project: str, location: str, *, credentials: Any | None = None) -> list[dict]:
     """Discover deployed engines in ``project``/``location`` (control plane)."""
-    import vertexai
+    import agentplatform
 
-    client = vertexai.Client(project=project, location=location, credentials=credentials)
+    client = agentplatform.Client(project=project, location=location, credentials=credentials)
     out: list[dict] = []
     for engine in client.agent_engines.list():
         resource = engine.api_resource
@@ -692,9 +695,9 @@ class GeminiEngine:
         self._pool_jobs: list[str] = []  # tracked pool-worker job names (to cancel on delete)
 
     def _client(self) -> Any:
-        import vertexai
+        import agentplatform
 
-        return vertexai.Client(
+        return agentplatform.Client(
             project=self._project, location=self._location, credentials=self._credentials
         )
 

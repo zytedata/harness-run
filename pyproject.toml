@@ -14,8 +14,8 @@ requires-python = ">=3.12,<3.14"
 dependencies = [
     "claude-agent-sdk>=0.2.119",  # task-lifecycle messages + stderr callback + effort option
     "openai-codex>=0.144.4",  # Codex harness; bundles a pinned codex CLI (openai-codex-cli-bin)
-    "google-adk>=1.0",
-    "google-cloud-aiplatform[adk,agent-engines]>=1.110",
+    "google-adk>=1.5",  # floor of the agentplatform AdkApp template (it raises below 1.5.0)
+    "google-cloud-aiplatform[adk,agent-engines]>=1.154",
     "google-cloud-storage",
     "google-cloud-logging",
     "google-cloud-pubsub",
@@ -36,6 +36,7 @@ dev = [
     # that flag ~76 pre-existing spots. Bump together with that cleanup.
     "ruff<0.16",
     "mypy",
+    "taskipy>=1.14.1",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -46,3 +47,6 @@ line-length = 100
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+
+[tool.taskipy.tasks]
+test = { cmd = "ENV_FOR_DYNACONF=testing pytest -vv" }

@@ -22,7 +22,7 @@ Lifted & generalized from the PoC ``deploy/deploy_agent_engine.py`` (DESIGN.md �
 everything is now driven off the declarative :class:`AgentSpec` (Zyte specifics dropped).
 
 The Google SDK is never imported here — :func:`build_engine_config` returns a plain
-``dict`` of kwargs for ``vertexai._genai.types.AgentEngineConfig(**kwargs)``, which the
+``dict`` of kwargs for ``agentplatform.types.AgentEngineConfig(**kwargs)``, which the
 backend constructs lazily. This module stays importable with ZERO third-party deps at
 import time (stdlib only at module scope; any third-party import is lazy inside a body).
 """
@@ -42,11 +42,13 @@ if TYPE_CHECKING:
 # Generalized from the PoC: scrapy/zyte-api (Zyte-specific) are dropped; agent-declared
 # baked deps (``spec.packages``) are appended by ``build_requirements``.
 _BASE_REQUIREMENTS: tuple[str, ...] = (
-    "google-cloud-aiplatform[adk,agent_engines]>=1.110",
+    # 1.154+ so the runtime can unpickle the ``agentplatform.agent_engines`` AdkApp the
+    # client stages (the pre-rename ``vertexai`` template module is a different class).
+    "google-cloud-aiplatform[adk,agent_engines]>=1.154",
     "cloudpickle",
     "pydantic",
     "claude-agent-sdk>=0.2.110",  # keep in lockstep with pyproject (task messages + stderr cb)
-    "google-adk>=1.0",
+    "google-adk>=1.5",  # floor of the agentplatform AdkApp template
     # uv as a PYTHON dependency, not via an install script: build-script filesystem changes
     # don't persist into the runtime container, but requirements always do. The uv console
     # script lands next to the runtime python -> already on PATH (skills shell out to it).
@@ -273,9 +275,9 @@ def build_engine_config(
     max_instances: int = 1,
     resource_limits: dict[str, str] | None = None,
 ) -> dict:
-    """Build the kwargs dict for ``vertexai._genai.types.AgentEngineConfig(**kwargs)``.
+    """Build the kwargs dict for ``agentplatform.types.AgentEngineConfig(**kwargs)``.
 
-    Does NOT import vertexai — returns a plain ``dict`` so the backend constructs the config
+    Does NOT import the SDK — returns a plain ``dict`` so the backend constructs the config
     lazily. ``project`` / ``location`` are accepted for caller symmetry (the genai client
     carries them); the staged ``extra_packages`` (from :func:`stage_agent`) are passed in.
     No ``build_options`` / install scripts — the toolkit needs no node (uv is a requirement).

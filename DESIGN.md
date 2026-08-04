@@ -222,15 +222,24 @@ for info in engine.list_sessions():                        # newest first
 
 ```python
 gemini.deploy(spec, project=..., location=...)   # create / update; mints a new version
-gemini.get_engine("spider-builder")              # latest version (app code default)
-gemini.get_engine("spider-builder", version=3)   # pin a version
+gemini.get_engine("spider-builder")              # serving version (app code default)
+gemini.get_engine("spider-builder", version=3)   # pin a version (an assertion — see below)
 gemini.list_engines(project=..., location=...)   # discover what's deployed
 engine.versions()                                # list versions of one engine
+engine.set_traffic(3) / engine.set_traffic()     # roll back to a version / back to always-latest
 engine.name, engine.version, engine.resource     # identity / underlying resource name
 ```
 
 Engine identity maps `spec.name` → a stable engine (Agent Engine `display_name`); each `deploy` mints a
 new version. App code pins or takes latest; it does not deploy.
+
+A **version is an Agent Runtime runtime revision** (`…/reasoningEngines/{id}/runtimeRevisions/{rev}`):
+`deploy` updates the engine of that display name and the platform mints an immutable revision, with the
+engine's traffic config deciding which one serves. One platform constraint shapes the API: `asyncQuery` —
+the toolkit's entire run plane — exists on the **engine** only (a revision has `query`/`streamQuery` but no
+async form), so a run always lands on the serving revision. Version pinning is therefore an *assertion*
+(`get_engine(version=…)` fails unless that revision is the one serving) and moving traffic is an explicit
+ops action (`engine.set_traffic`), not a per-caller routing choice.
 
 **Key types** (sketch — finalized in `spec.py` / `runtime/base.py`):
 

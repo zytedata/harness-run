@@ -15,7 +15,9 @@ dependencies = [
     "claude-agent-sdk>=0.2.119",  # task-lifecycle messages + stderr callback + effort option
     "openai-codex>=0.144.4",  # Codex harness; bundles a pinned codex CLI (openai-codex-cli-bin)
     "google-adk>=1.5",  # floor of the agentplatform AdkApp template (it raises below 1.5.0)
-    "google-cloud-aiplatform[adk,agent-engines]>=1.154",
+    # 1.163+ for the client-side runtime-revision surface (agent_engines.runtimes.revisions
+    # + AgentEngineConfig.traffic_config), which `deploy`/`get_engine(version=…)` build on.
+    "google-cloud-aiplatform[adk,agent-engines]>=1.163",
     "google-cloud-storage",
     "google-cloud-logging",
     "google-cloud-pubsub",

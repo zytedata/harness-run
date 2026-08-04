@@ -213,14 +213,33 @@ def deploy(
     max_instances: int = 1,
     resource_limits: dict[str, str] | None = None,
     pool_size: int = 2,
+    new_engine: bool = False,
     credentials: Any | None = None,
     **_: Any,
 ) -> Engine:
-    """Deploy ``spec`` to Gemini Agent Runtime, minting an engine (ops/CI action).
+    """Deploy ``spec`` to Gemini Agent Runtime, minting a **new revision** (ops/CI action).
 
     Bakes the toolkit package + resolved skills, applies the §6 deploy contracts, and returns
     a :class:`GeminiEngine`. With ``warm_pool=True`` it also ensures the dispatch topic/sub and
     fills the pool with ``pool_size`` pre-warmed workers (each a job blocked on ``__POOL_WAIT__``).
+
+    **Engine identity is ``spec.name``** (the engine display name): if an engine of that name
+    already exists, this *updates* it, and the platform mints a new **runtime revision** of it
+    (``.../reasoningEngines/{id}/runtimeRevisions/{rev}``) — the deployed engine keeps its
+    resource name, so app code's ``get_engine(spec.name)`` picks the new code up without
+    re-pointing at anything. Only the first deploy of a name creates an engine. Pass
+    ``new_engine=True`` to force a separate engine instead (e.g. a side-by-side experiment);
+    two engines then share the display name and ``get_engine`` resolves the most recent.
+
+    The new revision serves traffic immediately **unless** the engine's traffic was pinned
+    with :meth:`GeminiEngine.set_traffic` — a pin is sticky across deploys, so this warns and
+    leaves the pin in place rather than silently promoting the fresh revision.
+
+    Two warm-pool caveats when updating: workers already blocked on the dispatch subscription
+    keep running the revision they cold-started with (they are long-running jobs, untouched by
+    an engine update), so for a window turns may land on either revision; and the refill here
+    only adds ``pool_size`` more. For a hard cutover, ``delete()`` the engine's pool workers
+    (or deploy with ``new_engine=True``) instead.
 
     ``use_vertex`` (default) routes the model through Vertex, so the engine authenticates as its
     own GCP identity and **no LLM API key is ever in the agent's environment** (the recommended,
@@ -314,7 +333,15 @@ def deploy(
         resource_limits=resource_limits,
     )
     client = agentplatform.Client(project=project, location=location, credentials=credentials)
-    engine = client.agent_engines.create(agent=app, config=gt.AgentEngineConfig(**config_kwargs))
+    # Engine identity is the display name: update the existing engine (minting a revision)
+    # rather than piling up look-alike engines. Only a first deploy creates one.
+    existing = None if new_engine else _find_engine(client, spec.name)
+    config = gt.AgentEngineConfig(**config_kwargs)
+    if existing:
+        engine = client.agent_engines.update(name=existing, agent=app, config=config)
+        _warn_if_traffic_pinned(engine.api_resource)
+    else:
+        engine = client.agent_engines.create(agent=app, config=config)
     geng = GeminiEngine(
         resource=engine.api_resource.name,
         spec=spec,
@@ -329,34 +356,96 @@ def deploy(
     if warm_pool:
         try:
             geng.fill_pool(pool_size)  # block pool_size workers on the dispatch sub
-        except Exception:  # don't leak the freshly-created engine if filling the pool fails
-            try:
-                client.agent_engines.delete(name=geng.resource, force=True)
-            except Exception:  # noqa: BLE001
-                pass
+        except Exception:
+            # Don't leak the freshly-created engine if filling the pool fails — but only
+            # ours: on the update path the engine predates this call (with its revision
+            # history and, possibly, live sessions), so a failed refill must not delete it.
+            if existing is None:
+                try:
+                    client.agent_engines.delete(name=geng.resource, force=True)
+                except Exception:  # noqa: BLE001
+                    pass
             raise
     return geng
 
 
-def _resolve_resource(client: Any, name: str, version: str | None) -> str:
-    if version is not None:
-        raise NotImplementedError("version pinning is not supported yet; omit `version` for the latest engine.")
-    if "/reasoningEngines/" in name or "/agentEngines/" in name:
-        return name  # already a full resource path
+def _find_engine(client: Any, display_name: str) -> str | None:
+    """The resource name of the engine displayed as ``display_name``, or ``None``.
+
+    With ``deploy(new_engine=True)`` a name can map to several engines; the most recent wins
+    (both here and in :func:`_resolve_resource`), so a side-by-side experiment doesn't strand
+    ``get_engine`` on the older one.
+    """
     matches = [
         e for e in client.agent_engines.list()
-        if getattr(e.api_resource, "display_name", None) == name
+        if getattr(e.api_resource, "display_name", None) == display_name
     ]
-    if not matches:
+    return matches[-1].api_resource.name if matches else None
+
+
+def _resolve_resource(client: Any, name: str) -> str:
+    if "/reasoningEngines/" in name or "/agentEngines/" in name:
+        return name  # already a full resource path
+    resource = _find_engine(client, name)
+    if resource is None:
         raise LookupError(f"no deployed engine named {name!r} in this project/location")
-    return matches[-1].api_resource.name  # latest match
+    return resource
+
+
+def _warn_if_traffic_pinned(api_resource: Any) -> None:
+    """Warn when a freshly minted revision won't serve because traffic is pinned elsewhere."""
+    from . import revisions as rev
+
+    targets = rev.traffic_targets(getattr(api_resource, "traffic_config", None))
+    if targets:
+        import warnings
+
+        pinned = ", ".join(f"{v} ({p}%)" for v, p in targets)
+        warnings.warn(
+            f"this engine's traffic is pinned to {pinned}, so the revision just deployed is "
+            "NOT serving; call engine.set_traffic() to promote it (or set_traffic(version) to "
+            "keep routing deliberately)",
+            stacklevel=3,
+        )
+
+
+def _resolve_version(client: Any, resource: str, version: str) -> str:
+    """Validate ``version`` against ``resource``'s revisions and return its id.
+
+    Pinning is an assertion, not routing: the toolkit's run plane is ``asyncQuery``, which
+    exists only on the engine (a revision has ``query``/``streamQuery`` but no ``asyncQuery``),
+    so a run always lands on whichever revision serves. Pinning to a revision that is *not*
+    serving would silently run something else — so that raises instead, pointing at
+    :meth:`GeminiEngine.set_traffic`, the action that actually moves traffic.
+    """
+    from . import revisions as rev
+
+    version = rev.revision_id(str(version))
+    rows = rev.list_revisions(client, resource)
+    known = [r["version"] for r in rows]
+    if version not in known:
+        raise LookupError(
+            f"engine {resource} has no runtime revision {version!r}; "
+            f"available (newest first): {known or '(none)'}"
+        )
+    engine = client.agent_engines.get(name=resource)
+    serving = rev.serving_version(getattr(engine.api_resource, "traffic_config", None), rows)
+    if serving != version:
+        current = repr(serving) if serving else "a split across several revisions"
+        raise ValueError(
+            f"revision {version!r} is not the one serving traffic ({current}). Agent Runtime "
+            "routes async queries per ENGINE, not per revision, so a pinned handle cannot run "
+            "against a non-serving revision — move traffic first with "
+            f"engine.set_traffic({version!r})."
+        )
+    return version
 
 
 def get_engine(
     name: str,
     project: str | None = None,
     location: str | None = None,
-    version: str | None = None,
+    version: str | int | None = None,
     *,
     spec: AgentSpec | None = None,
     output_bucket: str | None = None,
@@ -368,11 +457,19 @@ def get_engine(
     Pass ``spec=`` (the one you deployed) to enable structured-output parsing and the correct
     idle stop-reason; otherwise a minimal fallback spec is used. Pass ``warm_pool=True`` to
     address a warm-pool engine (turns are dispatched to its pool instead of cold-started).
+
+    ``version`` pins the handle to a **runtime revision** (the id, or a full revision resource
+    name). It is an *assertion*: the lookup fails unless that revision exists and is the one
+    serving traffic — so a deploy-then-pin CI flow catches a moved/rolled-back engine at lookup
+    instead of running unknown code. It cannot route a run to a non-serving revision: Agent
+    Runtime's async query path is engine-level (see ``revisions.py``); use
+    :meth:`GeminiEngine.set_traffic` to move traffic first.
     """
     import agentplatform
 
     client = agentplatform.Client(project=project, location=location, credentials=credentials)
-    resource = _resolve_resource(client, name, version)
+    resource = _resolve_resource(client, name)
+    pinned = None if version is None else _resolve_version(client, resource, str(version))
     topic = subscription = None
     if warm_pool:
         topic, subscription = pool_paths(project, name)
@@ -386,6 +483,7 @@ def get_engine(
         warm=warm_pool,
         topic=topic,
         subscription=subscription,
+        version=pinned,
     )
 
 
@@ -680,6 +778,7 @@ class GeminiEngine:
         warm: bool = False,
         topic: str | None = None,
         subscription: str | None = None,
+        version: str | None = None,
     ) -> None:
         self._resource = resource
         self.spec = spec
@@ -690,6 +789,7 @@ class GeminiEngine:
         self._warm = warm
         self._topic = topic
         self._subscription = subscription
+        self._version = version  # pinned revision id; None => resolve the serving one lazily
         self._created = time.time()  # readiness-tail watermark (ignore stale pool markers)
         self._sessions: dict[str, GeminiSession] = {}
         self._pool_jobs: list[str] = []  # tracked pool-worker job names (to cancel on delete)
@@ -861,7 +961,61 @@ class GeminiEngine:
                 pass
 
     def versions(self) -> list[str]:
-        return ["latest"]
+        """This engine's runtime-revision ids, newest first (see :meth:`revisions`)."""
+        return [r["version"] for r in self.revisions()]
+
+    def revisions(self) -> list[dict]:
+        """This engine's runtime revisions, newest first, with their serving status.
+
+        Each row: ``version`` (the id used by ``get_engine(version=…)`` / :meth:`set_traffic`),
+        ``resource`` (full revision path), ``create_time``, ``state``, and ``serving`` — the
+        one revision every run currently lands on. ``serving`` is ``False`` on every row when
+        traffic is split across several (no single revision a run is guaranteed to hit).
+        """
+        from . import revisions as rev
+
+        client = self._client()
+        rows = rev.list_revisions(client, self._resource)
+        engine = client.agent_engines.get(name=self._resource)
+        serving = rev.serving_version(getattr(engine.api_resource, "traffic_config", None), rows)
+        for row in rows:
+            row["serving"] = row["version"] == serving
+        return rows
+
+    def set_traffic(self, version: str | int | None = None) -> None:
+        """Route **all** of this engine's traffic to ``version``; ``None`` = always-latest.
+
+        The rollback / promote action (an ops action, like ``deploy``). This is what makes a
+        revision reachable at all: the toolkit runs turns through the engine-level async query
+        path, so the traffic config — not the caller — decides which revision executes them
+        (see ``revisions.py``). Takes effect for turns started afterwards; an in-flight job and
+        an already-cold-started warm-pool worker finish on the revision they began on.
+        """
+        from . import revisions as rev
+
+        if version is None:
+            traffic = rev.always_latest_traffic()
+            resolved = None
+        else:
+            resolved = rev.revision_id(str(version))
+            traffic = rev.pinned_traffic(rev.revision_resource(self._resource, resolved))
+        # A dict config (the SDK validates it into an AgentEngineConfig) with no `agent`:
+        # the update mask is just `traffic_config`, so no rebuild and no new revision.
+        self._client().agent_engines.update(
+            name=self._resource, config={"traffic_config": traffic}
+        )
+        self._version = resolved
+
+    def delete_version(self, version: str | int) -> None:
+        """Delete one runtime revision (revisions accumulate; the serving one can't go).
+
+        Deleting the revision that serves traffic is rejected by the platform — promote
+        another with :meth:`set_traffic` first.
+        """
+        from . import revisions as rev
+
+        resource = rev.revision_resource(self._resource, rev.revision_id(str(version)))
+        self._client().agent_engines.runtimes.revisions.delete(name=resource)
 
     @property
     def name(self) -> str:
@@ -869,7 +1023,20 @@ class GeminiEngine:
 
     @property
     def version(self) -> str:
-        return "latest"
+        """The runtime revision this handle addresses: the pin, else the one serving traffic.
+
+        Resolved from the platform on first access and cached (``get_engine(version=…)`` and
+        :meth:`set_traffic` fill it in directly). Falls back to ``"latest"`` when there is no
+        single such revision to name — an unreachable control plane (an identity property must
+        not raise), an engine with no revisions, or traffic split across several.
+        """
+        if self._version is None:
+            try:
+                rows = self.revisions()
+            except Exception:  # noqa: BLE001 — identity property; degrade, never raise
+                return "latest"
+            self._version = next((r["version"] for r in rows if r["serving"]), None)
+        return self._version or "latest"
 
     @property
     def resource(self) -> str:

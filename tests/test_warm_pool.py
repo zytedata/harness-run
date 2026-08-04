@@ -183,6 +183,12 @@ def test_pool_worker_claims_and_runs(monkeypatch):
                   "secrets_gcs": "gs://bkt/invocation-secrets/dispatched-sid-x.json"})
     monkeypatch.setattr(pool, "worker_dispatch_from_env", lambda *a, **k: disp)
 
+    # _prewarm emits a readiness marker via a real CloudLoggingSink; off-GCP that stalls for
+    # ~55s discovering ambient credentials. Fake the sink (same pattern as the warm-path test
+    # above) so this test exercises the claim/run logic without a live GCP round-trip.
+    import remote_agent_toolkit.ports.eventsink as eventsink_mod
+    monkeypatch.setattr(eventsink_mod, "CloudLoggingSink", lambda **kw: InMemorySink(**kw))
+
     # Replace the heavy turn (real harness/model) with a recorder.
     seen = {}
 

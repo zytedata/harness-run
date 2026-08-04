@@ -325,6 +325,7 @@ def deploy(
         warm=warm_pool,
         topic=topic,
         subscription=subscription,
+        streams_events=True,  # build_env just baked AGENT_EVENT_STREAM (output_bucket is set)
     )
     if warm_pool:
         try:
@@ -386,7 +387,24 @@ def get_engine(
         warm=warm_pool,
         topic=topic,
         subscription=subscription,
+        streams_events=_engine_streams_events(client, resource),
     )
+
+
+def _engine_streams_events(client: Any, resource: str) -> bool:
+    """Whether ``resource`` was deployed with the incremental event stream (env marker).
+
+    Engines deployed by a stream-aware toolkit bake ``AGENT_EVENT_STREAM`` into their env;
+    clients tail the GCS mirror live for those, and fall back to the legacy Cloud Logging
+    tail otherwise (e.g. an engine deployed before streaming existed). Unreadable env (older
+    control-plane surface, permissions) degrades to the safe fallback.
+    """
+    try:
+        engine = client.agent_engines.get(name=resource)
+        env = engine.api_resource.spec.deployment_spec.env or []
+        return any(getattr(var, "name", None) == "AGENT_EVENT_STREAM" for var in env)
+    except Exception:  # noqa: BLE001 — lookup is best-effort; legacy tail always works
+        return False
 
 
 def list_engines(project: str, location: str, *, credentials: Any | None = None) -> list[dict]:
@@ -498,9 +516,24 @@ class GeminiSession:
                 cfg["output_gcs_uri"] = f"{engine._output_bucket}/jobs/{sid}.jsonl"
             self._last_job = engine._agent_engines().run_query_job(name=engine._resource, config=cfg)
 
-        sink = CloudLoggingSink(
-            log_name=_LOG_NAME, project=engine._project, credentials=engine._credentials
-        )
+        # Live channel: the GCS event mirror for stream-aware engines (quota-free, no
+        # ingestion lag), the legacy Cloud Logging tail otherwise (engines deployed before
+        # streaming; shares the project-wide 60-reads/min budget, backs off under it).
+        # Cloud Logging is still WRITTEN by every worker — it's the ops/debug channel.
+        if engine._streams_events:
+            from .stream import tail_stream
+
+            events_uri = f"{engine._output_bucket}/events"
+
+            def tail_source() -> AsyncIterator:
+                return tail_stream(events_uri, sid, since=since)
+        else:
+            sink = CloudLoggingSink(
+                log_name=_LOG_NAME, project=engine._project, credentials=engine._credentials
+            )
+
+            def tail_source() -> AsyncIterator:
+                return sink.tail(sid, since=since)
 
         # Cold runs hold the job's operation name, so the tail gets a watchdog: if the job
         # terminates without ever writing a terminal event, the run ends with an explained
@@ -530,12 +563,9 @@ class GeminiSession:
                 )
 
             def factory() -> AsyncIterator:
-                return _watched_tail(
-                    lambda: sink.tail(sid, since=since), probe, sid, history_reader
-                )
+                return _watched_tail(tail_source, probe, sid, history_reader)
         else:
-            def factory() -> AsyncIterator:
-                return sink.tail(sid, since=since)
+            factory = tail_source
 
         run = DrivenRun(factory, sid, engine.spec, on_complete=self._on_complete)
         self._current_run = run
@@ -680,6 +710,7 @@ class GeminiEngine:
         warm: bool = False,
         topic: str | None = None,
         subscription: str | None = None,
+        streams_events: bool = False,
     ) -> None:
         self._resource = resource
         self.spec = spec
@@ -687,6 +718,9 @@ class GeminiEngine:
         self._location = location
         self._output_bucket = output_bucket
         self._credentials = credentials
+        # Engine bakes AGENT_EVENT_STREAM (deployed by a stream-aware toolkit): the client
+        # tails the GCS event mirror live. False => legacy Cloud Logging tail.
+        self._streams_events = streams_events and bool(output_bucket)
         self._warm = warm
         self._topic = topic
         self._subscription = subscription
@@ -798,12 +832,20 @@ class GeminiEngine:
         created = self._created
 
         async def _await() -> bool:
-            from ...ports.eventsink import CloudLoggingSink
+            # Same channel split as the run tail: stream-aware engines write the readiness
+            # marker to the GCS mirror (events/<pool_id>/); older engines only log it.
+            if self._streams_events:
+                from .stream import tail_stream
 
-            sink = CloudLoggingSink(
-                log_name=_LOG_NAME, project=self._project, credentials=self._credentials
-            )
-            async for _ in sink.tail(pool_id, since=created):
+                markers = tail_stream(f"{self._output_bucket}/events", pool_id, since=created)
+            else:
+                from ...ports.eventsink import CloudLoggingSink
+
+                sink = CloudLoggingSink(
+                    log_name=_LOG_NAME, project=self._project, credentials=self._credentials
+                )
+                markers = sink.tail(pool_id, since=created)
+            async for _ in markers:
                 return True  # first marker since deploy => a worker is warm
             return False
 

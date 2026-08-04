@@ -666,20 +666,20 @@ worker's *actual* pickup is ~5 s. On claim the pool refills, so the next turn is
 > across that boundary is a future refinement; in practice the refill-on-claim cadence likely keeps enough
 > workers warm, so it shouldn't bite early on.
 
-**Event-stream throughput: one 60-reads/min budget per project.** The event stream you consume with
-`async for ev in run` is a Cloud Logging tail, and Cloud Logging caps log *reads* (`entries.list`) at
-**60 requests per minute per project** — fixed, [not raisable](https://cloud.google.com/logging/quotas),
-and shared by *everything* in the project: every concurrently-streamed run, every live test, every
-colleague. One tail polls ~1×/s, so a single streamed run nearly saturates the budget by itself; two or
-more concurrent tails **will** trade 429s. The toolkit treats a read-quota rejection as an operating
-condition, not an error: the tail backs off (exponentially, jittered, capped at 30 s) and picks the
-stream back up when the per-minute window refills — runs never fail because of it, but **event delivery
-latency grows with the number of concurrent tails** (at the cap each tail costs ~2–3 reads/min, so a few
-dozen concurrent streams degrade to ~30 s event batches). The *durable* record (GCS event mirror, job
-output, `session.history()`) is unaffected — only live streaming slows down. (Both `async for` and
-`await run` drive the same tail today, so running many agents concurrently in one project slows event
-delivery for all of them; a quota-free streaming channel — reading the GCS event mirror incrementally —
-is the planned way out, see DESIGN §12.)
+**Event streaming scales with your fleet.** The stream you consume with `async for ev in run` is the
+session's **GCS event mirror**, tailed live: the worker writes small batches as events happen and the
+client polls the object listing — strongly consistent (no ingestion lag) and free of any restrictive
+read quota, so tens of concurrently-streamed runs in one project are a non-event. The same objects are
+the durable history `session.history()` reads. Cloud Logging still receives every step (it's the
+indexed store the [debugging recipes](TESTING.md#debugging-a-live-run) query), but no client run
+depends on reading it.
+
+> _Engines deployed before event streaming_ (no `AGENT_EVENT_STREAM` in their env) are tailed the old
+> way, via Cloud Logging — whose *read* path is capped at
+> [60 requests/min per project](https://cloud.google.com/logging/quotas), fixed and shared by
+> everything in the project. The legacy tail backs off on 429s (exponential, jittered, capped 30 s)
+> instead of failing, so under contention those runs see slower event batches, never errors. Redeploy
+> an engine to move it to the stream.
 
 **Cost.** A deployed engine itself is (almost) free while idle: the toolkit deploys with `min_instances=0`
 (no standing container — the async path provisions a worker per job, so a min-instances container would serve

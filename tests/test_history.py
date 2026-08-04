@@ -91,13 +91,16 @@ def test_list_sessions_merges_sources(tmp_path):
 
 
 def test_run_turn_writes_turn_mirror(tmp_path, monkeypatch):
-    # The worker mirrors every surfaced event to a session-keyed file at end of turn — the
-    # durable record Session.history() reads (warm turns have no session-keyed job output).
+    # The worker streams every surfaced event into session-keyed mirror files AS THE TURN
+    # RUNS (stream.MirrorStream) — the durable record Session.history() reads (warm turns
+    # have no session-keyed job output) and the live channel the client tails.
+    from remote_agent_toolkit.runtime.gemini import stream as stream_mod
+
     monkeypatch.setenv("AGENT_JOBS_ROOT", str(tmp_path / "jobs"))
     monkeypatch.setenv("AGENT_EVENTS_GCS", "gs://bkt/events")
     monkeypatch.chdir(tmp_path)
     store = LocalBlobStore(str(tmp_path / "blobs"))
-    monkeypatch.setattr(history, "GcsBlobStore", lambda bucket: store)
+    monkeypatch.setattr(stream_mod, "GcsBlobStore", lambda bucket: store)
 
     class OneEventHarness:
         async def run(self, spec, rc):
@@ -117,8 +120,7 @@ def test_run_turn_writes_turn_mirror(tmp_path, monkeypatch):
 
     asyncio.run(drive())
 
-    keys = store.list("events/77/")
-    assert len(keys) == 1
+    assert store.list("events/77/")  # streamed incrementally; file count is timing-dependent
     events = history.read_history("gs://bkt", "77", store=store)
     assert [e.kind for e in events] == ["status", "result"]  # workspace_ready + the result
     assert events[-1].summary == "mirrored"

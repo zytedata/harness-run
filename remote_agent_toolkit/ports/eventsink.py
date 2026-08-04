@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import random
 import time
 from datetime import datetime, timezone
 from typing import AsyncIterator, Protocol, runtime_checkable
@@ -30,8 +31,33 @@ _MAX_WAIT_S = 3600.0
 # Per-poll bound + how many consecutive failed polls to ride out before surfacing the error.
 _POLL_TIMEOUT_S = 30.0
 _MAX_POLL_FAILURES = 10
+# Read-quota rejections are NOT failures. Cloud Logging caps `entries.list` at 60 requests
+# per minute PER PROJECT (fixed — cannot be raised), so concurrent tails in one project
+# WILL trade 429s under contention: every agent run, live test, and colleague shares the
+# same budget. A quota rejection proves the API is reachable and the per-minute window will
+# refill, so the tail backs off (exponential + jitter, capped) instead of counting toward
+# ``_MAX_POLL_FAILURES``; ``_MAX_WAIT_S`` still bounds the tail as a whole. The jittered cap
+# also self-balances fleets: at the cap, each tail costs ~2-3 reads/min, so ~20-30 concurrent
+# tails degrade to slower-but-steady delivery instead of starving each other out.
+_QUOTA_BACKOFF_BASE_S = 2.0
+_QUOTA_BACKOFF_CAP_S = 30.0
 # RFC3339 with microseconds + trailing Z — the timestamp format Cloud Logging filters accept.
 _RFC3339 = "%Y-%m-%dT%H:%M:%S.%fZ"
+
+
+def _is_quota_error(exc: BaseException) -> bool:
+    """True for a Cloud Logging read-quota rejection (HTTP 429 / gRPC RESOURCE_EXHAUSTED)."""
+    try:
+        from google.api_core import exceptions as gax  # ships with google-cloud-logging
+    except Exception:  # pragma: no cover — only hit where the client itself can't exist
+        return False
+    return isinstance(exc, (gax.TooManyRequests, gax.ResourceExhausted))
+
+
+def _quota_backoff_s(rejections: int) -> float:
+    """Jittered exponential backoff for the ``rejections``-th consecutive quota rejection."""
+    delay = min(_QUOTA_BACKOFF_CAP_S, _QUOTA_BACKOFF_BASE_S * 2 ** (rejections - 1))
+    return random.uniform(delay / 2, delay)  # jitter de-synchronizes concurrent tails
 
 
 def _json_safe(value):
@@ -123,7 +149,8 @@ class CloudLoggingSink:
         has right now (bounded by the log bucket's retention, ~30 days by default) and returns.
         The whole read is bounded by ``timeout``: the logging client has no per-call timeout of
         its own, and a dead connection would otherwise block forever (the wedged worker thread
-        is abandoned on timeout).
+        is abandoned on timeout). Read-quota rejections (the shared 60-reads/min project
+        budget) are retried with backoff within the same ``timeout`` instead of raising.
         """
         import concurrent.futures
 
@@ -153,11 +180,20 @@ class CloudLoggingSink:
 
         # No `with`: the context manager's shutdown WAITS on the worker, which would block on
         # the very wedge the timeout exists to escape. shutdown(wait=False) abandons it.
-        ex = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-        try:
-            return ex.submit(_list).result(timeout=timeout)
-        finally:
-            ex.shutdown(wait=False)
+        deadline = time.monotonic() + timeout
+        quota_rejections = 0
+        while True:
+            ex = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+            try:
+                return ex.submit(_list).result(timeout=max(0.1, deadline - time.monotonic()))
+            except Exception as exc:
+                remaining = deadline - time.monotonic()
+                if not (_is_quota_error(exc) and remaining > 0):
+                    raise
+                quota_rejections += 1
+                time.sleep(min(remaining, _quota_backoff_s(quota_rejections)))
+            finally:
+                ex.shutdown(wait=False)
 
     async def tail(
         self, session_id: str, since: float | None = None
@@ -180,6 +216,7 @@ class CloudLoggingSink:
         seen: set[str] = set()  # insert_ids already yielded, so repeated polls don't duplicate
 
         failures = 0  # consecutive failed/wedged polls; transient blips ride out, permanent raise
+        quota_rejections = 0  # consecutive 429s; expected under contention, backed off, never fatal
         while time.monotonic() - start < _MAX_WAIT_S:
             filter_str = (
                 f'logName="projects/{project}/logs/{self.log_name}" '
@@ -202,7 +239,15 @@ class CloudLoggingSink:
                     timeout=_POLL_TIMEOUT_S,
                 )
                 failures = 0
-            except Exception:  # noqa: BLE001 — timeout / transient auth / network blip
+                quota_rejections = 0
+            except Exception as exc:  # noqa: BLE001 — timeout / transient auth / network blip
+                if _is_quota_error(exc):
+                    # The 60-reads/min budget is shared by the whole project (see the
+                    # constants above): exhaustion is an operating condition, not a fault.
+                    # Back off so concurrent tails share the window; never raise for it.
+                    quota_rejections += 1
+                    await asyncio.sleep(_quota_backoff_s(quota_rejections))
+                    continue
                 failures += 1
                 if failures >= _MAX_POLL_FAILURES:
                     raise  # permanent (bad filter, revoked perms): surface, don't spin forever

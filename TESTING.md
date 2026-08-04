@@ -64,6 +64,13 @@ answer in the text. Typical numbers: deploy ~3.5–4 min (the two run in paralle
 ~3 min end-to-end, warm ~1 min, a few cents of model spend. Exit code is non-zero on any
 FAIL, so you can gate on it.
 
+Expect **slow event batches, not failures, under log-read contention**: the event tail shares
+Cloud Logging's fixed 60-reads/min **per-project** quota, and `MODE=both` alone runs two
+concurrent tails — add a colleague's test or any streamed agent run and the project is over
+budget. The tail backs off on 429s and recovers (events arrive in bursts up to ~30 s apart);
+a smoke run should never fail *because of* 429s. If you see one fail that way, that's a
+toolkit bug — report it.
+
 Prerequisites: the GCP setup from the
 [README "GCP setup & required permissions"](README.md#gcp-setup--required-permissions)
 (ADC login, IAM grants, Haiku enabled in Vertex Model Garden). Defaults target the shared

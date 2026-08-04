@@ -310,6 +310,15 @@ These are facts measured during the PoC. The library encodes them so consumers i
 - Async `run_query_job` surfaces **no** stderr, **no** stack traces, and only coarse (~12 min) GCS flushes.
   **Cloud Logging (`log_struct`) is the only near-real-time channel** — the harness emits a per-step
   structured log; the client tails it filtered by `session_id`. This is the `EventSink` port.
+- **Log reads are capped at 60 `entries.list` requests/min PER PROJECT** (fixed; Google says not
+  raisable). Every concurrent tail — runs, live tests, colleagues — shares that one budget, and a
+  single tail at the 1 s cadence consumes most of it. The tail therefore treats a 429/RESOURCE_EXHAUSTED
+  as an operating condition: exponential jittered backoff (capped 30 s), never counted toward the fatal
+  consecutive-failure threshold. Consequence: with N concurrent tails, live-event latency degrades
+  toward ~30 s batches (at the cap each tail costs ~2–3 reads/min ⇒ ~20–30 tails saturate). The durable
+  GCS records are unaffected. The scaling fix on the roadmap (§12) is to stream from the GCS event
+  mirror instead of Cloud Logging — the mirror is already the authoritative record; today it is written
+  per turn, so streaming from it needs incremental (per-event/batched) mirror writes.
 - **Cloud Trace spans per turn** (the console's Agent Platform *Traces* tab). The platform's ADK
   auto-instrumentation can't see inside the Claude subprocess, so the worker rebuilds the structure from
   the `AgentEvent` stream (`gemini/tracing.TurnTracer`): a root `invoke_agent` span per turn (parented
@@ -621,6 +630,18 @@ saving all onboarding docs for the end.
 - **Local parity with the engine image** — *Python package* parity is handled by the venv above; full
   OS-level parity (base OS, glibc, system tools) is the `dev/` parity image's job (install/dependency
   issues debugged on the laptop instead of through ~10-min cloud rebuilds).
+- **Quota-free event streaming (GCS mirror as the live channel)** — the Cloud Logging tail shares one
+  fixed 60-reads/min budget per project (§6), so live-event latency degrades as concurrent runs grow
+  (tens of agents ⇒ ~30 s batches). Planned fix: make the worker's GCS event mirror *incremental*
+  (append per event or small batch — e.g. one small object per batch under `events/<sid>/`) and teach the
+  client to stream by listing/reading new objects. GCS object listing is strongly consistent, has no
+  comparable read cap, reuses the existing `BlobStore` port and IAM, and the mirror is already the
+  authoritative record (Cloud Logging would remain for ops/debugging). Alternatives considered: Cloud
+  Logging's streaming `tail` API (hard cap of 10 concurrent tail sessions per project, also fixed —
+  a wall below "tens of agents"),
+  a log sink → Pub/Sub fan-out (works, but new infra + per-client subscription lifecycle + every client
+  receives all sessions' traffic), per-process tail multiplexing (helps one client with many sessions,
+  not many clients — could complement).
 - **Structured outputs** — prefer the SDK's constrained-decoding `structured_output`; keep "parse last
   JSON block" only as a fallback for harnesses that lack it. Confirm Vertex model support per model.
 - **Outcomes / rubrics** — CMA's iterate-until-graded "definition of done" is attractive for autonomous

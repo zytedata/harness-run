@@ -666,6 +666,21 @@ worker's *actual* pickup is ~5 s. On claim the pool refills, so the next turn is
 > across that boundary is a future refinement; in practice the refill-on-claim cadence likely keeps enough
 > workers warm, so it shouldn't bite early on.
 
+**Event-stream throughput: one 60-reads/min budget per project.** The event stream you consume with
+`async for ev in run` is a Cloud Logging tail, and Cloud Logging caps log *reads* (`entries.list`) at
+**60 requests per minute per project** — fixed, [not raisable](https://cloud.google.com/logging/quotas),
+and shared by *everything* in the project: every concurrently-streamed run, every live test, every
+colleague. One tail polls ~1×/s, so a single streamed run nearly saturates the budget by itself; two or
+more concurrent tails **will** trade 429s. The toolkit treats a read-quota rejection as an operating
+condition, not an error: the tail backs off (exponentially, jittered, capped at 30 s) and picks the
+stream back up when the per-minute window refills — runs never fail because of it, but **event delivery
+latency grows with the number of concurrent tails** (at the cap each tail costs ~2–3 reads/min, so a few
+dozen concurrent streams degrade to ~30 s event batches). The *durable* record (GCS event mirror, job
+output, `session.history()`) is unaffected — only live streaming slows down. (Both `async for` and
+`await run` drive the same tail today, so running many agents concurrently in one project slows event
+delivery for all of them; a quota-free streaming channel — reading the GCS event mirror incrementally —
+is the planned way out, see DESIGN §12.)
+
 **Cost.** A deployed engine itself is (almost) free while idle: the toolkit deploys with `min_instances=0`
 (no standing container — the async path provisions a worker per job, so a min-instances container would serve
 only the unused sync path while billing continuously). Warm workers are the exception: they are long-running

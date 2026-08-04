@@ -11,8 +11,8 @@ ship behind the same API: **Claude Code** (the default) and **Codex** (OpenAI mo
 > in-process (`local.deploy`), or deploy + run on Agent Runtime (`gemini.deploy` / `gemini.get_engine`), with
 > skills, structured output, checkpoint/resume, and a **warm pool** (~10–20 s pickup vs ~2.5 min cold) — all
 > exercised end-to-end on real infrastructure. The two paths share one `Engine`/`Session`/`Run` API. Not yet
-> built (raise `NotImplementedError` or simply absent): session `fork()`, `get_engine(version=…)` pinning, and
-> a sync run path. See [`examples/minimal`](examples/minimal) for a runnable agent and
+> built (raise `NotImplementedError` or simply absent): session `fork()` and a sync run path.
+> See [`examples/minimal`](examples/minimal) for a runnable agent and
 > [`DESIGN.md`](DESIGN.md) for the architecture, platform contracts (§6), and roadmap (§11).
 
 ## Install
@@ -404,19 +404,48 @@ result = await session.run("/scrape https://books.toscrape.com title, price")   
 **Managing deployed engines** (control plane):
 
 ```python
-gemini.deploy(spec, project=..., location=...)   # create; ops/CI only (warm_pool=True, pool_size=N for a pool)
+gemini.deploy(spec, project=..., location=...)   # create / update; ops/CI only (warm_pool=True, pool_size=N)
 gemini.deploy(spec, ..., resource_limits={"cpu": "4", "memory": "16Gi"})  # container CPU/RAM (default 4 / 4Gi)
 gemini.get_engine("spider-builder", project=..., location=...)   # look up by name (app code)
 gemini.get_engine("spider-builder", ..., spec=spec)              # pass spec for structured output
 gemini.list_engines(project=..., location=...)   # discover what's deployed
-engine.name, engine.resource                     # identity / underlying resource name
+engine.name, engine.version, engine.resource     # identity / serving revision / underlying resource name
 engine.wait_until_warm(timeout=300)              # warm pools: wait for a ready worker before dispatching
 engine.delete(delete_pool_resources=True)        # tear down: cancels pool workers, removes engine (+ topic/sub)
 ```
 
 Note: `engine.delete()` is the correct way to tear a warm pool down — its idle workers are long-running jobs
-that otherwise block deletion until they expire. Version pinning (`get_engine(..., version=N)`) and session
-`fork()` are not built yet; `get_engine` resolves the latest engine of that name.
+that otherwise block deletion until they expire. Session `fork()` is not built yet.
+
+### Versions: engines have revisions
+
+Engine identity is `spec.name`. Deploying a name that already exists **updates that engine**, and Agent
+Runtime mints a new immutable *runtime revision* of it — so app code's `get_engine("spider-builder")` picks
+the new code up without re-pointing at anything, and the previous revision stays around to roll back to.
+(Only the first deploy of a name creates an engine; pass `new_engine=True` for a deliberate side-by-side.)
+
+```python
+engine.versions()                        # ['7', '6', '5'] — revision ids, newest first
+engine.revisions()                       # + create_time / state / which one is `serving`
+engine.version                           # the revision this handle's runs execute on
+engine.set_traffic("6")                  # roll back: send 100% of traffic to revision 6
+engine.set_traffic()                     # back to always-latest (the platform default)
+engine.delete_version("5")               # prune an old revision (the serving one can't go)
+
+gemini.get_engine("spider-builder", ..., version="7")   # assert we're running revision 7
+```
+
+**`version=` is an assertion, not routing.** Agent Runtime exposes `asyncQuery` — the toolkit's whole run
+plane — on the *engine* only; a revision has `query`/`streamQuery` but no async form. So which revision runs
+a turn is decided by the engine's traffic config, not by the caller: `get_engine(..., version=N)` verifies
+that revision exists *and* is the one serving (a deploy-then-pin CI flow catches a rolled-back engine at
+lookup instead of running unknown code), and `set_traffic` is the ops action that actually moves traffic.
+Two callers cannot address two revisions of one engine concurrently.
+
+A traffic pin survives later deploys — a fresh revision won't serve until you `set_traffic()` again, and
+`deploy` warns when it lands in that state. For warm pools, note that workers already blocked on the
+dispatch subscription keep running the revision they cold-started with, so an update has a window where
+turns may land on either; `delete()` the pool (or deploy with `new_engine=True`) for a hard cutover.
 
 ## Past jobs: listing sessions & reading history
 

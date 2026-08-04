@@ -69,6 +69,17 @@ Prerequisites: the GCP setup from the
 (ADC login, IAM grants, Haiku enabled in Vertex Model Garden). Defaults target the shared
 `my-project` test project.
 
+### The revision probe (`make live-revisions`)
+
+[`dev/live_revisions.py`](dev/live_revisions.py) covers what the smoke test can't: the
+**control plane's versioning**. It deploys one throwaway engine (`ratk-rev-<you>`) twice and
+asserts that the second deploy *updates* it into a new runtime revision rather than creating
+a second engine, that traffic follows the newest revision, that `set_traffic` rolls back and
+a turn still runs, that `get_engine(version=…)` accepts the serving revision and rejects a
+non-serving one, and that `delete_version` prunes. Run it when you touch deploy, versioning,
+or traffic config. ~10 min: the two builds are **sequential** (the second is the update under
+test), so it costs about the same wall-clock as the smoke test's parallel pair.
+
 ### Writing a bespoke live probe
 
 When the smoke test doesn't cover your change (e.g. validating crash/retry behavior, or a

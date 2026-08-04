@@ -149,7 +149,12 @@ class Engine(Protocol):
         ...
 
     def versions(self) -> list[str]:
-        """List the deployed versions of this engine."""
+        """List the deployed versions of this engine, newest first.
+
+        A version is whatever the backend versions a deployment by: on ``gemini`` an Agent
+        Runtime **runtime revision** (each ``deploy`` of an existing name mints one); on
+        ``local`` the single pseudo-version ``"local"``.
+        """
         ...
 
     @property
@@ -159,7 +164,7 @@ class Engine(Protocol):
 
     @property
     def version(self) -> str:
-        """The resolved engine version."""
+        """The resolved engine version — the one this handle's runs execute on."""
         ...
 
     @property

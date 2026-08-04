@@ -6,7 +6,7 @@ VENV ?= .venv
 IMAGE ?= ratk-dev
 PACKAGES ?=
 
-.PHONY: test lint live-smoke parity-build parity-shell parity-check
+.PHONY: test lint live-smoke live-revisions parity-build parity-shell parity-check
 
 test:
 	$(VENV)/bin/python -m pytest -q
@@ -18,6 +18,11 @@ lint:
 # Costs real money + ~10 min; see TESTING.md for when it's required and how to configure.
 live-smoke:
 	$(VENV)/bin/python dev/live_smoke.py
+
+# Live check of the revision control plane (deploy-as-update, traffic rollback, pinning).
+# Two SEQUENTIAL builds — ~10 min; run it when you touch deploy/versioning.
+live-revisions:
+	$(VENV)/bin/python dev/live_revisions.py
 
 # Build the parity image. Pass the agent's spec.packages so they install exactly as on the
 # engine, e.g.:  make parity-build PACKAGES="pandas==2.2.* httpx>=0.27"

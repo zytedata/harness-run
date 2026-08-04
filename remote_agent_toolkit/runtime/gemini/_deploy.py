@@ -133,11 +133,9 @@ def build_env(
         # Per-session event mirror at events/<sid>/*.jsonl — BOTH the durable history
         # (Session.history(); the platform's own job output isn't session-keyed for warm
         # turns and keeps only the last cold job) AND the live channel: the worker streams
-        # batches as events happen and the client tails the listing (stream.py), keeping
-        # Cloud Logging emit-only. The marker below tells clients this engine streams —
-        # get_engine falls back to the Cloud Logging tail for engines deployed without it.
+        # batches as events happen and the client tails the listing (stream.py). Cloud
+        # Logging is emit-only (ops/debug), never tailed.
         env["AGENT_EVENTS_GCS"] = f"{output_bucket}/events"
-        env["AGENT_EVENT_STREAM"] = "jsonl-1"
 
     # Checkpoint/resume mirrors each turn's conversation + workspace to GCS. It needs a
     # bucket to write to, so we only enable it when an output_bucket is supplied; otherwise

@@ -54,9 +54,8 @@ async def main() -> int:
     print(f"{time.strftime('%H:%M:%S')} deploying {NAME} ...", flush=True)
     engine = gemini.deploy(spec, PROJECT, LOCATION)
     try:
-        check("deploy handle streams events", engine._streams_events)
         looked_up = gemini.get_engine(NAME, project=PROJECT, location=LOCATION, spec=spec)
-        check("get_engine detects the stream marker", looked_up._streams_events)
+        check("get_engine resolves the engine", looked_up.resource == engine.resource)
 
         session = looked_up.start_session()
         await run_turn(session, 'Run `python3 -c "print(6 * 7)"` in the shell and reply '

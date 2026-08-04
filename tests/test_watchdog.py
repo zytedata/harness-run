@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import asyncio
 import time
-from datetime import datetime, timezone
 
 import pytest
 
@@ -206,87 +205,13 @@ def test_watchdog_plain_end_of_stream_passes_through():
     assert [e.kind for e in events] == ["status"]  # no synthetic invention
 
 
-# -- layer 1: bounded polls ------------------------------------------------------
-
-
-class _Entry:
-    def __init__(self, payload, insert_id):
-        self.payload = payload
-        self.insert_id = insert_id
-        self.timestamp = datetime.now(timezone.utc)
+# -- layer 1: bounded one-shot read ------------------------------------------------------
 
 
 def _sink_with(client):
     sink = eventsink.CloudLoggingSink(project="p")
     sink._client = client
     return sink
-
-
-def test_tail_rides_out_transient_poll_failures(monkeypatch):
-    monkeypatch.setattr(eventsink, "_POLL_INTERVAL_S", 0.001)
-
-    class FlakyClient:
-        project = "p"
-        calls = 0
-
-        def list_entries(self, filter_, order_by):
-            FlakyClient.calls += 1
-            if FlakyClient.calls <= 2:
-                raise ConnectionError("transient network blip")
-            return [_Entry({"kind": "result", "summary": "ok"}, "i1")]
-
-    async def drive():
-        return [e async for e in _sink_with(FlakyClient()).tail("sid", since=time.time())]
-
-    events = asyncio.run(drive())
-    assert [e.kind for e in events] == ["result"] and FlakyClient.calls == 3
-
-
-def test_tail_surfaces_permanent_poll_failure(monkeypatch):
-    monkeypatch.setattr(eventsink, "_POLL_INTERVAL_S", 0.001)
-    monkeypatch.setattr(eventsink, "_MAX_POLL_FAILURES", 3)
-
-    class DeadClient:
-        project = "p"
-
-        def list_entries(self, filter_, order_by):
-            raise PermissionError("permanently forbidden")
-
-    async def drive():
-        return [e async for e in _sink_with(DeadClient()).tail("sid", since=time.time())]
-
-    with pytest.raises(PermissionError):
-        asyncio.run(drive())
-
-
-def test_tail_times_out_wedged_poll_and_retries(monkeypatch):
-    # A wedged connection blocks list_entries indefinitely; the per-poll bound abandons it
-    # and the NEXT poll (fresh call) succeeds.
-    monkeypatch.setattr(eventsink, "_POLL_INTERVAL_S", 0.001)
-    monkeypatch.setattr(eventsink, "_POLL_TIMEOUT_S", 0.05)
-
-    class WedgedOnceClient:
-        project = "p"
-        calls = 0
-
-        def list_entries(self, filter_, order_by):
-            WedgedOnceClient.calls += 1
-            if WedgedOnceClient.calls == 1:
-                time.sleep(0.5)  # wedged well past the poll bound
-                return []
-            return [_Entry({"kind": "result", "summary": "ok"}, "i1")]
-
-    async def drive():
-        # Measure inside the loop: asyncio.run()'s SHUTDOWN waits for the abandoned worker
-        # thread (loop.shutdown_default_executor), which is fine in production where the loop
-        # is long-lived — the stream itself must not wait out the wedge.
-        t0 = time.monotonic()
-        events = [e async for e in _sink_with(WedgedOnceClient()).tail("sid", since=time.time())]
-        return events, time.monotonic() - t0
-
-    events, elapsed = asyncio.run(drive())
-    assert [e.kind for e in events] == ["result"]
-    assert elapsed < 0.4  # did NOT wait out the 0.5 s wedge
 
 
 def test_read_bounded_by_timeout():

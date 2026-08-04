@@ -3,7 +3,7 @@
 Covers the write side (batching, immediate terminal flush, close-drains, best-effort on
 storage failure), the read side (ordering across files, watermark dedup, ``since`` floor,
 stop-at-result, transient-error tolerance), the live writer→tail round-trip, and the
-client-side channel selection (stream-aware engine vs legacy Cloud Logging tail).
+wedge protection, and the client-side wiring (an output bucket is required to run).
 """
 
 from __future__ import annotations
@@ -182,22 +182,49 @@ def test_tail_start_after_beats_the_clock_floor(tmp_path):
     assert [e.summary for e in events] == ["turn2"]
 
 
-# -- client-side channel selection --------------------------------------------------
+def test_tail_times_out_wedged_list_and_retries(tmp_path, monkeypatch):
+    # A wedged connection blocks a list indefinitely; the per-call bound abandons it and
+    # the NEXT poll (a fresh call) succeeds — the stream must not wait out the wedge.
+    monkeypatch.setattr(stream_mod, "_TAIL_POLL_S", 0.001)
+    monkeypatch.setattr(stream_mod, "_POLL_TIMEOUT_S", 0.05)
+
+    class WedgedOnce(LocalBlobStore):
+        calls = 0
+
+        def list(self, prefix):
+            WedgedOnce.calls += 1
+            if WedgedOnce.calls == 1:
+                time.sleep(0.5)  # wedged well past the poll bound
+            return super().list(prefix)
+
+    store = WedgedOnce(str(tmp_path))
+    store.put_bytes("events/s1/000000000000001-0001.jsonl", b'{"kind": "result"}')
+
+    async def drive():
+        # Measure inside the loop: asyncio.run()'s shutdown waits for the abandoned worker
+        # thread, which is fine in production where the loop is long-lived.
+        t0 = time.monotonic()
+        events = [e async for e in tail_stream(URI, "s1", store=store)]
+        return events, time.monotonic() - t0
+
+    events, elapsed = asyncio.run(drive())
+    assert [e.kind for e in events] == ["result"]
+    assert elapsed < 0.4  # did NOT wait out the 0.5s wedge
 
 
-def test_engine_streams_events_requires_marker_and_bucket():
+# -- client-side wiring --------------------------------------------------------------
+
+
+def test_submit_requires_an_output_bucket():
     from remote_agent_toolkit.runtime.gemini import backend
     from remote_agent_toolkit.spec import AgentSpec
 
-    def engine(**kw):
-        return backend.GeminiEngine(
-            resource="projects/p/locations/l/reasoningEngines/1",
-            spec=AgentSpec(name="a", model="m"), project="p", location="l", **kw,
-        )
-
-    assert engine(output_bucket="gs://b", streams_events=True)._streams_events
-    assert not engine(output_bucket="gs://b")._streams_events  # legacy engine => CL tail
-    assert not engine(streams_events=True)._streams_events  # no bucket to stream from
+    engine = backend.GeminiEngine(
+        resource="projects/p/locations/l/reasoningEngines/1",
+        spec=AgentSpec(name="a", model="m"), project=None, location=None,
+    )
+    with pytest.raises(ValueError, match="output bucket"):
+        backend.GeminiSession(engine, "sid").run("go")
 
 
 def test_tail_poll_cadence_is_subsecond():

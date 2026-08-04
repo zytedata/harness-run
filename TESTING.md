@@ -64,12 +64,10 @@ answer in the text. Typical numbers: deploy ~3.5–4 min (the two run in paralle
 ~3 min end-to-end, warm ~1 min, a few cents of model spend. Exit code is non-zero on any
 FAIL, so you can gate on it.
 
-Freshly deployed engines stream events via the **GCS mirror** (no read quota, no ingestion
-lag — see DESIGN §6), so concurrent tests don't contend. Only when a client tails an engine
-deployed *before* event streaming does the legacy Cloud Logging tail run — that path shares
-a fixed 60-reads/min **per-project** quota with everything else in the project, and backs
-off on 429s instead of failing (events then arrive in bursts up to ~30 s apart). A run
-failing *because of* 429s is a toolkit bug — report it.
+Events stream via the **GCS mirror** (no read quota, no ingestion lag — see DESIGN §6), so
+concurrent tests don't contend. Against an engine deployed *before* event streaming, all of
+a turn's events arrive in one batch with the result (its mirror was written at end-of-turn)
+— redeploy it for live streaming.
 
 Prerequisites: the GCP setup from the
 [README "GCP setup & required permissions"](README.md#gcp-setup--required-permissions)

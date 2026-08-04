@@ -313,16 +313,17 @@ These are facts measured during the PoC. The library encodes them so consumers i
   immediately), and the client tails the object listing — lexical name order == chronological,
   list-after-write is strongly consistent (no ingestion lag), and GCS has no restrictive read cap, so
   tens of concurrent streamed runs are a non-event. The same objects ARE the durable history
-  (`Session.history()` reads them) — one record, two roles. Engines bake `AGENT_EVENT_STREAM` to
-  advertise the channel; clients fall back to tailing Cloud Logging for engines deployed before it.
+  (`Session.history()` reads them) — one record, two roles. It is the ONLY live channel: engines
+  deployed before streaming wrote the mirror at end-of-turn, so against them a turn's events all
+  arrive in one batch with the terminal result (correct, just not live) and `wait_until_warm`
+  times out soft — redeploy them.
 - **Cloud Logging is emit-only**: every worker still writes the per-step `remote_agent_toolkit_steps`
   log (labelled by `session_id`) because debugging and alerting need an indexed, queryable,
   cross-session store — but no client run depends on it. Its READ path is capped at
   **60 `entries.list` requests/min PER PROJECT** (fixed; Google says not raisable), which is why
-  clients no longer tail it. The legacy tail fallback treats a 429/RESOURCE_EXHAUSTED as an operating
-  condition (exponential jittered backoff capped at 30 s, never counted toward the fatal
-  consecutive-failure threshold), so pre-stream engines degrade to slower event batches under
-  contention instead of failing.
+  it was dropped as a data plane (`CloudLoggingSink` has no `tail`). The only remaining log read is
+  the bounded one-shot history backstop (`CloudLoggingSink.read`, `read_history` layer 3 — sessions
+  older than mirroring); it retries 429s with backoff inside its timeout.
 - **Cloud Trace spans per turn** (the console's Agent Platform *Traces* tab). The platform's ADK
   auto-instrumentation can't see inside the Claude subprocess, so the worker rebuilds the structure from
   the `AgentEvent` stream (`gemini/tracing.TurnTracer`): a root `invoke_agent` span per turn (parented

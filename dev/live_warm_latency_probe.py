@@ -36,8 +36,7 @@ async def main() -> int:
     try:
         t0 = time.time()
         warm = await asyncio.to_thread(engine.wait_until_warm)
-        print(f"wait_until_warm={warm} after {time.time() - t0:.0f}s "
-              f"(via {'GCS stream' if engine._streams_events else 'Cloud Logging'})", flush=True)
+        print(f"wait_until_warm={warm} after {time.time() - t0:.0f}s", flush=True)
 
         t0 = time.time()
         session = engine.start_session()

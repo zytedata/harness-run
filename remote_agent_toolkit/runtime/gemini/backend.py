@@ -5,9 +5,10 @@ in an ``AdkApp``, and creates a reasoningEngine; app code addresses engines by n
 ``get_engine`` and never deploys (DESIGN.md §3.3).
 
 The run plane mirrors ``local`` exactly via the shared :class:`DrivenRun`: a ``Session.run``
-submits a ``run_query_job`` and the ``Run`` is driven by tailing the ``CloudLoggingSink`` for
-that session — so **stream** = tail, **await** = wait for the terminal ``result`` log event,
-**poll** = read the latest status. Same awaitable/iterable/pollable handle as local.
+submits a ``run_query_job`` and the ``Run`` is driven by tailing the session's GCS event
+mirror (``stream.tail_stream``) — so **stream** = tail, **await** = wait for the terminal
+``result`` event, **poll** = read the latest status. Same awaitable/iterable/pollable handle
+as local. Cloud Logging is written by every worker but never read here (ops/debug only).
 
 The Google SDK (``agentplatform`` / ``google-cloud-aiplatform``) and the sink are imported
 lazily inside the bodies, so importing this module needs no third-party deps. ``agentplatform``
@@ -27,13 +28,12 @@ from typing import Any, AsyncIterator, TYPE_CHECKING
 from ...events import AgentEvent, RunResult, RunStatus, StopReason
 from .._run import DrivenRun
 from .pool import POOL_WAIT_SENTINEL, dispatch_payload, pool_paths
+from .stream import tail_stream
 
 if TYPE_CHECKING:
     from ...spec import AgentSpec
     from ..base import Engine
 
-# Must match CloudLoggingSink's default log_name (the deployed agent emits here, the client tails it).
-_LOG_NAME = "remote_agent_toolkit_steps"
 _USER_ID = "ratk"
 
 # Cold-run watchdog: probe the job's state after this much stream silence, and end the run
@@ -325,7 +325,6 @@ def deploy(
         warm=warm_pool,
         topic=topic,
         subscription=subscription,
-        streams_events=True,  # build_env just baked AGENT_EVENT_STREAM (output_bucket is set)
     )
     if warm_pool:
         try:
@@ -387,24 +386,7 @@ def get_engine(
         warm=warm_pool,
         topic=topic,
         subscription=subscription,
-        streams_events=_engine_streams_events(client, resource),
     )
-
-
-def _engine_streams_events(client: Any, resource: str) -> bool:
-    """Whether ``resource`` was deployed with the incremental event stream (env marker).
-
-    Engines deployed by a stream-aware toolkit bake ``AGENT_EVENT_STREAM`` into their env;
-    clients tail the GCS mirror live for those, and fall back to the legacy Cloud Logging
-    tail otherwise (e.g. an engine deployed before streaming existed). Unreadable env (older
-    control-plane surface, permissions) degrades to the safe fallback.
-    """
-    try:
-        engine = client.agent_engines.get(name=resource)
-        env = engine.api_resource.spec.deployment_spec.env or []
-        return any(getattr(var, "name", None) == "AGENT_EVENT_STREAM" for var in env)
-    except Exception:  # noqa: BLE001 — lookup is best-effort; legacy tail always works
-        return False
 
 
 def list_engines(project: str, location: str, *, credentials: Any | None = None) -> list[dict]:
@@ -471,11 +453,15 @@ class GeminiSession:
     def _submit(
         self, message: str, resume: bool, secrets: dict[str, str] | None = None
     ) -> DrivenRun:
-        from ...ports.eventsink import CloudLoggingSink
-
         engine = self._engine
         sid = self._session_id
-        # Watermark the log tail just before kicking off (small slack for clock skew).
+        if not engine._output_bucket:
+            raise ValueError(
+                "running a turn requires the engine's output bucket (events stream through "
+                "it); construct the engine with output_bucket/project set."
+            )
+        # Clock floor for a re-attached session's first turn (small slack for clock skew);
+        # subsequent turns use the exact key watermark instead (see tail_source below).
         since = time.time() - 5
         secrets_uri = self._stage_secrets(secrets)
         self._staged_secrets_uri = secrets_uri  # cleaned up on completion (worker deletes at turn end)
@@ -519,30 +505,20 @@ class GeminiSession:
                 cfg["output_gcs_uri"] = f"{engine._output_bucket}/jobs/{sid}.jsonl"
             self._last_job = engine._agent_engines().run_query_job(name=engine._resource, config=cfg)
 
-        # Live channel: the GCS event mirror for stream-aware engines (quota-free, no
-        # ingestion lag), the legacy Cloud Logging tail otherwise (engines deployed before
-        # streaming; shares the project-wide 60-reads/min budget, backs off under it).
-        # Cloud Logging is still WRITTEN by every worker — it's the ops/debug channel.
-        if engine._streams_events:
-            from .stream import tail_stream
+        # Live channel: the GCS event mirror (quota-free, no ingestion lag). Cloud Logging
+        # is still WRITTEN by every worker — it's the ops/debug channel, never tailed.
+        # Engines deployed before streaming wrote the mirror only at end-of-turn: their
+        # events all arrive with the terminal result — redeploy them for live streaming.
+        events_uri = f"{engine._output_bucket}/events"
+        watermark = self._stream_watermark
 
-            events_uri = f"{engine._output_bucket}/events"
-            watermark = self._stream_watermark
-
-            def tail_source() -> AsyncIterator:
-                # start_after (the previous turn's last consumed object) is the reliable
-                # turn boundary; the `since` clock floor covers re-attached sessions only.
-                return tail_stream(
-                    events_uri, sid, since=since,
-                    start_after=watermark["key"] or None, watermark=watermark,
-                )
-        else:
-            sink = CloudLoggingSink(
-                log_name=_LOG_NAME, project=engine._project, credentials=engine._credentials
+        def tail_source() -> AsyncIterator:
+            # start_after (the previous turn's last consumed object) is the reliable
+            # turn boundary; the `since` clock floor covers re-attached sessions only.
+            return tail_stream(
+                events_uri, sid, since=since,
+                start_after=watermark["key"] or None, watermark=watermark,
             )
-
-            def tail_source() -> AsyncIterator:
-                return sink.tail(sid, since=since)
 
         # Cold runs hold the job's operation name, so the tail gets a watchdog: if the job
         # terminates without ever writing a terminal event, the run ends with an explained
@@ -719,7 +695,6 @@ class GeminiEngine:
         warm: bool = False,
         topic: str | None = None,
         subscription: str | None = None,
-        streams_events: bool = False,
     ) -> None:
         self._resource = resource
         self.spec = spec
@@ -727,9 +702,6 @@ class GeminiEngine:
         self._location = location
         self._output_bucket = output_bucket
         self._credentials = credentials
-        # Engine bakes AGENT_EVENT_STREAM (deployed by a stream-aware toolkit): the client
-        # tails the GCS event mirror live. False => legacy Cloud Logging tail.
-        self._streams_events = streams_events and bool(output_bucket)
         self._warm = warm
         self._topic = topic
         self._subscription = subscription
@@ -841,19 +813,10 @@ class GeminiEngine:
         created = self._created
 
         async def _await() -> bool:
-            # Same channel split as the run tail: stream-aware engines write the readiness
-            # marker to the GCS mirror (events/<pool_id>/); older engines only log it.
-            if self._streams_events:
-                from .stream import tail_stream
-
-                markers = tail_stream(f"{self._output_bucket}/events", pool_id, since=created)
-            else:
-                from ...ports.eventsink import CloudLoggingSink
-
-                sink = CloudLoggingSink(
-                    log_name=_LOG_NAME, project=self._project, credentials=self._credentials
-                )
-                markers = sink.tail(pool_id, since=created)
+            # A worker writes its readiness marker to the GCS mirror (events/<pool_id>/).
+            # NB engines deployed before event streaming only ever logged it — for those
+            # this times out (False, a soft signal: dispatch works regardless); redeploy.
+            markers = tail_stream(f"{self._output_bucket}/events", pool_id, since=created)
             async for _ in markers:
                 return True  # first marker since deploy => a worker is warm
             return False

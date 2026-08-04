@@ -676,12 +676,13 @@ the durable history `session.history()` reads. Cloud Logging still receives ever
 indexed store the [debugging recipes](TESTING.md#debugging-a-live-run) query), but no client run
 depends on reading it.
 
-> _Engines deployed before event streaming_ (no `AGENT_EVENT_STREAM` in their env) are tailed the old
-> way, via Cloud Logging — whose *read* path is capped at
+> _Engines deployed before event streaming_ wrote the mirror only at end-of-turn, so against them the
+> stream delivers all of a turn's events in one batch with the terminal result (still a correct run —
+> just not live), and `wait_until_warm` times out soft (its readiness marker only reached Cloud
+> Logging, which clients no longer read: its read path is capped at
 > [60 requests/min per project](https://cloud.google.com/logging/quotas), fixed and shared by
-> everything in the project. The legacy tail backs off on 429s (exponential, jittered, capped 30 s)
-> instead of failing, so under contention those runs see slower event batches, never errors. Redeploy
-> an engine to move it to the stream.
+> everything in the project — the reason it was dropped as a data plane). **Redeploy an engine to
+> move it to live streaming.**
 
 **Cost.** A deployed engine itself is (almost) free while idle: the toolkit deploys with `min_instances=0`
 (no standing container — the async path provisions a worker per job, so a min-instances container would serve

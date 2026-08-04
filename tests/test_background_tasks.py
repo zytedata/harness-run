@@ -94,6 +94,40 @@ def test_turn_stays_open_across_task_reinvocation(tmp_path, monkeypatch):
     assert client_cls.instances[0].disconnected  # CLI torn down at turn end
 
 
+def test_active_reinvocation_is_not_subject_to_notification_grace(tmp_path, monkeypatch):
+    # Once init proves the CLI re-invoked the model, the notification grace is over. A
+    # foreground tool/model step must not inherit that timeout. Record the timeout chosen
+    # for each stream read so the state boundary is deterministic without sleeping.
+    import remote_agent_toolkit.harness.claude_code as harness_mod
+
+    original_wait_for = harness_mod.asyncio.wait_for
+    timeouts = []
+
+    async def recording_wait_for(awaitable, timeout):
+        timeouts.append(timeout)
+        return await original_wait_for(awaitable, timeout)
+
+    monkeypatch.setattr(harness_mod.asyncio, "wait_for", recording_wait_for)
+
+    script = [
+        init_msg(),
+        task_started_msg("t1"),
+        result_msg(num_turns=2, result="WAITING"),
+        task_done_msg("t1"),
+        init_msg(),  # notification delivered; the new invocation is now actively working
+        result_msg(num_turns=3, result="verified, all done"),
+    ]
+    events, _ = _events_of(script, tmp_path, monkeypatch)
+
+    results = [e for e in events if e.kind == "result"]
+    assert len(results) == 1
+    assert results[0].summary == "verified, all done"
+    assert results[0].raw["num_turns"] == 5
+    assert ClaudeCodeHarness._UNDELIVERED_GRACE_S in timeouts[:-1]
+    assert timeouts[-1] is None  # active invocation: foreground work may run indefinitely
+    assert not any((e.raw or {}).get("event") == "task_wait_timeout" for e in events)
+
+
 def test_no_tasks_result_is_final_immediately(tmp_path, monkeypatch):
     events, _ = _events_of([init_msg(), result_msg(result="plain")], tmp_path, monkeypatch)
     assert [e.kind for e in events] == ["status", "result"]

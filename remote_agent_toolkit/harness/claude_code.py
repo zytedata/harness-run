@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import deque
+from enum import Enum
 from pathlib import Path
 from typing import Any, AsyncIterator, TYPE_CHECKING
 
@@ -118,6 +119,13 @@ class _TaskTracker:
         if self._undelivered:
             return "undelivered"
         return None
+
+
+class _StreamPhase(Enum):
+    """Whether the CLI is running the model or is between model invocations."""
+
+    ACTIVE = "active"
+    BETWEEN_INVOCATIONS = "between_invocations"
 
 
 class ClaudeCodeHarness:
@@ -266,6 +274,7 @@ class ClaudeCodeHarness:
         stashed: AgentEvent | None = None  # newest demoted (segment-boundary) result
         turns_total = 0  # num_turns resets per re-invocation; RunResult reports the sum
         wait_deadline: float | None = None
+        phase = _StreamPhase.ACTIVE  # the initial query has been submitted to the model
 
         client = ClaudeSDKClient(options=options)
         try:
@@ -273,7 +282,7 @@ class ClaudeCodeHarness:
             await client.query(ctx.prompt)
             stream = client.receive_messages()
             while True:
-                if stashed is None:
+                if stashed is None or phase is _StreamPhase.ACTIVE:
                     timeout = None  # model working; a foreground tool call may run long
                 elif tracker.waiting() == "pending":
                     timeout = max(1.0, wait_deadline - asyncio.get_running_loop().time())
@@ -284,18 +293,36 @@ class ClaudeCodeHarness:
                 except StopAsyncIteration:
                     break
                 except asyncio.TimeoutError:
-                    yield AgentEvent(
-                        kind="status",
-                        summary=(
+                    reason = tracker.waiting()
+                    if reason == "pending":
+                        summary = (
                             "gave up waiting on background tasks "
                             f"({len(tracker.pending)} still pending); finalizing with the "
                             "result already produced"
-                        ),
-                        raw={"event": "task_wait_timeout", "pending": tracker.pending},
+                        )
+                    else:
+                        summary = (
+                            "gave up waiting for Claude Code to re-invoke after a background "
+                            "task notification; finalizing with the result already produced"
+                        )
+                    yield AgentEvent(
+                        kind="status",
+                        summary=summary,
+                        raw={
+                            "event": "task_wait_timeout",
+                            "reason": reason,
+                            "pending": tracker.pending,
+                        },
                     )
                     break
                 for event in translator.translate(message):
                     tracker.observe(event)
+                    if (event.raw or {}).get("subtype") == "init":
+                        # The notification grace ends as soon as the CLI starts the next
+                        # invocation. Keep the stashed result only as a crash fallback; it
+                        # must not impose a per-message timeout on an actively working model.
+                        phase = _StreamPhase.ACTIVE
+                        wait_deadline = None
                     if event.kind != "result":
                         yield event
                         continue
@@ -311,10 +338,13 @@ class ClaudeCodeHarness:
                     # Segment boundary, not the end of the turn: hold the stream open
                     # for the CLI's task-completion re-invocation.
                     stashed = event
-                    if wait_deadline is None:
+                    phase = _StreamPhase.BETWEEN_INVOCATIONS
+                    if reason == "pending":
                         wait_deadline = (
                             asyncio.get_running_loop().time() + spec.background_task_timeout
                         )
+                    else:
+                        wait_deadline = None
                     yield AgentEvent(
                         kind="status",
                         summary=(

@@ -57,7 +57,7 @@ path, and tears everything down in `finally`:
 
 - **cold** — `run_query_job`, the production default: every job provisions its own worker
   (~2.5 min startup before the turn runs).
-- **warm** — pub/sub dispatch to a pre-warmed pool worker (~10–20 s pickup).
+- **warm** — pub/sub dispatch to a pre-warmed pool worker (~4 s to first observed event).
 
 Pass criteria per engine: terminal result with `error=False`, `turns > 0`, and the expected
 answer in the text. Typical numbers: deploy ~3.5–4 min (the two run in parallel), cold turn
@@ -79,7 +79,10 @@ Prerequisites: the GCP setup from the
 ### Writing a bespoke live probe
 
 When the smoke test doesn't cover your change (e.g. validating crash/retry behavior, or a
-new event field), follow the same pattern — it's what keeps live testing safe and cheap:
+new event field), follow the same pattern — it's what keeps live testing safe and cheap.
+Worked examples in [`dev/`](dev): `live_two_turn_probe.py` (two turns on one session over
+the event stream — the probe that caught the stale-result replay bug) and
+`live_warm_latency_probe.py` (wait_until_warm + measured dispatch→first-event latency):
 
 - **Throwaway, named engines**: suffix with something identifying (`-itest`, your name) so
   leftovers are attributable; never point a probe at someone's standing engine.

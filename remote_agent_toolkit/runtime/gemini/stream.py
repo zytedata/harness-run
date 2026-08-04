@@ -134,23 +134,39 @@ async def tail_stream(
     session_id: str,
     since: float | None = None,
     *,
+    start_after: str | None = None,
+    watermark: dict | None = None,
     store: Any | None = None,
 ) -> AsyncIterator[AgentEvent]:
     """Stream a session's mirrored events live; stops after the terminal ``result``.
 
-    Polls the session's object listing (lexical == chronological) from a watermark:
-    ``since`` (epoch seconds) floors the *object names*, so previous turns' files are
-    skipped without reading them. Every storage call is bounded; transient errors ride
-    out (up to ``_MAX_POLL_FAILURES`` consecutive), and ``_MAX_WAIT_S`` bounds the tail
-    as a whole — same envelope as the Cloud Logging tail this replaces.
+    Polls the session's object listing (lexical == chronological) from a floor, skipping
+    previous turns' files without reading them. Two floors compose (the higher wins):
+
+    * ``start_after`` — an exact object key; only strictly-later keys are consumed. THE
+      turn-boundary floor: the previous turn's tail records its last consumed key (via
+      ``watermark``), and the next turn starts after it. Clock-free, so it is immune to
+      the back-to-back-turns hazard where a time floor with skew slack re-delivers the
+      previous turn's just-written terminal result as the new turn's first event.
+    * ``since`` (epoch seconds) — floors the names' leading epoch-ms stamp. The fallback
+      for re-attached sessions (fresh process, no watermark yet); its 5 s submit slack is
+      only safe when turns are NOT back-to-back, which re-attachment guarantees.
+
+    ``watermark`` (optional ``dict``) is updated in place — ``watermark["key"]`` is the
+    last consumed object key — so the caller can hand it to the next turn's tail. Every
+    storage call is bounded; transient errors ride out (up to ``_MAX_POLL_FAILURES``
+    consecutive), and ``_MAX_WAIT_S`` bounds the tail as a whole — same envelope as the
+    Cloud Logging tail this replaces.
     """
     from .history import _parse_jsonl, event_from_mirror
 
     blobs, prefix = _blobs_and_prefix(events_uri, store)
     sid_prefix = f"{prefix}{session_id}/"
-    # Names start with a 15-digit epoch-ms stamp, so this floor string sorts below every
-    # file written at/after `since` and above everything older.
+    # Names start with a 15-digit epoch-ms stamp, so the `since` floor string sorts below
+    # every file written at/after it and above everything older.
     consumed = f"{sid_prefix}{int(since * 1000):015d}" if since else sid_prefix
+    if start_after:
+        consumed = max(consumed, start_after)
     start = time.monotonic()
     failures = 0
     while time.monotonic() - start < _MAX_WAIT_S:
@@ -179,6 +195,8 @@ async def tail_stream(
                 break
             failures = 0
             consumed = key
+            if watermark is not None:
+                watermark["key"] = key
             for event in _parse_jsonl(data, event_from_mirror):
                 yield event
                 if event.kind == "result":

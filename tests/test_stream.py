@@ -147,6 +147,41 @@ def test_live_round_trip_writer_feeding_running_tail(tmp_path):
     assert [e.kind for e in events] == ["status", "tool_use", "result"]
 
 
+def test_tail_start_after_beats_the_clock_floor(tmp_path):
+    """Back-to-back turns: the previous turn's files can be SECONDS old — inside the
+    5s `since` slack — so the clock floor alone would replay its terminal result as the
+    new turn's first event (live-caught bug). The explicit key watermark must win."""
+    store = LocalBlobStore(str(tmp_path))
+    watermark: dict = {"key": ""}
+
+    # Turn 1 streams and its tail records the consumed watermark.
+    w1 = MirrorStream(URI, "s1", store=store)
+    w1.append(_ev("result", "turn1"))
+    w1.close()
+
+    async def turn1():
+        return [e async for e in tail_stream(URI, "s1", store=store, watermark=watermark)]
+
+    events = asyncio.run(turn1())
+    assert [e.summary for e in events] == ["turn1"]
+    assert watermark["key"], "tail must record the last consumed object"
+
+    # Turn 2 submits immediately: since = now - 5 covers turn 1's just-written file.
+    since = time.time() - 5
+    w2 = MirrorStream(URI, "s1", store=store)
+    w2.append(_ev("result", "turn2"))
+    w2.close()
+
+    async def turn2(**kw):
+        return [e async for e in tail_stream(URI, "s1", since=since, store=store, **kw)]
+
+    # Without the watermark the stale result comes back first (the bug)...
+    assert asyncio.run(turn2())[0].summary == "turn1"
+    # ...with it, turn 2 sees only its own events.
+    events = asyncio.run(turn2(start_after=watermark["key"], watermark=watermark))
+    assert [e.summary for e in events] == ["turn2"]
+
+
 # -- client-side channel selection --------------------------------------------------
 
 

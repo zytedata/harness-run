@@ -434,6 +434,9 @@ class GeminiSession:
         self._current_run: DrivenRun | None = None
         self._last_job: Any | None = None
         self._staged_secrets_uri: str | None = None  # staged handoff object (cleanup on complete)
+        # Last mirror object consumed by this session's stream tail; the NEXT turn's tail
+        # starts strictly after it (the clock-free turn boundary — see stream.tail_stream).
+        self._stream_watermark: dict = {"key": ""}
 
     def run(self, message: str, *, secrets: dict[str, str] | None = None) -> DrivenRun:
         """Start a fresh turn (submits a ``run_query_job``).
@@ -524,9 +527,15 @@ class GeminiSession:
             from .stream import tail_stream
 
             events_uri = f"{engine._output_bucket}/events"
+            watermark = self._stream_watermark
 
             def tail_source() -> AsyncIterator:
-                return tail_stream(events_uri, sid, since=since)
+                # start_after (the previous turn's last consumed object) is the reliable
+                # turn boundary; the `since` clock floor covers re-attached sessions only.
+                return tail_stream(
+                    events_uri, sid, since=since,
+                    start_after=watermark["key"] or None, watermark=watermark,
+                )
         else:
             sink = CloudLoggingSink(
                 log_name=_LOG_NAME, project=engine._project, credentials=engine._credentials

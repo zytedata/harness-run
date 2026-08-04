@@ -9,7 +9,7 @@ ship behind the same API: **Claude Code** (the default) and **Codex** (OpenAI mo
 
 > **Status: `local` and Gemini Agent Runtime both work — validated live.** Define an `AgentSpec` and run it
 > in-process (`local.deploy`), or deploy + run on Agent Runtime (`gemini.deploy` / `gemini.get_engine`), with
-> skills, structured output, checkpoint/resume, and a **warm pool** (~10–20 s pickup vs ~2.5 min cold) — all
+> skills, structured output, checkpoint/resume, and a **warm pool** (~4 s pickup vs ~2.5 min cold) — all
 > exercised end-to-end on real infrastructure. The two paths share one `Engine`/`Session`/`Run` API. Not yet
 > built (raise `NotImplementedError` or simply absent): session `fork()`, `get_engine(version=…)` pinning, and
 > a sync run path. See [`examples/minimal`](examples/minimal) for a runnable agent and
@@ -642,7 +642,7 @@ deploys — it looks an engine up by name and runs.
 | Path | Start latency | Ceiling | Use for |
 |---|---|---|---|
 | Async (default) | **~2.5 min** per-job worker provisioning | long-running | one-shot / long autonomous jobs |
-| **Warm pool** (`warm_pool=True`) | **~10–20 s** to first *observed* event | long-running | interactive *and* long — best of both |
+| **Warm pool** (`warm_pool=True`) | **~4 s** to first *observed* event | long-running | interactive *and* long — best of both |
 | Sync | ~3–9 s | ~600 s (10 min) hard | _not supported yet (see below)_ |
 
 The ~2.5 min async start is **per job, not a one-time cold start** — it's Vertex provisioning a dedicated
@@ -654,12 +654,14 @@ expose it yet** — the run plane is built around the async + warm-pool paths, w
 interactive work. We can add sync later if a genuinely short-turn use case needs the lower start latency.
 
 **How `warm_pool=True` works.** `gemini.deploy(spec, warm_pool=True)` keeps a pool of pre-provisioned workers,
-each blocked on a Pub/Sub subscription (a competing-consumers *atomic claim*). A worker warms its Cloud
-Logging + storage channels during its idle wait and reports ready — `engine.wait_until_warm()` blocks on that
-signal. A run is then dispatched to a free worker, so the turn goes nearly straight to the model. The first
-**observed** event lands **~10–20 s** after dispatch (vs ~2.5 min cold) — that window is dominated by **Cloud
-Logging's write→queryable ingestion lag**, which varies run to run and is inherent to a log-tail channel; the
-worker's *actual* pickup is ~5 s. On claim the pool refills, so the next turn is warm too.
+each blocked on a Pub/Sub subscription (a competing-consumers *atomic claim*). A worker warms its logging +
+storage channels during its idle wait and reports ready — `engine.wait_until_warm()` blocks on that signal.
+A run is then dispatched to a free worker, so the turn goes nearly straight to the model. The first
+**observed** event lands **~4 s** after dispatch (measured: 3.8 s to first event, 10.9 s to the result of a
+one-tool Haiku turn, vs ~2.5 min cold) — the worker's claim pickup plus one ~0.5 s mirror flush and one
+tail poll; events then stream **~1–2 s** behind the agent for the rest of the turn. (Before the GCS event
+stream this number was ~10–20 s, dominated by Cloud Logging's ingestion lag.) On claim the pool refills, so
+the next turn is warm too.
 
 > _Keeping the pool full:_ warm workers are themselves long-running jobs and will eventually exit at the
 > platform's max-job-duration limit (whose exact value we haven't pinned down). Topping the pool back up

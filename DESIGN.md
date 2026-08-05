@@ -335,12 +335,16 @@ These are facts measured during the PoC. The library encodes them so consumers i
   `ensure_export_pipe` (self-installed OTLP provider for a no-op ambient provider) was REMOVED after the
   probe evidence — exported spans carry the platform's `service.instance.id=<hex>-<pid>` resource stamp,
   not ours, so every cloud worker already has the platform's provider and the pipe never fired;
-  resurrect from git history only if the platform ever ships job workers without one. The default RE
-  service-agent role already includes `telemetry.traces.write`. Strictly best-effort: `TurnTracer` never
+  resurrect from git history only if the platform ever ships job workers without one. Since a platform
+  change of **2026-08-04** the RE service agent needs explicit `roles/telemetry.tracesWriter` +
+  `roles/telemetry.metricsWriter` grants — its default role stopped sufficing and every export in the
+  project 403'd (`Failed to export span batch code: 403`) until they were added (README "GCP setup" has
+  the grants). Strictly best-effort: `TurnTracer` never
   raises — a tracing failure must not take a run down. Span values are truncated summaries (same text as
   the log/mirror; no new exposure surface). Traces are diagnostics; `history()` is the record.
   Live-validated facts: **Cloud Trace ingestion lag ~5–10 min** (poll patiently before declaring spans
-  lost; the v1 read API also does NOT expose span exception records — only the console shows them);
+  lost; since 2026-08-04 the v1 read API returns NOTHING for new spans — they live in the new
+  telemetry-backed store, console-only — and it never exposed span exception records);
   **one trace per turn** — every turn runs in its own query job (cold submits one; a warm pool
   worker claims exactly one turn, processes it, exits), so a turn's spans nest under that job's ADK
   wrapper spans and a multi-turn session spans several traces, stitched by `gen_ai.conversation.id`

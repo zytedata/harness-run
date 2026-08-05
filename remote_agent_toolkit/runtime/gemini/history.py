@@ -2,8 +2,11 @@
 
 Three persistence layers hold a session's record, in decreasing fidelity:
 
-1. **Mirrored events** — ``events/<sid>/<epoch_ms>.jsonl`` under the output bucket, one file
-   per turn, written by the worker at end-of-turn (:func:`write_turn_mirror`). The only
+1. **Mirrored events** — ``events/<sid>/*.jsonl`` under the output bucket: small JSONL batch
+   files streamed by the worker AS THE TURN RUNS (``stream.MirrorStream``; the same mirror is
+   the client's live channel — see ``stream.py``). Engines deployed before streaming wrote
+   one file per turn at end-of-turn instead (:func:`write_turn_mirror` — kept for one-shot
+   markers); both eras read identically here, lexical name order == chronological. The only
    session-keyed durable record for **warm** turns (their platform job output goes to a
    throwaway pool path), and the only layer that keeps ALL turns of a cold multi-turn session
    (the platform job output at ``jobs/<sid>.jsonl`` is per-job, so a resume overwrites it).
@@ -197,7 +200,8 @@ def list_sessions(
         for key in blobs.list(f"{base}{_EVENTS_PREFIX}/"):
             rest = key[len(f"{base}{_EVENTS_PREFIX}/"):]
             sid = rest.split("/", 1)[0]
-            if sid:
+            # `<name>-pool` entries are warm-pool readiness markers, not sessions.
+            if sid and not sid.endswith("-pool"):
                 note(sid, "events", key)
 
         for key in blobs.list(f"{base}{_JOBS_PREFIX}/"):

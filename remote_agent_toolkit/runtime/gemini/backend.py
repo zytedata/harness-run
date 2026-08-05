@@ -5,9 +5,10 @@ in an ``AdkApp``, and creates a reasoningEngine; app code addresses engines by n
 ``get_engine`` and never deploys (DESIGN.md §3.3).
 
 The run plane mirrors ``local`` exactly via the shared :class:`DrivenRun`: a ``Session.run``
-submits a ``run_query_job`` and the ``Run`` is driven by tailing the ``CloudLoggingSink`` for
-that session — so **stream** = tail, **await** = wait for the terminal ``result`` log event,
-**poll** = read the latest status. Same awaitable/iterable/pollable handle as local.
+submits a ``run_query_job`` and the ``Run`` is driven by tailing the session's GCS event
+mirror (``stream.tail_stream``) — so **stream** = tail, **await** = wait for the terminal
+``result`` event, **poll** = read the latest status. Same awaitable/iterable/pollable handle
+as local. Cloud Logging is written by every worker but never read here (ops/debug only).
 
 The Google SDK (``agentplatform`` / ``google-cloud-aiplatform``) and the sink are imported
 lazily inside the bodies, so importing this module needs no third-party deps. ``agentplatform``
@@ -27,13 +28,12 @@ from typing import Any, AsyncIterator, TYPE_CHECKING
 from ...events import AgentEvent, RunResult, RunStatus, StopReason
 from .._run import DrivenRun
 from .pool import POOL_WAIT_SENTINEL, dispatch_payload, pool_paths
+from .stream import tail_stream
 
 if TYPE_CHECKING:
     from ...spec import AgentSpec
     from ..base import Engine
 
-# Must match CloudLoggingSink's default log_name (the deployed agent emits here, the client tails it).
-_LOG_NAME = "remote_agent_toolkit_steps"
 _USER_ID = "ratk"
 
 # Cold-run watchdog: probe the job's state after this much stream silence, and end the run
@@ -514,6 +514,9 @@ class GeminiSession:
         self._current_run: DrivenRun | None = None
         self._last_job: Any | None = None
         self._staged_secrets_uri: str | None = None  # staged handoff object (cleanup on complete)
+        # Last mirror object consumed by this session's stream tail; the NEXT turn's tail
+        # starts strictly after it (the clock-free turn boundary — see stream.tail_stream).
+        self._stream_watermark: dict = {"key": ""}
 
     def run(self, message: str, *, secrets: dict[str, str] | None = None) -> DrivenRun:
         """Start a fresh turn (submits a ``run_query_job``).
@@ -548,11 +551,15 @@ class GeminiSession:
     def _submit(
         self, message: str, resume: bool, secrets: dict[str, str] | None = None
     ) -> DrivenRun:
-        from ...ports.eventsink import CloudLoggingSink
-
         engine = self._engine
         sid = self._session_id
-        # Watermark the log tail just before kicking off (small slack for clock skew).
+        if not engine._output_bucket:
+            raise ValueError(
+                "running a turn requires the engine's output bucket (events stream through "
+                "it); construct the engine with output_bucket/project set."
+            )
+        # Clock floor for a re-attached session's first turn (small slack for clock skew);
+        # subsequent turns use the exact key watermark instead (see tail_source below).
         since = time.time() - 5
         secrets_uri = self._stage_secrets(secrets)
         self._staged_secrets_uri = secrets_uri  # cleaned up on completion (worker deletes at turn end)
@@ -596,9 +603,20 @@ class GeminiSession:
                 cfg["output_gcs_uri"] = f"{engine._output_bucket}/jobs/{sid}.jsonl"
             self._last_job = engine._agent_engines().run_query_job(name=engine._resource, config=cfg)
 
-        sink = CloudLoggingSink(
-            log_name=_LOG_NAME, project=engine._project, credentials=engine._credentials
-        )
+        # Live channel: the GCS event mirror (quota-free, no ingestion lag). Cloud Logging
+        # is still WRITTEN by every worker — it's the ops/debug channel, never tailed.
+        # Engines deployed before streaming wrote the mirror only at end-of-turn: their
+        # events all arrive with the terminal result — redeploy them for live streaming.
+        events_uri = f"{engine._output_bucket}/events"
+        watermark = self._stream_watermark
+
+        def tail_source() -> AsyncIterator:
+            # start_after (the previous turn's last consumed object) is the reliable
+            # turn boundary; the `since` clock floor covers re-attached sessions only.
+            return tail_stream(
+                events_uri, sid, since=since,
+                start_after=watermark["key"] or None, watermark=watermark,
+            )
 
         # Cold runs hold the job's operation name, so the tail gets a watchdog: if the job
         # terminates without ever writing a terminal event, the run ends with an explained
@@ -628,12 +646,9 @@ class GeminiSession:
                 )
 
             def factory() -> AsyncIterator:
-                return _watched_tail(
-                    lambda: sink.tail(sid, since=since), probe, sid, history_reader
-                )
+                return _watched_tail(tail_source, probe, sid, history_reader)
         else:
-            def factory() -> AsyncIterator:
-                return sink.tail(sid, since=since)
+            factory = tail_source
 
         run = DrivenRun(factory, sid, engine.spec, on_complete=self._on_complete)
         self._current_run = run
@@ -898,12 +913,11 @@ class GeminiEngine:
         created = self._created
 
         async def _await() -> bool:
-            from ...ports.eventsink import CloudLoggingSink
-
-            sink = CloudLoggingSink(
-                log_name=_LOG_NAME, project=self._project, credentials=self._credentials
-            )
-            async for _ in sink.tail(pool_id, since=created):
+            # A worker writes its readiness marker to the GCS mirror (events/<pool_id>/).
+            # NB engines deployed before event streaming only ever logged it — for those
+            # this times out (False, a soft signal: dispatch works regardless); redeploy.
+            markers = tail_stream(f"{self._output_bucket}/events", pool_id, since=created)
+            async for _ in markers:
                 return True  # first marker since deploy => a worker is warm
             return False
 

@@ -1,19 +1,25 @@
 """``EventSink`` port + adapters (DESIGN.md §6, §7).
 
-The only near-real-time async channel on Gemini Agent Runtime: the harness emits a
-per-step structured log (write side), the client tails it filtered by ``session_id``
-(read side). Protocol is stdlib-only; ``CloudLoggingSink`` imports
-``google.cloud.logging`` lazily so this module stays importable with zero third-party
-deps. An ``emit``/``tail`` pair MUST round-trip an :class:`AgentEvent`; ``tail`` stops at
-the terminal ``"result"`` event so a client loop terminates without external signalling.
+On Gemini Agent Runtime the harness ``emit``\\s a per-step structured log to Cloud Logging —
+the **ops/debug channel**: indexed and queryable across sessions (see TESTING.md's debugging
+recipes), but never read by a client run. The LIVE channel clients tail is the GCS event
+mirror (``runtime/gemini/stream.py``); Cloud Logging reads are capped at 60 ``entries.list``
+requests/min PER PROJECT (fixed), which is why nothing load-bearing reads logs — only the
+bounded one-shot :meth:`CloudLoggingSink.read` remains, as a last-resort history backstop.
+
+Protocol is stdlib-only; ``CloudLoggingSink`` imports ``google.cloud.logging`` lazily so
+this module stays importable with zero third-party deps. An ``emit``/``tail`` pair MUST
+round-trip an :class:`AgentEvent`; ``tail`` stops at the terminal ``"result"`` event so a
+client loop terminates without external signalling (``InMemorySink`` and the GCS stream
+honour this; ``CloudLoggingSink`` is emit-only).
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import random
 import time
-from datetime import datetime, timezone
 from typing import AsyncIterator, Protocol, runtime_checkable
 
 from ..events import AgentEvent
@@ -21,17 +27,26 @@ from ..events import AgentEvent
 # Cloud Logging caps a single entry at 256KB; keep the (potentially huge) result text well
 # under that. summary is the only free-form field that can grow without bound.
 _SUMMARY_CAP = 60000
-# tail poll cadence and overall safety ceiling: a client must not block forever if the
-# terminal "result" event never arrives (crashed runtime, lost log entry, etc.). 1s keeps
-# the observed stream snappy; the residual first-event latency is Cloud Logging's own
-# write→queryable ingestion lag (a few seconds), inherent to a log-tail channel.
-_POLL_INTERVAL_S = 1.0
-_MAX_WAIT_S = 3600.0
-# Per-poll bound + how many consecutive failed polls to ride out before surfacing the error.
-_POLL_TIMEOUT_S = 30.0
-_MAX_POLL_FAILURES = 10
-# RFC3339 with microseconds + trailing Z — the timestamp format Cloud Logging filters accept.
-_RFC3339 = "%Y-%m-%dT%H:%M:%S.%fZ"
+# Read-quota rejections of the one-shot read() are retried, not raised: Cloud Logging caps
+# `entries.list` at 60 requests/min PER PROJECT (fixed — cannot be raised), shared by every
+# reader in the project, so a 429 just means "the per-minute window is exhausted".
+_QUOTA_BACKOFF_BASE_S = 2.0
+_QUOTA_BACKOFF_CAP_S = 30.0
+
+
+def _is_quota_error(exc: BaseException) -> bool:
+    """True for a Cloud Logging read-quota rejection (HTTP 429 / gRPC RESOURCE_EXHAUSTED)."""
+    try:
+        from google.api_core import exceptions as gax  # ships with google-cloud-logging
+    except Exception:  # pragma: no cover — only hit where the client itself can't exist
+        return False
+    return isinstance(exc, (gax.TooManyRequests, gax.ResourceExhausted))
+
+
+def _quota_backoff_s(rejections: int) -> float:
+    """Jittered exponential backoff for the ``rejections``-th consecutive quota rejection."""
+    delay = min(_QUOTA_BACKOFF_CAP_S, _QUOTA_BACKOFF_BASE_S * 2 ** (rejections - 1))
+    return random.uniform(delay / 2, delay)  # jitter de-synchronizes concurrent readers
 
 
 def _json_safe(value):
@@ -123,7 +138,8 @@ class CloudLoggingSink:
         has right now (bounded by the log bucket's retention, ~30 days by default) and returns.
         The whole read is bounded by ``timeout``: the logging client has no per-call timeout of
         its own, and a dead connection would otherwise block forever (the wedged worker thread
-        is abandoned on timeout).
+        is abandoned on timeout). Read-quota rejections (the shared 60-reads/min project
+        budget) are retried with backoff within the same ``timeout`` instead of raising.
         """
         import concurrent.futures
 
@@ -153,88 +169,20 @@ class CloudLoggingSink:
 
         # No `with`: the context manager's shutdown WAITS on the worker, which would block on
         # the very wedge the timeout exists to escape. shutdown(wait=False) abandons it.
-        ex = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-        try:
-            return ex.submit(_list).result(timeout=timeout)
-        finally:
-            ex.shutdown(wait=False)
-
-    async def tail(
-        self, session_id: str, since: float | None = None
-    ) -> AsyncIterator[AgentEvent]:
-        import google.cloud.logging  # lazy: only available where the client is installed
-
-        client = self._get_client()
-        # The log filter needs a fully-qualified logName, which needs a project. Prefer the
-        # explicit one, else fall back to the client's resolved project.
-        project = self.project or client.project
-        start = time.monotonic()
-        # Watermark: only fetch entries at/after this RFC3339 timestamp. Start from `since`
-        # (epoch seconds) if given, else a little before "now" to tolerate clock skew.
-        if since is not None:
-            watermark = datetime.fromtimestamp(since, tz=timezone.utc).strftime(_RFC3339)
-        else:
-            watermark = datetime.fromtimestamp(
-                time.time() - 5.0, tz=timezone.utc
-            ).strftime(_RFC3339)
-        seen: set[str] = set()  # insert_ids already yielded, so repeated polls don't duplicate
-
-        failures = 0  # consecutive failed/wedged polls; transient blips ride out, permanent raise
-        while time.monotonic() - start < _MAX_WAIT_S:
-            filter_str = (
-                f'logName="projects/{project}/logs/{self.log_name}" '
-                f'AND labels.session_id="{session_id}" '
-                f'AND timestamp>="{watermark}"'
-            )
-            # Bound every poll: the logging client exposes no per-call timeout, and a dead
-            # connection otherwise blocks list_entries FOREVER (observed live — the tail hung
-            # ~1 h past job completion on a dropped network). On timeout the (possibly wedged)
-            # worker thread is abandoned and the next poll uses a fresh call.
+        deadline = time.monotonic() + timeout
+        quota_rejections = 0
+        while True:
+            ex = concurrent.futures.ThreadPoolExecutor(max_workers=1)
             try:
-                entries = await asyncio.wait_for(
-                    asyncio.to_thread(
-                        lambda f=filter_str: list(
-                            client.list_entries(
-                                filter_=f, order_by=google.cloud.logging.ASCENDING
-                            )
-                        )
-                    ),
-                    timeout=_POLL_TIMEOUT_S,
-                )
-                failures = 0
-            except Exception:  # noqa: BLE001 — timeout / transient auth / network blip
-                failures += 1
-                if failures >= _MAX_POLL_FAILURES:
-                    raise  # permanent (bad filter, revoked perms): surface, don't spin forever
-                await asyncio.sleep(_POLL_INTERVAL_S)
-                continue
-            stop = False
-            for entry in entries:
-                insert_id = getattr(entry, "insert_id", None)
-                if insert_id and insert_id in seen:
-                    continue
-                if insert_id:
-                    seen.add(insert_id)
-                payload = entry.payload or {}
-                event = AgentEvent(
-                    kind=payload["kind"],
-                    summary=payload.get("summary", ""),
-                    raw=payload.get("raw"),
-                    cost_usd=payload.get("cost_usd"),
-                    usage=payload.get("usage"),
-                )
-                # Advance the watermark to this entry's timestamp so the next poll fetches
-                # only newer entries (dedup by insert_id still guards the == boundary).
-                ts = getattr(entry, "timestamp", None)
-                if ts is not None:
-                    watermark = ts.astimezone(timezone.utc).strftime(_RFC3339)
-                yield event
-                if event.kind == "result":
-                    stop = True  # terminal event — let the client loop end naturally
-                    break
-            if stop:
-                return
-            await asyncio.sleep(_POLL_INTERVAL_S)
+                return ex.submit(_list).result(timeout=max(0.1, deadline - time.monotonic()))
+            except Exception as exc:
+                remaining = deadline - time.monotonic()
+                if not (_is_quota_error(exc) and remaining > 0):
+                    raise
+                quota_rejections += 1
+                time.sleep(min(remaining, _quota_backoff_s(quota_rejections)))
+            finally:
+                ex.shutdown(wait=False)
 
 
 class InMemorySink:

@@ -47,7 +47,7 @@ def test_warm_session_dispatches_and_tails(monkeypatch):
     spec = AgentSpec(name="w", model="m")
     engine = backend.GeminiEngine(
         resource="r/reasoningEngines/1", spec=spec, project=None, location=None,
-        output_bucket=None, warm=True, topic="t", subscription="s",
+        output_bucket="gs://out", warm=True, topic="t", subscription="s",
     )
 
     published = []
@@ -60,8 +60,8 @@ def test_warm_session_dispatches_and_tails(monkeypatch):
     seed.emit(AgentEvent(kind="message", summary="working"))
     seed.emit(AgentEvent(kind="result", summary="done", cost_usd=0.1,
                          raw={"subtype": "success", "is_error": False, "num_turns": 3, "session_id": "warm-sid"}))
-    import remote_agent_toolkit.ports.eventsink as eventsink_mod
-    monkeypatch.setattr(eventsink_mod, "CloudLoggingSink", lambda **kw: seed)
+    # _submit tails the GCS event stream — patch the backend seam with our seeded sink.
+    monkeypatch.setattr(backend, "tail_stream", lambda uri, sid, **kw: seed.tail(sid))
 
     session = backend.GeminiSession(engine, "warm-sid")
     result = asyncio.run(_await(session.run("go")))

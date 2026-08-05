@@ -559,25 +559,28 @@ failed turn or failed tool call marks its span with error status, so a trace of 
 it broke at a glance. Span values are truncated one-line summaries — the same text that already flows to
 Cloud Logging and the event mirror (never secret values), so tracing adds no new exposure surface.
 
-To turn it on: enable the `telemetry.googleapis.com` + `cloudtrace.googleapis.com` APIs on the project and
-grant the runtime service agent `roles/telemetry.tracesWriter` + `roles/telemetry.metricsWriter` (see
-[GCP setup](#gcp-setup--required-permissions)); whoever wants to *view* traces needs
-`roles/cloudtrace.user`. The two writer grants became necessary with a platform change of **2026-08-04**:
-before it the service agent's default role sufficed, after it every export from every engine in the
-project fails with `Failed to export span batch code: 403, reason: Forbidden` in the engine log (metrics
-batches too) until they are granted — if you see that line, this is why. The toolkit's own contribution is
-the force-flush of OpenTelemetry at the end of every turn — the load-bearing part: the platform
+There's nothing to turn on: the runtime service agent's default role covers the export, and the toolkit
+force-flushes OpenTelemetry at the end of every turn — which is the load-bearing part: the platform
 initializes telemetry in job workers but never flushes it on the async job path the toolkit uses, so
 without that flush no span would ever leave the worker (verified with a standalone repro; raised with
-Google).
+Google). The only prerequisites are the `telemetry.googleapis.com` + `cloudtrace.googleapis.com` APIs on
+the project, and `roles/cloudtrace.user` for whoever wants to *view* traces.
+
+**If every export fails with `Failed to export span batch code: 403, reason: Forbidden`** in the engine
+log (metrics batches too) and no trace reaches the console: that is the
+`opentelemetry-exporter-gcp-trace` / `-gcp-logging` **1.14.0 regression** (released 2026-08-03). It is
+baked in at engine *build* time — any engine built while 1.14.0 was the latest is broken regardless of
+IAM (extra telemetry-writer grants do not help; isolated via canary builds differing only in these two
+packages). The toolkit pins both `<1.14` in its baked requirements since 2026-08-05 — **redeploy** any
+engine built between 2026-08-03 and picking up that fix.
 
 **Known gaps** (platform-side, as of 2026-07/08, raised with Google): the console's *session conversation*
 panel stays empty ("No chat conversation data") — it is fed by platform instrumentation that doesn't run
 for the async job path — and the trace tree shows a cosmetic "(Missing span ID …)" placeholder above the
-turn (the platform tears the job worker down before its own wrapper span is exported). Since the
-2026-08-04 change, spans also live in the new telemetry-backed store: the console (Traces tab / Trace
-explorer) shows them, but the legacy Cloud Trace **v1 list API** returns nothing — don't use it to check
-whether tracing works. Span values here
+turn (the platform tears the job worker down before its own wrapper span is exported). As of 2026-08-05,
+new spans land in the telemetry-backed store: the console (Traces tab / Trace explorer) shows them, but
+the legacy Cloud Trace **v1 list API** no longer returns them — don't use it to check whether tracing
+works. Span values here
 are one-line summaries; for full prompts/outputs use [`session.history()`](#past-jobs-listing-sessions--reading-history). Traces are diagnostics, not the
 record of a run — for programmatic history use [`session.history()`](#past-jobs-listing-sessions--reading-history).
 Cloud Trace has a free monthly span quota; a Claude-agent turn produces tens of spans, not thousands.
@@ -614,8 +617,6 @@ for the running job. Grant it:
 | `roles/storage.objectAdmin` | the output/checkpoint bucket | workspace snapshots, artifacts, the session store |
 | `roles/logging.logWriter` | project | the agent emits structured step logs |
 | `roles/pubsub.subscriber` | project _(warm pool)_ | warm-pool workers pull turns; project-level since the toolkit auto-creates a per-engine subscription |
-| `roles/telemetry.tracesWriter` | project _(tracing)_ | span export — required since a 2026-08-04 platform change; without it every export logs `Failed to export span batch code: 403` |
-| `roles/telemetry.metricsWriter` | project _(tracing)_ | the platform's own OTel metrics export (same change, same 403 otherwise) |
 
 No `secretmanager.secretAccessor` is needed for the runtime agent: **secrets are passed per-invocation, not
 resolved from Secret Manager by the engine** (see [Secrets & security](#secrets--security)). If a *caller*
@@ -657,8 +658,7 @@ gcloud iam service-accounts create agent-runtime --project $PROJECT
 for R in roles/aiplatform.user roles/storage.admin roles/logging.viewer roles/cloudbuild.builds.editor \
          roles/pubsub.editor; do  # pubsub.editor only needed for warm pools
   gcloud projects add-iam-policy-binding $PROJECT --member "serviceAccount:$OP" --role $R; done
-for R in roles/logging.logWriter roles/telemetry.tracesWriter roles/telemetry.metricsWriter; do
-  gcloud projects add-iam-policy-binding $PROJECT --member "serviceAccount:$RE" --role $R; done
+gcloud projects add-iam-policy-binding $PROJECT --member "serviceAccount:$RE" --role roles/logging.logWriter
 gcloud services enable telemetry.googleapis.com cloudtrace.googleapis.com --project $PROJECT  # tracing
 # grant $RE objectAdmin on the output bucket; let yourself impersonate $OP (no secretAccessor needed —
 # secrets are passed per-invocation, not read from Secret Manager by the engine):

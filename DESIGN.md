@@ -335,11 +335,13 @@ These are facts measured during the PoC. The library encodes them so consumers i
   `ensure_export_pipe` (self-installed OTLP provider for a no-op ambient provider) was REMOVED after the
   probe evidence — exported spans carry the platform's `service.instance.id=<hex>-<pid>` resource stamp,
   not ours, so every cloud worker already has the platform's provider and the pipe never fired;
-  resurrect from git history only if the platform ever ships job workers without one. Since a platform
-  change of **2026-08-04** the RE service agent needs explicit `roles/telemetry.tracesWriter` +
-  `roles/telemetry.metricsWriter` grants — its default role stopped sufficing and every export in the
-  project 403'd (`Failed to export span batch code: 403`) until they were added (README "GCP setup" has
-  the grants). Strictly best-effort: `TurnTracer` never
+  resurrect from git history only if the platform ever ships job workers without one. The default RE
+  service-agent role suffices for the export. KNOWN REGRESSION (pinned in `_BASE_REQUIREMENTS`):
+  `opentelemetry-exporter-gcp-trace`/`-gcp-logging` **1.14.0** (2026-08-03) break all worker telemetry
+  export (`Failed to export span batch code: 403` on every span/metrics batch) — baked at engine BUILD
+  time via the unpinned aiplatform extras, unaffected by IAM grants; isolated 2026-08-05 by canary
+  builds differing only in these two packages (google-adk 2.6.1→2.6.2 ruled out the same way). Pinned
+  `<1.14`; engines built 2026-08-03..05 need a redeploy. Strictly best-effort: `TurnTracer` never
   raises — a tracing failure must not take a run down. Span values are truncated summaries (same text as
   the log/mirror; no new exposure surface). Traces are diagnostics; `history()` is the record.
   Live-validated facts: **Cloud Trace ingestion lag ~5–10 min** (poll patiently before declaring spans

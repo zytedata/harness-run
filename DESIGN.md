@@ -396,6 +396,16 @@ These are facts measured during the PoC. The library encodes them so consumers i
   query verbatim — which is why per-invocation secrets never ride the invocation payload (see §3.5): they
   are staged at a per-invocation `invocation-secrets/<sid>-<nonce>.json` object the worker fetches and
   deletes at the end of a completed turn (retry-safe; a 1-day lifecycle rule reaps orphans).
+- **Run-scoped specs** — the spec passed to `get_engine(spec=)` is authoritative for that handle's
+  runs: it is staged at `invocation-spec/<sid>-<nonce>.json` (same retry-safe handoff shape as
+  secrets — only the pointer rides the warm dispatch payload / cold `AGENT_SPEC_GCS=` directive) and
+  the worker executes it instead of the deploy-baked spec. Run-scoped parameters (target repo/ref,
+  model, prompt variant) thus need no engine redeploy. A missing staging FAILS the turn (running the
+  baked spec instead would be a silent wrong-configuration run); a spec whose `RepoSource.url`
+  embeds `user:token@` is refused client-side before staging (staged specs are referenced from
+  persisted payloads and must be credential-free). Deploy-time-only fields (`packages`, harness
+  availability in the image) still come from the deployment; baked skills serve as a staging fast
+  path only while the run's `skills` match the baked declaration.
 - **Cloud Logging** — the per-step log, bounded by log-bucket retention (~30 days default).
 - **Checkpoints** — transcript + workspace tar under `checkpoints/`, keyed by (mapped) session id.
 - `engine.list_sessions()` merges the GCS layers (bucket-wide) with the engine's ADK sessions;

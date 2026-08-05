@@ -29,6 +29,7 @@ from ...events import AgentEvent
 _RESUME_DIRECTIVE = re.compile(r"^\s*AGENT_RESUME=(\S+)[ \t]*\r?\n", re.IGNORECASE)
 _SECRETS_DIRECTIVE = re.compile(r"^\s*AGENT_SECRETS_GCS=(\S+)[ \t]*\r?\n", re.IGNORECASE)
 _SESSION_DIRECTIVE = re.compile(r"^\s*AGENT_SESSION=(\S+)[ \t]*\r?\n", re.IGNORECASE)
+_SPEC_DIRECTIVE = re.compile(r"^\s*AGENT_SPEC_GCS=(\S+)[ \t]*\r?\n", re.IGNORECASE)
 _AGENT_DESCRIPTION = "A remote-agent-toolkit agent: a Claude Code session driven by the toolkit harness."
 
 
@@ -69,6 +70,19 @@ def _split_secrets_directive(prompt: str) -> tuple[str | None, str]:
     the job input) targets the staged secrets object; see :func:`_fetch_secrets`.
     """
     m = _SECRETS_DIRECTIVE.match(prompt)
+    if m:
+        return m.group(1), prompt[m.end():]
+    return None, prompt
+
+
+def _split_spec_directive(prompt: str) -> tuple[str | None, str]:
+    """Strip a leading ``AGENT_SPEC_GCS=<gs://...>`` directive (cold-path run-scoped spec).
+
+    Returns ``(uri, remaining_prompt)``; ``(None, prompt)`` when absent. The pointer targets
+    the staged ``AgentSpec.to_dict()`` this turn must run (instead of the deploy-baked one);
+    see ``_run_turn``. Consumed here so the model never sees it.
+    """
+    m = _SPEC_DIRECTIVE.match(prompt)
     if m:
         return m.group(1), prompt[m.end():]
     return None, prompt
@@ -173,8 +187,13 @@ def _prewarm(spec: Any) -> None:
         pass
 
 
-def _prepare_workspace(rc: Any) -> dict:
-    """Restore a prior workspace (resume) or stage the baked skills into a fresh cwd. Sync."""
+def _prepare_workspace(rc: Any, prefer_baked_skills: bool = True) -> dict:
+    """Restore a prior workspace (resume) or stage the baked skills into a fresh cwd. Sync.
+
+    ``prefer_baked_skills=False`` forces resolving ``rc.spec.skills`` from their sources at
+    run time instead of the deploy-baked dir — used when a run-scoped spec declares skills
+    that differ from the baked ones (including declaring none).
+    """
     from ...skills import provision, skills_subdir
     from ...spec import SkillSource
 
@@ -196,7 +215,7 @@ def _prepare_workspace(rc: Any) -> dict:
             repos = reauth_repos(rc.workspace, rc.spec.repos, rc.secrets)
     else:
         rc.workspace.mkdir(parents=True, exist_ok=True)
-        baked = _find_baked_skills()
+        baked = _find_baked_skills() if prefer_baked_skills else None
         # Provision from the baked dir (a local source) rather than re-resolving spec.skills,
         # which could re-clone a git source at runtime (slow / no network in the engine).
         sources = (SkillSource.local(str(baked)),) if baked else rc.spec.skills
@@ -245,9 +264,10 @@ class ToolkitAgent(BaseAgent):
             return
 
         # Strip leading control directives (never shown to the model): the toolkit session
-        # id, secrets pointer, resume marker.
+        # id, secrets pointer, run-scoped spec pointer, resume marker.
         directive_sid, prompt = _split_session_directive(prompt)
         secrets_uri, prompt = _split_secrets_directive(prompt)
+        spec_uri, prompt = _split_spec_directive(prompt)
         resume_sid, prompt = _split_resume_directive(prompt)
         # The toolkit session id is the stable token: it tags the Cloud Logging stream the
         # client tails, and pins the Claude session id for checkpoint keying. It rides the
@@ -259,13 +279,15 @@ class ToolkitAgent(BaseAgent):
             or ctx.invocation_id
         )
         async for event in self._run_turn(
-            spec, session_id, prompt, resume_sid, secrets_uri, invocation_id
+            spec, session_id, prompt, resume_sid, secrets_uri, invocation_id,
+            spec_uri=spec_uri,
         ):
             yield event
 
     async def _run_turn(
         self, spec: Any, session_id: str, prompt: str, resume_sid: str | None,
         secrets_uri: str | None = None, invocation_id: str = "",
+        spec_uri: str | None = None,
     ) -> AsyncGenerator[Any, None]:
         """Process one turn under ``session_id``: prep workspace, drive the harness, surface events.
 
@@ -274,6 +296,12 @@ class ToolkitAgent(BaseAgent):
         ``secrets_uri`` points at the staged secrets object (fetched here; deleted only once
         the turn's terminal result went out, so a platform retry of a killed attempt still
         finds it); values never ride the invocation payload.
+
+        ``spec_uri`` points at a staged run-scoped spec (``handoff.stage_spec``): the turn
+        runs THAT spec instead of the deploy-baked one (run-scoped parameters — target repo,
+        model, prompt — without an engine redeploy). Same retry-safe staging contract as
+        secrets. A missing staging FAILS the turn: silently running the baked spec instead
+        of the requested one would be a wrong-configuration run.
         """
         from ...harness import resolve_harness
         from ...harness.context import RunContext
@@ -285,6 +313,41 @@ class ToolkitAgent(BaseAgent):
         # Claude/checkpoint side needs a canonical UUID, mapped deterministically from it.
         sink = CloudLoggingSink(session_id=session_id)
         claude_sid = _claude_session_id(session_id)
+
+        # Resolve the run-scoped spec BEFORE anything derives from ``spec`` (checkpoint
+        # ports, RunContext, tracer).
+        prefer_baked_skills = True
+        if spec_uri:
+            from ...spec import AgentSpec
+            from .handoff import fetch_spec
+            from .history import mirror_line, write_turn_mirror
+
+            fetched = fetch_spec(spec_uri)
+            if fetched is None:
+                ev = AgentEvent(
+                    kind="result",
+                    summary=(
+                        "run-scoped spec unavailable (staging object missing/unreadable); "
+                        "failing the turn"
+                    ),
+                    raw={"event": "spec_error", "is_error": True, "subtype": "error",
+                         "session_id": session_id},
+                )
+                sink.emit(ev)
+                events_uri = os.environ.get("AGENT_EVENTS_GCS")
+                if events_uri:
+                    import time as _time
+
+                    write_turn_mirror(events_uri, session_id, [mirror_line(ev)],
+                                      now_ms=int(_time.time() * 1000))
+                yield to_adk_event(ev, self.name, invocation_id)
+                return
+            # Baked skills are a staging fast path, valid only while the run's skills are
+            # the deploy-baked ones; a differing declaration (including "none") resolves
+            # from the run-scoped spec's own sources.
+            prefer_baked_skills = fetched.get("skills") == self.spec_data.get("skills")
+            spec = AgentSpec.from_dict(fetched)
+
         secrets, secrets_warning = _fetch_secrets(secrets_uri)
         blobs, session_store = _checkpoint_ports(spec)
         rc = RunContext(
@@ -344,7 +407,7 @@ class ToolkitAgent(BaseAgent):
         try:
             if secrets_warning is not None:  # value-free: staged secrets were unavailable
                 yield surface(secrets_warning)
-            prep = await asyncio.to_thread(_prepare_workspace, rc)
+            prep = await asyncio.to_thread(_prepare_workspace, rc, prefer_baked_skills)
             yield surface(AgentEvent(kind="status", summary=prep["summary"], raw=prep))
 
             async for event in resolve_harness(spec).run(spec, rc):
@@ -390,10 +453,12 @@ class ToolkitAgent(BaseAgent):
         # completion cleanup and the bucket lifecycle rule back this up; see handoff docs).
         # Deliberately after `finally`, not in it: `finally` also runs under GeneratorExit
         # (a half-consumed turn), where the run may still be retried/resumed elsewhere.
-        if saw_result and secrets_uri:
+        if saw_result and (secrets_uri or spec_uri):
             from .handoff import delete_staged_secrets
 
-            await asyncio.to_thread(delete_staged_secrets, secrets_uri)
+            for staged in (secrets_uri, spec_uri):
+                if staged:
+                    await asyncio.to_thread(delete_staged_secrets, staged)
 
     async def _pool_worker(self, spec: Any, invocation_id: str = "") -> AsyncGenerator[Any, None]:
         """Block pulling the dispatch subscription, then process the claimed turn.
@@ -468,10 +533,11 @@ class ToolkitAgent(BaseAgent):
         message = claimed.get("message", "")
         resume = bool(claimed.get("resume"))
         secrets_uri = claimed.get("secrets_gcs")  # pointer only; values are staged in GCS
+        spec_uri = claimed.get("spec_gcs")  # run-scoped spec pointer (see _run_turn)
         async for event in self._run_turn(
             spec, session_id, message,
             resume_sid=session_id if resume else None, secrets_uri=secrets_uri,
-            invocation_id=invocation_id,
+            invocation_id=invocation_id, spec_uri=spec_uri,
         ):
             yield event
 

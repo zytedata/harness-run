@@ -180,7 +180,8 @@ def test_pool_worker_claims_and_runs(monkeypatch):
     # the staged-secrets pointer that must flow through to the turn (values never ride here).
     disp = InMemoryDispatch()
     disp.publish({"session_id": "dispatched-sid", "message": "do it", "resume": False,
-                  "secrets_gcs": "gs://bkt/invocation-secrets/dispatched-sid-x.json"})
+                  "secrets_gcs": "gs://bkt/invocation-secrets/dispatched-sid-x.json",
+                  "spec_gcs": "gs://bkt/invocation-spec/dispatched-sid-x.json"})
     monkeypatch.setattr(pool, "worker_dispatch_from_env", lambda *a, **k: disp)
 
     # _prewarm emits a readiness marker via a real CloudLoggingSink; off-GCP that stalls for
@@ -193,9 +194,9 @@ def test_pool_worker_claims_and_runs(monkeypatch):
     seen = {}
 
     async def fake_run_turn(spec_, session_id, prompt, resume_sid, secrets_uri=None,
-                            invocation_id=""):
+                            invocation_id="", spec_uri=None):
         seen.update(session_id=session_id, prompt=prompt, resume_sid=resume_sid,
-                    secrets_uri=secrets_uri, invocation_id=invocation_id)
+                    secrets_uri=secrets_uri, invocation_id=invocation_id, spec_uri=spec_uri)
         yield "turn-event"
 
     monkeypatch.setattr(agent, "_run_turn", fake_run_turn)
@@ -210,4 +211,5 @@ def test_pool_worker_claims_and_runs(monkeypatch):
     assert events == ["turn-event"]
     assert seen == {"session_id": "dispatched-sid", "prompt": "do it", "resume_sid": None,
                     "secrets_uri": "gs://bkt/invocation-secrets/dispatched-sid-x.json",
+                    "spec_uri": "gs://bkt/invocation-spec/dispatched-sid-x.json",
                     "invocation_id": "e-inv-77"}

@@ -44,7 +44,11 @@ def pool_paths(project: str, name: str) -> tuple[str, str]:
 
 
 def dispatch_payload(
-    session_id: str, message: str, resume: bool, secrets_gcs: str | None = None
+    session_id: str,
+    message: str,
+    resume: bool,
+    secrets_gcs: str | None = None,
+    spec_gcs: str | None = None,
 ) -> dict:
     """The turn payload published to the pool: the worker adopts ``session_id`` for the turn.
 
@@ -52,10 +56,18 @@ def dispatch_payload(
     pointer to the staged object the worker fetches (and deletes once the turn completes —
     a redelivered dispatch must still find it; ``handoff.py``). A Pub/Sub message is
     retained until acked, so values in it would persist.
+
+    ``spec_gcs`` points at the staged run-scoped spec (``handoff.stage_spec``): the worker
+    runs THAT spec instead of the engine's deploy-baked one. Same pointer-not-value shape —
+    the spec is not secret, but the pointer keeps payloads small and matches the cold path.
+    Workers older than this field ignore it (they run the baked spec), which is why client
+    and engine must deploy from the same toolkit revision.
     """
     payload = {"session_id": session_id, "message": message, "resume": bool(resume)}
     if secrets_gcs:
         payload["secrets_gcs"] = secrets_gcs
+    if spec_gcs:
+        payload["spec_gcs"] = spec_gcs
     return payload
 
 

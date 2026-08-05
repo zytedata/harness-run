@@ -436,10 +436,34 @@ engine.wait_until_warm()                          # block until a pool worker re
 
 # App code looks the engine up by name and runs — it never deploys:
 engine = gemini.get_engine("spider-builder", project="my-project", location="us-central1",
-                           spec=spec, warm_pool=True)   # pass spec for structured output; warm_pool to dispatch
+                           spec=spec, warm_pool=True)   # this spec is what the runs execute; warm_pool to dispatch
 session = engine.start_session()
 result = await session.run("/scrape https://books.toscrape.com title, price")   # default: wait for the result
 ```
+
+### Run-scoped specs: `get_engine(spec=...)` is authoritative
+
+An engine is deployed per agent *role*, but many parameters are per-**run**: which repo/ref
+to operate on, the model or prompt variant for an A/B evaluation. Those are spec fields —
+and requiring an engine redeploy per combination would be unworkable. So the spec you pass
+to `get_engine` **rides each invocation** (staged to GCS, only the pointer travels in the
+payload — same handoff shape as secrets) and the worker executes *it*, not the deploy-baked
+spec. Without `spec=`, runs execute the baked spec exactly as before.
+
+Two constraints:
+
+* **Deploy-time fields stay deploy-time**: `packages` (and harness *availability* — the CLI
+  binaries present in the image) come from what was deployed; a run-scoped spec can select
+  among what the image has, not add to it. Baked skills are reused as a staging fast path
+  when the run's `skills` match the deployed ones; a differing declaration resolves from
+  its own sources at run time.
+* **No credentials in the spec**: a staged spec is referenced from persisted payloads, so
+  `run()` refuses a spec whose `RepoSource.url` embeds `user:token@` — name the token via
+  `RepoSource(auth=..., auth_user=...)` and pass the value in `run(secrets=...)`.
+
+Client and engine must be deployed from the same toolkit revision (already the rule — the
+invocation payload is a wire contract): an older engine ignores the run-scoped spec on the
+warm path and would leak the directive into the prompt on the cold path.
 
 **Managing deployed engines** (control plane):
 
@@ -447,7 +471,7 @@ result = await session.run("/scrape https://books.toscrape.com title, price")   
 gemini.deploy(spec, project=..., location=...)   # create / update; ops/CI only (warm_pool=True, pool_size=N)
 gemini.deploy(spec, ..., resource_limits={"cpu": "4", "memory": "16Gi"})  # container CPU/RAM (default 4 / 4Gi)
 gemini.get_engine("spider-builder", project=..., location=...)   # look up by name (app code)
-gemini.get_engine("spider-builder", ..., spec=spec)              # pass spec for structured output
+gemini.get_engine("spider-builder", ..., spec=spec)              # runs execute THIS spec (run-scoped; see above)
 gemini.list_engines(project=..., location=...)   # discover what's deployed
 engine.name, engine.version, engine.resource     # identity / serving revision / underlying resource name
 engine.wait_until_warm(timeout=300)              # warm pools: wait for a ready worker before dispatching

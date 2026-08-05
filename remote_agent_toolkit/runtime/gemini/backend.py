@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import time
 import uuid
 from typing import Any, AsyncIterator, TYPE_CHECKING
@@ -40,6 +41,8 @@ _USER_ID = "ratk"
 # this long after the job is seen terminal with still no terminal event (ingestion-lag grace).
 _WATCHDOG_QUIET_S = 60.0
 _WATCHDOG_GRACE_S = 120.0
+
+logger = logging.getLogger(__name__)
 
 
 def _event_fingerprint(event: AgentEvent) -> tuple:
@@ -189,11 +192,34 @@ def _fallback_spec(name: str) -> AgentSpec:
 
     Result-building needs ``output_schema`` (structured parsing) and ``checkpoint`` (the
     idle stop-reason). Without the real spec, structured output is skipped and a clean turn
-    reports ``END_TURN``. Pass ``spec=`` to ``get_engine`` to recover both.
+    reports ``END_TURN`` — and runs execute the engine's deploy-baked spec (no run-scoped
+    spec transport). Pass ``spec=`` to ``get_engine`` to recover all three.
     """
     from ...spec import AgentSpec
 
     return AgentSpec(name=name, model="")
+
+
+def _assert_spec_payload_safe(spec: AgentSpec) -> None:
+    """Refuse to stage a run-scoped spec that embeds credentials.
+
+    The staged spec is an invocation artifact (a GCS object referenced by a persisted
+    payload), so it must never carry secret values. The one field that commonly smuggles
+    them is a pre-authenticated repo URL (``https://user:token@host/...``) — name the token
+    via ``RepoSource(auth=..., auth_user=...)`` and pass its value in ``run(secrets=...)``
+    instead.
+    """
+    from urllib.parse import urlsplit
+
+    for repo in spec.repos or ():
+        parts = urlsplit(repo.url)
+        if parts.username or parts.password:
+            raise ValueError(
+                f"RepoSource.url for {parts.hostname or repo.url!r} embeds credentials; a "
+                "run-scoped spec is staged per invocation and must be credential-free. Name "
+                "the token via RepoSource(auth=..., auth_user=...) and pass its value in "
+                "run(secrets={...}) instead."
+            )
 
 
 # -- control plane -------------------------------------------------------------
@@ -454,9 +480,13 @@ def get_engine(
 ) -> Engine:
     """Look up a deployed engine by ``name`` (the app-code hot path; never deploys).
 
-    Pass ``spec=`` (the one you deployed) to enable structured-output parsing and the correct
-    idle stop-reason; otherwise a minimal fallback spec is used. Pass ``warm_pool=True`` to
-    address a warm-pool engine (turns are dispatched to its pool instead of cold-started).
+    A ``spec=`` you pass here is **authoritative for runs started from this handle**: each
+    run stages it per invocation and the worker executes it instead of the engine's
+    deploy-baked spec (run-scoped parameters — target repo/ref, model, prompt — without an
+    engine redeploy; deploy-time-only fields like ``packages`` still come from the image).
+    It also enables structured-output parsing and the correct idle stop-reason client-side.
+    Without ``spec=``, runs execute the deploy-baked spec as before. Pass ``warm_pool=True``
+    to address a warm-pool engine (turns are dispatched to its pool instead of cold-started).
 
     ``version`` pins the handle to a **runtime revision** (the id, or a full revision resource
     name). It is an *assertion*: the lookup fails unless that revision exists and is the one
@@ -484,6 +514,7 @@ def get_engine(
         topic=topic,
         subscription=subscription,
         version=pinned,
+        spec_transport=spec is not None,
     )
 
 
@@ -514,6 +545,7 @@ class GeminiSession:
         self._current_run: DrivenRun | None = None
         self._last_job: Any | None = None
         self._staged_secrets_uri: str | None = None  # staged handoff object (cleanup on complete)
+        self._staged_spec_uri: str | None = None  # staged run-scoped spec (cleanup on complete)
 
     def run(self, message: str, *, secrets: dict[str, str] | None = None) -> DrivenRun:
         """Start a fresh turn (submits a ``run_query_job``).
@@ -545,6 +577,29 @@ class GeminiSession:
 
         return stage_secrets(engine._output_bucket, self._session_id, secrets)
 
+    def _stage_run_spec(self) -> str | None:
+        """Stage this handle's spec for the invocation; return its gs:// URI (or ``None``).
+
+        ``None`` when the engine was looked up without ``spec=`` (fallback spec — runs
+        execute the deploy-baked one) or when no output bucket is configured (nowhere to
+        stage; logged, and the run proceeds on the baked spec as before this feature).
+        """
+        engine = self._engine
+        if not engine._spec_transport:
+            return None
+        _assert_spec_payload_safe(engine.spec)
+        if not engine._output_bucket:
+            logger.warning(
+                "engine %s has no output bucket; run-scoped spec transport skipped — the "
+                "run executes the deploy-baked spec (construct the engine with "
+                "output_bucket/project set to transport the spec)",
+                getattr(engine, "name", engine._resource),
+            )
+            return None
+        from .handoff import stage_spec
+
+        return stage_spec(engine._output_bucket, self._session_id, engine.spec.to_dict())
+
     def _submit(
         self, message: str, resume: bool, secrets: dict[str, str] | None = None
     ) -> DrivenRun:
@@ -556,12 +611,17 @@ class GeminiSession:
         since = time.time() - 5
         secrets_uri = self._stage_secrets(secrets)
         self._staged_secrets_uri = secrets_uri  # cleaned up on completion (worker deletes at turn end)
+        spec_uri = self._stage_run_spec()
+        self._staged_spec_uri = spec_uri
 
         if engine._warm:
             # Warm path: dispatch the turn to the pool (a warm worker adopts our session_id),
             # then refill so the next turn stays warm. No cold run_query_job. The payload
-            # carries only the secrets *pointer*, never values.
-            engine._dispatch().publish(dispatch_payload(sid, message, resume, secrets_uri))
+            # carries only the secrets *pointer*, never values — and the run-scoped spec
+            # pointer, so the worker runs THIS handle's spec, not the deploy-baked one.
+            engine._dispatch().publish(
+                dispatch_payload(sid, message, resume, secrets_uri, spec_uri)
+            )
             try:
                 engine.fill_pool(1)
             except Exception:  # noqa: BLE001 — refill is best-effort; the turn already dispatched
@@ -574,6 +634,8 @@ class GeminiSession:
             directives = f"AGENT_SESSION={sid}\n"
             if secrets_uri:
                 directives += f"AGENT_SECRETS_GCS={secrets_uri}\n"
+            if spec_uri:
+                directives += f"AGENT_SPEC_GCS={spec_uri}\n"
             if resume:
                 directives += f"AGENT_RESUME={sid}\n"
             prompt = directives + message
@@ -650,13 +712,17 @@ class GeminiSession:
         self._last_result = result
         self._stop_reason = stop_reason
         self._status = RunStatus.IDLE
-        # Backstop cleanup of the staged secrets object; the worker normally deleted it on
-        # read, but a run that failed before the worker fetched would otherwise leave it.
-        if self._staged_secrets_uri:
+        # Backstop cleanup of the staged handoff objects (secrets + run-scoped spec); the
+        # worker normally deletes them at turn end, but a run that failed before the worker
+        # fetched would otherwise leave them for the lifecycle rule.
+        if self._staged_secrets_uri or self._staged_spec_uri:
             from .handoff import delete_staged_secrets
 
-            delete_staged_secrets(self._staged_secrets_uri)
+            for staged in (self._staged_secrets_uri, self._staged_spec_uri):
+                if staged:
+                    delete_staged_secrets(staged)
             self._staged_secrets_uri = None
+            self._staged_spec_uri = None
 
     async def interrupt(self) -> None:
         """Interrupt the in-flight run: stop tailing AND cancel the remote job.
@@ -779,9 +845,14 @@ class GeminiEngine:
         topic: str | None = None,
         subscription: str | None = None,
         version: str | None = None,
+        spec_transport: bool = True,
     ) -> None:
         self._resource = resource
         self.spec = spec
+        # When True (a real spec: deploy handle, or get_engine(spec=...)), each run stages
+        # this spec and the worker executes it instead of the deploy-baked one. False only
+        # for fallback-spec lookups (get_engine without spec=) — those run the baked spec.
+        self._spec_transport = spec_transport
         self._project = project
         self._location = location
         self._output_bucket = output_bucket

@@ -53,6 +53,24 @@ def test_delete_staged_secrets_best_effort(tmp_path):
     handoff.delete_staged_secrets(uri, store=store)  # idempotent, no raise
 
 
+def test_stage_and_fetch_spec_round_trip(tmp_path):
+    store = LocalBlobStore(str(tmp_path))
+    spec_dict = {"name": "n", "model": "m", "repos": [{"url": "https://h/r.git"}]}
+    uri = handoff.stage_spec("gs://bkt/out", "sid-9", spec_dict, store=store)
+    assert uri.startswith("gs://bkt/out/invocation-spec/sid-9-") and uri.endswith(".json")
+
+    # Same retry contract as secrets: fetch leaves the object (a platform retry re-fetches
+    # the same pointer); deletion is explicit.
+    assert handoff.fetch_spec(uri, store=store) == spec_dict
+    assert handoff.fetch_spec(uri, store=store) == spec_dict
+    handoff.delete_staged_secrets(uri, store=store)
+
+    # A missing staging is None — the worker FAILS the turn on it (running the baked spec
+    # instead of the requested one would be a silent wrong-configuration run), unlike
+    # secrets where the run degrades gracefully.
+    assert handoff.fetch_spec(uri, store=store) is None
+
+
 def test_localblobstore_delete_idempotent(tmp_path):
     store = LocalBlobStore(str(tmp_path))
     store.put_bytes("a/b.txt", b"x")
@@ -70,10 +88,25 @@ def test_secrets_lifecycle_rule_scopes_to_prefix():
     assert rule == {
         "action": {"type": "Delete"},
         # Scoped under the output prefix: must never touch jobs/checkpoints/artifacts.
-        "condition": {"age": 1, "matchesPrefix": ["out/invocation-secrets/"]},
+        # Covers BOTH staging prefixes (secrets + run-scoped specs).
+        "condition": {
+            "age": 1,
+            "matchesPrefix": ["out/invocation-secrets/", "out/invocation-spec/"],
+        },
     }
     _, bare = handoff.secrets_lifecycle_rule("gs://bkt")
-    assert bare["condition"]["matchesPrefix"] == ["invocation-secrets/"]
+    assert bare["condition"]["matchesPrefix"] == ["invocation-secrets/", "invocation-spec/"]
+
+
+def test_ensure_lifecycle_upgrades_a_secrets_only_rule():
+    # A bucket configured before the run-scoped-spec prefix existed has a secrets-only
+    # delete rule; ensure() must notice the uncovered spec prefix and append the combined
+    # rule (the doubled secrets coverage is harmless).
+    old = {"action": {"type": "Delete"},
+           "condition": {"age": 1, "matchesPrefix": ["invocation-secrets/"]}}
+    bucket = _FakeBucket([old])
+    assert handoff.ensure_secrets_lifecycle("gs://bkt", bucket_obj=bucket) is True
+    assert bucket.patched == 1 and len(bucket.lifecycle_rules) == 2
 
 
 class _FakeBucket:

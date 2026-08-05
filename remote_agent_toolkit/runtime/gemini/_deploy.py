@@ -64,13 +64,6 @@ _BASE_REQUIREMENTS: tuple[str, ...] = (
     "google-cloud-trace",
     "opentelemetry-sdk",
     "opentelemetry-exporter-otlp-proto-http",
-    # 1.14.0 (2026-08-03) breaks telemetry export in engine workers: every span/metrics
-    # batch 403s ("Failed to export span batch code: 403, reason: Forbidden") and no
-    # trace reaches the console. Isolated by canary builds differing ONLY in these two
-    # (google-adk 2.6.1->2.6.2 was ruled out the same way); extra IAM grants do not help.
-    # Transitives of the aiplatform extras, pinned here until upstream fixes.
-    "opentelemetry-exporter-gcp-trace<1.14",
-    "opentelemetry-exporter-gcp-logging<1.14",
     "pyyaml",
     "jsonschema",
 )

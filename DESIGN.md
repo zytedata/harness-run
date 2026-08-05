@@ -336,12 +336,17 @@ These are facts measured during the PoC. The library encodes them so consumers i
   probe evidence — exported spans carry the platform's `service.instance.id=<hex>-<pid>` resource stamp,
   not ours, so every cloud worker already has the platform's provider and the pipe never fired;
   resurrect from git history only if the platform ever ships job workers without one. The default RE
-  service-agent role suffices for the export. KNOWN REGRESSION (pinned in `_BASE_REQUIREMENTS`):
-  `opentelemetry-exporter-gcp-trace`/`-gcp-logging` **1.14.0** (2026-08-03) break all worker telemetry
-  export (`Failed to export span batch code: 403` on every span/metrics batch) — baked at engine BUILD
-  time via the unpinned aiplatform extras, unaffected by IAM grants; isolated 2026-08-05 by canary
-  builds differing only in these two packages (google-adk 2.6.1→2.6.2 ruled out the same way). Pinned
-  `<1.14`; engines built 2026-08-03..05 need a redeploy. Strictly best-effort: `TurnTracer` never
+  service-agent role suffices for the export. INCIDENT LOG (2026-08-03..05): every worker span/metrics
+  batch 403'd project-wide (`Failed to export span batch code: 403`) — a SERVER-side Telemetry API
+  outage that self-resolved 2026-08-05 ~14:40 UTC. Two client-side theories were each disproven by a
+  counterfactual run: IAM grants (telemetry writer roles — changed nothing), then a dependency pin
+  (`opentelemetry-exporter-gcp-*<1.14`, briefly shipped then reverted — the 1.14.0 release timing was
+  coincidence, its diff is metadata-only, and an unpinned build ran clean once the backend recovered;
+  the span path in agentplatform's bootstrap never imports that package anyway, it exports plain OTLP
+  to telemetry.googleapis.com). Debugging surfaces that settled it: engine build logs land under the
+  engine's `reasoning_engine_id` in Cloud Logging (diff `Successfully installed` sets between good/bad
+  builds; compare assembly-image digests), and beware time-confounded canaries — always re-run the
+  BROKEN configuration before declaring a fix causal. Strictly best-effort: `TurnTracer` never
   raises — a tracing failure must not take a run down. Span values are truncated summaries (same text as
   the log/mirror; no new exposure surface). Traces are diagnostics; `history()` is the record.
   Live-validated facts: **Cloud Trace ingestion lag ~5–10 min** (poll patiently before declaring spans

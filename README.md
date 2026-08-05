@@ -567,12 +567,14 @@ Google). The only prerequisites are the `telemetry.googleapis.com` + `cloudtrace
 the project, and `roles/cloudtrace.user` for whoever wants to *view* traces.
 
 **If every export fails with `Failed to export span batch code: 403, reason: Forbidden`** in the engine
-log (metrics batches too) and no trace reaches the console: that is the
-`opentelemetry-exporter-gcp-trace` / `-gcp-logging` **1.14.0 regression** (released 2026-08-03). It is
-baked in at engine *build* time — any engine built while 1.14.0 was the latest is broken regardless of
-IAM (extra telemetry-writer grants do not help; isolated via canary builds differing only in these two
-packages). The toolkit pins both `<1.14` in its baked requirements since 2026-08-05 — **redeploy** any
-engine built between 2026-08-03 and picking up that fix.
+log (metrics batches too) and no trace reaches the console, suspect a **server-side Telemetry API
+incident before touching your own config**. One such outage ran 2026-08-03..05 (UTC) in our project and
+self-resolved on Google's side; while it lasted, both plausible client-side fixes were disproven by
+counterfactual runs — extra IAM grants (`roles/telemetry.tracesWriter`/`metricsWriter`) changed nothing,
+and pinning back the coincidentally-just-released `opentelemetry-exporter-gcp-*` 1.14.0 only *appeared*
+to help until an unpinned build was retried after the backend recovered. The tell for server-side: the
+403s appear across unrelated engines at once and vanish the same way, with no config change on either
+side. Nothing to fix locally; the turns themselves are unaffected (traces are a diagnostic channel).
 
 **Known gaps** (platform-side, as of 2026-07/08, raised with Google): the console's *session conversation*
 panel stays empty ("No chat conversation data") — it is fed by platform instrumentation that doesn't run

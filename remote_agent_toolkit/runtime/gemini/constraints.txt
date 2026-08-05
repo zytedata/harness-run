@@ -1,0 +1,39 @@
+# Platform-critical version constraints applied to every engine build.
+#
+# Why in-tree: engines resolve their requirements at BUILD time, so without pins two
+# deploys of the same toolkit commit can produce different runtimes (latest-at-build).
+# This file makes the platform-critical layer deterministic, and refreshing it is a
+# reviewable diff instead of an invisible drift.
+#
+# Semantics: pip constraints (`-c`). The Agent Engine build offers no hook for a real
+# constraints file — extra_packages are extracted only at container runtime, AFTER
+# `pip install -r requirements.txt` has run — so `build_requirements()` merges these
+# into the requirements list client-side at deploy time: a constraint intersects with
+# any requirement (base or spec.packages) of the same name; names not otherwise
+# required are appended as pinned requirements (everything below is installed either
+# way, as a direct or transitive dep).
+#
+# Refreshing: bump the pin(s), deploy a canary engine, run a live turn, confirm the
+# turn completes and telemetry exports cleanly (no `Failed to export ... 403/4xx` in
+# the worker logs), then merge. For the pickle-coupled block, upgrade the local venv
+# in the same change — `verify_deploy_env()` enforces that they match at deploy time.
+#
+# Pin provenance: the verified-clean canary build of 2026-08-05 (assembly base image
+# assembly-service-py312, engine 6064925380265902080).
+
+# Pickle-coupled to the DEPLOY venv: the engine build unpickles the AdkApp object the
+# deploying client pickled, so these must match the operator's venv (fail-fast checked
+# by verify_deploy_env() before the ~4 min billable build).
+google-cloud-aiplatform==1.163.0
+cloudpickle==3.1.2
+pydantic==2.13.4
+
+# Agent runtime stack.
+google-adk==2.6.2
+claude-agent-sdk==0.2.130
+a2a-sdk==0.3.26
+google-auth==2.56.2
+
+# OTel export path (OTLP to telemetry.googleapis.com, wired up by the platform).
+opentelemetry-sdk==1.42.1
+opentelemetry-exporter-otlp-proto-http==1.42.1

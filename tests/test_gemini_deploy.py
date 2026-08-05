@@ -34,6 +34,68 @@ def test_build_requirements_includes_base_and_spec_packages() -> None:
     assert not any("remote-agent-toolkit" in r for r in reqs)
 
 
+def test_constraints_file_parses_and_pins_platform_layer() -> None:
+    cons = deploy.load_constraints()
+    # Every pickle-coupled package must carry a pin (verify_deploy_env relies on it).
+    for name in deploy._PICKLE_COUPLED:
+        assert name in cons
+    # Representative platform pins.
+    assert "google-adk" in cons
+    assert "opentelemetry-sdk" in cons
+
+
+def test_build_requirements_merges_constraints() -> None:
+    reqs = deploy.build_requirements(_spec())
+
+    aip = next(r for r in reqs if r.startswith("google-cloud-aiplatform"))
+    assert "[adk,agent_engines]" in aip  # extras survive the merge
+    assert "==" in aip and ">=1.154" in aip  # base floor and constraint pin intersect
+    # Constrained packages nothing requires directly are appended as pinned requirements.
+    assert any(r.startswith("google-auth==") for r in reqs)
+    # Unconstrained base deps stay untouched.
+    assert "uv>=0.5" in reqs
+
+
+def test_build_requirements_spec_repin_merges_into_one_line() -> None:
+    # pip rejects duplicate requirement names — a spec re-pin must merge, not duplicate.
+    reqs = deploy.build_requirements(_spec(packages=["jsonschema>=4"]))
+    js = [r for r in reqs if r.startswith("jsonschema")]
+    assert js == ["jsonschema>=4"]
+
+
+def test_build_requirements_conflicting_spec_pin_raises() -> None:
+    import pytest
+
+    with pytest.raises(ValueError, match="unsatisfiable"):
+        deploy.build_requirements(_spec(packages=["pydantic==2.0.0"]))
+
+
+def test_build_requirements_url_requirement_passes_through() -> None:
+    url = "mypkg @ https://example.com/mypkg-1.0-py3-none-any.whl"
+    reqs = deploy.build_requirements(_spec(packages=[url]))
+    assert url in reqs
+
+
+def test_verify_deploy_env_accepts_this_venv() -> None:
+    # The dev venv is held to the same contract as an operator's deploy venv.
+    deploy.verify_deploy_env()
+
+
+def test_verify_deploy_env_raises_on_pickle_coupled_skew(monkeypatch) -> None:
+    import importlib.metadata
+
+    import pytest
+
+    real = importlib.metadata.version
+    monkeypatch.setattr(
+        importlib.metadata,
+        "version",
+        lambda name: "0.0.1" if name == "cloudpickle" else real(name),
+    )
+    with pytest.raises(RuntimeError, match="cloudpickle"):
+        deploy.verify_deploy_env()
+
+
 def test_build_env_no_baked_secrets_and_buckets() -> None:
     spec = _spec(checkpoint=True, env={"FEATURE_FLAG": "on"})
 

@@ -69,25 +69,137 @@ _BASE_REQUIREMENTS: tuple[str, ...] = (
 )
 
 
+# Constraints for the platform-critical layer (pip ``-c`` semantics, merged into the
+# requirements by ``build_requirements`` — the engine build offers no hook for a real
+# constraints file: extra_packages are extracted only at container runtime, after pip).
+_CONSTRAINTS_PATH = Path(__file__).parent / "constraints.txt"
+
+# The engine build unpickles the AdkApp object the deploying client pickled, so these
+# packages must match between the deploy venv and the engine — enforced by
+# :func:`verify_deploy_env` against their ``constraints.txt`` pins.
+_PICKLE_COUPLED: tuple[str, ...] = ("google-cloud-aiplatform", "cloudpickle", "pydantic")
+
+
+def load_constraints() -> dict:
+    """Parse ``constraints.txt`` into ``{canonical package name: SpecifierSet}``."""
+    from packaging.requirements import Requirement  # lazy: keep import-time stdlib-only
+    from packaging.utils import canonicalize_name
+
+    out: dict = {}
+    for raw in _CONSTRAINTS_PATH.read_text().splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if line:
+            req = Requirement(line)
+            out[canonicalize_name(req.name)] = req.specifier
+    return out
+
+
+def _unsatisfiable(req) -> bool:
+    """True when a merged specifier set excludes one of its own ``==``/``===`` pins."""
+    from packaging.version import InvalidVersion, Version
+
+    for s in req.specifier:
+        if s.operator in ("==", "===") and not s.version.endswith(".*"):
+            try:
+                version = Version(s.version)
+            except InvalidVersion:
+                continue
+            if not req.specifier.contains(version, prereleases=True):
+                return True
+    return False
+
+
 def build_requirements(spec: AgentSpec) -> list[str]:
     """Compute the runtime ``requirements`` list, applying the §6 build contracts.
 
     Returns the base third-party deps every engine needs (uv, the a2a-sdk pin,
     claude-agent-sdk, google-adk, the GCP/otel stack) followed by the agent's own declared
-    baked deps (``spec.packages``). The toolkit package is shipped via ``extra_packages``,
-    so ``remote-agent-toolkit`` is deliberately absent here. Order is preserved and dupes
-    are dropped (a spec may re-pin a base dep).
+    baked deps (``spec.packages``), with the ``constraints.txt`` pins merged in (pip ``-c``
+    semantics, applied client-side). The toolkit package is shipped via ``extra_packages``,
+    so ``remote-agent-toolkit`` is deliberately absent here. Order is first-seen; a spec
+    re-pin of a base dep merges into one line (pip rejects duplicate names outright).
+
+    Raises ``ValueError`` when a merge is unsatisfiable (e.g. ``spec.packages`` pins a
+    platform-critical package to a version ``constraints.txt`` excludes) — fail fast
+    here, not 4 billable minutes into the engine build.
     """
-    seen: set[str] = set()
-    out: list[str] = []
+    from packaging.requirements import InvalidRequirement, Requirement  # lazy
+    from packaging.utils import canonicalize_name
+
     # The Codex SDK bundles a pinned codex CLI binary (tens of MB): baked only for
     # codex-harness engines. Keep in lockstep with pyproject.
     extra = ("openai-codex>=0.144.4",) if spec.harness == "codex" else ()
-    for req in (*_BASE_REQUIREMENTS, *extra, *spec.packages):
-        if req not in seen:
-            seen.add(req)
-            out.append(req)
-    return out
+
+    entries: list = []  # str (opaque pass-through) or Requirement, in first-seen order
+    by_name: dict = {}
+    for line in (*_BASE_REQUIREMENTS, *extra, *spec.packages):
+        try:
+            req = Requirement(line)
+        except InvalidRequirement:
+            entries.append(line)  # not PEP 508 (e.g. a pip option) — pass through as-is
+            continue
+        if req.url:
+            entries.append(line)  # direct URL: no specifier to merge, keep verbatim
+            continue
+        key = canonicalize_name(req.name)
+        if key in by_name:
+            by_name[key].specifier &= req.specifier
+            by_name[key].extras |= req.extras
+        else:
+            by_name[key] = req
+            entries.append(req)
+
+    constraints = load_constraints()
+    for key, req in by_name.items():
+        if key in constraints:
+            req.specifier &= constraints[key]
+    # Constrained packages nothing requires directly (e.g. google-auth) are installed as
+    # transitive deps either way — appending them as pinned requirements is equivalent.
+    for key, specifier in constraints.items():
+        if key not in by_name:
+            entries.append(f"{key}{specifier}")
+
+    for req in by_name.values():
+        if _unsatisfiable(req):
+            raise ValueError(
+                f"unsatisfiable requirement {str(req)!r} after merging spec.packages with "
+                f"the platform constraints ({_CONSTRAINTS_PATH}); align the spec's pin "
+                "with the constraint or refresh the constraint deliberately"
+            )
+    return [str(e) for e in entries]
+
+
+def verify_deploy_env() -> None:
+    """Fail fast when the deploy venv diverges from the pickle-coupled pins.
+
+    The engine build unpickles the ``agentplatform`` AdkApp that THIS venv pickles, so
+    for :data:`_PICKLE_COUPLED` the venv version and the engine's ``constraints.txt`` pin
+    must agree — a skew can produce an engine that fails to unpickle (or misbehaves)
+    only at build/runtime, after the ~4 min billable build. Called by ``deploy`` before
+    any side effect.
+    """
+    import importlib.metadata
+
+    from packaging.version import Version  # lazy: keep import-time stdlib-only
+
+    constraints = load_constraints()
+    problems: list[str] = []
+    for name in _PICKLE_COUPLED:
+        specifier = constraints.get(name)
+        if specifier is None:
+            continue
+        try:
+            installed = importlib.metadata.version(name)
+        except importlib.metadata.PackageNotFoundError:
+            continue
+        if not specifier.contains(Version(installed), prereleases=True):
+            problems.append(f"{name}: venv has {installed}, constraints.txt wants {specifier}")
+    if problems:
+        raise RuntimeError(
+            "deploy venv out of sync with the pickle-coupled engine pins — the engine "
+            "build unpickles what this venv pickles, so they must match. Either sync the "
+            f"venv or refresh runtime/gemini/constraints.txt: {'; '.join(problems)}"
+        )
 
 
 def build_env(

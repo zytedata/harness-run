@@ -60,9 +60,18 @@ path, and tears everything down in `finally`:
 - **warm** — pub/sub dispatch to a pre-warmed pool worker (~10–20 s pickup).
 
 Pass criteria per engine: terminal result with `error=False`, `turns > 0`, and the expected
-answer in the text. Typical numbers: deploy ~3.5–4 min (the two run in parallel), cold turn
-~3 min end-to-end, warm ~1 min, a few cents of model spend. Exit code is non-zero on any
-FAIL, so you can gate on it.
+answer in the text (the `*-spec` checks additionally require the run-scoped system prompt's
+marker — proving the worker ran the handle's spec, not the deploy-baked one). Typical
+numbers: deploy ~3.5–4 min (the two run in parallel), cold turn ~3 min end-to-end, warm
+~1 min, a few cents of model spend. Exit code is non-zero on any FAIL, so you can gate on it.
+
+**Running on end-user ADC (no SA impersonation)?** Two gotchas, both observed live:
+set `GOOGLE_CLOUD_QUOTA_PROJECT=<project>` or every Cloud Logging read 429s (end-user
+credentials without a quota project bill reads against a default consumer with no
+quota) — and even then, the event tail polls at 1 Hz (= 60 reads/min) while the default
+per-user logging read quota is 60/min, so the smoke's two parallel mode tails can still
+429. `IMPERSONATE_SA` avoids both; otherwise run modes separately (`MODE=cold`, then
+`MODE=warm`) via `dev/_smoke_slowpoll.py`, which lowers the tail cadence for the smoke run.
 
 Prerequisites: the GCP setup from the
 [README "GCP setup & required permissions"](README.md#gcp-setup--required-permissions)

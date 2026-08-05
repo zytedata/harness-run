@@ -567,14 +567,16 @@ Google). The only prerequisites are the `telemetry.googleapis.com` + `cloudtrace
 the project, and `roles/cloudtrace.user` for whoever wants to *view* traces.
 
 **If every export fails with `Failed to export span batch code: 403, reason: Forbidden`** in the engine
-log (metrics batches too) and no trace reaches the console, suspect a **server-side Telemetry API
-incident before touching your own config**. One such outage ran 2026-08-03..05 (UTC) in our project and
-self-resolved on Google's side; while it lasted, both plausible client-side fixes were disproven by
-counterfactual runs — extra IAM grants (`roles/telemetry.tracesWriter`/`metricsWriter`) changed nothing,
-and pinning back the coincidentally-just-released `opentelemetry-exporter-gcp-*` 1.14.0 only *appeared*
-to help until an unpinned build was retried after the backend recovered. The tell for server-side: the
-403s appear across unrelated engines at once and vanish the same way, with no config change on either
-side. Nothing to fix locally; the turns themselves are unaffected (traces are a diagnostic channel).
+log (metrics batches too) and no trace reaches the console, suspect **server-side per-engine state
+before touching your own config** — and note the breakage sticks to the engine *resource*, not to your
+code. During a Telemetry API incident of 2026-08-03..05 (UTC), every engine **created while it lasted**
+exported nothing but 403s and *kept doing so after the incident ended*, while identical builds created
+before or after worked fine — proven by canaries byte-identical in installed packages that differed
+only in creation time. Client-side theories disproven along the way: extra IAM grants
+(`roles/telemetry.tracesWriter`/`metricsWriter`) changed nothing, and pinning back the
+coincidentally-just-released `opentelemetry-exporter-gcp-*` 1.14.0 only *appeared* to help. **Fix:
+redeploy the affected engine** (in-place update first; fresh engine if the 403s survive it). The turns
+themselves are unaffected throughout (traces are a diagnostic channel).
 
 **Known gaps** (platform-side, as of 2026-07/08, raised with Google): the console's *session conversation*
 panel stays empty ("No chat conversation data") — it is fed by platform instrumentation that doesn't run

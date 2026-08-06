@@ -567,16 +567,19 @@ Google). The only prerequisites are the `telemetry.googleapis.com` + `cloudtrace
 the project, and `roles/cloudtrace.user` for whoever wants to *view* traces.
 
 **If every export fails with `Failed to export span batch code: 403, reason: Forbidden`** in the engine
-log (metrics batches too) and no trace reaches the console, suspect **server-side per-engine state
-before touching your own config** — and note the breakage sticks to the engine *resource*, not to your
-code. During a Telemetry API incident of 2026-08-03..05 (UTC), every engine **created while it lasted**
-exported nothing but 403s and *kept doing so after the incident ended*, while identical builds created
-before or after worked fine — proven by canaries byte-identical in installed packages that differed
-only in creation time. Client-side theories disproven along the way: extra IAM grants
-(`roles/telemetry.tracesWriter`/`metricsWriter`) changed nothing, and pinning back the
-coincidentally-just-released `opentelemetry-exporter-gcp-*` 1.14.0 only *appeared* to help. **Fix:
-redeploy the affected engine** (in-place update first; fresh engine if the 403s survive it). The turns
-themselves are unaffected throughout (traces are a diagnostic channel).
+log (metrics batches too) and no trace reaches the console, the engine's pickle almost certainly carries
+the **wrong GCP project**. `AdkApp` snapshots the aiplatform global config's project at *construction*
+time on the deploy machine; the worker later force-feeds that pickled project into
+`GOOGLE_CLOUD_PROJECT` and routes every span/metric batch to it — so a stray local default (e.g.
+gcloud's org-wide `other-project`) bakes a cross-project telemetry write into the engine, which the
+runtime service agent is (rightly) forbidden to perform. The breakage is **persistent per engine**
+(it's in the pickle) and survives redeploys from the same misconfigured environment — which is what made
+it masquerade as a server-side incident for three days in 2026-08. The toolkit now pins the deploy
+target into the app (`build_adk_app`) and refuses to ship a pickle that captured anything else; on older
+toolkit versions, fix the deploy environment (`gcloud config set project <target>` or
+`GOOGLE_CLOUD_PROJECT=<target>`) and redeploy. Diagnosis shortcut: `python -m pickletools
+agent_engine.pkl | grep -A1 project` on the staged pickle — the project string is visible in cleartext.
+The turns themselves are unaffected throughout (traces are a diagnostic channel).
 
 **Known gaps** (platform-side, as of 2026-07/08, raised with Google): the console's *session conversation*
 panel stays empty ("No chat conversation data") — it is fed by platform instrumentation that doesn't run

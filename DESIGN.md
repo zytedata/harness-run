@@ -350,20 +350,29 @@ These are facts measured during the PoC. The library encodes them so consumers i
   probe evidence — exported spans carry the platform's `service.instance.id=<hex>-<pid>` resource stamp,
   not ours, so every cloud worker already has the platform's provider and the pipe never fired;
   resurrect from git history only if the platform ever ships job workers without one. The default RE
-  service-agent role suffices for the export. INCIDENT LOG (2026-08-03..05): every worker span/metrics
-  batch 403'd (`Failed to export span batch code: 403`) — SERVER-side Telemetry API breakage that is
-  **per-engine and persistent**: engines CREATED during the incident window kept 403ing after it ended
-  (Szilárd's 13:15 UTC engine still failing at 15:54), while byte-identical builds (same packages, same
-  1.14.0 exporters, same assembly image digest) created before or after worked — so the broken state
-  lives in the engine resource's registration with the Telemetry backend, and the fix is to REDEPLOY
-  the affected engine. Client-side theories each disproven by a counterfactual run: IAM grants
-  (telemetry writer roles — changed nothing), then a dependency pin (`opentelemetry-exporter-gcp-*
-  <1.14`, briefly shipped then reverted — release timing was coincidence, its diff is metadata-only,
-  and the span path in agentplatform's bootstrap never imports that package anyway; it exports plain
-  OTLP to telemetry.googleapis.com). Debugging surfaces that settled it: engine build logs land under
-  the engine's `reasoning_engine_id` in Cloud Logging (diff `Successfully installed` sets between
-  good/bad builds; compare assembly-image digests), and beware time-confounded canaries — always
-  re-run the BROKEN configuration (ideally the broken ARTIFACT) before declaring a fix causal.
+  service-agent role suffices for the export. INCIDENT LOG (2026-08-03..06, root-caused 08-06): every
+  worker span/metrics batch 403'd (`Failed to export span batch code: 403`) on engines deployed from
+  environments whose gcloud/ADC default project wasn't the deploy target. ROOT CAUSE: `AdkApp.__init__`
+  snapshots `initializer.global_config.project` into its pickled `_tmpl_attrs`; the worker sets
+  `GOOGLE_CLOUD_PROJECT` from the pickle and telemetry export routes to THAT project — a pickled
+  `other-project` (the org-wide gcloud default) made the RE service agent attempt cross-project writes,
+  hence 403 Forbidden, persistently, on every engine deployed from such a machine (and only those —
+  which made it look like server-side per-engine state keyed on creation time for three days).
+  Settled by an artifact-bisect ladder, each step one variable: byte-identical redeploy of a broken
+  engine's staged artifacts under a different creator → still 403 (artifact-borne, not
+  creation-context); model swap both directions → no effect; installed-version matrix across
+  broken/clean builds → identical versions on both sides (packages ruled out); `pickletools.dis` diff
+  of the two pickles → `project: other-project` vs `project: my-project`; byte-patching ONLY that
+  string in the broken pickle → clean. Earlier theories disproven en route: IAM grants (telemetry
+  writer roles — inert), exporter version pins (release-timing coincidence), server-side incident
+  windows (the "windows" were just who deployed from which laptop). FIX: `build_adk_app` pins the
+  deploy target via `aiplatform.init(project=..., location=...)` before constructing the app and hard-
+  fails if the pickle captured anything else. Debugging surfaces that settled it: engine build logs
+  land under the engine's `reasoning_engine_id` in Cloud Logging (diff `Successfully installed` sets;
+  compare assembly-image digests), staged artifacts are readable in the staging bucket (the pickle's
+  strings are cleartext — `pickletools.dis`), and beware time-confounded canaries — always re-run the
+  BROKEN configuration (ideally the broken ARTIFACT, ideally byte-identically) before declaring a fix
+  causal.
   Strictly best-effort: `TurnTracer` never
   raises — a tracing failure must not take a run down. Span values are truncated summaries (same text as
   the log/mirror; no new exposure surface). Traces are diagnostics; `history()` is the record.

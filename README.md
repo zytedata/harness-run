@@ -9,7 +9,7 @@ ship behind the same API: **Claude Code** (the default) and **Codex** (OpenAI mo
 
 > **Status: `local` and Gemini Agent Runtime both work — validated live.** Define an `AgentSpec` and run it
 > in-process (`local.deploy`), or deploy + run on Agent Runtime (`gemini.deploy` / `gemini.get_engine`), with
-> skills, structured output, checkpoint/resume, and a **warm pool** (~10–20 s pickup vs ~2.5 min cold) — all
+> skills, structured output, checkpoint/resume, and a **warm pool** (~4 s pickup vs ~2.5 min cold) — all
 > exercised end-to-end on real infrastructure. The two paths share one `Engine`/`Session`/`Run` API. Not yet
 > built (raise `NotImplementedError` or simply absent): session `fork()` and a sync run path.
 > See [`examples/minimal`](examples/minimal) for a runnable agent and
@@ -583,18 +583,35 @@ failed turn or failed tool call marks its span with error status, so a trace of 
 it broke at a glance. Span values are truncated one-line summaries — the same text that already flows to
 Cloud Logging and the event mirror (never secret values), so tracing adds no new exposure surface.
 
-There's nothing to turn on: the runtime's default service-agent role already includes
-`telemetry.traces.write`, and the toolkit force-flushes OpenTelemetry at the end of every turn — which is
-the load-bearing part: the platform initializes telemetry in job workers but never flushes it on the
-async job path the toolkit uses, so without that flush no span would ever leave the worker (verified with
-a standalone repro; raised with Google). The only prerequisites are the `telemetry.googleapis.com` +
-`cloudtrace.googleapis.com` APIs on the project, and `roles/cloudtrace.user` for whoever wants to *view*
-traces.
+There's nothing to turn on: the runtime service agent's default role covers the export, and the toolkit
+force-flushes OpenTelemetry at the end of every turn — which is the load-bearing part: the platform
+initializes telemetry in job workers but never flushes it on the async job path the toolkit uses, so
+without that flush no span would ever leave the worker (verified with a standalone repro; raised with
+Google). The only prerequisites are the `telemetry.googleapis.com` + `cloudtrace.googleapis.com` APIs on
+the project, and `roles/cloudtrace.user` for whoever wants to *view* traces.
 
-**Known gaps** (platform-side, as of 2026-07, raised with Google): the console's *session conversation*
+**If every export fails with `Failed to export span batch code: 403, reason: Forbidden`** in the engine
+log (metrics batches too) and no trace reaches the console, the engine's pickle almost certainly carries
+the **wrong GCP project**. `AdkApp` snapshots the aiplatform global config's project at *construction*
+time on the deploy machine; the worker later force-feeds that pickled project into
+`GOOGLE_CLOUD_PROJECT` and routes every span/metric batch to it — so a stray local default (e.g.
+gcloud's org-wide `other-project`) bakes a cross-project telemetry write into the engine, which the
+runtime service agent is (rightly) forbidden to perform. The breakage is **persistent per engine**
+(it's in the pickle) and survives redeploys from the same misconfigured environment — which is what made
+it masquerade as a server-side incident for three days in 2026-08. The toolkit now pins the deploy
+target into the app (`build_adk_app`) and refuses to ship a pickle that captured anything else; on older
+toolkit versions, fix the deploy environment (`gcloud config set project <target>` or
+`GOOGLE_CLOUD_PROJECT=<target>`) and redeploy. Diagnosis shortcut: `python -m pickletools
+agent_engine.pkl | grep -A1 project` on the staged pickle — the project string is visible in cleartext.
+The turns themselves are unaffected throughout (traces are a diagnostic channel).
+
+**Known gaps** (platform-side, as of 2026-07/08, raised with Google): the console's *session conversation*
 panel stays empty ("No chat conversation data") — it is fed by platform instrumentation that doesn't run
 for the async job path — and the trace tree shows a cosmetic "(Missing span ID …)" placeholder above the
-turn (the platform tears the job worker down before its own wrapper span is exported). Span values here
+turn (the platform tears the job worker down before its own wrapper span is exported). As of 2026-08-05,
+new spans land in the telemetry-backed store: the console (Traces tab / Trace explorer) shows them, but
+the legacy Cloud Trace **v1 list API** no longer returns them — don't use it to check whether tracing
+works. Span values here
 are one-line summaries; for full prompts/outputs use [`session.history()`](#past-jobs-listing-sessions--reading-history). Traces are diagnostics, not the
 record of a run — for programmatic history use [`session.history()`](#past-jobs-listing-sessions--reading-history).
 Cloud Trace has a free monthly span quota; a Claude-agent turn produces tens of spans, not thousands.
@@ -695,7 +712,7 @@ deploys — it looks an engine up by name and runs.
 | Path | Start latency | Ceiling | Use for |
 |---|---|---|---|
 | Async (default) | **~2.5 min** per-job worker provisioning | long-running | one-shot / long autonomous jobs |
-| **Warm pool** (`warm_pool=True`) | **~10–20 s** to first *observed* event | long-running | interactive *and* long — best of both |
+| **Warm pool** (`warm_pool=True`) | **~4 s** to first *observed* event | long-running | interactive *and* long — best of both |
 | Sync | ~3–9 s | ~600 s (10 min) hard | _not supported yet (see below)_ |
 
 The ~2.5 min async start is **per job, not a one-time cold start** — it's Vertex provisioning a dedicated
@@ -707,17 +724,35 @@ expose it yet** — the run plane is built around the async + warm-pool paths, w
 interactive work. We can add sync later if a genuinely short-turn use case needs the lower start latency.
 
 **How `warm_pool=True` works.** `gemini.deploy(spec, warm_pool=True)` keeps a pool of pre-provisioned workers,
-each blocked on a Pub/Sub subscription (a competing-consumers *atomic claim*). A worker warms its Cloud
-Logging + storage channels during its idle wait and reports ready — `engine.wait_until_warm()` blocks on that
-signal. A run is then dispatched to a free worker, so the turn goes nearly straight to the model. The first
-**observed** event lands **~10–20 s** after dispatch (vs ~2.5 min cold) — that window is dominated by **Cloud
-Logging's write→queryable ingestion lag**, which varies run to run and is inherent to a log-tail channel; the
-worker's *actual* pickup is ~5 s. On claim the pool refills, so the next turn is warm too.
+each blocked on a Pub/Sub subscription (a competing-consumers *atomic claim*). A worker warms its logging +
+storage channels during its idle wait and reports ready — `engine.wait_until_warm()` blocks on that signal.
+A run is then dispatched to a free worker, so the turn goes nearly straight to the model. The first
+**observed** event lands **~4 s** after dispatch (measured: 3.8 s to first event, 10.9 s to the result of a
+one-tool Haiku turn, vs ~2.5 min cold) — the worker's claim pickup plus one ~0.5 s mirror flush and one
+tail poll; events then stream **~1–2 s** behind the agent for the rest of the turn. (Before the GCS event
+stream this number was ~10–20 s, dominated by Cloud Logging's ingestion lag.) On claim the pool refills, so
+the next turn is warm too.
 
 > _Keeping the pool full:_ warm workers are themselves long-running jobs and will eventually exit at the
 > platform's max-job-duration limit (whose exact value we haven't pinned down). Topping the pool back up
 > across that boundary is a future refinement; in practice the refill-on-claim cadence likely keeps enough
 > workers warm, so it shouldn't bite early on.
+
+**Event streaming scales with your fleet.** The stream you consume with `async for ev in run` is the
+session's **GCS event mirror**, tailed live: the worker writes small batches as events happen and the
+client polls the object listing — strongly consistent (no ingestion lag) and free of any restrictive
+read quota, so tens of concurrently-streamed runs in one project are a non-event. The same objects are
+the durable history `session.history()` reads. Cloud Logging still receives every step (it's the
+indexed store the [debugging recipes](TESTING.md#debugging-a-live-run) query), but no client run
+depends on reading it.
+
+> _Engines deployed before event streaming_ wrote the mirror only at end-of-turn, so against them the
+> stream delivers all of a turn's events in one batch with the terminal result (still a correct run —
+> just not live), and `wait_until_warm` times out soft (its readiness marker only reached Cloud
+> Logging, which clients no longer read: its read path is capped at
+> [60 requests/min per project](https://cloud.google.com/logging/quotas), fixed and shared by
+> everything in the project — the reason it was dropped as a data plane). **Redeploy an engine to
+> move it to live streaming.**
 
 **Cost.** A deployed engine itself is (almost) free while idle: the toolkit deploys with `min_instances=0`
 (no standing container — the async path provisions a worker per job, so a min-instances container would serve

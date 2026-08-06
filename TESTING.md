@@ -57,7 +57,7 @@ path, and tears everything down in `finally`:
 
 - **cold** — `run_query_job`, the production default: every job provisions its own worker
   (~2.5 min startup before the turn runs).
-- **warm** — pub/sub dispatch to a pre-warmed pool worker (~10–20 s pickup).
+- **warm** — pub/sub dispatch to a pre-warmed pool worker (~4 s to first observed event).
 
 Pass criteria per engine: terminal result with `error=False`, `turns > 0`, and the expected
 answer in the text (the `*-spec` checks additionally require the run-scoped system prompt's
@@ -72,6 +72,11 @@ quota) — and even then, the event tail polls at 1 Hz (= 60 reads/min) while th
 per-user logging read quota is 60/min, so the smoke's two parallel mode tails can still
 429. `IMPERSONATE_SA` avoids both; otherwise run modes separately (`MODE=cold`, then
 `MODE=warm`) via `dev/_smoke_slowpoll.py`, which lowers the tail cadence for the smoke run.
+
+Events stream via the **GCS mirror** (no read quota, no ingestion lag — see DESIGN §6), so
+concurrent tests don't contend. Against an engine deployed *before* event streaming, all of
+a turn's events arrive in one batch with the result (its mirror was written at end-of-turn)
+— redeploy it for live streaming.
 
 Prerequisites: the GCP setup from the
 [README "GCP setup & required permissions"](README.md#gcp-setup--required-permissions)
@@ -92,7 +97,10 @@ test), so it costs about the same wall-clock as the smoke test's parallel pair.
 ### Writing a bespoke live probe
 
 When the smoke test doesn't cover your change (e.g. validating crash/retry behavior, or a
-new event field), follow the same pattern — it's what keeps live testing safe and cheap:
+new event field), follow the same pattern — it's what keeps live testing safe and cheap.
+Worked examples in [`dev/`](dev): `live_two_turn_probe.py` (two turns on one session over
+the event stream — the probe that caught the stale-result replay bug) and
+`live_warm_latency_probe.py` (wait_until_warm + measured dispatch→first-event latency):
 
 - **Throwaway, named engines**: suffix with something identifying (`-itest`, your name) so
   leftovers are attributable; never point a probe at someone's standing engine.

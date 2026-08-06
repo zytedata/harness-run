@@ -317,8 +317,22 @@ These are facts measured during the PoC. The library encodes them so consumers i
 
 **Observability**
 - Async `run_query_job` surfaces **no** stderr, **no** stack traces, and only coarse (~12 min) GCS flushes.
-  **Cloud Logging (`log_struct`) is the only near-real-time channel** — the harness emits a per-step
-  structured log; the client tails it filtered by `session_id`. This is the `EventSink` port.
+  **The GCS event mirror is the live channel** (`stream.py`): the worker streams every surfaced event
+  into small JSONL batch objects under `events/<sid>/` (~0.5 s cadence; a terminal `result` flushes
+  immediately), and the client tails the object listing — lexical name order == chronological,
+  list-after-write is strongly consistent (no ingestion lag), and GCS has no restrictive read cap, so
+  tens of concurrent streamed runs are a non-event. The same objects ARE the durable history
+  (`Session.history()` reads them) — one record, two roles. It is the ONLY live channel: engines
+  deployed before streaming wrote the mirror at end-of-turn, so against them a turn's events all
+  arrive in one batch with the terminal result (correct, just not live) and `wait_until_warm`
+  times out soft — redeploy them.
+- **Cloud Logging is emit-only**: every worker still writes the per-step `remote_agent_toolkit_steps`
+  log (labelled by `session_id`) because debugging and alerting need an indexed, queryable,
+  cross-session store — but no client run depends on it. Its READ path is capped at
+  **60 `entries.list` requests/min PER PROJECT** (fixed; Google says not raisable), which is why
+  it was dropped as a data plane (`CloudLoggingSink` has no `tail`). The only remaining log read is
+  the bounded one-shot history backstop (`CloudLoggingSink.read`, `read_history` layer 3 — sessions
+  older than mirroring); it retries 429s with backoff inside its timeout.
 - **Cloud Trace spans per turn** (the console's Agent Platform *Traces* tab). The platform's ADK
   auto-instrumentation can't see inside the Claude subprocess, so the worker rebuilds the structure from
   the `AgentEvent` stream (`gemini/tracing.TurnTracer`): a root `invoke_agent` span per turn (parented
@@ -336,11 +350,35 @@ These are facts measured during the PoC. The library encodes them so consumers i
   probe evidence — exported spans carry the platform's `service.instance.id=<hex>-<pid>` resource stamp,
   not ours, so every cloud worker already has the platform's provider and the pipe never fired;
   resurrect from git history only if the platform ever ships job workers without one. The default RE
-  service-agent role already includes `telemetry.traces.write`. Strictly best-effort: `TurnTracer` never
+  service-agent role suffices for the export. INCIDENT LOG (2026-08-03..06, root-caused 08-06): every
+  worker span/metrics batch 403'd (`Failed to export span batch code: 403`) on engines deployed from
+  environments whose gcloud/ADC default project wasn't the deploy target. ROOT CAUSE: `AdkApp.__init__`
+  snapshots `initializer.global_config.project` into its pickled `_tmpl_attrs`; the worker sets
+  `GOOGLE_CLOUD_PROJECT` from the pickle and telemetry export routes to THAT project — a pickled
+  `other-project` (the org-wide gcloud default) made the RE service agent attempt cross-project writes,
+  hence 403 Forbidden, persistently, on every engine deployed from such a machine (and only those —
+  which made it look like server-side per-engine state keyed on creation time for three days).
+  Settled by an artifact-bisect ladder, each step one variable: byte-identical redeploy of a broken
+  engine's staged artifacts under a different creator → still 403 (artifact-borne, not
+  creation-context); model swap both directions → no effect; installed-version matrix across
+  broken/clean builds → identical versions on both sides (packages ruled out); `pickletools.dis` diff
+  of the two pickles → `project: other-project` vs `project: my-project`; byte-patching ONLY that
+  string in the broken pickle → clean. Earlier theories disproven en route: IAM grants (telemetry
+  writer roles — inert), exporter version pins (release-timing coincidence), server-side incident
+  windows (the "windows" were just who deployed from which laptop). FIX: `build_adk_app` pins the
+  deploy target via `aiplatform.init(project=..., location=...)` before constructing the app and hard-
+  fails if the pickle captured anything else. Debugging surfaces that settled it: engine build logs
+  land under the engine's `reasoning_engine_id` in Cloud Logging (diff `Successfully installed` sets;
+  compare assembly-image digests), staged artifacts are readable in the staging bucket (the pickle's
+  strings are cleartext — `pickletools.dis`), and beware time-confounded canaries — always re-run the
+  BROKEN configuration (ideally the broken ARTIFACT, ideally byte-identically) before declaring a fix
+  causal.
+  Strictly best-effort: `TurnTracer` never
   raises — a tracing failure must not take a run down. Span values are truncated summaries (same text as
   the log/mirror; no new exposure surface). Traces are diagnostics; `history()` is the record.
   Live-validated facts: **Cloud Trace ingestion lag ~5–10 min** (poll patiently before declaring spans
-  lost; the v1 read API also does NOT expose span exception records — only the console shows them);
+  lost; since 2026-08-04 the v1 read API returns NOTHING for new spans — they live in the new
+  telemetry-backed store, console-only — and it never exposed span exception records);
   **one trace per turn** — every turn runs in its own query job (cold submits one; a warm pool
   worker claims exactly one turn, processes it, exits), so a turn's spans nest under that job's ADK
   wrapper spans and a multi-turn session spans several traces, stitched by `gen_ai.conversation.id`
@@ -640,6 +678,19 @@ saving all onboarding docs for the end.
 - **Local parity with the engine image** — *Python package* parity is handled by the venv above; full
   OS-level parity (base OS, glibc, system tools) is the `dev/` parity image's job (install/dependency
   issues debugged on the laptop instead of through ~10-min cloud rebuilds).
+- **Quota-free event streaming — BUILT (2026-08, `stream.py`; the channel is described in §6).** The
+  Cloud Logging tail shared one fixed 60-reads/min budget per project, so live-event latency degraded
+  as concurrent runs grew (tens of agents ⇒ ~30 s batches); the incremental GCS mirror removed that
+  wall. Alternatives considered and rejected, for the record: Cloud Logging's streaming `tail` API
+  (hard cap of 10 concurrent tail sessions per project, also fixed — a wall below "tens of agents");
+  a log sink → Pub/Sub fan-out (works, but new infra + per-client subscription lifecycle + every
+  client receives all sessions' traffic); per-process tail multiplexing (helps one client with many
+  sessions, not many clients); the platform's native streams — sync `streamQuery` and A2A
+  `tasks/subscribe` — which live on the serving path (~10-min ceiling, standing-container billing),
+  not the async-job path the run plane is built on; and managed `sessions.events`, which would lean on
+  the platform session machinery that broke under us on 2026-07-28 (and our events are deliberately
+  `partial`, i.e. not appended). Worth raising in the existing Google query-job telemetry thread: a
+  native progress-stream for `asyncQuery` would let us delete this channel entirely.
 - **Structured outputs** — prefer the SDK's constrained-decoding `structured_output`; keep "parse last
   JSON block" only as a fallback for harnesses that lack it. Confirm Vertex model support per model.
 - **Outcomes / rubrics** — CMA's iterate-until-graded "definition of done" is attractive for autonomous

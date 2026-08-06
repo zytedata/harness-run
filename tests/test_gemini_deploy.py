@@ -185,3 +185,28 @@ def test_deploy_submodule_import_does_not_shadow_the_deploy_function() -> None:
         f"submodule(s) {sorted(submodules & set(gemini.__all__))} collide with gemini.__all__"
     )
     assert callable(gemini.deploy)
+
+
+def test_build_adk_app_pins_deploy_project() -> None:
+    """The pickled AdkApp must carry the DEPLOY target, not the deployer's local default.
+
+    AdkApp snapshots the aiplatform global config at construction and the engine worker
+    exports all telemetry to the snapshotted project — a stray local default (gcloud's
+    ``other-project``) baked into the pickle gave every span/metric export a persistent
+    403 (2026-08-03→06 incident). build_adk_app must override whatever the environment
+    left in the global config, and refuse to ship a mismatch.
+    """
+    import pytest
+
+    pytest.importorskip("agentplatform")
+    import google.cloud.aiplatform as aiplatform
+
+    from remote_agent_toolkit.runtime.gemini.backend import build_adk_app
+
+    # Simulate the incident: some earlier code path left an unrelated default behind.
+    aiplatform.init(project="stray-local-default", location="europe-west1")
+
+    app = build_adk_app(_spec(), project="deploy-target", location="us-central1")
+
+    assert app._tmpl_attrs["project"] == "deploy-target"
+    assert app._tmpl_attrs["location"] == "us-central1"

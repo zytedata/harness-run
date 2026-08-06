@@ -180,9 +180,19 @@ def _prewarm(spec: Any) -> None:
             pass
     try:
         pool_id = pool_log_id_from_subscription(os.environ.get("AGENT_POOL_SUBSCRIPTION", ""))
-        CloudLoggingSink(session_id=pool_id).emit(
-            AgentEvent(kind="status", summary="pool worker ready", raw={"event": "pool_ready"})
-        )
+        ready = AgentEvent(kind="status", summary="pool worker ready", raw={"event": "pool_ready"})
+        # GCS marker under events/<pool_id>/ — what wait_until_warm tails (quota-free);
+        # the Cloud Logging emit stays for ops (and pre-stream clients).
+        events_uri = os.environ.get("AGENT_EVENTS_GCS")
+        if events_uri:
+            import time as _time
+
+            from .history import mirror_line, write_turn_mirror
+
+            write_turn_mirror(
+                events_uri, pool_id, [mirror_line(ready)], now_ms=int(_time.time() * 1000)
+            )
+        CloudLoggingSink(session_id=pool_id).emit(ready)
     except Exception:  # noqa: BLE001
         pass
 
@@ -366,13 +376,15 @@ class ToolkitAgent(BaseAgent):
             interactive=spec.checkpoint if spec.interactive is None else spec.interactive,
         )
 
-        # Every surfaced event is also buffered into `mirror` and flushed to a session-keyed
-        # GCS file when the turn ends (the durable history Session.history() reads — the
-        # platform's own job output isn't session-keyed for warm turns). Events never carry
-        # secret values, so neither does the mirror.
-        from .history import mirror_line, write_turn_mirror
+        # Every surfaced event also streams into the session-keyed GCS mirror as it happens
+        # (batched ~0.5s): the mirror is BOTH the durable history Session.history() reads AND
+        # the live channel the client tails (stream.tail_stream) — Cloud Logging stays
+        # emit-only for ops/debugging. Events never carry secret values, so neither does the
+        # mirror. A missing AGENT_EVENTS_GCS (pre-stream local tests) degrades to no mirror.
+        from .stream import MirrorStream
 
-        mirror: list[dict] = []
+        events_uri = os.environ.get("AGENT_EVENTS_GCS")
+        stream = MirrorStream(events_uri, session_id) if events_uri else None
         # Cloud Trace spans rebuilt from the same stream (the console's Traces tab).
         # Best-effort by construction.
         tracer = TurnTracer(agent_name=self.name, model=spec.model, session_id=session_id)
@@ -386,15 +398,16 @@ class ToolkitAgent(BaseAgent):
 
         sampler = start_sampler(
             session_id,
-            on_event=lambda ev: (sink.emit(ev), mirror.append(mirror_line(ev))),
+            on_event=lambda ev: (sink.emit(ev), stream.append(ev) if stream else None),
         )
 
         def surface(event: AgentEvent) -> Any:
             if event.kind == "result" and sampler is not None:
                 event.raw = event.raw or {}
                 sampler.enrich_result(event.raw)
-            sink.emit(event)  # near-real-time channel (Cloud Logging)
-            mirror.append(mirror_line(event))
+            sink.emit(event)  # ops/debug channel (Cloud Logging; clients no longer tail it)
+            if stream is not None:
+                stream.append(event)  # live channel + durable history (GCS mirror)
             tracer.observe(event)  # span open/close + annotations (never raises)
             return to_adk_event(event, self.name, invocation_id)
 
@@ -439,14 +452,11 @@ class ToolkitAgent(BaseAgent):
             if sampler is not None:
                 sampler.stop()
             tracer.close()  # end the turn span (+ any tool span orphaned by a crash)
-            # Flush the turn's durable history file — also on early generator close (a
-            # partially-consumed turn still leaves a record). SYNC on purpose: this finally
-            # also runs under GeneratorExit, where awaiting is illegal. Best-effort by design.
-            events_uri = os.environ.get("AGENT_EVENTS_GCS")
-            if events_uri and mirror:
-                import time as _time
-
-                write_turn_mirror(events_uri, session_id, mirror, now_ms=int(_time.time() * 1000))
+            # Drain the mirror writer — also on early generator close (a partially-consumed
+            # turn still leaves a durable record). SYNC on purpose: this finally also runs
+            # under GeneratorExit, where awaiting is illegal. Best-effort by design.
+            if stream is not None:
+                stream.close()
         # The terminal result went out, so no platform retry of this attempt can follow —
         # NOW the staged secrets can go. A killed attempt never reaches this line, leaving
         # the object for the platform's automatic re-run of the same payload (the client's

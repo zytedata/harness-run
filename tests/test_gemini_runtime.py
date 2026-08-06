@@ -119,8 +119,8 @@ def test_cold_submit_stages_secrets_and_query_carries_only_pointer(monkeypatch):
         AgentEvent(kind="result", summary="ok", raw={"subtype": "success", "is_error": False,
                                                      "num_turns": 1, "session_id": "sid-3"}),
     ])
-    import remote_agent_toolkit.ports.eventsink as eventsink_mod
-    monkeypatch.setattr(eventsink_mod, "CloudLoggingSink", lambda **kw: seed)
+    # _submit tails the GCS event stream — patch the backend seam with our seeded sink.
+    monkeypatch.setattr(backend, "tail_stream", lambda uri, sid, **kw: seed.tail(sid))
 
     session = backend.GeminiSession(engine, "sid-3")
     asyncio.run(_await(session.run("go", secrets={"SH_APIKEY": "SUPERSECRET"})))
@@ -198,9 +198,8 @@ def test_gemini_session_run_drives_from_sink(monkeypatch):
         AgentEvent(kind="result", summary="done", cost_usd=0.2, usage={"t": 1},
                    raw={"subtype": "success", "is_error": False, "num_turns": 4, "session_id": "sid-1"}),
     ])
-    # _submit constructs CloudLoggingSink(...) for tailing — return our pre-seeded sink instead.
-    import remote_agent_toolkit.ports.eventsink as eventsink_mod
-    monkeypatch.setattr(eventsink_mod, "CloudLoggingSink", lambda **kw: seed)
+    # _submit tails the GCS event stream — patch the backend seam with our seeded sink.
+    monkeypatch.setattr(backend, "tail_stream", lambda uri, sid, **kw: seed.tail(sid))
 
     session = backend.GeminiSession(engine, "sid-1")
     result = asyncio.run(_await(session.run("go")))
@@ -236,7 +235,7 @@ def test_gemini_interrupt_cancels_remote_job(monkeypatch):
 def test_gemini_session_send_prefixes_resume(monkeypatch):
     spec = AgentSpec(name="g", model="m", checkpoint=True)
     engine = backend.GeminiEngine(resource="r/reasoningEngines/9", spec=spec,
-                                  project=None, location=None, output_bucket=None)
+                                  project=None, location=None, output_bucket="gs://out")
     captured = {}
 
     class FakeAE:
@@ -249,8 +248,8 @@ def test_gemini_session_send_prefixes_resume(monkeypatch):
         AgentEvent(kind="result", summary="resumed", raw={"subtype": "success", "is_error": False,
                                                           "num_turns": 1, "session_id": "sid-2"}),
     ])
-    import remote_agent_toolkit.ports.eventsink as eventsink_mod
-    monkeypatch.setattr(eventsink_mod, "CloudLoggingSink", lambda **kw: seed)
+    # _submit tails the GCS event stream — patch the backend seam with our seeded sink.
+    monkeypatch.setattr(backend, "tail_stream", lambda uri, sid, **kw: seed.tail(sid))
 
     session = backend.GeminiSession(engine, "sid-2")
     asyncio.run(_await(session.send("answer")))

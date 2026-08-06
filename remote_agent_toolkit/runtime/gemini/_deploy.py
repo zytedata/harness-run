@@ -130,9 +130,11 @@ def build_env(
     # Produced files are uploaded under the output bucket after each run.
     if output_bucket:
         env["AGENT_ARTIFACTS_GCS"] = f"{output_bucket}/artifacts"
-        # Durable per-session event history: each turn mirrors its events to
-        # events/<sid>/<ts>.jsonl (the platform's own job output isn't session-keyed for
-        # warm turns and keeps only the last cold job) — read via Session.history().
+        # Per-session event mirror at events/<sid>/*.jsonl — BOTH the durable history
+        # (Session.history(); the platform's own job output isn't session-keyed for warm
+        # turns and keeps only the last cold job) AND the live channel: the worker streams
+        # batches as events happen and the client tails the listing (stream.py). Cloud
+        # Logging is emit-only (ops/debug), never tailed.
         env["AGENT_EVENTS_GCS"] = f"{output_bucket}/events"
 
     # Checkpoint/resume mirrors each turn's conversation + workspace to GCS. It needs a

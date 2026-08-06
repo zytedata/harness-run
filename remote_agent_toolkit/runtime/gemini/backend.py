@@ -302,11 +302,17 @@ def deploy(
     import agentplatform
     from agentplatform import types as gt
 
-    from ._deploy import build_engine_config, stage_agent, validate_resource_limits
+    from ._deploy import (
+        build_engine_config,
+        stage_agent,
+        validate_resource_limits,
+        verify_deploy_env,
+    )
 
     # Fail fast BEFORE any side effect (pub/sub ensure, staging, the ~4 min billable build).
     if resource_limits is not None:
         validate_resource_limits(resource_limits)
+    verify_deploy_env()  # pickle-coupled venv pins must match constraints.txt
     # A model override applies to the harness too: the deployed agent reads spec.model, so
     # bake the override into the spec (not just the env) before serializing it.
     if model:

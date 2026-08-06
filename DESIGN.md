@@ -434,16 +434,23 @@ These are facts measured during the PoC. The library encodes them so consumers i
   query verbatim — which is why per-invocation secrets never ride the invocation payload (see §3.5): they
   are staged at a per-invocation `invocation-secrets/<sid>-<nonce>.json` object the worker fetches and
   deletes at the end of a completed turn (retry-safe; a 1-day lifecycle rule reaps orphans).
-- **Run-scoped specs** — the spec passed to `get_engine(spec=)` is authoritative for that handle's
-  runs: it is staged at `invocation-spec/<sid>-<nonce>.json` (same retry-safe handoff shape as
-  secrets — only the pointer rides the warm dispatch payload / cold `AGENT_SPEC_GCS=` directive) and
-  the worker executes it instead of the deploy-baked spec. Run-scoped parameters (target repo/ref,
-  model, prompt variant) thus need no engine redeploy. A missing staging FAILS the turn (running the
-  baked spec instead would be a silent wrong-configuration run); a spec whose `RepoSource.url`
-  embeds `user:token@` is refused client-side before staging (staged specs are referenced from
-  persisted payloads and must be credential-free). Deploy-time-only fields (`packages`, harness
-  availability in the image) still come from the deployment; baked skills serve as a staging fast
-  path only while the run's `skills` match the baked declaration.
+- **Session/turn configs** — run-time configuration is typed by the lifetime of what it configures
+  (README "Deploy / session / turn"): a `SessionConfig` binds ONCE at `start_session(config=)` and is
+  persisted at the session's stable `session-config/<sid>.json` key (every turn's payload points at
+  it; `get_session` re-attach reads it back and accepts no substitute — the session's world is
+  created on turn 1 and snapshot-restored after, so a mid-conversation change could not be honored);
+  a `TurnConfig` rides one `run()`/`send()` as a nonce-keyed `turn-config/<sid>-<nonce>.json` (cold
+  directives `AGENT_SESSION_CONFIG_GCS=` / `AGENT_TURN_CONFIG_GCS=`). The worker merges deploy-baked
+  ← session ← turn, validates the harness choice against the image's baked CLIs, executes the
+  result, and echoes it as an `effective_spec` event — the ground-truth record for post-mortem and
+  replay. Config objects are non-secret by construction (inline `user:token@` repo URLs are refused
+  at config construction) and are KEPT (30-day lifecycle rule) rather than deleted like secrets. A
+  missing config, an unknown config field, or an unbaked harness FAILS the turn — never a silent
+  fall-back to the baked spec. With no configs, nothing is staged and the turn runs the deploy-baked
+  spec exactly as before. Session/turn parameters (target repo/ref, model, prompt variant, budgets)
+  thus need no engine redeploy; deploy-time-only fields (`packages`, harness availability) still
+  come from the deployment, and baked skills serve as a staging fast path only while the effective
+  `skills` match the baked declaration.
 - **Cloud Logging** — the per-step log, bounded by log-bucket retention (~30 days default).
 - **Checkpoints** — transcript + workspace tar under `checkpoints/`, keyed by (mapped) session id.
 - `engine.list_sessions()` merges the GCS layers (bucket-wide) with the engine's ADK sessions;

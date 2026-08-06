@@ -447,42 +447,92 @@ engine.wait_until_warm()                          # block until a pool worker re
 
 # App code looks the engine up by name and runs — it never deploys:
 engine = gemini.get_engine("spider-builder", project="my-project", location="us-central1",
-                           spec=spec, warm_pool=True)   # this spec is what the runs execute; warm_pool to dispatch
+                           warm_pool=True)     # pure addressing; warm_pool to dispatch to the pool
 session = engine.start_session()
 result = await session.run("/scrape https://books.toscrape.com title, price")   # default: wait for the result
 ```
 
-### Run-scoped specs: `get_engine(spec=...)` is authoritative
+### Deploy / session / turn: the three configuration scopes
 
-An engine is deployed per agent *role*, but many parameters are per-**run**: which repo/ref
-to operate on, the model or prompt variant for an A/B evaluation. Those are spec fields —
-and requiring an engine redeploy per combination would be unworkable. So the spec you pass
-to `get_engine` **rides each invocation** (staged to GCS, only the pointer travels in the
-payload — same handoff shape as secrets) and the worker executes *it*, not the deploy-baked
-spec. Without `spec=`, runs execute the baked spec exactly as before.
+An engine is deployed per agent *role*, but much of its configuration is naturally
+per-**session** (which repo/ref this conversation operates on, the prompt or model variant
+of an A/B experiment) or per-**turn** (budgets, structured output for the final turn) —
+and requiring a ~4 min engine redeploy per combination would be unworkable. Configuration
+therefore has three scopes, each with its own type, named by the lifetime of what it
+configures:
 
-Two constraints:
+| Scope | Type | Bound at | What belongs here |
+|---|---|---|---|
+| deploy | `AgentSpec` | `gemini.deploy(spec)` | identity (`name`), image contents (`packages`, engine `env`, the harness CLIs — `harnesses=(...)` bakes several), and the *defaults* for everything below |
+| session | `SessionConfig` | `engine.start_session(config=...)` | the conversation's world: `repos`, `skills`, `mcp_servers`, `system_prompt`, `harness` (selects among the baked CLIs), `checkpoint`/`interactive`, `extra_env` — plus session-wide defaults for the turn knobs |
+| turn | `TurnConfig` | `session.run(config=...)` / `send(config=...)` | the knobs the harness re-reads every invocation: `model`, `reasoning_effort`, `max_turns`, `max_budget_usd`, `background_task_timeout`, `permission_mode`, tool lists, `output_schema` |
 
-* **Deploy-time fields stay deploy-time**: `packages` (and harness *availability* — the CLI
-  binaries present in the image) come from what was deployed; a run-scoped spec can select
-  among what the image has, not add to it. Baked skills are reused as a staging fast path
-  when the run's `skills` match the deployed ones; a differing declaration resolves from
-  its own sources at run time.
-* **No credentials in the spec**: a staged spec is referenced from persisted payloads, so
-  `run()` refuses a spec whose `RepoSource.url` embeds `user:token@` — name the token via
-  `RepoSource(auth=..., auth_user=...)` and pass the value in `run(secrets=...)`.
+Both config types are **sparse overlays**: a field left at `INHERIT` (the default) keeps
+the value from the layer below; a set field replaces it wholesale (`extra_env` is the one
+additive exception — it adds onto the deployed `env`). Deploy-only facts have no config
+field at all, so "different `packages` per run" is a `TypeError`, not a silent no-op.
 
-Client and engine must be deployed from the same toolkit revision (already the rule — the
-invocation payload is a wire contract): an older engine ignores the run-scoped spec on the
-warm path and would leak the directive into the prompt on the cold path.
+```python
+from remote_agent_toolkit import RepoSource, SessionConfig, TurnConfig
+
+engine = gemini.get_engine("spider-builder", project=..., location=..., warm_pool=True)
+
+session = engine.start_session(config=SessionConfig(          # bound ONCE, for good
+    repos=[RepoSource.git("https://bitbucket.org/o/store", ref="heal/issue-123",
+                          auth="bb-token")],                   # named secret, never inline
+    model="claude-sonnet-4-6",                                 # overrides the deployed default
+))
+run  = await session.run("Fix the price selector", secrets={"bb-token": tok})
+run2 = await session.send(                                     # same session config; per-turn overlay:
+    "Summarize what you changed as JSON",
+    secrets={"bb-token": tok},
+    config=TurnConfig(output_schema=ChangeReport, reasoning_effort="low"),
+)
+```
+
+**Why the session config binds once.** A session's first turn clones `repos` and provisions
+`skills` into a fresh workspace; every later turn restores a snapshot of the previous
+turn's workspace (with the agent's uncommitted work) and never re-reads those fields. A
+mid-conversation change could not be honored — so the API refuses to express it: `send()`
+takes no session config, and `get_session(sid)` re-attach reads back the config the opener
+persisted rather than accepting one.
+
+The contracts behind this:
+
+* **The worker executes the merged spec** (deploy-baked ← session ← turn) and **echoes it
+  as an `effective_spec` event** — the durable ground-truth record of what actually ran
+  (drive post-mortems and replays from it, not from what you think you passed). The config
+  objects themselves are persisted in GCS next to the session's records (30-day lifecycle)
+  for the same reason.
+* **Fail closed**: a missing config object, a config field this engine revision doesn't
+  know, or a `harness` the image doesn't bake all FAIL the turn with a terminal error —
+  never a silent fall-back to the baked spec (a wrong-configuration run is exactly what
+  this exists to prevent). Client and engine must be deployed from the same toolkit
+  revision (already the rule — the invocation payload is a wire contract).
+* **No config → nothing staged**: a plain `start_session()`/`run()` is byte-for-byte the
+  pre-config behavior; the turn runs the deploy-baked spec with zero extra moving parts.
+* **Deploy-time fields stay deploy-time**: `packages` and harness *availability* come from
+  the image; a session selects among what is baked (`AgentSpec(harnesses=("claude-code",
+  "codex"))` bakes both CLIs so sessions can pick either). Baked skills are reused as a
+  staging fast path when the effective `skills` match the deployed ones; a differing
+  declaration resolves from its own sources at run time.
+* **No credentials in configs**: config objects are referenced from persisted payloads and
+  kept for debugging, so `SessionConfig` refuses a `RepoSource.url` embedding
+  `user:token@` at construction — name the token via `RepoSource(auth=..., auth_user=...)`
+  and pass the value in `run(secrets=...)`.
+
+> **Migrating from `get_engine(spec=...)`:** that parameter is gone (it was only ever a
+> client-side parsing hint; runs always executed the deploy-baked spec). Bind a
+> `SessionConfig` at `start_session` for anything the old spec was supposed to change —
+> including `output_schema`/`checkpoint`, which also restore the client-side structured
+> parsing and idle stop-reason the old hint provided.
 
 **Managing deployed engines** (control plane):
 
 ```python
 gemini.deploy(spec, project=..., location=...)   # create / update; ops/CI only (warm_pool=True, pool_size=N)
 gemini.deploy(spec, ..., resource_limits={"cpu": "4", "memory": "16Gi"})  # container CPU/RAM (default 4 / 4Gi)
-gemini.get_engine("spider-builder", project=..., location=...)   # look up by name (app code)
-gemini.get_engine("spider-builder", ..., spec=spec)              # runs execute THIS spec (run-scoped; see above)
+gemini.get_engine("spider-builder", project=..., location=...)   # look up by name (app code; addressing only)
 gemini.list_engines(project=..., location=...)   # discover what's deployed
 engine.name, engine.version, engine.resource     # identity / serving revision / underlying resource name
 engine.wait_until_warm(timeout=300)              # warm pools: wait for a ready worker before dispatching
@@ -528,7 +578,7 @@ Every `gemini` run leaves a durable record, and the library reads it back — fr
 the run:
 
 ```python
-engine = gemini.get_engine("spider-builder", project=..., location=..., spec=spec)
+engine = gemini.get_engine("spider-builder", project=..., location=...)
 
 for info in engine.list_sessions():            # newest first: {"session_id", "sources", "last_file"}
     session = engine.get_session(info["session_id"])

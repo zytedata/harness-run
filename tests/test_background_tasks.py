@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import asyncio
 
+from claude_agent_sdk import AssistantMessage, TextBlock
+
 from fakes import init_msg, make_sdk_client, result_msg, task_done_msg, task_started_msg
 
 from remote_agent_toolkit import AgentSpec
@@ -52,6 +54,25 @@ def test_tracker_lifecycle():
     # Terminal but the model hasn't been re-invoked yet — the CLI is about to.
     assert tr.waiting() == "undelivered" and tr.pending == {}
     feed(init_msg())  # re-invocation: the notification was delivered
+    assert tr.waiting() is None
+
+
+def test_tracker_clears_terminal_notification_after_later_assistant_output():
+    tr = _TaskTracker()
+    translate = EventTranslator().translate
+
+    def feed(msg):
+        for ev in translate(msg):
+            tr.observe(ev)
+
+    feed(task_started_msg("t1"))
+    feed(task_done_msg("t1"))
+    assert tr.waiting() == "undelivered"
+
+    # This is the common foreground/auto-backgrounded command ordering: the
+    # completion arrives mid-invocation, then Claude discusses it and keeps
+    # working.  The later assistant output proves the notification was consumed.
+    feed(AssistantMessage(content=[TextBlock(text="the task passed")], model="m"))
     assert tr.waiting() is None
 
 
@@ -132,6 +153,20 @@ def test_no_tasks_result_is_final_immediately(tmp_path, monkeypatch):
     events, _ = _events_of([init_msg(), result_msg(result="plain")], tmp_path, monkeypatch)
     assert [e.kind for e in events] == ["status", "result"]
     assert events[-1].summary == "plain"
+
+
+def test_midturn_task_completion_does_not_demote_later_final_result(tmp_path, monkeypatch):
+    script = [
+        task_started_msg("t1"),
+        task_done_msg("t1"),
+        AssistantMessage(content=[TextBlock(text="observed completion")], model="m"),
+        result_msg(num_turns=2, result="final answer"),
+        "hang",  # must not be read: the result is terminal immediately
+    ]
+    events, _ = _events_of(script, tmp_path, monkeypatch)
+
+    assert events[-1].kind == "result" and events[-1].summary == "final answer"
+    assert not any((e.raw or {}).get("event") == "awaiting_tasks" for e in events)
 
 
 def test_error_result_ends_turn_even_with_pending_tasks(tmp_path, monkeypatch):

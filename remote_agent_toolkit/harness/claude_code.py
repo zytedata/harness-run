@@ -96,6 +96,19 @@ class _TaskTracker:
         self._undelivered: set[str] = set()
 
     def observe(self, event: AgentEvent) -> None:
+        # A later assistant message proves that every terminal notification seen
+        # before it has reached Claude's context.  Without this, every task that
+        # completed *during* a long invocation remained "undelivered" forever,
+        # even after Claude discussed its result and continued working.  At the
+        # eventual final result that stale ledger kept the CLI open long enough
+        # for old ScheduleWakeup prompts to create a spurious follow-up turn.
+        #
+        # Result events are deliberately excluded: a task can finish while an
+        # already-running model call is producing its final response, in which
+        # case that result is not proof that the notification was in context.
+        if event.kind in {"message", "thinking", "tool_use"}:
+            self._undelivered.clear()
+
         raw = event.raw or {}
         kind = raw.get("event")
         if kind == "task_started":
@@ -111,6 +124,10 @@ class _TaskTracker:
     @property
     def pending(self) -> dict[str, str]:
         return dict(self._pending)
+
+    @property
+    def undelivered(self) -> set[str]:
+        return set(self._undelivered)
 
     def waiting(self) -> str | None:
         """Why the turn must stay open at a result event (``None`` = truly done)."""
@@ -349,10 +366,14 @@ class ClaudeCodeHarness:
                         kind="status",
                         summary=(
                             f"turn paused awaiting background tasks ({reason}: "
-                            f"{len(tracker.pending) or len(tracker._undelivered)})"
+                            f"{len(tracker.pending) or len(tracker.undelivered)})"
                         ),
-                        raw={"event": "awaiting_tasks", "reason": reason,
-                             "pending": tracker.pending},
+                        raw={
+                            "event": "awaiting_tasks",
+                            "reason": reason,
+                            "pending": tracker.pending,
+                            "undelivered": sorted(tracker.undelivered),
+                        },
                     )
         except Exception as exc:
             # Surface the captured stderr with the failure: as a status event (reaches the

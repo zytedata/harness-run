@@ -122,24 +122,38 @@ class EventTranslator:
             yield AgentEvent(
                 kind="status",
                 summary=f"background task started: {message.description}"[:200],
-                raw={"event": "task_started", "task_id": message.task_id,
-                     "description": message.description},
+                raw={
+                    "event": "task_started",
+                    "task_id": message.task_id,
+                    "description": message.description,
+                    "tool_use_id": message.tool_use_id,
+                    "task_type": message.task_type,
+                },
             )
         elif isinstance(message, TaskNotificationMessage):
             if message.status in TERMINAL_TASK_STATUSES:
                 yield AgentEvent(
                     kind="status",
                     summary=f"background task {message.status}: {message.summary or ''}"[:200],
-                    raw={"event": "task_terminal", "task_id": message.task_id,
-                         "status": message.status, "summary": message.summary},
+                    raw={
+                        "event": "task_terminal",
+                        "task_id": message.task_id,
+                        "status": message.status,
+                        "summary": message.summary,
+                        "tool_use_id": message.tool_use_id,
+                    },
                 )
         elif isinstance(message, TaskUpdatedMessage):
             if (message.status or "") in TERMINAL_TASK_STATUSES:
                 yield AgentEvent(
                     kind="status",
                     summary=f"background task {message.status}",
-                    raw={"event": "task_terminal", "task_id": message.task_id,
-                         "status": message.status},
+                    raw={
+                        "event": "task_terminal",
+                        "task_id": message.task_id,
+                        "status": message.status,
+                        "patch": message.patch,
+                    },
                 )
         elif isinstance(message, SystemMessage):
             if message.subtype == "init":

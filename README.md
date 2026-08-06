@@ -410,6 +410,17 @@ spec = AgentSpec(
 )
 ```
 
+**The platform-critical layer is pinned in-tree.** Engines resolve their requirements at *build* time, so
+without pins two deploys of the same toolkit commit could produce different runtimes.
+[`runtime/gemini/constraints.txt`](remote_agent_toolkit/runtime/gemini/constraints.txt) pins the packages the
+toolkit's engine contract depends on (aiplatform, google-adk, claude-agent-sdk, the OTel export stack, …)
+with pip-constraints semantics, merged into the requirements at deploy time; refreshing a pin is a normal
+reviewed diff (bump → canary deploy → live turn → clean telemetry). Your `packages` merge with these — a pin
+that contradicts a platform constraint fails fast at deploy, before the billable build. Deploy also verifies
+your venv matches the pickle-coupled pins (aiplatform, cloudpickle, pydantic): the engine build unpickles an
+object your venv pickled, so those versions must agree — if deploy raises, sync your venv to the constraint
+(or refresh the constraint deliberately).
+
 **`local` honors `packages` too**: `local.deploy` resolves them into a per-engine venv (via `uv`, with the
 engine contract's Python 3.12 — uv provisions the interpreter if your machine lacks it) and activates it in
 the agent's environment. Same spec, same starting packages on both backends — and since `uv` hardlinks from

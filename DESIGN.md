@@ -459,6 +459,14 @@ These are facts measured during the PoC. The library encodes them so consumers i
 - **glibc base, Python 3.12** — the `claude-agent-sdk` wheel ships a self-contained glibc ELF `claude`
   binary; no Alpine/musl; SDK supports Python ≤3.13.
 - `a2a-sdk>=0.3.4,<0.4` (1.x incompatible with ADK 2.3.0).
+- **Platform-critical pins live in-tree** (`runtime/gemini/constraints.txt`, pip `-c` semantics) —
+  engines resolve requirements at BUILD time, so unpinned deps mean two deploys of one commit can differ.
+  `build_requirements` merges the constraints client-side (the build offers no hook for a real `-c` file:
+  extra_packages extract only at container runtime, after pip has run) and fails fast on an unsatisfiable
+  merge with `spec.packages`. The pickle-coupled packages (aiplatform/cloudpickle/pydantic — the engine
+  build unpickles the AdkApp the deploy venv pickles) are additionally checked against the deploy venv by
+  `verify_deploy_env()`. Refresh = bump pin(s) + canary deploy + live turn + clean telemetry, one
+  reviewed diff.
 - Only `/tmp` is writable → agent cwd under `/tmp/agent-jobs/<session-id>/workspace` (see the
   workspace-leaf contract below).
 - `IS_SANDBOX=1` to allow `bypassPermissions` under root.

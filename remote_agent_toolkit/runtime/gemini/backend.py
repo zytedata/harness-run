@@ -199,6 +199,45 @@ def _fallback_spec(name: str) -> AgentSpec:
 # -- control plane -------------------------------------------------------------
 
 
+def build_adk_app(
+    spec: AgentSpec, *, project: str, location: str, credentials: Any | None = None
+) -> Any:
+    """Construct the AdkApp to pickle, with the deploy target pinned into it.
+
+    ``AdkApp.__init__`` snapshots the aiplatform global config's project/location into
+    its (pickled) template attrs; the engine worker later force-feeds that project into
+    ``GOOGLE_CLOUD_PROJECT`` and routes all OTel span/metric export to it. Left to
+    resolve from the deployer's environment (gcloud/ADC default), an unrelated project
+    gets baked into the engine and every telemetry export 403s from then on — that
+    exact incident (a pickled ``other-project``) burned 2026-08-03→06. So: initialize the
+    global config from the deploy args, and refuse to ship a pickle that captured
+    anything else.
+    """
+    import google.cloud.aiplatform as aiplatform
+    from agentplatform.agent_engines import AdkApp
+
+    # session_service_builder pins the app to in-memory ADK sessions: the toolkit keys
+    # everything by its own session id (AGENT_SESSION directive + GCS mirror), and the
+    # 2026-07-28 platform runner's managed-session wiring is broken on new engines.
+    from .adk_agent import build_agent, in_memory_session_service
+
+    aiplatform.init(project=project, location=location, credentials=credentials)
+    app = AdkApp(
+        agent=build_agent(spec),
+        enable_tracing=True,
+        session_service_builder=in_memory_session_service,
+    )
+    baked = (app._tmpl_attrs.get("project"), app._tmpl_attrs.get("location"))
+    if baked != (project, location):
+        raise RuntimeError(
+            f"AdkApp captured project/location {baked!r} instead of "
+            f"{(project, location)!r}; the engine would export its telemetry to the "
+            "wrong project (persistent 403s on every span/metric batch). Refusing to "
+            "deploy."
+        )
+    return app
+
+
 def deploy(
     spec: AgentSpec,
     project: str,
@@ -262,9 +301,7 @@ def deploy(
 
     import agentplatform
     from agentplatform import types as gt
-    from agentplatform.agent_engines import AdkApp
 
-    from .adk_agent import build_agent
     from ._deploy import build_engine_config, stage_agent, validate_resource_limits
 
     # Fail fast BEFORE any side effect (pub/sub ensure, staging, the ~4 min billable build).
@@ -307,16 +344,7 @@ def deploy(
 
     stage_dir, extra_packages = stage_agent(spec)
     os.chdir(stage_dir)  # extra_packages are resolved relative to the cwd
-    # session_service_builder pins the app to in-memory ADK sessions: the toolkit keys
-    # everything by its own session id (AGENT_SESSION directive + GCS mirror), and the
-    # 2026-07-28 platform runner's managed-session wiring is broken on new engines.
-    from .adk_agent import in_memory_session_service
-
-    app = AdkApp(
-        agent=build_agent(spec),
-        enable_tracing=True,
-        session_service_builder=in_memory_session_service,
-    )
+    app = build_adk_app(spec, project=project, location=location, credentials=credentials)
     config_kwargs = build_engine_config(
         spec,
         project=project,

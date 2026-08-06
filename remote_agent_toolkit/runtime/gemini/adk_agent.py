@@ -29,7 +29,10 @@ from ...events import AgentEvent
 _RESUME_DIRECTIVE = re.compile(r"^\s*AGENT_RESUME=(\S+)[ \t]*\r?\n", re.IGNORECASE)
 _SECRETS_DIRECTIVE = re.compile(r"^\s*AGENT_SECRETS_GCS=(\S+)[ \t]*\r?\n", re.IGNORECASE)
 _SESSION_DIRECTIVE = re.compile(r"^\s*AGENT_SESSION=(\S+)[ \t]*\r?\n", re.IGNORECASE)
-_SPEC_DIRECTIVE = re.compile(r"^\s*AGENT_SPEC_GCS=(\S+)[ \t]*\r?\n", re.IGNORECASE)
+_SESSION_CONFIG_DIRECTIVE = re.compile(
+    r"^\s*AGENT_SESSION_CONFIG_GCS=(\S+)[ \t]*\r?\n", re.IGNORECASE
+)
+_TURN_CONFIG_DIRECTIVE = re.compile(r"^\s*AGENT_TURN_CONFIG_GCS=(\S+)[ \t]*\r?\n", re.IGNORECASE)
 _AGENT_DESCRIPTION = "A remote-agent-toolkit agent: a Claude Code session driven by the toolkit harness."
 
 
@@ -75,17 +78,22 @@ def _split_secrets_directive(prompt: str) -> tuple[str | None, str]:
     return None, prompt
 
 
-def _split_spec_directive(prompt: str) -> tuple[str | None, str]:
-    """Strip a leading ``AGENT_SPEC_GCS=<gs://...>`` directive (cold-path run-scoped spec).
+def _split_config_directives(prompt: str) -> tuple[str | None, str | None, str]:
+    """Strip leading ``AGENT_SESSION_CONFIG_GCS=`` / ``AGENT_TURN_CONFIG_GCS=`` directives.
 
-    Returns ``(uri, remaining_prompt)``; ``(None, prompt)`` when absent. The pointer targets
-    the staged ``AgentSpec.to_dict()`` this turn must run (instead of the deploy-baked one);
-    see ``_run_turn``. Consumed here so the model never sees it.
+    Returns ``(session_config_uri, turn_config_uri, remaining_prompt)``. The pointers
+    target the session's persisted ``SessionConfig`` and this turn's ``TurnConfig`` —
+    overlays the turn must run on top of the deploy-baked spec (see ``_run_turn``).
+    Consumed here so the model never sees them.
     """
-    m = _SPEC_DIRECTIVE.match(prompt)
+    session_uri = turn_uri = None
+    m = _SESSION_CONFIG_DIRECTIVE.match(prompt)
     if m:
-        return m.group(1), prompt[m.end():]
-    return None, prompt
+        session_uri, prompt = m.group(1), prompt[m.end():]
+    m = _TURN_CONFIG_DIRECTIVE.match(prompt)
+    if m:
+        turn_uri, prompt = m.group(1), prompt[m.end():]
+    return session_uri, turn_uri, prompt
 
 
 def _fetch_secrets(secrets_uri: str | None) -> tuple[dict, AgentEvent | None]:
@@ -274,10 +282,10 @@ class ToolkitAgent(BaseAgent):
             return
 
         # Strip leading control directives (never shown to the model): the toolkit session
-        # id, secrets pointer, run-scoped spec pointer, resume marker.
+        # id, secrets pointer, session/turn config pointers, resume marker.
         directive_sid, prompt = _split_session_directive(prompt)
         secrets_uri, prompt = _split_secrets_directive(prompt)
-        spec_uri, prompt = _split_spec_directive(prompt)
+        session_config_uri, turn_config_uri, prompt = _split_config_directives(prompt)
         resume_sid, prompt = _split_resume_directive(prompt)
         # The toolkit session id is the stable token: it tags the Cloud Logging stream the
         # client tails, and pins the Claude session id for checkpoint keying. It rides the
@@ -290,14 +298,14 @@ class ToolkitAgent(BaseAgent):
         )
         async for event in self._run_turn(
             spec, session_id, prompt, resume_sid, secrets_uri, invocation_id,
-            spec_uri=spec_uri,
+            session_config_uri=session_config_uri, turn_config_uri=turn_config_uri,
         ):
             yield event
 
     async def _run_turn(
         self, spec: Any, session_id: str, prompt: str, resume_sid: str | None,
         secrets_uri: str | None = None, invocation_id: str = "",
-        spec_uri: str | None = None,
+        session_config_uri: str | None = None, turn_config_uri: str | None = None,
     ) -> AsyncGenerator[Any, None]:
         """Process one turn under ``session_id``: prep workspace, drive the harness, surface events.
 
@@ -307,11 +315,15 @@ class ToolkitAgent(BaseAgent):
         the turn's terminal result went out, so a platform retry of a killed attempt still
         finds it); values never ride the invocation payload.
 
-        ``spec_uri`` points at a staged run-scoped spec (``handoff.stage_spec``): the turn
-        runs THAT spec instead of the deploy-baked one (run-scoped parameters — target repo,
-        model, prompt — without an engine redeploy). Same retry-safe staging contract as
-        secrets. A missing staging FAILS the turn: silently running the baked spec instead
-        of the requested one would be a wrong-configuration run.
+        ``session_config_uri`` / ``turn_config_uri`` point at the session's persisted
+        ``SessionConfig`` and this turn's ``TurnConfig``: sparse overlays merged over the
+        deploy-baked spec, and the merged result is what this turn RUNS (run-scoped
+        parameters — target repo, model, prompt — without an engine redeploy). The merged
+        spec is echoed as an ``effective_spec`` event: the durable ground-truth record of
+        what actually ran (config objects themselves are also kept — see ``handoff.py``).
+        A missing/unreadable config, an unknown config field, or a harness the image
+        doesn't bake FAILS the turn: silently running the baked spec instead of the
+        requested configuration would be a wrong-configuration run.
         """
         from ...harness import resolve_harness
         from ...harness.context import RunContext
@@ -324,39 +336,69 @@ class ToolkitAgent(BaseAgent):
         sink = CloudLoggingSink(session_id=session_id)
         claude_sid = _claude_session_id(session_id)
 
-        # Resolve the run-scoped spec BEFORE anything derives from ``spec`` (checkpoint
-        # ports, RunContext, tracer).
-        prefer_baked_skills = True
-        if spec_uri:
-            from ...spec import AgentSpec
-            from .handoff import fetch_spec
+        def _terminal_error(summary: str) -> AgentEvent:
+            """Emit a terminal error result to every channel (pre-MirrorStream failures)."""
             from .history import mirror_line, write_turn_mirror
 
-            fetched = fetch_spec(spec_uri)
-            if fetched is None:
-                ev = AgentEvent(
-                    kind="result",
-                    summary=(
-                        "run-scoped spec unavailable (staging object missing/unreadable); "
-                        "failing the turn"
-                    ),
-                    raw={"event": "spec_error", "is_error": True, "subtype": "error",
-                         "session_id": session_id},
-                )
-                sink.emit(ev)
-                events_uri = os.environ.get("AGENT_EVENTS_GCS")
-                if events_uri:
-                    import time as _time
+            ev = AgentEvent(
+                kind="result",
+                summary=summary,
+                raw={"event": "config_error", "is_error": True, "subtype": "error",
+                     "session_id": session_id},
+            )
+            sink.emit(ev)
+            events_uri = os.environ.get("AGENT_EVENTS_GCS")
+            if events_uri:
+                import time as _time
 
-                    write_turn_mirror(events_uri, session_id, [mirror_line(ev)],
-                                      now_ms=int(_time.time() * 1000))
-                yield to_adk_event(ev, self.name, invocation_id)
+                write_turn_mirror(events_uri, session_id, [mirror_line(ev)],
+                                  now_ms=int(_time.time() * 1000))
+            return ev
+
+        # Resolve the effective spec BEFORE anything derives from ``spec`` (checkpoint
+        # ports, RunContext, tracer): deploy-baked spec ← session config ← turn config.
+        prefer_baked_skills = True
+        configs_applied = False
+        if session_config_uri or turn_config_uri:
+            from ...config import (
+                SessionConfig,
+                TurnConfig,
+                apply_session_config,
+                apply_turn_config,
+                validate_harness_choice,
+            )
+            from .handoff import fetch_config
+
+            baked = spec
+            try:
+                session_cfg = turn_cfg = None
+                if session_config_uri:
+                    fetched = fetch_config(session_config_uri)
+                    if fetched is None:
+                        raise ValueError(
+                            "session config unavailable (persisted object missing/unreadable)"
+                        )
+                    session_cfg = SessionConfig.from_dict(fetched)
+                if turn_config_uri:
+                    fetched = fetch_config(turn_config_uri)
+                    if fetched is None:
+                        raise ValueError(
+                            "turn config unavailable (staged object missing/unreadable)"
+                        )
+                    turn_cfg = TurnConfig.from_dict(fetched)
+                spec = apply_turn_config(apply_session_config(baked, session_cfg), turn_cfg)
+                validate_harness_choice(baked, spec)
+            except Exception as exc:  # noqa: BLE001 — wrong-config runs must fail loudly
+                yield to_adk_event(
+                    _terminal_error(f"{str(exc)[:300]}; failing the turn"),
+                    self.name, invocation_id,
+                )
                 return
-            # Baked skills are a staging fast path, valid only while the run's skills are
-            # the deploy-baked ones; a differing declaration (including "none") resolves
-            # from the run-scoped spec's own sources.
-            prefer_baked_skills = fetched.get("skills") == self.spec_data.get("skills")
-            spec = AgentSpec.from_dict(fetched)
+            configs_applied = True
+            # Baked skills are a staging fast path, valid only while the effective skills
+            # are the deploy-baked ones; a differing declaration (including "none")
+            # resolves from the effective spec's own sources.
+            prefer_baked_skills = spec.to_dict().get("skills") == self.spec_data.get("skills")
 
         secrets, secrets_warning = _fetch_secrets(secrets_uri)
         blobs, session_store = _checkpoint_ports(spec)
@@ -418,6 +460,21 @@ class ToolkitAgent(BaseAgent):
         # redacted by the git layer; never put secrets in an event.
         saw_result = False
         try:
+            if configs_applied:
+                # The ground-truth record of what this turn runs: the merged effective
+                # spec (baked ← session config ← turn config), durable in the mirror.
+                # Specs carry no secret values by contract, so neither does this event.
+                yield surface(AgentEvent(
+                    kind="status",
+                    summary=(
+                        "effective spec resolved "
+                        f"(session config: {bool(session_config_uri)}, "
+                        f"turn config: {bool(turn_config_uri)})"
+                    ),
+                    raw={"event": "effective_spec", "spec": spec.to_dict(),
+                         "session_config_gcs": session_config_uri,
+                         "turn_config_gcs": turn_config_uri},
+                ))
             if secrets_warning is not None:  # value-free: staged secrets were unavailable
                 yield surface(secrets_warning)
             prep = await asyncio.to_thread(_prepare_workspace, rc, prefer_baked_skills)
@@ -463,12 +520,11 @@ class ToolkitAgent(BaseAgent):
         # completion cleanup and the bucket lifecycle rule back this up; see handoff docs).
         # Deliberately after `finally`, not in it: `finally` also runs under GeneratorExit
         # (a half-consumed turn), where the run may still be retried/resumed elsewhere.
-        if saw_result and (secrets_uri or spec_uri):
+        # Config objects are NOT deleted — they are the post-mortem record (handoff.py).
+        if saw_result and secrets_uri:
             from .handoff import delete_staged_secrets
 
-            for staged in (secrets_uri, spec_uri):
-                if staged:
-                    await asyncio.to_thread(delete_staged_secrets, staged)
+            await asyncio.to_thread(delete_staged_secrets, secrets_uri)
 
     async def _pool_worker(self, spec: Any, invocation_id: str = "") -> AsyncGenerator[Any, None]:
         """Block pulling the dispatch subscription, then process the claimed turn.
@@ -543,11 +599,13 @@ class ToolkitAgent(BaseAgent):
         message = claimed.get("message", "")
         resume = bool(claimed.get("resume"))
         secrets_uri = claimed.get("secrets_gcs")  # pointer only; values are staged in GCS
-        spec_uri = claimed.get("spec_gcs")  # run-scoped spec pointer (see _run_turn)
+        session_config_uri = claimed.get("session_config_gcs")  # config pointers (_run_turn)
+        turn_config_uri = claimed.get("turn_config_gcs")
         async for event in self._run_turn(
             spec, session_id, message,
             resume_sid=session_id if resume else None, secrets_uri=secrets_uri,
-            invocation_id=invocation_id, spec_uri=spec_uri,
+            invocation_id=invocation_id,
+            session_config_uri=session_config_uri, turn_config_uri=turn_config_uri,
         ):
             yield event
 

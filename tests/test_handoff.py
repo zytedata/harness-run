@@ -53,22 +53,29 @@ def test_delete_staged_secrets_best_effort(tmp_path):
     handoff.delete_staged_secrets(uri, store=store)  # idempotent, no raise
 
 
-def test_stage_and_fetch_spec_round_trip(tmp_path):
+def test_config_persist_and_fetch(tmp_path):
     store = LocalBlobStore(str(tmp_path))
-    spec_dict = {"name": "n", "model": "m", "repos": [{"url": "https://h/r.git"}]}
-    uri = handoff.stage_spec("gs://bkt/out", "sid-9", spec_dict, store=store)
-    assert uri.startswith("gs://bkt/out/invocation-spec/sid-9-") and uri.endswith(".json")
+    cfg = {"model": "m-run", "repos": [{"url": "https://h/r.git"}]}
 
-    # Same retry contract as secrets: fetch leaves the object (a platform retry re-fetches
-    # the same pointer); deletion is explicit.
-    assert handoff.fetch_spec(uri, store=store) == spec_dict
-    assert handoff.fetch_spec(uri, store=store) == spec_dict
-    handoff.delete_staged_secrets(uri, store=store)
+    # The session config lives at a STABLE per-session key (one config per session, bound
+    # at open): every turn points here, and re-attach reads the same object back.
+    uri = handoff.persist_session_config("gs://bkt/out", "sid-9", cfg, store=store)
+    assert uri == "gs://bkt/out/session-config/sid-9.json"
+    assert uri == handoff.session_config_uri("gs://bkt/out", "sid-9")
+    assert handoff.fetch_config(uri, store=store) == cfg
+    assert handoff.load_session_config("gs://bkt/out", "sid-9", store=store) == (uri, cfg)
+    assert handoff.load_session_config("gs://bkt/out", "sid-none", store=store) is None
 
-    # A missing staging is None — the worker FAILS the turn on it (running the baked spec
-    # instead of the requested one would be a silent wrong-configuration run), unlike
-    # secrets where the run degrades gracefully.
-    assert handoff.fetch_spec(uri, store=store) is None
+    # Turn configs are nonce-keyed (one per turn) and, like the session config, are KEPT
+    # (post-mortem record) — only the lifecycle rule reaps them.
+    turi = handoff.stage_turn_config("gs://bkt/out", "sid-9", {"model": "m-t"}, store=store)
+    assert turi.startswith("gs://bkt/out/turn-config/sid-9-") and turi.endswith(".json")
+    assert handoff.fetch_config(turi, store=store) == {"model": "m-t"}
+
+    # A missing config is None — the worker FAILS the turn on it (running the baked spec
+    # instead of the requested configuration would be a silent wrong-run), unlike secrets
+    # where the run degrades gracefully.
+    assert handoff.fetch_config("gs://bkt/out/turn-config/sid-9-gone.json", store=store) is None
 
 
 def test_localblobstore_delete_idempotent(tmp_path):
@@ -82,35 +89,43 @@ def test_localblobstore_delete_idempotent(tmp_path):
 # -- lifecycle rule (the third cleanup layer, applied at deploy) ---------------------
 
 
-def test_secrets_lifecycle_rule_scopes_to_prefix():
-    name, rule = handoff.secrets_lifecycle_rule("gs://bkt/out")
+def test_handoff_lifecycle_rules_scope_to_prefix():
+    name, rules = handoff.handoff_lifecycle_rules("gs://bkt/out")
     assert name == "bkt"
-    assert rule == {
-        "action": {"type": "Delete"},
-        # Scoped under the output prefix: must never touch jobs/checkpoints/artifacts.
-        # Covers BOTH staging prefixes (secrets + run-scoped specs).
-        "condition": {
-            "age": 1,
-            "matchesPrefix": ["out/invocation-secrets/", "out/invocation-spec/"],
+    assert rules == [
+        {
+            # Secrets: tight reap (values; the rule is the backstop behind worker/client deletes).
+            "action": {"type": "Delete"},
+            "condition": {"age": 1, "matchesPrefix": ["out/invocation-secrets/"]},
         },
-    }
-    _, bare = handoff.secrets_lifecycle_rule("gs://bkt")
-    assert bare["condition"]["matchesPrefix"] == ["invocation-secrets/", "invocation-spec/"]
+        {
+            # Configs: kept for post-mortem debugging, aged out much later.
+            "action": {"type": "Delete"},
+            "condition": {
+                "age": 30,
+                "matchesPrefix": ["out/session-config/", "out/turn-config/"],
+            },
+        },
+    ]
+    _, bare = handoff.handoff_lifecycle_rules("gs://bkt")
+    assert bare[0]["condition"]["matchesPrefix"] == ["invocation-secrets/"]
+    assert bare[1]["condition"]["matchesPrefix"] == ["session-config/", "turn-config/"]
 
 
-def test_ensure_lifecycle_upgrades_a_secrets_only_rule():
-    # A bucket configured before the run-scoped-spec prefix existed has a secrets-only
-    # delete rule; ensure() must notice the uncovered spec prefix and append the combined
-    # rule (the doubled secrets coverage is harmless).
+def test_ensure_lifecycle_appends_only_missing_rules():
+    # A bucket configured by an older revision has a secrets-only delete rule; ensure()
+    # must notice the uncovered config prefixes and append only the config rule (the
+    # existing secrets coverage is respected, not duplicated).
     old = {"action": {"type": "Delete"},
            "condition": {"age": 1, "matchesPrefix": ["invocation-secrets/"]}}
     bucket = _FakeBucket([old])
-    assert handoff.ensure_secrets_lifecycle("gs://bkt", bucket_obj=bucket) is True
+    assert handoff.ensure_handoff_lifecycle("gs://bkt", bucket_obj=bucket) is True
     assert bucket.patched == 1 and len(bucket.lifecycle_rules) == 2
+    assert bucket.lifecycle_rules[1]["condition"]["age"] == handoff.CONFIG_LIFECYCLE_DAYS
 
 
 class _FakeBucket:
-    """The slice of google.cloud.storage.Bucket that ensure_secrets_lifecycle touches."""
+    """The slice of google.cloud.storage.Bucket that ensure_handoff_lifecycle touches."""
 
     def __init__(self, rules=()):
         self.lifecycle_rules = list(rules)
@@ -120,23 +135,23 @@ class _FakeBucket:
         self.patched += 1
 
 
-def test_ensure_secrets_lifecycle_adds_rule_once():
+def test_ensure_handoff_lifecycle_adds_rules_once():
     bucket = _FakeBucket()
-    assert handoff.ensure_secrets_lifecycle("gs://bkt/out", bucket_obj=bucket) is True
+    assert handoff.ensure_handoff_lifecycle("gs://bkt/out", bucket_obj=bucket) is True
     assert bucket.patched == 1
-    assert bucket.lifecycle_rules == [handoff.secrets_lifecycle_rule("gs://bkt/out")[1]]
+    assert bucket.lifecycle_rules == handoff.handoff_lifecycle_rules("gs://bkt/out")[1]
 
-    # Idempotent: a covering rule (matched structurally, not by dict equality — GCS echoes
-    # rules back with its own normalization) means no second patch.
-    assert handoff.ensure_secrets_lifecycle("gs://bkt/out", bucket_obj=bucket) is True
+    # Idempotent: covering rules (matched structurally, not by dict equality — GCS echoes
+    # rules back with its own normalization) mean no second patch.
+    assert handoff.ensure_handoff_lifecycle("gs://bkt/out", bucket_obj=bucket) is True
     assert bucket.patched == 1
 
 
-def test_ensure_secrets_lifecycle_preserves_foreign_rules_and_never_raises():
+def test_ensure_handoff_lifecycle_preserves_foreign_rules_and_never_raises():
     foreign = {"action": {"type": "Delete"}, "condition": {"age": 30, "matchesPrefix": ["logs/"]}}
     bucket = _FakeBucket([foreign])
-    assert handoff.ensure_secrets_lifecycle("gs://bkt", bucket_obj=bucket) is True
-    assert foreign in bucket.lifecycle_rules and len(bucket.lifecycle_rules) == 2
+    assert handoff.ensure_handoff_lifecycle("gs://bkt", bucket_obj=bucket) is True
+    assert foreign in bucket.lifecycle_rules and len(bucket.lifecycle_rules) == 3
 
     class Exploding:
         @property
@@ -144,4 +159,4 @@ def test_ensure_secrets_lifecycle_preserves_foreign_rules_and_never_raises():
             raise RuntimeError("403 storage.buckets.update denied")
 
     # Best-effort: a perms failure is a False (deploy warns), never an exception.
-    assert handoff.ensure_secrets_lifecycle("gs://bkt", bucket_obj=Exploding()) is False
+    assert handoff.ensure_handoff_lifecycle("gs://bkt", bucket_obj=Exploding()) is False

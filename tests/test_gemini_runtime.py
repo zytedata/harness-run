@@ -107,13 +107,6 @@ def test_cold_submit_stages_secrets_and_query_carries_only_pointer(monkeypatch):
 
     import remote_agent_toolkit.runtime.gemini.handoff as handoff_mod
     monkeypatch.setattr(handoff_mod, "stage_secrets", fake_stage)
-    staged_spec = {}
-
-    def fake_stage_spec(bucket, sid, spec_dict):
-        staged_spec.update(bucket=bucket, sid=sid, spec=spec_dict)
-        return f"gs://out/invocation-spec/{sid}-abc.json"
-
-    monkeypatch.setattr(handoff_mod, "stage_spec", fake_stage_spec)
 
     seed = _seed_sink("sid-3", [
         AgentEvent(kind="result", summary="ok", raw={"subtype": "success", "is_error": False,
@@ -129,10 +122,10 @@ def test_cold_submit_stages_secrets_and_query_carries_only_pointer(monkeypatch):
     assert "SUPERSECRET" not in query                      # never the value
     assert "AGENT_SECRETS_GCS=gs://out/invocation-secrets/sid-3-abc.json" in query
     assert staged["secrets"] == {"SH_APIKEY": "SUPERSECRET"}  # staged out-of-band
-    # The run-scoped spec rides the same way: staged out-of-band, only the pointer in the
-    # (persisted) query, so this handle's spec — not the deploy-baked one — runs the turn.
-    assert "AGENT_SPEC_GCS=gs://out/invocation-spec/sid-3-abc.json" in query
-    assert staged_spec["spec"] == spec.to_dict()
+    # No session/turn config was bound, so nothing config-related rides the query — the
+    # turn runs the deploy-baked spec, with zero extra staging (the pre-config behavior).
+    assert "AGENT_SESSION_CONFIG_GCS" not in query
+    assert "AGENT_TURN_CONFIG_GCS" not in query
     # Completion cleans up the staged object (backstop; the worker deletes at turn end).
     assert session._staged_secrets_uri is None
     # 2026-07-28 platform-runner regressions: the invoked method must be named
@@ -188,10 +181,6 @@ def test_gemini_session_run_drives_from_sink(monkeypatch):
             return {"job": "fake"}
 
     monkeypatch.setattr(engine, "_agent_engines", lambda: FakeAE())
-    # Offline: route the run-scoped spec staging away from real GCS.
-    import remote_agent_toolkit.runtime.gemini.handoff as handoff_mod
-    monkeypatch.setattr(handoff_mod, "stage_spec",
-                        lambda bucket, sid, spec_dict: f"gs://out/invocation-spec/{sid}-x.json")
 
     seed = _seed_sink("sid-1", [
         AgentEvent(kind="message", summary="working"),

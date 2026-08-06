@@ -48,7 +48,8 @@ def dispatch_payload(
     message: str,
     resume: bool,
     secrets_gcs: str | None = None,
-    spec_gcs: str | None = None,
+    session_config_gcs: str | None = None,
+    turn_config_gcs: str | None = None,
 ) -> dict:
     """The turn payload published to the pool: the worker adopts ``session_id`` for the turn.
 
@@ -57,17 +58,20 @@ def dispatch_payload(
     a redelivered dispatch must still find it; ``handoff.py``). A Pub/Sub message is
     retained until acked, so values in it would persist.
 
-    ``spec_gcs`` points at the staged run-scoped spec (``handoff.stage_spec``): the worker
-    runs THAT spec instead of the engine's deploy-baked one. Same pointer-not-value shape —
-    the spec is not secret, but the pointer keeps payloads small and matches the cold path.
-    Workers older than this field ignore it (they run the baked spec), which is why client
-    and engine must deploy from the same toolkit revision.
+    ``session_config_gcs`` / ``turn_config_gcs`` point at the session's persisted
+    ``SessionConfig`` and this turn's ``TurnConfig`` (``handoff.py``): the worker overlays
+    them on its deploy-baked spec and runs the result. Same pointer-not-value shape — the
+    configs are not secret, but the pointer keeps payloads small and matches the cold
+    path. Workers older than these fields ignore them (they run the baked spec), which is
+    why client and engine must deploy from the same toolkit revision.
     """
     payload = {"session_id": session_id, "message": message, "resume": bool(resume)}
     if secrets_gcs:
         payload["secrets_gcs"] = secrets_gcs
-    if spec_gcs:
-        payload["spec_gcs"] = spec_gcs
+    if session_config_gcs:
+        payload["session_config_gcs"] = session_config_gcs
+    if turn_config_gcs:
+        payload["turn_config_gcs"] = turn_config_gcs
     return payload
 
 

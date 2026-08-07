@@ -60,9 +60,15 @@ path, and tears everything down in `finally`:
 - **warm** — pub/sub dispatch to a pre-warmed pool worker (~4 s to first observed event).
 
 Pass criteria per engine: terminal result with `error=False`, `turns > 0`, and the expected
-answer in the text. Typical numbers: deploy ~3.5–4 min (the two run in parallel), cold turn
-~3 min end-to-end, warm ~1 min, a few cents of model spend. Exit code is non-zero on any
-FAIL, so you can gate on it.
+answer in the text. The `*-session-config` / `*-turn-config` checks additionally exercise the
+config transport on a second session per mode: the session-config turn must carry the
+run-time system prompt's marker (the worker ran the session's config, not the deploy-baked
+spec), the turn-config turn must return `structured_output` parsed via a per-turn
+`output_schema` **and** still carry the marker (the session config persists across turns),
+and both turns must stream the worker's `effective_spec` echo with the config pointers.
+Typical numbers: deploy ~3.5–4 min (the two run in parallel), cold turn ~3 min end-to-end,
+warm ~1 min, a few cents of model spend. Exit code is non-zero on any FAIL, so you can gate
+on it.
 
 Events stream via the **GCS mirror** (no read quota, no ingestion lag — see DESIGN §6), so
 concurrent tests don't contend. Against an engine deployed *before* event streaming, all of

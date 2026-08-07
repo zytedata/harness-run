@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import time
 import uuid
 from typing import Any, AsyncIterator, TYPE_CHECKING
@@ -31,6 +32,7 @@ from .pool import POOL_WAIT_SENTINEL, dispatch_payload, pool_paths
 from .stream import tail_stream
 
 if TYPE_CHECKING:
+    from ...config import SessionConfig, TurnConfig
     from ...spec import AgentSpec
     from ..base import Engine
 
@@ -40,6 +42,8 @@ _USER_ID = "ratk"
 # this long after the job is seen terminal with still no terminal event (ingestion-lag grace).
 _WATCHDOG_QUIET_S = 60.0
 _WATCHDOG_GRACE_S = 120.0
+
+logger = logging.getLogger(__name__)
 
 
 def _event_fingerprint(event: AgentEvent) -> tuple:
@@ -185,11 +189,13 @@ def _run_blocking(make_coro, timeout: float) -> bool:
 
 
 def _fallback_spec(name: str) -> AgentSpec:
-    """A minimal spec for a looked-up engine when the caller didn't pass the real one.
+    """A minimal spec for a looked-up engine (``get_engine`` never knows the deployed one).
 
-    Result-building needs ``output_schema`` (structured parsing) and ``checkpoint`` (the
-    idle stop-reason). Without the real spec, structured output is skipped and a clean turn
-    reports ``END_TURN``. Pass ``spec=`` to ``get_engine`` to recover both.
+    Client-side result building needs ``output_schema`` (structured parsing) and
+    ``checkpoint`` (the idle stop-reason). Runs execute the engine's deploy-baked spec —
+    overlaid with any ``SessionConfig``/``TurnConfig`` the caller binds, which is also how
+    the client recovers structured parsing and the right stop-reason: set
+    ``output_schema``/``checkpoint`` on the config and both sides see them.
     """
     from ...spec import AgentSpec
 
@@ -320,19 +326,20 @@ def deploy(
     staging_bucket = staging_bucket or f"gs://{project}-agent-staging"
     output_bucket = output_bucket or f"gs://{project}-agent-output"
 
-    # Backstop reaper for staged invocation secrets orphaned by a crash on both sides
-    # (worker delete at turn end + client delete on completion are the main lines).
-    # Best-effort: the rule is the third cleanup layer and the operator may lack
+    # Backstop reapers for handoff objects: staged secrets orphaned by a crash on both
+    # sides (worker delete at turn end + client delete on completion are the main lines)
+    # and the persisted session/turn configs (kept for debugging, aged out after 30 days).
+    # Best-effort: the rules are backstops and the operator may lack
     # storage.buckets.update — warn, never fail the deploy.
-    from .handoff import ensure_secrets_lifecycle
+    from .handoff import ensure_handoff_lifecycle
 
-    if not ensure_secrets_lifecycle(output_bucket):
+    if not ensure_handoff_lifecycle(output_bucket):
         import warnings
 
         warnings.warn(
-            f"could not ensure the invocation-secrets lifecycle rule on {output_bucket}; "
-            "staged secrets orphaned by crashed jobs will not be auto-reaped "
-            "(needs storage.buckets.update on the bucket)",
+            f"could not ensure the handoff lifecycle rules on {output_bucket}; staged "
+            "secrets orphaned by crashed jobs and old config objects will not be "
+            "auto-reaped (needs storage.buckets.update on the bucket)",
             stacklevel=2,
         )
 
@@ -481,16 +488,19 @@ def get_engine(
     location: str | None = None,
     version: str | int | None = None,
     *,
-    spec: AgentSpec | None = None,
     output_bucket: str | None = None,
     warm_pool: bool = False,
     credentials: Any | None = None,
+    **kwargs: Any,
 ) -> Engine:
     """Look up a deployed engine by ``name`` (the app-code hot path; never deploys).
 
-    Pass ``spec=`` (the one you deployed) to enable structured-output parsing and the correct
-    idle stop-reason; otherwise a minimal fallback spec is used. Pass ``warm_pool=True`` to
-    address a warm-pool engine (turns are dispatched to its pool instead of cold-started).
+    Pure ADDRESSING: the handle identifies which engine turns run against; it carries no
+    execution configuration. Runs execute the engine's deploy-baked spec, overlaid with
+    the session's ``SessionConfig`` (``engine.start_session(config=...)``) and each turn's
+    ``TurnConfig`` (``run(config=...)``) — see the README "Deploy / session / turn".
+    Pass ``warm_pool=True`` to address a warm-pool engine (turns are dispatched to its
+    pool instead of cold-started).
 
     ``version`` pins the handle to a **runtime revision** (the id, or a full revision resource
     name). It is an *assertion*: the lookup fails unless that revision exists and is the one
@@ -499,6 +509,17 @@ def get_engine(
     Runtime's async query path is engine-level (see ``revisions.py``); use
     :meth:`GeminiEngine.set_traffic` to move traffic first.
     """
+    if "spec" in kwargs:
+        raise TypeError(
+            "get_engine() no longer accepts spec=: it used to be a client-side parsing "
+            "hint only (runs always executed the deploy-baked spec). Run-time "
+            "configuration now has its own types — bind a SessionConfig at "
+            "engine.start_session(config=...) and per-turn overrides via "
+            "run(config=TurnConfig(...)); both are honored by the worker. See "
+            "https://github.com/zytedata/remote-agent-toolkit/pull/16"
+        )
+    if kwargs:
+        raise TypeError(f"get_engine() got unexpected keyword argument(s) {sorted(kwargs)}")
     import agentplatform
 
     client = agentplatform.Client(project=project, location=location, credentials=credentials)
@@ -509,7 +530,7 @@ def get_engine(
         topic, subscription = pool_paths(project, name)
     return GeminiEngine(
         resource=resource,
-        spec=spec or _fallback_spec(name),
+        spec=_fallback_spec(name),
         project=project,
         location=location,
         output_bucket=output_bucket or (f"gs://{project}-agent-output" if project else None),
@@ -537,9 +558,24 @@ def list_engines(project: str, location: str, *, credentials: Any | None = None)
 
 
 class GeminiSession:
-    """A run-plane session over Agent Engine (CMA-style lifecycle; DESIGN.md §4)."""
+    """A run-plane session over Agent Engine (CMA-style lifecycle; DESIGN.md §4).
 
-    def __init__(self, engine: GeminiEngine, session_id: str) -> None:
+    A session's :class:`~remote_agent_toolkit.config.SessionConfig` is bound ONCE, at
+    ``engine.start_session(config=...)`` — it is persisted at a stable per-session GCS
+    key, every turn's payload points at it, and a process re-attaching by id
+    (``engine.get_session``) reads that same object back. A re-attacher can never pass a
+    different config: the session's world (repos, skills, prompt) is created on its first
+    turn and snapshot-restored on every later one, so substituting a config
+    mid-conversation could not be honored — the API refuses to express it.
+    """
+
+    def __init__(
+        self,
+        engine: GeminiEngine,
+        session_id: str,
+        config: SessionConfig | None = None,
+        config_resolved: bool = True,
+    ) -> None:
         self._engine = engine
         self._session_id = session_id
         self._status = RunStatus.PENDING
@@ -548,11 +584,22 @@ class GeminiSession:
         self._current_run: DrivenRun | None = None
         self._last_job: Any | None = None
         self._staged_secrets_uri: str | None = None  # staged handoff object (cleanup on complete)
+        self._session_config = config
+        self._session_config_uri: str | None = None
+        # False for a re-attached session: the opener's persisted config (if any) is
+        # loaded from GCS on first use — see _resolve_session_config.
+        self._session_config_resolved = config_resolved
         # Last mirror object consumed by this session's stream tail; the NEXT turn's tail
         # starts strictly after it (the clock-free turn boundary — see stream.tail_stream).
         self._stream_watermark: dict = {"key": ""}
 
-    def run(self, message: str, *, secrets: dict[str, str] | None = None) -> DrivenRun:
+    def run(
+        self,
+        message: str,
+        *,
+        secrets: dict[str, str] | None = None,
+        config: TurnConfig | None = None,
+    ) -> DrivenRun:
         """Start a fresh turn (submits a ``run_query_job``).
 
         ``secrets`` is a per-invocation name → value map (the agent's own keys, any repo
@@ -561,12 +608,27 @@ class GeminiSession:
         completes — a platform retry of a killed attempt must still find it); only that pointer
         rides the invocation (the platform persists a job's input verbatim, and a Pub/Sub
         message is retained until acked, so values must never travel in either).
-        """
-        return self._submit(message, resume=False, secrets=secrets)
 
-    def send(self, message: str, *, secrets: dict[str, str] | None = None) -> DrivenRun:
-        """Resume this session with ``message``. Pass ``secrets`` again (not persisted)."""
-        return self._submit(message, resume=True, secrets=secrets)
+        ``config`` is this turn's :class:`~remote_agent_toolkit.config.TurnConfig` — a
+        sparse overlay of the invocation knobs (model, budgets, tool policy, output
+        schema) on top of the session's effective spec, for this turn only.
+        """
+        return self._submit(message, resume=False, secrets=secrets, turn_config=config)
+
+    def send(
+        self,
+        message: str,
+        *,
+        secrets: dict[str, str] | None = None,
+        config: TurnConfig | None = None,
+    ) -> DrivenRun:
+        """Resume this session with ``message``. Pass ``secrets`` again (not persisted).
+
+        ``config`` is a per-turn :class:`~remote_agent_toolkit.config.TurnConfig` (see
+        :meth:`run`). There is deliberately no session config here: the session's world
+        was bound at ``start_session`` and cannot change mid-conversation.
+        """
+        return self._submit(message, resume=True, secrets=secrets, turn_config=config)
 
     def _stage_secrets(self, secrets: dict[str, str] | None) -> str | None:
         """Stage per-invocation secrets to a nonce-keyed GCS object; return its gs:// URI."""
@@ -582,8 +644,67 @@ class GeminiSession:
 
         return stage_secrets(engine._output_bucket, self._session_id, secrets)
 
+    def _bind_config(self, config: SessionConfig | None) -> None:
+        """Persist the session's config at its stable key (called once, at session open)."""
+        if config is None or not config.set_fields():
+            self._session_config = None
+            self._session_config_resolved = True
+            return
+        engine = self._engine
+        if not engine._output_bucket:
+            raise ValueError(
+                "start_session(config=...) requires the engine's output bucket (the config "
+                "is persisted there for the workers and for re-attach); construct the "
+                "engine with output_bucket/project set."
+            )
+        from .handoff import persist_session_config
+
+        self._session_config = config
+        self._session_config_uri = persist_session_config(
+            engine._output_bucket, self._session_id, config.to_dict()
+        )
+        self._session_config_resolved = True
+
+    def _resolve_session_config(self) -> None:
+        """Re-attach path: load the opener's persisted config (pointer + dict) from GCS.
+
+        One GCS read on the session's first use; a session with no persisted config
+        resolves to none (runs execute the deploy-baked spec).
+        """
+        if self._session_config_resolved:
+            return
+        self._session_config_resolved = True
+        engine = self._engine
+        if not engine._output_bucket:
+            return
+        from ...config import SessionConfig
+        from .handoff import load_session_config
+
+        found = load_session_config(engine._output_bucket, self._session_id)
+        if found is not None:
+            self._session_config_uri, config_dict = found
+            self._session_config = SessionConfig.from_dict(config_dict)
+
+    def _client_spec(self, turn_config: TurnConfig | None = None) -> AgentSpec:
+        """The client-side effective spec: engine spec + session + turn overlays.
+
+        Used for result building (structured-output parsing, the idle stop-reason). The
+        worker computes the same overlay over its deploy-baked spec — and echoes the
+        merged result as an ``effective_spec`` event, the ground-truth record.
+        """
+        from ...config import apply_session_config, apply_turn_config
+
+        self._resolve_session_config()
+        return apply_turn_config(
+            apply_session_config(self._engine.spec, self._session_config), turn_config
+        )
+
     def _submit(
-        self, message: str, resume: bool, secrets: dict[str, str] | None = None
+        self,
+        message: str,
+        resume: bool,
+        secrets: dict[str, str] | None = None,
+        turn_config: TurnConfig | None = None,
     ) -> DrivenRun:
         engine = self._engine
         sid = self._session_id
@@ -597,24 +718,44 @@ class GeminiSession:
         since = time.time() - 5
         secrets_uri = self._stage_secrets(secrets)
         self._staged_secrets_uri = secrets_uri  # cleaned up on completion (worker deletes at turn end)
+        self._resolve_session_config()  # re-attach: recover the opener's persisted config
+        turn_config_uri = None
+        if turn_config is not None and turn_config.set_fields():
+            from .handoff import stage_turn_config
+
+            turn_config_uri = stage_turn_config(
+                engine._output_bucket, sid, turn_config.to_dict()
+            )
 
         if engine._warm:
             # Warm path: dispatch the turn to the pool (a warm worker adopts our session_id),
             # then refill so the next turn stays warm. No cold run_query_job. The payload
-            # carries only the secrets *pointer*, never values.
-            engine._dispatch().publish(dispatch_payload(sid, message, resume, secrets_uri))
+            # carries only pointers, never values: the secrets object, the session's
+            # persisted config, and this turn's config — the worker overlays the configs
+            # on its deploy-baked spec and runs the result.
+            engine._dispatch().publish(
+                dispatch_payload(
+                    sid, message, resume, secrets_uri,
+                    session_config_gcs=self._session_config_uri,
+                    turn_config_gcs=turn_config_uri,
+                )
+            )
             try:
                 engine.fill_pool(1)
             except Exception:  # noqa: BLE001 — refill is best-effort; the turn already dispatched
                 pass
         else:
             # Cold path: the prompt is the only reliable channel to the agent, so the
-            # session id, secrets POINTER, and resume marker ride leading directive lines
-            # the agent strips. Never secret values: the platform persists the job input
-            # to jobs/<sid>_input.jsonl.
+            # session id, secrets POINTER, config pointers, and resume marker ride leading
+            # directive lines the agent strips. Never secret values: the platform persists
+            # the job input to jobs/<sid>_input.jsonl.
             directives = f"AGENT_SESSION={sid}\n"
             if secrets_uri:
                 directives += f"AGENT_SECRETS_GCS={secrets_uri}\n"
+            if self._session_config_uri:
+                directives += f"AGENT_SESSION_CONFIG_GCS={self._session_config_uri}\n"
+            if turn_config_uri:
+                directives += f"AGENT_TURN_CONFIG_GCS={turn_config_uri}\n"
             if resume:
                 directives += f"AGENT_RESUME={sid}\n"
             prompt = directives + message
@@ -684,7 +825,7 @@ class GeminiSession:
         else:
             factory = tail_source
 
-        run = DrivenRun(factory, sid, engine.spec, on_complete=self._on_complete)
+        run = DrivenRun(factory, sid, self._client_spec(turn_config), on_complete=self._on_complete)
         self._current_run = run
         self._status = RunStatus.RUNNING
         self._stop_reason = None
@@ -699,8 +840,10 @@ class GeminiSession:
         self._last_result = result
         self._stop_reason = stop_reason
         self._status = RunStatus.IDLE
-        # Backstop cleanup of the staged secrets object; the worker normally deleted it on
-        # read, but a run that failed before the worker fetched would otherwise leave it.
+        # Backstop cleanup of the staged SECRETS object; the worker normally deletes it at
+        # turn end, but a run that failed before the worker fetched would otherwise leave
+        # it for the lifecycle rule. Config objects are deliberately NOT deleted — they are
+        # the post-mortem record of what the session/turn was asked to run (handoff.py).
         if self._staged_secrets_uri:
             from .handoff import delete_staged_secrets
 
@@ -789,8 +932,10 @@ class GeminiSession:
             if result_ev is not None:
                 from .._run import build_result
 
+                # The session-level effective spec (re-attach recovers the persisted
+                # config, so structured parsing / stop-reason match what the opener saw).
                 self._last_result, self._stop_reason = build_result(
-                    result_ev, self._session_id, self._engine.spec
+                    result_ev, self._session_id, self._client_spec()
                 )
                 self._status = RunStatus.IDLE
         return self._last_result
@@ -830,6 +975,10 @@ class GeminiEngine:
         version: str | None = None,
     ) -> None:
         self._resource = resource
+        # The deploy handle carries the real deployed spec; a get_engine handle carries a
+        # minimal fallback (addressing only). Either way runs execute the engine's baked
+        # spec overlaid with the session/turn configs — the client uses this spec only as
+        # the base of its own view for result parsing.
         self.spec = spec
         self._project = project
         self._location = location
@@ -887,7 +1036,22 @@ class GeminiEngine:
             if job_name:
                 self._pool_jobs.append(job_name)
 
-    def start_session(self) -> GeminiSession:
+    def start_session(self, config: SessionConfig | None = None) -> GeminiSession:
+        """Begin a new session; ``config`` binds its :class:`SessionConfig` for good.
+
+        The config (a sparse overlay over the deploy-baked spec — repos, skills, prompt,
+        model, ...) is persisted at a stable per-session GCS key here and cannot be
+        changed afterwards: the session's world is created on its first turn and
+        snapshot-restored on every later one. ``send()`` and re-attach take no config.
+        """
+        # Fail fast BEFORE the platform session is created: binding a config needs the
+        # output bucket (it is persisted there for the workers and for re-attach).
+        if config is not None and config.set_fields() and not self._output_bucket:
+            raise ValueError(
+                "start_session(config=...) requires the engine's output bucket (the config "
+                "is persisted there for the workers and for re-attach); construct the "
+                "engine with output_bucket/project set."
+            )
         if self._warm:
             # Warm turns run in pool workers, not a per-session engine invocation, so the
             # session id is just a client-chosen token (used for log-tail + checkpoint keying).
@@ -899,11 +1063,22 @@ class GeminiEngine:
             created = self._agent_engines().sessions.create(name=self._resource, user_id=_USER_ID)
             session_id = created.response.name.rsplit("/", 1)[-1]
         session = GeminiSession(self, session_id)
+        session._bind_config(config)
         self._sessions[session_id] = session
         return session
 
     def get_session(self, session_id: str) -> GeminiSession:
-        return self._sessions.get(session_id) or GeminiSession(self, session_id)
+        """Re-attach to an existing session by id (poll / continue).
+
+        Takes NO config on purpose: the session's :class:`SessionConfig` was bound at
+        ``start_session`` and persisted next to the session's records — re-attach reads
+        that back, so every process resuming the session runs the same world. Accepting a
+        config here would let a re-attacher change repos/skills/prompt mid-conversation,
+        which the workspace-snapshot model cannot honor.
+        """
+        return self._sessions.get(session_id) or GeminiSession(
+            self, session_id, config_resolved=False
+        )
 
     def list_sessions(self) -> list[dict]:
         """Enumerate this engine's known past sessions, newest first.

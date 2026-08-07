@@ -21,6 +21,47 @@ tag `vX.Y.Z`, push the commit and the tag.
 
 ## Unreleased
 
+### Added
+
+- Configuration now has three scopes, one type each: the `AgentSpec` baked at
+  deploy, a `SessionConfig` bound once at `engine.start_session(config=…)`
+  (the conversation's world: `repos`, `skills`, `mcp_servers`,
+  `system_prompt`, `harness`, `checkpoint`, `extra_env`, plus session-wide
+  knob defaults), and a `TurnConfig` passed per turn to `run()`/`send()`
+  (`model`, `reasoning_effort`, budgets, `permission_mode`, tool lists,
+  `output_schema`). Both configs are sparse overlays: a field left at
+  `INHERIT` keeps the value from the layer below. Full parity between the
+  `local` and `gemini` backends; no more ~4 min engine redeploy to vary
+  per-conversation or per-turn settings.
+- The worker echoes the merged configuration it actually executed as an
+  `effective_spec` event in the session's stream — the durable ground-truth
+  record for debugging and replay.
+- `AgentSpec(harnesses=("claude-code", "codex"))` bakes several harness CLIs
+  into one image, so each session can pick its harness; selecting one the
+  image doesn't carry fails the turn loudly.
+
+(all [#16])
+
+### Backwards-incompatible
+
+- `get_engine(spec=…)` is removed, with no deprecation shim — passing `spec`
+  raises a `TypeError` pointing at the replacement ([#16]). It was
+  only ever a client-side parsing hint; runs always executed the
+  deploy-baked spec. **To update:** `get_engine(…)` now only addresses an
+  engine; bind a `SessionConfig` at `start_session` for anything the old
+  spec was supposed to change — including `output_schema`/`checkpoint`,
+  which also restore the client-side structured parsing and idle
+  stop-reason the old hint provided. Per-turn knobs go to
+  `run(config=TurnConfig(…))`.
+- Engines deployed from an older toolkit revision keep working with new
+  client code **as long as you pass no configs** (nothing config-related
+  rides the invocation then). To *use* `SessionConfig`/`TurnConfig` against
+  one, redeploy it first: an old worker predates the fail-closed contract,
+  so it would silently run its baked spec instead (and on the cold path the
+  unrecognized directive line would additionally leak into the prompt).
+
+[#16]: https://github.com/zytedata/remote-agent-toolkit/pull/16
+
 ## 0.1.0 — 2026-08-07
 
 Initial release. What's in the box:
@@ -30,10 +71,10 @@ Initial release. What's in the box:
 - `AgentSpec`: one declarative spec for an agent — system prompt, skills
   (local or packaged), MCP servers (local or remote), extra Python/apt
   packages, git repositories to provision (with host-aware auth), per-run
-  secrets, structured `output_schema`, model override, `reasoning_effort`,
-  and container `resource_limits` (CPU/memory).
-- Harnesses: Claude Code (via the Claude Agent SDK) and Codex (OpenAI models)
-  behind the same `AgentSpec`/engine/session API.
+  secrets, structured `output_schema`, model override, `reasoning_effort`
+  ([#3]), and container `resource_limits` (CPU/memory, [#6]).
+- Harnesses: Claude Code (via the Claude Agent SDK) and Codex (OpenAI models,
+  [#2]) behind the same `AgentSpec`/engine/session API.
 
 ### Run planes
 
@@ -41,16 +82,17 @@ Initial release. What's in the box:
   image mirrors the engine's install contract.
 - Gemini Agent Runtime (Vertex AI Agent Engine): `deploy()` /
   `get_engine()` / sessions with multi-turn `run()`, real interrupt,
-  checkpoint/resume (canonical-UUID session ids), and agent versions —
-  `deploy` creates revisions and `get_engine(version=…)` pins one.
+  checkpoint/resume (canonical-UUID session ids, [#1]), and agent versions —
+  `deploy` creates revisions and `get_engine(version=…)` pins one ([#13]).
 - Warm pool: pre-provisioned workers claimed per turn for lower latency,
   with readiness signaling, pre-warm tuning, and robust cross-process
   teardown.
 - Live event streaming over a GCS mirror (quota-free); Cloud Logging is
   emit-only. Clock-free turn boundaries prevent stale-result replay on fast
-  resume.
+  resume. Out-of-order live logs are reconciled on history recovery
+  ([#10], [#15]).
 - Worker CPU/RAM self-sampling with `Session.resource_samples()` for OOM
-  forensics.
+  forensics ([#7]).
 
 ### Deploy reliability
 
@@ -58,10 +100,22 @@ Initial release. What's in the box:
   google-adk, telemetry stack, …) is pinned via an in-tree
   `constraints.txt`, merged into engine requirements client-side;
   `verify_deploy_env()` fails fast when the deploying venv drifts from the
-  pickle-coupled pins.
+  pickle-coupled pins ([#18]).
 - The deploy target project/location is pinned into the pickled `AdkApp`
   (`build_adk_app`), so engine telemetry can no longer follow the deployer's
   stray local gcloud default into the wrong project (persistent span/metric
-  export 403s).
+  export 403s) ([#17]).
 - Retry-safe secrets handoff: per-invocation secrets are deleted at turn
-  end, not on first read.
+  end, not on first read ([#5]).
+
+[#1]: https://github.com/zytedata/remote-agent-toolkit/pull/1
+[#2]: https://github.com/zytedata/remote-agent-toolkit/pull/2
+[#3]: https://github.com/zytedata/remote-agent-toolkit/pull/3
+[#5]: https://github.com/zytedata/remote-agent-toolkit/pull/5
+[#6]: https://github.com/zytedata/remote-agent-toolkit/pull/6
+[#7]: https://github.com/zytedata/remote-agent-toolkit/pull/7
+[#10]: https://github.com/zytedata/remote-agent-toolkit/pull/10
+[#13]: https://github.com/zytedata/remote-agent-toolkit/pull/13
+[#15]: https://github.com/zytedata/remote-agent-toolkit/pull/15
+[#17]: https://github.com/zytedata/remote-agent-toolkit/pull/17
+[#18]: https://github.com/zytedata/remote-agent-toolkit/pull/18

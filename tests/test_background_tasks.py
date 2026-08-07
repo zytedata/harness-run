@@ -14,7 +14,14 @@ import asyncio
 
 from claude_agent_sdk import AssistantMessage, TextBlock
 
-from fakes import init_msg, make_sdk_client, result_msg, task_done_msg, task_started_msg
+from fakes import (
+    init_msg,
+    make_sdk_client,
+    result_msg,
+    task_done_msg,
+    task_started_msg,
+    tool_result_msg,
+)
 
 from remote_agent_toolkit import AgentSpec
 from remote_agent_toolkit.harness.claude_code import ClaudeCodeHarness, _TaskTracker
@@ -57,7 +64,7 @@ def test_tracker_lifecycle():
     assert tr.waiting() is None
 
 
-def test_tracker_clears_terminal_notification_after_later_assistant_output():
+def test_tracker_clears_terminal_notification_after_boundary_and_assistant_output():
     tr = _TaskTracker()
     translate = EventTranslator().translate
 
@@ -69,10 +76,34 @@ def test_tracker_clears_terminal_notification_after_later_assistant_output():
     feed(task_done_msg("t1"))
     assert tr.waiting() == "undelivered"
 
-    # This is the common foreground/auto-backgrounded command ordering: the
-    # completion arrives mid-invocation, then Claude discusses it and keeps
-    # working.  The later assistant output proves the notification was consumed.
+    # The common mid-invocation ordering (verified live): the completion arrives while
+    # a foreground tool runs, its result flows back (the CLI assembles the next model
+    # call there, injecting the notification), and the model's output from that call
+    # proves delivery.
+    feed(tool_result_msg())
+    assert tr.waiting() == "undelivered"  # staged: the next call carries it
     feed(AssistantMessage(content=[TextBlock(text="the task passed")], model="m"))
+    assert tr.waiting() is None
+
+
+def test_tracker_keeps_notification_that_landed_during_an_in_flight_call():
+    # Assistant output emitted AFTER the notification can come from a model call that
+    # was already in flight when it arrived — no tool-result boundary in between. The
+    # CLI re-invokes right after the result in that case (verified live, CLI 2.1.223),
+    # so the notification must stay undelivered and hold the turn open.
+    tr = _TaskTracker()
+    translate = EventTranslator().translate
+
+    def feed(msg):
+        for ev in translate(msg):
+            tr.observe(ev)
+
+    feed(task_started_msg("t1"))
+    feed(tool_result_msg())  # the backgrounding Bash call's own result
+    feed(task_done_msg("t1"))
+    feed(AssistantMessage(content=[TextBlock(text="a long final essay")], model="m"))
+    assert tr.waiting() == "undelivered"
+    feed(init_msg())  # the CLI's re-invocation delivers it
     assert tr.waiting() is None
 
 
@@ -156,9 +187,14 @@ def test_no_tasks_result_is_final_immediately(tmp_path, monkeypatch):
 
 
 def test_midturn_task_completion_does_not_demote_later_final_result(tmp_path, monkeypatch):
+    # The completion lands between model calls (here: during a foreground tool), the
+    # tool result boundary hands it to the next call, and the model discusses it. The
+    # eventual final result must be terminal immediately — no grace wait in which a
+    # stale ScheduleWakeup prompt could spawn a spurious extra segment.
     script = [
         task_started_msg("t1"),
         task_done_msg("t1"),
+        tool_result_msg(),
         AssistantMessage(content=[TextBlock(text="observed completion")], model="m"),
         result_msg(num_turns=2, result="final answer"),
         "hang",  # must not be read: the result is terminal immediately
@@ -167,6 +203,30 @@ def test_midturn_task_completion_does_not_demote_later_final_result(tmp_path, mo
 
     assert events[-1].kind == "result" and events[-1].summary == "final answer"
     assert not any((e.raw or {}).get("event") == "awaiting_tasks" for e in events)
+
+
+def test_completion_during_final_in_flight_call_holds_turn_for_reinvocation(tmp_path, monkeypatch):
+    # Verified live (CLI 2.1.223): a task completing while the FINAL model call is in
+    # flight is not in that call's context — the CLI re-invokes ~40 ms after the result.
+    # The in-flight call's output must not count as delivery proof (no tool-result
+    # boundary), so the turn stays open and the re-invoked segment's result wins.
+    script = [
+        init_msg(),
+        task_started_msg("t1"),
+        tool_result_msg(),  # the backgrounding Bash call returns
+        task_done_msg("t1"),  # completes while the final (essay) call is in flight
+        AssistantMessage(content=[TextBlock(text="a long final essay")], model="m"),
+        result_msg(num_turns=2, result="a long final essay"),
+        init_msg(),  # the CLI's re-invocation, moments after the result
+        result_msg(num_turns=1, result="the background task completed"),
+    ]
+    events, _ = _events_of(script, tmp_path, monkeypatch)
+
+    results = [e for e in events if e.kind == "result"]
+    assert len(results) == 1
+    assert results[0].summary == "the background task completed"
+    assert results[0].raw["num_turns"] == 3
+    assert any((e.raw or {}).get("event") == "awaiting_tasks" for e in events)
 
 
 def test_error_result_ends_turn_even_with_pending_tasks(tmp_path, monkeypatch):

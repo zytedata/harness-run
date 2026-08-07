@@ -93,21 +93,30 @@ class _TaskTracker:
 
     def __init__(self) -> None:
         self._pending: dict[str, str] = {}  # task_id -> description
-        self._undelivered: set[str] = set()
+        self._undelivered: set[str] = set()  # terminal; no tool-result boundary seen since
+        self._staged: set[str] = set()  # terminal + boundary seen; next model call has it
 
     def observe(self, event: AgentEvent) -> None:
-        # A later assistant message proves that every terminal notification seen
-        # before it has reached Claude's context.  Without this, every task that
-        # completed *during* a long invocation remained "undelivered" forever,
-        # even after Claude discussed its result and continued working.  At the
-        # eventual final result that stale ledger kept the CLI open long enough
-        # for old ScheduleWakeup prompts to create a spurious follow-up turn.
-        #
-        # Result events are deliberately excluded: a task can finish while an
-        # already-running model call is producing its final response, in which
-        # case that result is not proof that the notification was in context.
-        if event.kind in {"message", "thinking", "tool_use"}:
+        # Delivery proof (verified live, CLI 2.1.223): the CLI injects a terminal
+        # notification into the NEXT model call it assembles — never into a call already
+        # in flight. Assistant output therefore proves delivery only when a tool_result
+        # boundary (where the next call is assembled) separates the notification from
+        # that output. Two stages:
+        #   task_terminal  → undelivered (the CLI has not had a call to inject it into)
+        #   tool_result    → staged      (the call being assembled will carry it)
+        #   model output   → delivered   (that call ran; drop the staged ids)
+        # Without this, a task completing *during* a long invocation stayed
+        # "undelivered" forever — even after Claude discussed its result — and the
+        # stale ledger at the final result kept the CLI open long enough for old
+        # ScheduleWakeup prompts to create a spurious follow-up turn. Clearing on bare
+        # assistant output is NOT enough: output emitted after the notification can
+        # come from a call that was already in flight when it arrived, and the CLI
+        # then re-invokes ~40 ms after the result — the turn must stay open for it.
+        if event.kind == "tool_result":
+            self._staged |= self._undelivered
             self._undelivered.clear()
+        elif event.kind in {"message", "thinking", "tool_use"}:
+            self._staged.clear()
 
         raw = event.raw or {}
         kind = raw.get("event")
@@ -120,6 +129,7 @@ class _TaskTracker:
         elif raw.get("subtype") == "init":
             # A (re-)invocation started: terminal notifications so far were delivered.
             self._undelivered.clear()
+            self._staged.clear()
 
     @property
     def pending(self) -> dict[str, str]:
@@ -127,13 +137,13 @@ class _TaskTracker:
 
     @property
     def undelivered(self) -> set[str]:
-        return set(self._undelivered)
+        return self._undelivered | self._staged
 
     def waiting(self) -> str | None:
         """Why the turn must stay open at a result event (``None`` = truly done)."""
         if self._pending:
             return "pending"
-        if self._undelivered:
+        if self._undelivered or self._staged:
             return "undelivered"
         return None
 
@@ -301,7 +311,7 @@ class ClaudeCodeHarness:
             while True:
                 if stashed is None or phase is _StreamPhase.ACTIVE:
                     timeout = None  # model working; a foreground tool call may run long
-                elif tracker.waiting() == "pending":
+                elif tracker.waiting() == "pending" and wait_deadline is not None:
                     timeout = max(1.0, wait_deadline - asyncio.get_running_loop().time())
                 else:  # terminal notification observed; re-invocation due momentarily
                     timeout = self._UNDELIVERED_GRACE_S

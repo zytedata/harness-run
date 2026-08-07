@@ -28,6 +28,14 @@ pip install "git+ssh://git@github.com/zytedata/remote-agent-toolkit.git"
 # or:  uv pip install "git+ssh://git@github.com/zytedata/remote-agent-toolkit.git"
 ```
 
+Releases are git tags — pin one to shield yourself from in-development changes on `main`
+(see [`CHANGELOG.md`](CHANGELOG.md) for what's in each release and how to upgrade across
+breaking changes):
+
+```bash
+pip install "git+ssh://git@github.com/zytedata/remote-agent-toolkit.git@v0.1.0"
+```
+
 Developing on the toolkit itself (early users are expected to contribute)? Clone it and `uv sync` — that
 installs the runtime deps plus the `dev` group (pytest, ruff, mypy).
 
@@ -851,3 +859,7 @@ adapters seam (§7), and the phased roadmap (§11). The README grows with the co
 Contributing? [`TESTING.md`](TESTING.md) covers the testing ladder — the offline suite (`make test`), the
 install-parity image ([`dev/`](dev/)), and **live validation** on real Agent Runtime (`make live-smoke`):
 when each is required and how to debug a live run.
+
+Changes ship as tagged releases documented in [`CHANGELOG.md`](CHANGELOG.md) — its header spells out
+the versioning policy (0.x minor releases may break; every breaking change carries update notes) and
+the release checklist. If your PR changes behavior, add an entry under `Unreleased`.

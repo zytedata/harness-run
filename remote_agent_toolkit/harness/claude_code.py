@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import deque
+from enum import Enum
 from pathlib import Path
 from typing import Any, AsyncIterator, TYPE_CHECKING
 
@@ -92,9 +93,31 @@ class _TaskTracker:
 
     def __init__(self) -> None:
         self._pending: dict[str, str] = {}  # task_id -> description
-        self._undelivered: set[str] = set()
+        self._undelivered: set[str] = set()  # terminal; no tool-result boundary seen since
+        self._staged: set[str] = set()  # terminal + boundary seen; next model call has it
 
     def observe(self, event: AgentEvent) -> None:
+        # Delivery proof (verified live, CLI 2.1.223): the CLI injects a terminal
+        # notification into the NEXT model call it assembles — never into a call already
+        # in flight. Assistant output therefore proves delivery only when a tool_result
+        # boundary (where the next call is assembled) separates the notification from
+        # that output. Two stages:
+        #   task_terminal  → undelivered (the CLI has not had a call to inject it into)
+        #   tool_result    → staged      (the call being assembled will carry it)
+        #   model output   → delivered   (that call ran; drop the staged ids)
+        # Without this, a task completing *during* a long invocation stayed
+        # "undelivered" forever — even after Claude discussed its result — and the
+        # stale ledger at the final result kept the CLI open long enough for old
+        # ScheduleWakeup prompts to create a spurious follow-up turn. Clearing on bare
+        # assistant output is NOT enough: output emitted after the notification can
+        # come from a call that was already in flight when it arrived, and the CLI
+        # then re-invokes ~40 ms after the result — the turn must stay open for it.
+        if event.kind == "tool_result":
+            self._staged |= self._undelivered
+            self._undelivered.clear()
+        elif event.kind in {"message", "thinking", "tool_use"}:
+            self._staged.clear()
+
         raw = event.raw or {}
         kind = raw.get("event")
         if kind == "task_started":
@@ -106,18 +129,30 @@ class _TaskTracker:
         elif raw.get("subtype") == "init":
             # A (re-)invocation started: terminal notifications so far were delivered.
             self._undelivered.clear()
+            self._staged.clear()
 
     @property
     def pending(self) -> dict[str, str]:
         return dict(self._pending)
 
+    @property
+    def undelivered(self) -> set[str]:
+        return self._undelivered | self._staged
+
     def waiting(self) -> str | None:
         """Why the turn must stay open at a result event (``None`` = truly done)."""
         if self._pending:
             return "pending"
-        if self._undelivered:
+        if self._undelivered or self._staged:
             return "undelivered"
         return None
+
+
+class _StreamPhase(Enum):
+    """Whether the CLI is running the model or is between model invocations."""
+
+    ACTIVE = "active"
+    BETWEEN_INVOCATIONS = "between_invocations"
 
 
 class ClaudeCodeHarness:
@@ -266,6 +301,7 @@ class ClaudeCodeHarness:
         stashed: AgentEvent | None = None  # newest demoted (segment-boundary) result
         turns_total = 0  # num_turns resets per re-invocation; RunResult reports the sum
         wait_deadline: float | None = None
+        phase = _StreamPhase.ACTIVE  # the initial query has been submitted to the model
 
         client = ClaudeSDKClient(options=options)
         try:
@@ -273,9 +309,9 @@ class ClaudeCodeHarness:
             await client.query(ctx.prompt)
             stream = client.receive_messages()
             while True:
-                if stashed is None:
+                if stashed is None or phase is _StreamPhase.ACTIVE:
                     timeout = None  # model working; a foreground tool call may run long
-                elif tracker.waiting() == "pending":
+                elif tracker.waiting() == "pending" and wait_deadline is not None:
                     timeout = max(1.0, wait_deadline - asyncio.get_running_loop().time())
                 else:  # terminal notification observed; re-invocation due momentarily
                     timeout = self._UNDELIVERED_GRACE_S
@@ -284,18 +320,36 @@ class ClaudeCodeHarness:
                 except StopAsyncIteration:
                     break
                 except asyncio.TimeoutError:
-                    yield AgentEvent(
-                        kind="status",
-                        summary=(
+                    reason = tracker.waiting()
+                    if reason == "pending":
+                        summary = (
                             "gave up waiting on background tasks "
                             f"({len(tracker.pending)} still pending); finalizing with the "
                             "result already produced"
-                        ),
-                        raw={"event": "task_wait_timeout", "pending": tracker.pending},
+                        )
+                    else:
+                        summary = (
+                            "gave up waiting for Claude Code to re-invoke after a background "
+                            "task notification; finalizing with the result already produced"
+                        )
+                    yield AgentEvent(
+                        kind="status",
+                        summary=summary,
+                        raw={
+                            "event": "task_wait_timeout",
+                            "reason": reason,
+                            "pending": tracker.pending,
+                        },
                     )
                     break
                 for event in translator.translate(message):
                     tracker.observe(event)
+                    if (event.raw or {}).get("subtype") == "init":
+                        # The notification grace ends as soon as the CLI starts the next
+                        # invocation. Keep the stashed result only as a crash fallback; it
+                        # must not impose a per-message timeout on an actively working model.
+                        phase = _StreamPhase.ACTIVE
+                        wait_deadline = None
                     if event.kind != "result":
                         yield event
                         continue
@@ -311,18 +365,25 @@ class ClaudeCodeHarness:
                     # Segment boundary, not the end of the turn: hold the stream open
                     # for the CLI's task-completion re-invocation.
                     stashed = event
-                    if wait_deadline is None:
+                    phase = _StreamPhase.BETWEEN_INVOCATIONS
+                    if reason == "pending":
                         wait_deadline = (
                             asyncio.get_running_loop().time() + spec.background_task_timeout
                         )
+                    else:
+                        wait_deadline = None
                     yield AgentEvent(
                         kind="status",
                         summary=(
                             f"turn paused awaiting background tasks ({reason}: "
-                            f"{len(tracker.pending) or len(tracker._undelivered)})"
+                            f"{len(tracker.pending) or len(tracker.undelivered)})"
                         ),
-                        raw={"event": "awaiting_tasks", "reason": reason,
-                             "pending": tracker.pending},
+                        raw={
+                            "event": "awaiting_tasks",
+                            "reason": reason,
+                            "pending": tracker.pending,
+                            "undelivered": sorted(tracker.undelivered),
+                        },
                     )
         except Exception as exc:
             # Surface the captured stderr with the failure: as a status event (reaches the

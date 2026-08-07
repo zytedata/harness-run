@@ -3,14 +3,17 @@
 A Python library for **defining and running remote/background AI agents** at Zyte. Define an agent
 declaratively as an `AgentSpec`, then run it both **locally** (in-process, for dev) and **remotely** on
 **Gemini Agent Runtime** (prod) through *one* API — with custom skills, GitHub access, structured outputs,
-checkpoint/resume and warm starts, without re-learning the platform's sharp edges. Two agent harnesses
+checkpoint/resume and warm starts, without re-learning the platform's sharp edges. Deploy an engine once
+per agent role, then customize **per session** (`SessionConfig`: repo/ref, prompt, model, skills) and
+**per turn** (`TurnConfig`: budgets, model, output schema) without redeploying — see
+[Deploy / session / turn](#deploy--session--turn-the-three-configuration-scopes). Two agent harnesses
 ship behind the same API: **Claude Code** (the default) and **Codex** (OpenAI models; see
 [Choosing the harness](#choosing-the-harness-claude-code-or-codex)).
 
 > **Status: `local` and Gemini Agent Runtime both work — validated live.** Define an `AgentSpec` and run it
 > in-process (`local.deploy`), or deploy + run on Agent Runtime (`gemini.deploy` / `gemini.get_engine`), with
-> skills, structured output, checkpoint/resume, and a **warm pool** (~4 s pickup vs ~2.5 min cold) — all
-> exercised end-to-end on real infrastructure. The two paths share one `Engine`/`Session`/`Run` API. Not yet
+> skills, structured output, checkpoint/resume, per-session/per-turn configuration, and a **warm pool**
+> (~4 s pickup vs ~2.5 min cold) — all exercised end-to-end on real infrastructure. The two paths share one `Engine`/`Session`/`Run` API. Not yet
 > built (raise `NotImplementedError` or simply absent): session `fork()` and a sync run path.
 > See [`examples/minimal`](examples/minimal) for a runnable agent and
 > [`DESIGN.md`](DESIGN.md) for the architecture, platform contracts (§6), and roadmap (§11).
@@ -118,6 +121,16 @@ asyncio.run(main())
 
 For a quick sync script, `local.run(spec, "…")` does `deploy → start_session → await run` and returns the
 `RunResult`.
+
+The deployed spec is the *default*; a session can override parts of it without redeploying — locally and
+on gemini alike ([full story](#deploy--session--turn-the-three-configuration-scopes)):
+
+```python
+from remote_agent_toolkit import SessionConfig, TurnConfig
+
+session = engine.start_session(config=SessionConfig(model="claude-opus-4-6"))   # this conversation only
+result = await session.run("…", config=TurnConfig(max_budget_usd=0.5))          # this turn only
+```
 
 **Which credential pays for a local run.** The Agent SDK inherits your whole shell environment (it only
 *adds* what the toolkit passes), and `HOME` isn't isolated, so the `claude` CLI sees your own login. It picks
@@ -509,6 +522,12 @@ The contracts behind this:
   never a silent fall-back to the baked spec (a wrong-configuration run is exactly what
   this exists to prevent). Client and engine must be deployed from the same toolkit
   revision (already the rule — the invocation payload is a wire contract).
+* **Old engines**: an engine deployed from an older toolkit revision keeps working with
+  new client code **as long as you pass no configs** (nothing config-related rides the
+  invocation then). To *use* `SessionConfig`/`TurnConfig` against it, redeploy it first:
+  an old worker predates the fail-closed contract, so it would silently run its baked
+  spec instead (and on the cold path the unrecognized directive line would additionally
+  leak into the prompt).
 * **No config → nothing staged**: a plain `start_session()`/`run()` is byte-for-byte the
   pre-config behavior; the turn runs the deploy-baked spec with zero extra moving parts.
 * **Deploy-time fields stay deploy-time**: `packages` and harness *availability* come from

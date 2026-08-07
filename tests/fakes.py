@@ -19,6 +19,8 @@ from claude_agent_sdk import (
     SystemMessage,
     TaskNotificationMessage,
     TaskStartedMessage,
+    ToolResultBlock,
+    UserMessage,
 )
 
 
@@ -47,6 +49,12 @@ def task_done_msg(task_id, status="completed"):
         output_file="", summary=f"task {task_id} {status}", uuid="u",
         session_id="claude-sid",
     )
+
+
+def tool_result_msg(tool_use_id="tu1", content="ok"):
+    """A tool result flowing back to the model — the point where the CLI assembles the
+    next model call (and injects any queued task notifications into it)."""
+    return UserMessage(content=[ToolResultBlock(tool_use_id=tool_use_id, content=content)])
 
 
 def make_sdk_client(script):

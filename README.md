@@ -530,12 +530,6 @@ The contracts behind this:
   never a silent fall-back to the baked spec (a wrong-configuration run is exactly what
   this exists to prevent). Client and engine must be deployed from the same toolkit
   revision (already the rule — the invocation payload is a wire contract).
-* **Old engines**: an engine deployed from an older toolkit revision keeps working with
-  new client code **as long as you pass no configs** (nothing config-related rides the
-  invocation then). To *use* `SessionConfig`/`TurnConfig` against it, redeploy it first:
-  an old worker predates the fail-closed contract, so it would silently run its baked
-  spec instead (and on the cold path the unrecognized directive line would additionally
-  leak into the prompt).
 * **No config → nothing staged**: a plain `start_session()`/`run()` is byte-for-byte the
   pre-config behavior; the turn runs the deploy-baked spec with zero extra moving parts.
 * **Deploy-time fields stay deploy-time**: `packages` and harness *availability* come from
@@ -547,12 +541,6 @@ The contracts behind this:
   kept for debugging, so `SessionConfig` refuses a `RepoSource.url` embedding
   `user:token@` at construction — name the token via `RepoSource(auth=..., auth_user=...)`
   and pass the value in `run(secrets=...)`.
-
-> **Migrating from `get_engine(spec=...)`:** that parameter is gone (it was only ever a
-> client-side parsing hint; runs always executed the deploy-baked spec). Bind a
-> `SessionConfig` at `start_session` for anything the old spec was supposed to change —
-> including `output_schema`/`checkpoint`, which also restore the client-side structured
-> parsing and idle stop-reason the old hint provided.
 
 **Managing deployed engines** (control plane):
 

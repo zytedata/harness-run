@@ -257,6 +257,10 @@ class ClaudeCodeHarness:
             max_budget_usd=spec.max_budget_usd,
             env=runtime_env(spec, ctx),
             mcp_servers=self._mcp_servers(spec, ctx),
+            # MCP config is loaded outside the setting sources, so `spec.mcp_servers` is
+            # the only channel that reaches the agent: no project `.mcp.json`, no host
+            # config, no plugin-provided server.
+            strict_mcp_config=True,
             system_prompt=self._system_prompt(spec, ctx.interactive),
             **extra,
         )

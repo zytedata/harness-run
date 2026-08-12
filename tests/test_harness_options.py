@@ -63,6 +63,12 @@ def test_github_mcp_built_from_resolved_secret_only():
     assert gh["type"] == "http" and gh["headers"]["Authorization"] == "Bearer ghp_x"
 
 
+def test_mcp_config_is_strict():
+    # Only spec.mcp_servers reaches the agent; a `.mcp.json` in the workspace does not.
+    spec = AgentSpec(name="a", model="m")
+    assert ClaudeCodeHarness().build_options(spec, _ctx(spec)).strict_mcp_config is True
+
+
 def test_remote_mcp_passthrough():
     spec = AgentSpec(name="a", model="m",
                      mcp_servers=[McpServer.remote("zyte", "https://mcp.zyte.com", {"X-Key": "v"})])

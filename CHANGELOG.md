@@ -42,6 +42,16 @@ tag `vX.Y.Z`, push the commit and the tag.
 
 (all [#16])
 
+### Changed
+
+- Claude Code runs now pass `--strict-mcp-config`: MCP servers come from
+  `mcp_servers` in the spec/configs only. MCP config is loaded outside the
+  setting sources, so the existing project-only isolation did not stop the CLI
+  from picking up a `.mcp.json` sitting in the workspace — and the workspace
+  is a cloned repo, which could ship a `stdio` server (an arbitrary command)
+  for the agent to run. A repo whose `.mcp.json` servers *are* wanted must
+  mirror them into `mcp_servers` ([#21]).
+
 ### Fixed
 
 - Structured output is no longer lost when a background-task notification arrives
@@ -81,6 +91,7 @@ tag `vX.Y.Z`, push the commit and the tag.
 
 [#16]: https://github.com/zytedata/remote-agent-toolkit/pull/16
 [#20]: https://github.com/zytedata/remote-agent-toolkit/pull/20
+[#21]: https://github.com/zytedata/remote-agent-toolkit/pull/21
 [#22]: https://github.com/zytedata/remote-agent-toolkit/pull/22
 
 ## 0.1.0 — 2026-08-07

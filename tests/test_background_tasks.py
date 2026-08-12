@@ -323,12 +323,15 @@ def test_no_segment_summaries_without_output_schema(tmp_path, monkeypatch):
     assert "segment_summaries" not in events[-1].raw
 
 
-def test_segment_summaries_newest_first_json_bearing_only_capped(tmp_path, monkeypatch):
-    # Four demoted segments with JSON + one prose-only: the prose one is filtered out
-    # (useless for recovery) and the JSON ones are capped at 3, newest first.
+def test_segment_summaries_newest_first_schema_valid_only_capped(tmp_path, monkeypatch):
+    # Four demoted segments with schema-valid JSON, one prose-only, one with junk JSON:
+    # only schema-valid texts are kept (junk must not fill the cap and evict a real
+    # answer), capped at 3, newest first.
     spec = AgentSpec(name="a", model="m", output_schema=_SCHEMA)
     script = [init_msg()]
-    texts = ["no json here"] + ['{"url": "https://example.com/%d"}' % i for i in range(4)]
+    texts = ["no json here", '{"quoted_api_response": true}'] + [
+        '{"url": "https://example.com/%d"}' % i for i in range(4)
+    ]
     for i, text in enumerate(texts):
         script += [
             task_started_msg(f"t{i}"),

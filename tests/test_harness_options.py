@@ -127,4 +127,5 @@ def test_checkpoint_session_wiring():
 def test_interactive_false_omits_suffix():
     spec = AgentSpec(name="a", model="m")  # system_prompt None
     opts = ClaudeCodeHarness().build_options(spec, _ctx(spec, interactive=False))
-    assert opts.system_prompt is None  # harness default — no INTERACTIVE MODE injection
+    # Claude Code's own prompt, with no INTERACTIVE MODE injection.
+    assert opts.system_prompt == {"type": "preset", "preset": "claude_code"}

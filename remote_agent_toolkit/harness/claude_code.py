@@ -176,22 +176,19 @@ class ClaudeCodeHarness:
 
         * ``SystemPrompt`` → inherit Claude Code's preset and append.
         * plain ``str``    → replace the prompt entirely (suffix appended in interactive).
-        * ``None``         → harness default (a preset+suffix only if interactive).
+        * ``None``         → Claude Code's preset. The SDK's own ``None`` means an *empty*
+          system prompt (``--system-prompt ""``): no preset, no ``CLAUDE.md``, no
+          environment block, so the agent would not be Claude Code at all.
         """
         suffix = _INTERACTIVE_SUFFIX if interactive else ""
         sp = spec.system_prompt
         if isinstance(sp, str):
             return sp + suffix if suffix else sp
-        if isinstance(sp, SystemPrompt):
-            append = (sp.append or "") + suffix
-            preset: dict[str, Any] = {"type": "preset", "preset": "claude_code"}
-            if append:
-                preset["append"] = append
-            return preset
-        # None: only override the default when we must inject the interactive suffix.
-        if suffix:
-            return {"type": "preset", "preset": "claude_code", "append": suffix}
-        return None
+        append = (sp.append or "" if isinstance(sp, SystemPrompt) else "") + suffix
+        preset: dict[str, Any] = {"type": "preset", "preset": "claude_code"}
+        if append:
+            preset["append"] = append
+        return preset
 
     def _mcp_servers(self, spec: AgentSpec, ctx: RunContext) -> dict:
         """Translate ``spec.mcp_servers`` into SDK MCP config, pulling tokens from secrets."""

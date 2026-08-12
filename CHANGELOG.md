@@ -52,6 +52,14 @@ tag `vX.Y.Z`, push the commit and the tag.
   results' texts (`raw["segment_summaries"]`, newest first) and result building
   falls back over them; `RunResult.structured_output_recovered` marks a recovered
   value ([#20]).
+- An unset `system_prompt` now gives the Claude Code harness its own preset
+  prompt, instead of an *empty* system prompt (the Agent SDK's `None` means
+  `--system-prompt ""`). Previously a default spec produced a bare agent on
+  non-interactive runs — no Claude Code identity, no `CLAUDE.md` — while
+  interactive runs got the full preset; now `None` behaves like
+  `SystemPrompt.inherit()` on both harnesses. Note the behavior change on
+  redeploy: default-spec agents get the preset prompt and start honoring
+  `CLAUDE.md` from cloned repos ([#22]).
 
 ### Backwards-incompatible
 
@@ -73,6 +81,7 @@ tag `vX.Y.Z`, push the commit and the tag.
 
 [#16]: https://github.com/zytedata/remote-agent-toolkit/pull/16
 [#20]: https://github.com/zytedata/remote-agent-toolkit/pull/20
+[#22]: https://github.com/zytedata/remote-agent-toolkit/pull/22
 
 ## 0.1.0 — 2026-08-07
 

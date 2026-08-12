@@ -270,6 +270,152 @@ def test_undelivered_grace_does_not_hang_on_midturn_delivery(tmp_path, monkeypat
     assert events[-1].kind == "result" and events[-1].summary == "handled inline"
 
 
+# -- structured-output recovery from displaced segment results -------------------------
+#
+# The reply to a stale background-task notification can become the turn's final message,
+# displacing the schema-valid deliverable the agent already emitted (eval feedback:
+# agentic-scraping-eval#14 — a killed crawl.log monitor turned a successful run into
+# no_deliverable). The final result carries the demoted results' JSON-bearing texts so
+# build_result can fall back over them.
+
+_SCHEMA = {"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]}
+_DELIVERABLE = '```json\n{"url": "https://rothys.com"}\n```'
+
+
+def test_final_result_carries_displaced_deliverable_and_build_result_recovers_it(
+    tmp_path, monkeypatch
+):
+    # The exact Rothy's run-004 shape: deliverable emitted, monitor still pending →
+    # demoted; the kill notification re-invokes; the ack becomes the final message.
+    spec = AgentSpec(name="a", model="m", output_schema=_SCHEMA)
+    script = [
+        init_msg(),
+        task_started_msg("t1", description="tail crawl.log"),
+        result_msg(num_turns=2, result=_DELIVERABLE),  # demoted: t1 still pending
+        task_done_msg("t1", status="killed"),
+        init_msg(),  # the CLI's re-invocation with the stale notification
+        result_msg(num_turns=1, result="Noted — the monitor was killed; nothing more to do."),
+    ]
+    events, _ = _events_of(script, tmp_path, monkeypatch, spec=spec)
+
+    final = events[-1]
+    assert final.kind == "result" and "Noted" in final.summary
+    assert final.raw["segment_summaries"] == [_DELIVERABLE]
+
+    from remote_agent_toolkit.runtime._run import build_result
+
+    result, _ = build_result(final, "sid", spec)
+    assert result.structured_output == {"url": "https://rothys.com"}
+    assert result.structured_output_recovered is True
+    assert result.text == final.summary  # text stays the real final message
+
+
+def test_no_segment_summaries_without_output_schema(tmp_path, monkeypatch):
+    script = [
+        init_msg(),
+        task_started_msg("t1"),
+        result_msg(num_turns=2, result=_DELIVERABLE),
+        task_done_msg("t1"),
+        init_msg(),
+        result_msg(num_turns=1, result="noted"),
+    ]
+    events, _ = _events_of(script, tmp_path, monkeypatch)
+    assert "segment_summaries" not in events[-1].raw
+
+
+def test_segment_summaries_newest_first_schema_valid_only_capped(tmp_path, monkeypatch):
+    # Four demoted segments with schema-valid JSON, one prose-only, one with junk JSON:
+    # only schema-valid texts are kept (junk must not fill the cap and evict a real
+    # answer), capped at 3, newest first.
+    spec = AgentSpec(name="a", model="m", output_schema=_SCHEMA)
+    script = [init_msg()]
+    texts = ["no json here", '{"quoted_api_response": true}'] + [
+        '{"url": "https://example.com/%d"}' % i for i in range(4)
+    ]
+    for i, text in enumerate(texts):
+        script += [
+            task_started_msg(f"t{i}"),
+            result_msg(num_turns=1, result=text),  # demoted: t<i> still pending
+            task_done_msg(f"t{i}"),
+            init_msg(),
+        ]
+    script.append(result_msg(num_turns=1, result="all monitors done"))
+    events, _ = _events_of(script, tmp_path, monkeypatch, spec=spec)
+
+    assert events[-1].raw["segment_summaries"] == [
+        '{"url": "https://example.com/3"}',
+        '{"url": "https://example.com/2"}',
+        '{"url": "https://example.com/1"}',
+    ]
+
+
+def test_promoted_stash_excludes_its_own_text_from_summaries(tmp_path, monkeypatch):
+    # Timeout path: the newest demoted result IS the final result; only the earlier
+    # segment's text rides along as a fallback candidate.
+    spec = AgentSpec(
+        name="a", model="m", output_schema=_SCHEMA, background_task_timeout=0.01
+    )
+    first = '{"url": "https://example.com/first"}'
+    second = '{"url": "https://example.com/second"}'
+    script = [
+        init_msg(),
+        task_started_msg("t1"),
+        result_msg(num_turns=1, result=first),
+        task_done_msg("t1"),
+        init_msg(),
+        task_started_msg("t2"),
+        result_msg(num_turns=1, result=second),  # demoted, then the wait times out
+        "hang",
+    ]
+    events, _ = _events_of(script, tmp_path, monkeypatch, spec=spec)
+
+    final = events[-1]
+    assert final.kind == "result" and final.summary == second
+    assert final.raw["segment_summaries"] == [first]
+
+
+def _result_event(summary, segment_summaries=None):
+    from remote_agent_toolkit.events import AgentEvent
+
+    raw = {"subtype": "success", "is_error": False, "num_turns": 1}
+    if segment_summaries is not None:
+        raw["segment_summaries"] = segment_summaries
+    return AgentEvent(kind="result", summary=summary, raw=raw, cost_usd=0.01)
+
+
+def test_build_result_terminal_parse_wins_over_segments():
+    from remote_agent_toolkit.runtime._run import build_result
+
+    spec = AgentSpec(name="a", model="m", output_schema=_SCHEMA)
+    ev = _result_event('{"url": "https://final.example"}', ['{"url": "https://old.example"}'])
+    result, _ = build_result(ev, "sid", spec)
+    assert result.structured_output == {"url": "https://final.example"}
+    assert result.structured_output_recovered is False
+
+
+def test_build_result_skips_schema_invalid_segments():
+    from remote_agent_toolkit.runtime._run import build_result
+
+    spec = AgentSpec(name="a", model="m", output_schema=_SCHEMA)
+    ev = _result_event(
+        "wrapping up",
+        ['{"url": 42}', '{"url": "https://valid.example"}'],  # newest first; newest invalid
+    )
+    result, _ = build_result(ev, "sid", spec)
+    assert result.structured_output == {"url": "https://valid.example"}
+    assert result.structured_output_recovered is True
+
+
+def test_build_result_ignores_segments_without_schema():
+    from remote_agent_toolkit.runtime._run import build_result
+
+    spec = AgentSpec(name="a", model="m")
+    ev = _result_event("done", ['{"url": "https://x.example"}'])
+    result, _ = build_result(ev, "sid", spec)
+    assert result.structured_output is None
+    assert result.structured_output_recovered is False
+
+
 def test_crash_while_awaiting_tasks_keeps_stashed_result(tmp_path, monkeypatch):
     # If the CLI dies while the turn is held open, the segment result already produced
     # must not be voided (same principle as the runtimes' late-harness-death handling).

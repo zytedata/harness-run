@@ -16,10 +16,11 @@ import asyncio
 from collections import deque
 from enum import Enum
 from pathlib import Path
-from typing import Any, AsyncIterator, TYPE_CHECKING
+from typing import Any, AsyncIterator, Sequence, TYPE_CHECKING
 
 from ..events import AgentEvent
 from ..spec import SystemPrompt
+from ..structured import parse_structured_output
 from ._shared import (
     GITHUB_MCP_TOKEN_KEYS as _GITHUB_MCP_TOKEN_KEYS,
     INTERACTIVE_SUFFIX as _INTERACTIVE_SUFFIX,
@@ -164,6 +165,10 @@ class ClaudeCodeHarness:
     # (no re-invoke follows) and must not hang the run.
     _UNDELIVERED_GRACE_S = 20.0
 
+    # How many demoted (segment-boundary) result texts ride the final result event as
+    # structured-output recovery candidates (``raw["segment_summaries"]``, newest first).
+    _SEGMENT_FALLBACK_MAX = 3
+
     # -- option building -------------------------------------------------------
 
     def _system_prompt(self, spec: AgentSpec, interactive: bool) -> Any:
@@ -265,10 +270,14 @@ class ClaudeCodeHarness:
         """Checkpoint the workspace inline at the terminal result event (see ``_shared``)."""
         return finalize_checkpoint(spec, ctx)
 
-    def _final_result(self, event: AgentEvent, turns_total: int) -> AgentEvent:
+    def _final_result(
+        self, event: AgentEvent, turns_total: int, segment_summaries: Sequence[str] = ()
+    ) -> AgentEvent:
         """Stamp the cumulative turn count onto the turn's final result event."""
         if event.raw is not None:
             event.raw["num_turns"] = turns_total
+            if segment_summaries:
+                event.raw["segment_summaries"] = list(segment_summaries)
         return event
 
     async def run(self, spec: AgentSpec, ctx: RunContext) -> AsyncIterator[AgentEvent]:
@@ -284,6 +293,12 @@ class ClaudeCodeHarness:
         (before the trailing checkpoint status event, so the snapshot happens while a
         non-draining executor is still pulling). ``spec.background_task_timeout`` bounds
         the wait; on expiry the last produced result stands.
+
+        A deliverable a demoted result carried is not lost to the demotion: the final
+        result rides with the demoted results' schema-valid texts
+        (``raw["segment_summaries"]``, newest first), so ``build_result`` can recover
+        the structured output when the model's reply to a stale task notification
+        displaced it from the turn's final message.
         """
         from claude_agent_sdk import ClaudeSDKClient
 
@@ -298,10 +313,34 @@ class ClaudeCodeHarness:
         translator = EventTranslator()
         tracker = _TaskTracker()
         finalized = False
-        stashed: AgentEvent | None = None  # newest demoted (segment-boundary) result
+        # Every demoted (segment-boundary) result, oldest first; the newest is also the
+        # crash/timeout fallback result when the turn never reaches a clean final one.
+        demoted: list[AgentEvent] = []
         turns_total = 0  # num_turns resets per re-invocation; RunResult reports the sum
         wait_deadline: float | None = None
         phase = _StreamPhase.ACTIVE  # the initial query has been submitted to the model
+
+        def segment_summaries(final_ev: AgentEvent) -> list[str]:
+            # Recovery candidates carried on the final result for build_result: each
+            # demoted result was the agent's intended end-of-turn answer until a
+            # background-task notification re-invoked the model past it, and the reply
+            # to a stale notification can displace a schema-valid deliverable from the
+            # turn's final text. Newest first, capped to keep the persisted result
+            # event small — and filtered with the reader's own schema-validating parse,
+            # so the cap can never fill with junk JSON (e.g. a quoted API response) and
+            # evict a real answer.
+            if spec.output_schema is None:
+                return []
+            out: list[str] = []
+            for ev in reversed(demoted):
+                if ev is final_ev or not ev.summary:
+                    continue
+                if parse_structured_output(ev.summary, spec.output_schema) is None:
+                    continue
+                out.append(ev.summary)
+                if len(out) >= self._SEGMENT_FALLBACK_MAX:
+                    break
+            return out
 
         client = ClaudeSDKClient(options=options)
         try:
@@ -309,7 +348,7 @@ class ClaudeCodeHarness:
             await client.query(ctx.prompt)
             stream = client.receive_messages()
             while True:
-                if stashed is None or phase is _StreamPhase.ACTIVE:
+                if not demoted or phase is _StreamPhase.ACTIVE:
                     timeout = None  # model working; a foreground tool call may run long
                 elif tracker.waiting() == "pending" and wait_deadline is not None:
                     timeout = max(1.0, wait_deadline - asyncio.get_running_loop().time())
@@ -346,7 +385,7 @@ class ClaudeCodeHarness:
                     tracker.observe(event)
                     if (event.raw or {}).get("subtype") == "init":
                         # The notification grace ends as soon as the CLI starts the next
-                        # invocation. Keep the stashed result only as a crash fallback; it
+                        # invocation. Keep the demoted result only as a crash fallback; it
                         # must not impose a per-message timeout on an actively working model.
                         phase = _StreamPhase.ACTIVE
                         wait_deadline = None
@@ -358,13 +397,13 @@ class ClaudeCodeHarness:
                     if reason is None:
                         fin = self._finalize(spec, ctx)
                         finalized = True
-                        yield self._final_result(event, turns_total)
+                        yield self._final_result(event, turns_total, segment_summaries(event))
                         if fin is not None:
                             yield fin
                         return
                     # Segment boundary, not the end of the turn: hold the stream open
                     # for the CLI's task-completion re-invocation.
-                    stashed = event
+                    demoted.append(event)
                     phase = _StreamPhase.BETWEEN_INVOCATIONS
                     if reason == "pending":
                         wait_deadline = (
@@ -396,7 +435,7 @@ class ClaudeCodeHarness:
                     summary=f"claude stderr (tail): {tail}",
                     raw={"event": "claude_stderr", "log": str(stderr_log.path)},
                 )
-            if stashed is not None and not finalized:
+            if demoted and not finalized:
                 # A real result exists — the crash while waiting on tasks must not void
                 # it (same principle as the runtimes' late-harness-death handling).
                 yield AgentEvent(
@@ -406,7 +445,8 @@ class ClaudeCodeHarness:
                 )
                 fin = self._finalize(spec, ctx)
                 finalized = True
-                yield self._final_result(stashed, turns_total)
+                last = demoted[-1]
+                yield self._final_result(last, turns_total, segment_summaries(last))
                 if fin is not None:
                     yield fin
                 return
@@ -423,10 +463,11 @@ class ClaudeCodeHarness:
 
         # Stream ended / wait timed out without a clean final result: the last produced
         # result stands (then the defensive no-result fallback, as before).
-        if stashed is not None and not finalized:
+        if demoted and not finalized:
             fin = self._finalize(spec, ctx)
             finalized = True
-            yield self._final_result(stashed, turns_total)
+            last = demoted[-1]
+            yield self._final_result(last, turns_total, segment_summaries(last))
             if fin is not None:
                 yield fin
         elif not finalized:

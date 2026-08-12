@@ -42,6 +42,17 @@ tag `vX.Y.Z`, push the commit and the tag.
 
 (all [#16])
 
+### Fixed
+
+- Structured output is no longer lost when a background-task notification arrives
+  after the agent has already delivered its answer: the model's reply to the stale
+  notification became the turn's final message, and structured parsing — which reads
+  the final message only — returned nothing, so a successful run read as having no
+  deliverable. The final result event now carries the displaced segment-boundary
+  results' texts (`raw["segment_summaries"]`, newest first) and result building
+  falls back over them; `RunResult.structured_output_recovered` marks a recovered
+  value ([#20]).
+
 ### Backwards-incompatible
 
 - `get_engine(spec=…)` is removed, with no deprecation shim — passing `spec`
@@ -61,6 +72,7 @@ tag `vX.Y.Z`, push the commit and the tag.
   unrecognized directive line would additionally leak into the prompt).
 
 [#16]: https://github.com/zytedata/remote-agent-toolkit/pull/16
+[#20]: https://github.com/zytedata/remote-agent-toolkit/pull/20
 
 ## 0.1.0 — 2026-08-07
 

@@ -43,14 +43,25 @@ def stop_reason_for(result_raw: dict, checkpoint: bool) -> StopReason:
 
 def build_result(result_ev: AgentEvent, session_id: str, spec: AgentSpec) -> tuple[RunResult, StopReason]:
     raw = result_ev.raw or {}
-    structured = (
-        parse_structured_output(result_ev.summary, spec.output_schema)
-        if spec.output_schema is not None
-        else None
-    )
+    structured = None
+    recovered = False
+    if spec.output_schema is not None:
+        structured = parse_structured_output(result_ev.summary, spec.output_schema)
+        if structured is None:
+            # The turn's final text can lose the deliverable: a stale background-task
+            # notification re-invokes the model after it already answered, and its
+            # reply to the notification becomes the final message. The harness carries
+            # the displaced segment-boundary results' texts on the result event
+            # (newest first) — recover the structured output from those.
+            for text in raw.get("segment_summaries") or ():
+                structured = parse_structured_output(text, spec.output_schema)
+                if structured is not None:
+                    recovered = True
+                    break
     result = RunResult(
         text=result_ev.summary,
         structured_output=structured,
+        structured_output_recovered=recovered,
         is_error=bool(raw.get("is_error")),
         num_turns=int(raw.get("num_turns") or 0),
         cost_usd=float(result_ev.cost_usd or 0.0),

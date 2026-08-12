@@ -122,6 +122,10 @@ def test_cold_submit_stages_secrets_and_query_carries_only_pointer(monkeypatch):
     assert "SUPERSECRET" not in query                      # never the value
     assert "AGENT_SECRETS_GCS=gs://out/invocation-secrets/sid-3-abc.json" in query
     assert staged["secrets"] == {"SH_APIKEY": "SUPERSECRET"}  # staged out-of-band
+    # No session/turn config was bound, so nothing config-related rides the query — the
+    # turn runs the deploy-baked spec, with zero extra staging (the pre-config behavior).
+    assert "AGENT_SESSION_CONFIG_GCS" not in query
+    assert "AGENT_TURN_CONFIG_GCS" not in query
     # Completion cleans up the staged object (backstop; the worker deletes at turn end).
     assert session._staged_secrets_uri is None
     # 2026-07-28 platform-runner regressions: the invoked method must be named
@@ -350,7 +354,7 @@ def test_run_turn_late_crash_keeps_terminal_result(tmp_path, monkeypatch):
 def test_run_turn_surfaces_workspace_prep_crash(monkeypatch):
     # Workspace prep (repo clone / skills staging) runs BEFORE the first emitted event; a
     # failure there (e.g. a bad repo token) must also yield a terminal error, not silence.
-    def boom(rc):
+    def boom(rc, prefer_baked_skills=True):
         raise RuntimeError("git clone failed: fatal: Authentication failed")
 
     monkeypatch.setattr(adk_agent, "_prepare_workspace", boom)

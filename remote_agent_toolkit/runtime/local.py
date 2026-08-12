@@ -27,16 +27,47 @@ from ..events import AgentEvent, RunResult, RunStatus, StopReason
 from ._run import DrivenRun
 
 if TYPE_CHECKING:
+    from ..config import SessionConfig, TurnConfig
     from ..spec import AgentSpec
+
+# Where a session's bound config is persisted inside the engine's blob root, so a
+# process re-attaching by id (with the same workdir) recovers it — same rule as gemini:
+# the config is bound once at session start and cannot be substituted on re-attach.
+_SESSION_CONFIG_KEY = "session-config/{sid}.json"
 
 
 class LocalSession:
-    """An in-process session with the CMA-style lifecycle (DESIGN.md §4)."""
+    """An in-process session with the CMA-style lifecycle (DESIGN.md §4).
 
-    def __init__(self, engine: LocalEngine, session_id: str) -> None:
+    The session's :class:`~remote_agent_toolkit.config.SessionConfig` (bound at
+    ``engine.start_session(config=...)``) overlays the engine's spec for every turn of
+    this session; a per-turn :class:`~remote_agent_toolkit.config.TurnConfig` overlays
+    that for one turn. Same scope model as gemini — see ``runtime.base``.
+    """
+
+    def __init__(
+        self,
+        engine: LocalEngine,
+        session_id: str,
+        config: SessionConfig | None = None,
+        config_resolved: bool = True,
+    ) -> None:
+        from ..config import apply_session_config, validate_harness_choice
+
         self._engine = engine
         self._session_id = session_id
-        spec = engine.spec
+        if not config_resolved and config is None:
+            config = self._load_persisted_config()
+        elif config is not None and config.set_fields():
+            self._persist_config(config)
+        else:
+            config = None
+        self._config = config
+        # The session's effective spec: the deployed spec + the bound overlay. Everything
+        # below (checkpoint wiring, turns) derives from THIS, not engine.spec.
+        spec = apply_session_config(engine.spec, config)
+        validate_harness_choice(engine.spec, spec)  # fail at bind, not mid-turn
+        self._spec = spec
         self._job_dir = engine._jobs_root / session_id
         # Wire checkpoint adapters only when the spec opts in (parity with gemini).
         self._blobs: Any | None = None
@@ -62,32 +93,80 @@ class LocalSession:
         self._last_result: RunResult | None = None
         self._current_run: DrivenRun | None = None
 
+    # -- session-config persistence (cross-process re-attach, same workdir) -----
+
+    def _config_store(self) -> Any:
+        from ..ports.blobstore import LocalBlobStore
+
+        return LocalBlobStore(str(self._engine._blob_root))
+
+    def _persist_config(self, config: SessionConfig) -> None:
+        import json
+
+        self._config_store().put_bytes(
+            _SESSION_CONFIG_KEY.format(sid=self._session_id),
+            json.dumps(config.to_dict()).encode("utf-8"),
+        )
+
+    def _load_persisted_config(self) -> SessionConfig | None:
+        import json
+
+        from ..config import SessionConfig
+
+        try:
+            data = self._config_store().get_bytes(_SESSION_CONFIG_KEY.format(sid=self._session_id))
+        except Exception:  # noqa: BLE001 — no persisted config: the session has none
+            return None
+        return SessionConfig.from_dict(json.loads(data.decode("utf-8")))
+
     # -- run plane -------------------------------------------------------------
 
-    def run(self, message: str, *, secrets: dict[str, str] | None = None) -> DrivenRun:
+    def run(
+        self,
+        message: str,
+        *,
+        secrets: dict[str, str] | None = None,
+        config: TurnConfig | None = None,
+    ) -> DrivenRun:
         """Start a fresh turn from ``message``.
 
         ``secrets`` is a per-invocation name → value map (the agent's own API keys, any repo
         ``auth`` / GitHub MCP token). Values live only for this run; they are never baked into
-        the spec and never logged.
+        the spec and never logged. ``config`` is this turn's
+        :class:`~remote_agent_toolkit.config.TurnConfig` overlay (invocation knobs only).
         """
-        return self._start(message, resume_sid=None, secrets=secrets)
+        return self._start(message, resume_sid=None, secrets=secrets, turn_config=config)
 
-    def send(self, message: str, *, secrets: dict[str, str] | None = None) -> DrivenRun:
+    def send(
+        self,
+        message: str,
+        *,
+        secrets: dict[str, str] | None = None,
+        config: TurnConfig | None = None,
+    ) -> DrivenRun:
         """Resume this session with ``message`` (continues the conversation).
 
         Conversation + workspace continuity requires ``spec.checkpoint=True``; without it
         this runs a fresh turn with no memory of the prior one. Pass ``secrets`` again (they
         are not persisted across turns) so repo push auth is re-embedded on resume.
+        ``config`` is a per-turn :class:`~remote_agent_toolkit.config.TurnConfig`; the
+        SESSION config cannot change here (bound at ``start_session``).
         """
-        return self._start(message, resume_sid=self._session_id, secrets=secrets)
+        return self._start(
+            message, resume_sid=self._session_id, secrets=secrets, turn_config=config
+        )
 
     def _start(
-        self, message: str, resume_sid: str | None, secrets: dict[str, str] | None = None
+        self,
+        message: str,
+        resume_sid: str | None,
+        secrets: dict[str, str] | None = None,
+        turn_config: TurnConfig | None = None,
     ) -> DrivenRun:
+        from ..config import apply_turn_config
         from ..harness.context import RunContext
 
-        spec = self._engine.spec
+        spec = apply_turn_config(self._spec, turn_config)
         ctx = RunContext(
             spec=spec,
             prompt=message,
@@ -105,7 +184,7 @@ class LocalSession:
         async def factory() -> AsyncIterator[AgentEvent]:
             prep = await asyncio.to_thread(engine._prepare_workspace, ctx, resume_sid is not None)
             yield AgentEvent(kind="status", summary=prep["summary"], raw=prep)
-            async for event in engine._harness.run(spec, ctx):
+            async for event in engine._harness_for(spec).run(spec, ctx):
                 yield event
 
         run = DrivenRun(factory, self._session_id, spec, on_complete=self._on_complete)
@@ -208,6 +287,19 @@ class LocalEngine:
 
     # -- helpers used by sessions/runs ----------------------------------------
 
+    def _harness_for(self, spec: AgentSpec) -> Any:
+        """The harness binding for a turn's effective spec.
+
+        The engine-default harness is resolved once at deploy (``self._harness``); a
+        session that selected a DIFFERENT harness (``SessionConfig(harness=...)``,
+        validated against ``spec.harnesses`` at bind) resolves its own here.
+        """
+        if spec.harness == self.spec.harness:
+            return self._harness
+        from ..harness import resolve_harness
+
+        return resolve_harness(spec)
+
     def _prepare_workspace(self, ctx: Any, is_resume: bool) -> dict:
         """Restore a prior workspace (resume) or stage skills + clone repos into a fresh cwd.
 
@@ -255,19 +347,28 @@ class LocalEngine:
 
     # -- Engine protocol -------------------------------------------------------
 
-    def start_session(self) -> LocalSession:
+    def start_session(self, config: SessionConfig | None = None) -> LocalSession:
+        """Begin a new session; ``config`` binds its ``SessionConfig`` for good (see base).
+
+        The config is persisted under the engine's workdir so a process re-attaching by
+        id (same workdir) recovers it — parity with gemini's GCS persistence.
+        """
         # Canonical UUID (dashed), NOT uuid4().hex: this id is passed to the Claude Agent
         # SDK as session_id (checkpoint keying) / resume, and the SDK rejects a non-canonical
         # id at runtime with "Invalid session ID. Must be a valid UUID".
-        session = LocalSession(self, str(uuid.uuid4()))
+        session = LocalSession(self, str(uuid.uuid4()), config=config)
         self._sessions[session.session_id] = session
         return session
 
     def get_session(self, session_id: str) -> LocalSession:
+        """Re-attach by id (e.g. to resume from a checkpoint written earlier).
+
+        Takes NO config on purpose: the session runs under the config bound at
+        ``start_session`` (recovered from the workdir), never a substituted one.
+        """
         session = self._sessions.get(session_id)
         if session is None:
-            # Re-attach by id (e.g. to resume from a checkpoint written earlier).
-            session = LocalSession(self, session_id)
+            session = LocalSession(self, session_id, config_resolved=False)
             self._sessions[session_id] = session
         return session
 

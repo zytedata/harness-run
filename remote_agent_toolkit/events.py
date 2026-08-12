@@ -56,6 +56,12 @@ class RunResult:
     Attributes:
         text: Final assistant text, or ``None``.
         structured_output: Parsed structured output if an ``output_schema`` was set.
+        structured_output_recovered: ``structured_output`` came from an earlier
+            segment-boundary result of the turn, not from ``text`` — a background-task
+            notification re-invoked the model after it delivered the answer, and its
+            reply to the stale notification displaced the deliverable from the final
+            message. The recovered value is real; this flags that ``text`` doesn't
+            contain it.
         is_error: Whether the run terminated in error.
         num_turns: Number of agent turns consumed.
         cost_usd: Total spend for the run.
@@ -69,6 +75,7 @@ class RunResult:
 
     text: str | None
     structured_output: Any = None
+    structured_output_recovered: bool = False
     is_error: bool = False
     num_turns: int = 0
     cost_usd: float = 0.0

@@ -6,9 +6,12 @@ both implement identically, so app code is backend-agnostic.
 
 from __future__ import annotations
 
-from typing import AsyncIterator, Protocol, runtime_checkable
+from typing import AsyncIterator, Protocol, TYPE_CHECKING, runtime_checkable
 
 from ..events import AgentEvent, RunResult, RunStatus, StopReason
+
+if TYPE_CHECKING:
+    from ..config import SessionConfig, TurnConfig
 
 
 @runtime_checkable
@@ -58,19 +61,35 @@ class Session(Protocol):
     :meth:`Engine.get_session` and poll / continue it.
     """
 
-    def run(self, message: str, *, secrets: dict[str, str] | None = None) -> Run:
+    def run(
+        self,
+        message: str,
+        *,
+        secrets: dict[str, str] | None = None,
+        config: TurnConfig | None = None,
+    ) -> Run:
         """Start a run from ``message`` (kicks off a fresh turn).
 
         ``secrets`` is a per-invocation name → value map (the agent's own keys, any repo
         ``auth`` / GitHub MCP token). Values are never baked into the spec or logged.
+        ``config`` is this turn's :class:`~remote_agent_toolkit.config.TurnConfig` — a
+        sparse overlay of the invocation knobs on the session's effective spec.
         """
         ...
 
-    def send(self, message: str, *, secrets: dict[str, str] | None = None) -> Run:
+    def send(
+        self,
+        message: str,
+        *,
+        secrets: dict[str, str] | None = None,
+        config: TurnConfig | None = None,
+    ) -> Run:
         """Resume an idle session with ``message`` (e.g. answer a ``needs_input`` pause).
 
         Resumes via checkpoint on a warm worker (DESIGN.md §3.7). Pass ``secrets`` again — they
-        are not persisted across turns, so repo push auth is re-embedded on resume.
+        are not persisted across turns, so repo push auth is re-embedded on resume. ``config``
+        is a per-turn :class:`~remote_agent_toolkit.config.TurnConfig`; the SESSION config
+        cannot change here (bound at :meth:`Engine.start_session`, world snapshot-restored).
         """
         ...
 
@@ -132,12 +151,23 @@ class Engine(Protocol):
     ``gemini.get_engine(name)`` looks one up without deploying.
     """
 
-    def start_session(self) -> Session:
-        """Begin a new session against this engine."""
+    def start_session(self, config: SessionConfig | None = None) -> Session:
+        """Begin a new session against this engine.
+
+        ``config`` binds the session's :class:`~remote_agent_toolkit.config.SessionConfig`
+        (a sparse overlay over the deployed spec: repos, skills, prompt, model, ...) for
+        the session's whole life — its world is created on the first turn and
+        snapshot-restored after, so it cannot change mid-conversation.
+        """
         ...
 
     def get_session(self, session_id: str) -> Session:
-        """Re-attach to an existing session by id (poll / continue)."""
+        """Re-attach to an existing session by id (poll / continue).
+
+        Deliberately takes NO config: the session runs under the config bound at
+        :meth:`start_session` (persisted with the session's records and read back here),
+        so a re-attaching process can never substitute a different world mid-conversation.
+        """
         ...
 
     def list_sessions(self) -> list[dict]:

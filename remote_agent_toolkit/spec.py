@@ -248,8 +248,15 @@ class AgentSpec:
             The spec's harness-shaped fields (``permission_mode``, tool lists, skills)
             are translated by each binding; see the harness module docstrings for the
             mapping and any parity caveats.
+        harnesses: ALL harnesses this deployment offers (their CLIs are baked into the
+            engine image), e.g. ``("claude-code", "codex")`` to bake both so sessions can
+            pick either via ``SessionConfig(harness=...)`` without a second engine.
+            Empty (default) means just ``(harness,)``. ``harness`` stays the default a
+            session runs when its config doesn't select one, and must be in this list.
+            Baking both costs image size. See :attr:`baked_harnesses`.
         system_prompt: A ``SystemPrompt`` (inherit + append) or a plain ``str``
-            (replace entirely) or ``None`` (harness default).
+            (replace entirely) or ``None`` — the harness's built-in prompt, i.e. the
+            same agent ``SystemPrompt.inherit()`` asks for.
         skills: Skill sources, resolved & staged at deploy/run time.
         repos: Git repositories cloned into the agent's cwd before it runs (with push auth
             from a GitHub token in ``secrets`` when present).
@@ -316,6 +323,7 @@ class AgentSpec:
     output_schema: Any = None
     env: Mapping[str, str] | None = field(default=None)
     packages: tuple[str, ...] = ()
+    harnesses: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         # Coerce list args to frozen-hashable tuples without breaking frozen-ness.
@@ -323,10 +331,21 @@ class AgentSpec:
         object.__setattr__(self, "repos", tuple(self.repos))
         object.__setattr__(self, "mcp_servers", tuple(self.mcp_servers))
         object.__setattr__(self, "packages", tuple(self.packages))
+        object.__setattr__(self, "harnesses", tuple(self.harnesses))
+        if self.harnesses and self.harness not in self.harnesses:
+            raise ValueError(
+                f"harness {self.harness!r} (the default) must be in harnesses="
+                f"{list(self.harnesses)} — the default must be one of the baked CLIs"
+            )
         if self.allowed_tools is not None:
             object.__setattr__(self, "allowed_tools", tuple(self.allowed_tools))
         if self.disallowed_tools is not None:
             object.__setattr__(self, "disallowed_tools", tuple(self.disallowed_tools))
+
+    @property
+    def baked_harnesses(self) -> tuple[str, ...]:
+        """Every harness this deployment offers: ``harnesses``, defaulting to ``(harness,)``."""
+        return self.harnesses or (self.harness,)
 
     # -- serialization ---------------------------------------------------------
 
@@ -362,6 +381,8 @@ class AgentSpec:
             d["env"] = dict(self.env)
         if self.output_schema is not None:
             d["output_schema"] = _output_schema_to_dict(self.output_schema)
+        if self.harnesses:
+            d["harnesses"] = list(self.harnesses)
         return d
 
     @classmethod
@@ -399,6 +420,7 @@ class AgentSpec:
             output_schema=d.get("output_schema"),
             env=dict(d["env"]) if d.get("env") is not None else None,
             packages=tuple(d.get("packages", ())),
+            harnesses=tuple(d.get("harnesses", ())),
         )
 
     def to_yaml(self) -> str:

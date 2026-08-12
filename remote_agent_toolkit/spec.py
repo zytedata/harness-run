@@ -249,7 +249,8 @@ class AgentSpec:
             are translated by each binding; see the harness module docstrings for the
             mapping and any parity caveats.
         system_prompt: A ``SystemPrompt`` (inherit + append) or a plain ``str``
-            (replace entirely) or ``None`` (harness default).
+            (replace entirely) or ``None`` — the harness's built-in prompt, i.e. the
+            same agent ``SystemPrompt.inherit()`` asks for.
         skills: Skill sources, resolved & staged at deploy/run time.
         repos: Git repositories cloned into the agent's cwd before it runs (with push auth
             from a GitHub token in ``secrets`` when present).

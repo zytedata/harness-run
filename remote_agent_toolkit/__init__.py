@@ -7,12 +7,16 @@ yaml) are imported lazily inside the function/method that needs them.
 
 from __future__ import annotations
 
+from .config import INHERIT, SessionConfig, TurnConfig
 from .events import AgentEvent, RunResult, RunStatus, StopReason
 from .runtime import gemini, local
 from .spec import AgentSpec, McpServer, RepoSource, SkillSource, SystemPrompt
 
 __all__ = [
     "AgentSpec",
+    "SessionConfig",
+    "TurnConfig",
+    "INHERIT",
     "SystemPrompt",
     "SkillSource",
     "RepoSource",

@@ -126,9 +126,11 @@ def build_requirements(spec: AgentSpec) -> list[str]:
     from packaging.requirements import InvalidRequirement, Requirement  # lazy
     from packaging.utils import canonicalize_name
 
-    # The Codex SDK bundles a pinned codex CLI binary (tens of MB): baked only for
-    # codex-harness engines. Keep in lockstep with pyproject.
-    extra = ("openai-codex>=0.144.4",) if spec.harness == "codex" else ()
+    # The Codex SDK bundles a pinned codex CLI binary (tens of MB): baked only when the
+    # deployment offers the codex harness (spec.harness or spec.harnesses) — harness
+    # AVAILABILITY is a deploy-time fact; sessions select among what is baked. Keep in
+    # lockstep with pyproject.
+    extra = ("openai-codex>=0.144.4",) if "codex" in spec.baked_harnesses else ()
 
     entries: list = []  # str (opaque pass-through) or Requirement, in first-seen order
     by_name: dict = {}
@@ -259,8 +261,9 @@ def build_env(
     # its OWN GCP identity (the RE service agent) — no API key in the agent's environment. For
     # API-key mode (use_vertex=False) the caller passes ANTHROPIC_API_KEY per-invocation.
     # The Codex harness calls the OpenAI API directly (no Vertex path for OpenAI models);
-    # its OPENAI_API_KEY travels per-invocation, so the vertex routing vars are omitted.
-    if use_vertex and project and spec.harness != "codex":
+    # its OPENAI_API_KEY travels per-invocation, so the vertex routing vars are set only
+    # when a non-codex harness is baked (they are inert for codex turns either way).
+    if use_vertex and project and any(h != "codex" for h in spec.baked_harnesses):
         env["CLAUDE_CODE_USE_VERTEX"] = "1"
         env["ANTHROPIC_VERTEX_PROJECT_ID"] = project
         env["CLOUD_ML_REGION"] = vertex_region

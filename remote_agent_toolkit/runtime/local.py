@@ -69,10 +69,12 @@ class LocalSession:
         validate_harness_choice(engine.spec, spec)  # fail at bind, not mid-turn
         self._spec = spec
         self._job_dir = engine._jobs_root / session_id
-        # Wire checkpoint adapters only when the spec opts in (parity with gemini).
+        # Wire the blob/session-store adapters only when the spec opts in (parity with
+        # gemini). ``transcript`` wires them for reading the transcript back; the workspace
+        # snapshot stays behind ``checkpoint`` alone (see ``_shared.finalize_checkpoint``).
         self._blobs: Any | None = None
         self._session_store: Any | None = None
-        if spec.checkpoint:
+        if spec.checkpoint or spec.transcript:
             from ..checkpoint.session_store import BlobSessionStore
 
             ckpt_gcs = os.environ.get("AGENT_CHECKPOINT_GCS")
@@ -243,6 +245,15 @@ class LocalSession:
         ws = self._job_dir / "workspace"
         ws.mkdir(parents=True, exist_ok=True)
         return ws
+
+    async def transcripts(self) -> dict[str, list[dict]]:
+        """This session's persisted harness transcripts (see ``runtime.base.Session``)."""
+        if self._session_store is None:
+            raise RuntimeError(
+                "no transcript was persisted for this session — deploy the spec with "
+                "AgentSpec(transcript=True)"
+            )
+        return await self._session_store.load_all(self._session_id)
 
     def history(self) -> list[AgentEvent]:
         raise NotImplementedError(

@@ -617,6 +617,21 @@ result exists — poll `run.done` for in-flight runs, not this. Caveats: `list_s
 bucket-wide, so engines sharing an output bucket see each other's sessions; the `local` runtime keeps no
 durable event log (`list_sessions` shows its workdir's session dirs; `history()` raises).
 
+### Reading the harness transcript
+
+`AgentEvent`s are summaries. When you need the harness's own record — per-turn usage, tool statuses,
+subagent trees, permission denials — deploy with `transcript=True` and read it back on both runtimes:
+
+```python
+spec = AgentSpec(name="scorer", model="claude-sonnet-4-6", transcript=True)
+...
+transcripts = await session.transcripts()   # {"main": [...], "subagents/<id>": [...], ...}
+```
+
+`checkpoint=True` implies it (resume needs the transcript), but `transcript=True` alone adds **no
+workspace snapshot** — a run with a multi-hundred-MB working directory pays for the transcript only. The
+`codex` harness keeps its conversation under `checkpoint` alone, so `transcripts()` reads back `{}` there.
+
 ## Monitoring job CPU/RAM (OOM forensics)
 
 The platform gives you **no** resource metrics for agent jobs: query-job containers run in a Google tenant

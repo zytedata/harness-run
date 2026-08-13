@@ -156,9 +156,13 @@ def _find_baked_skills() -> Path | None:
 
 
 def _checkpoint_ports(spec: Any) -> tuple[Any | None, Any | None]:
-    """Build (BlobStore, SessionStore) from ``AGENT_CHECKPOINT_GCS`` when checkpointing is on."""
+    """Build (BlobStore, SessionStore) from ``AGENT_CHECKPOINT_GCS`` when checkpointing is on.
+
+    Also built for a transcript-only spec: the transcript is mirrored to the store, while
+    the workspace snapshot stays behind ``spec.checkpoint`` (``_shared.finalize_checkpoint``).
+    """
     ckpt = os.environ.get("AGENT_CHECKPOINT_GCS")
-    if not (spec.checkpoint and ckpt):
+    if not ((spec.checkpoint or spec.transcript) and ckpt):
         return None, None
     from ...checkpoint.session_store import BlobSessionStore
     from ...ports.blobstore import GcsBlobStore
@@ -179,7 +183,7 @@ def _prewarm(spec: Any) -> None:
     from ...ports.eventsink import CloudLoggingSink
     from .pool import pool_log_id_from_subscription
 
-    if spec.checkpoint and os.environ.get("AGENT_CHECKPOINT_GCS"):
+    if (spec.checkpoint or spec.transcript) and os.environ.get("AGENT_CHECKPOINT_GCS"):
         try:
             from google.cloud import storage
 

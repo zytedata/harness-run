@@ -893,6 +893,26 @@ class GeminiSession:
             credentials=engine._credentials,
         )
 
+    async def transcripts(self) -> dict[str, list[dict]]:
+        """This session's persisted harness transcripts (see ``runtime.base.Session``).
+
+        Read straight from the engine's checkpoint prefix, so it works for a session
+        re-attached from another process — the same objects the worker mirrored the
+        transcript to during the run.
+        """
+        from ...checkpoint.session_store import BlobSessionStore
+        from ...ports.blobstore import GcsBlobStore, parse_gcs_uri
+
+        engine = self._engine
+        if not engine._output_bucket:
+            raise RuntimeError(
+                "transcripts() reads the engine's checkpoint prefix under its output "
+                "bucket; construct the engine with output_bucket/project set."
+            )
+        bucket, prefix = parse_gcs_uri(f"{engine._output_bucket}/checkpoints")
+        blobs = GcsBlobStore(bucket, (prefix + "/") if prefix else "")
+        return await BlobSessionStore(blobs).load_all(self._session_id)
+
     def resource_samples(self) -> list[dict]:
         """This session's worker CPU/RAM samples, oldest first (OOM forensics).
 

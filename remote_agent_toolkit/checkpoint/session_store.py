@@ -77,6 +77,23 @@ class BlobSessionStore:
                 out.append(e)
         return out or None
 
+    # -- beyond the protocol: read a whole session back ----------------------
+    async def load_all(self, session_id: str) -> dict[str, list[dict]]:
+        """Every transcript of ``session_id``, keyed by ``"main"`` and each subagent subpath.
+
+        Leaves with no entries are omitted, so a session that was never persisted reads
+        back as ``{}``. What the runtimes' ``Session.transcripts()`` is built on.
+        """
+        out: dict[str, list[dict]] = {}
+        for leaf in ("main", *await self.list_subkeys({"session_id": session_id})):
+            key = {"session_id": session_id}
+            if leaf != "main":
+                key["subpath"] = leaf
+            entries = await self.load(key)
+            if entries:
+                out[leaf] = entries
+        return out
+
     # -- optional: lets resume rehydrate subagent transcripts ---------------
     async def list_subkeys(self, key: dict) -> list[str]:
         sid = key["session_id"]

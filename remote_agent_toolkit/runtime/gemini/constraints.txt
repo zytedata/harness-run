@@ -19,12 +19,14 @@
 # in the same change — `verify_deploy_env()` enforces that they match at deploy time.
 #
 # Pin provenance: the verified-clean canary build of 2026-08-05 (assembly base image
-# assembly-service-py312, engine 6064925380265902080).
+# assembly-service-py312, engine 6064925380265902080); google-cloud-aiplatform
+# refreshed to 1.164.0 on 2026-08-13, verified by a clean `make live-smoke`
+# (cold+warm engines, all six checks pass, spans exported with no export errors).
 
 # Pickle-coupled to the DEPLOY venv: the engine build unpickles the AdkApp object the
 # deploying client pickled, so these must match the operator's venv (fail-fast checked
 # by verify_deploy_env() before the ~4 min billable build).
-google-cloud-aiplatform==1.163.0
+google-cloud-aiplatform==1.164.0
 cloudpickle==3.1.2
 pydantic==2.13.4
 

@@ -42,6 +42,19 @@ tag `vX.Y.Z`, push the commit and the tag.
 
 (all [#16])
 
+- `AgentSpec(transcript=True)` persists the harness's own transcript — the full
+  per-turn record: usage, tool statuses, subagent trees, permission denials —
+  and `Session.transcripts()` reads it back on both runtimes, keyed by `"main"`
+  plus each subagent subpath. Reading a transcript used to require
+  `checkpoint=True`, which also archives the entire working directory to blobs
+  at every turn: hundreds of MB per run for an agent that writes a lot, paid
+  purely to get at a JSONL. `checkpoint=True` still implies `transcript`
+  (resume needs the transcript), so existing specs are unaffected. On `gemini`
+  the flag is what opens the checkpoint bucket, so a transcript-only spec needs
+  a redeploy with an `output_bucket`. The `codex` harness persists its
+  conversation under `checkpoint` alone, so `transcripts()` reads back `{}`
+  there ([#26]).
+
 ### Changed
 
 - Claude Code runs now pass `--strict-mcp-config`: MCP servers come from
@@ -100,6 +113,7 @@ tag `vX.Y.Z`, push the commit and the tag.
 [#21]: https://github.com/zytedata/remote-agent-toolkit/pull/21
 [#22]: https://github.com/zytedata/remote-agent-toolkit/pull/22
 [#24]: https://github.com/zytedata/remote-agent-toolkit/pull/24
+[#26]: https://github.com/zytedata/remote-agent-toolkit/pull/26
 
 ## 0.1.0 — 2026-08-07
 

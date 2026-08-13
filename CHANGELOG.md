@@ -42,6 +42,12 @@ tag `vX.Y.Z`, push the commit and the tag.
 
 (all [#16])
 
+- `gemini.deploy(..., pool_max_wait_s=...)` sets how long an idle warm-pool
+  worker waits for an assignment before exiting. The worker side always read
+  `AGENT_POOL_MAX_WAIT_S`, but nothing plumbed it into the engine env, so
+  the knob was unreachable; passing it without `warm_pool=True` now fails
+  loudly instead of being swallowed by `deploy()`'s kwargs catch-all ([#28]).
+
 ### Changed
 
 - Claude Code runs now pass `--strict-mcp-config`: MCP servers come from
@@ -57,6 +63,13 @@ tag `vX.Y.Z`, push the commit and the tag.
   from now on (`uv sync` suffices); already-deployed engines are unaffected,
   the pin is baked into their image. Verified with a clean `make live-smoke`
   ([#24]).
+- The default idle life of a warm-pool worker is now a day, up from 30
+  minutes. An idle-expired worker exits **without replacement**, and a pool
+  that drains to empty never self-recovers (the post-dispatch refill worker
+  claims the pending dispatch itself) — so the short default silently turned
+  any pool quiet for half an hour permanently cold. Note the cost implication
+  on redeploy: idle workers now bill for up to a day; pass `pool_max_wait_s`
+  to dial it back for pools with steady traffic ([#28]).
 
 ### Fixed
 
@@ -100,6 +113,7 @@ tag `vX.Y.Z`, push the commit and the tag.
 [#21]: https://github.com/zytedata/remote-agent-toolkit/pull/21
 [#22]: https://github.com/zytedata/remote-agent-toolkit/pull/22
 [#24]: https://github.com/zytedata/remote-agent-toolkit/pull/24
+[#28]: https://github.com/zytedata/remote-agent-toolkit/pull/28
 
 ## 0.1.0 — 2026-08-07
 

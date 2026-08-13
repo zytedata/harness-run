@@ -141,6 +141,28 @@ def test_build_env_vertex_routing_default_and_api_key_opt_out() -> None:
     assert "CLAUDE_CODE_USE_VERTEX" not in deploy.build_env(_spec())
 
 
+def test_build_env_pool_max_wait() -> None:
+    """pool_max_wait_s must reach the worker env: the wait loop reads AGENT_POOL_MAX_WAIT_S
+    from the WORKER process, and before this knob nothing plumbed it there (the var was
+    unreachable — callers resorted to monkeypatching build_env)."""
+    import pytest
+
+    pool_kw = dict(warm_pool=True, pool_subscription="projects/p/subscriptions/s")
+
+    env = deploy.build_env(_spec(), **pool_kw, pool_max_wait_s=7200)
+    assert env["AGENT_POOL_SUBSCRIPTION"] == "projects/p/subscriptions/s"
+    assert env["AGENT_POOL_MAX_WAIT_S"] == "7200"
+
+    # Unset -> absent from the env, so the worker-side default (pool.DEFAULT_MAX_WAIT_S)
+    # stays authoritative.
+    assert "AGENT_POOL_MAX_WAIT_S" not in deploy.build_env(_spec(), **pool_kw)
+    # Not a pool worker -> the knob is meaningless; never baked.
+    assert "AGENT_POOL_MAX_WAIT_S" not in deploy.build_env(_spec(), pool_max_wait_s=7200)
+
+    with pytest.raises(ValueError, match="pool_max_wait_s"):
+        deploy.build_env(_spec(), **pool_kw, pool_max_wait_s=0)
+
+
 def test_stage_skills_local(tmp_path: Path) -> None:
     # Fake local skill dir: one folder with a SKILL.md.
     src = tmp_path / "src"
@@ -192,6 +214,20 @@ def test_build_engine_config_resource_limits() -> None:
     cfg = deploy.build_engine_config(_spec(), resource_limits=limits, **kw)
     assert cfg["resource_limits"] == {"cpu": "8", "memory": "16Gi"}
     assert cfg["resource_limits"] is not limits  # defensive copy
+
+
+def test_build_engine_config_pool_max_wait_passthrough() -> None:
+    cfg = deploy.build_engine_config(
+        _spec(),
+        project="proj",
+        location="us-central1",
+        staging_bucket="gs://staging",
+        extra_packages=[],
+        warm_pool=True,
+        pool_subscription="projects/p/subscriptions/s",
+        pool_max_wait_s=3600,
+    )
+    assert cfg["env_vars"]["AGENT_POOL_MAX_WAIT_S"] == "3600"
 
 
 def test_validate_resource_limits_rejects_malformed() -> None:

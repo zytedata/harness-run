@@ -258,6 +258,7 @@ def deploy(
     max_instances: int = 1,
     resource_limits: dict[str, str] | None = None,
     pool_size: int = 2,
+    pool_max_wait_s: float | None = None,
     new_engine: bool = False,
     credentials: Any | None = None,
     **_: Any,
@@ -286,6 +287,16 @@ def deploy(
     only adds ``pool_size`` more. For a hard cutover, ``delete()`` the engine's pool workers
     (or deploy with ``new_engine=True``) instead.
 
+    **Warm workers idle-expire, and the pool does not self-recover.** An idle worker waits
+    ``pool_max_wait_s`` (default: a day) for an assignment, then exits — silently, and
+    WITHOUT replacement: the only automatic refill is the one worker submitted after each
+    dispatch, and against an *empty* pool that refill worker claims the very dispatch it was
+    meant to back-fill, so net pool size stays 0 and every turn pays the ~2.5 min cold boot
+    until :meth:`GeminiEngine.fill_pool` is called by hand. Idle workers bill while they
+    wait, so ``pool_max_wait_s`` is the idle-cost/latency dial: lower it for engines that
+    are dispatched to constantly (expiry never fires), keep or raise it for pools that must
+    stay warm across quiet gaps.
+
     ``use_vertex`` (default) routes the model through Vertex, so the engine authenticates as its
     own GCP identity and **no LLM API key is ever in the agent's environment** (the recommended,
     prompt-injection-safe default). Set ``use_vertex=False`` only if the project can't use Vertex
@@ -302,6 +313,12 @@ def deploy(
     job runner can OOM-kill a worker mid-turn, losing the attempt's work and spend even
     though the retry (see the handoff docs) picks the turn up from scratch.
     """
+    # Fail fast BEFORE any side effect (pub/sub ensure, staging, the ~4 min billable build).
+    if pool_max_wait_s is not None and not warm_pool:
+        # Loud on purpose: a silently-ignored idle-life knob is exactly the operational
+        # surprise this parameter exists to remove.
+        raise ValueError("pool_max_wait_s only applies to warm-pool engines; pass warm_pool=True")
+
     import dataclasses
     import os
 
@@ -315,7 +332,6 @@ def deploy(
         verify_deploy_env,
     )
 
-    # Fail fast BEFORE any side effect (pub/sub ensure, staging, the ~4 min billable build).
     if resource_limits is not None:
         validate_resource_limits(resource_limits)
     verify_deploy_env()  # pickle-coupled venv pins must match constraints.txt
@@ -369,6 +385,7 @@ def deploy(
         use_vertex=use_vertex,
         warm_pool=warm_pool,
         pool_subscription=subscription,
+        pool_max_wait_s=pool_max_wait_s,
         min_instances=min_instances,
         max_instances=max_instances,
         resource_limits=resource_limits,
@@ -1016,6 +1033,13 @@ class GeminiEngine:
 
         Use this to top a warm pool back up — e.g. after reusing an engine via
         ``get_engine`` whose workers have idle-expired, or to grow the pool.
+
+        This is also the ONLY way to re-warm a pool that drained to empty: workers that
+        idle-expire (after the engine's ``pool_max_wait_s``, default a day) exit without
+        replacement, and the automatic one-worker refill after each dispatch cannot grow
+        an empty pool — that worker just claims the pending dispatch itself (see
+        :func:`deploy`). Each worker cold-boots (~2.5 min); ``wait_until_warm()`` blocks
+        until one reports ready.
         """
         ae = self._agent_engines()
         # Pool workers are query jobs too. The current Agent Runtime runner silently

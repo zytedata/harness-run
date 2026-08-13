@@ -37,10 +37,27 @@ def test_pool_helpers(monkeypatch):
     monkeypatch.delenv("AGENT_POOL_SUBSCRIPTION", raising=False)
     assert pool.worker_dispatch_from_env() is None  # not a pool worker without the env
 
+    # Idle life: the default is a day (an expired worker is never replaced, so a short
+    # default silently drained pools over any quiet gap); deploy(pool_max_wait_s=...)
+    # overrides it via the env var build_env() bakes into the engine.
+    monkeypatch.delenv("AGENT_POOL_MAX_WAIT_S", raising=False)
+    assert pool.resolve_max_wait_s() == 24 * 3600
+    monkeypatch.setenv("AGENT_POOL_MAX_WAIT_S", "7200")
+    assert pool.resolve_max_wait_s() == 7200.0
+
     # Readiness pool-id is consistent: derived from the name (control plane) == from the
     # subscription (worker side), so both tail/emit the same Cloud Logging key.
     assert pool.pool_log_id("Spider-Builder") == "ratk-spider-builder-pool"
     assert pool.pool_log_id_from_subscription(sub) == pool.pool_log_id("Spider-Builder")
+
+
+def test_deploy_rejects_pool_max_wait_without_pool():
+    """The knob must fail loudly when it cannot take effect (deploy()'s **_ catch-all
+    would otherwise swallow it silently — the exact surprise the parameter removes)."""
+    import pytest
+
+    with pytest.raises(ValueError, match="warm_pool"):
+        backend.deploy(AgentSpec(name="x", model="m"), "proj", "loc", pool_max_wait_s=3600.0)
 
 
 def test_warm_session_dispatches_and_tails(monkeypatch):

@@ -295,6 +295,10 @@ These are facts measured during the PoC. The library encodes them so consumers i
 - The worker emits **heartbeats** while idle (the async executor kills silent jobs) and **pre-warms**
   during the wait (provision skills + establish the GCS channel) so post-assignment setup is ~0.
 - On claim, the control plane refills the pool so a warm worker is ready for the next turn.
+- An idle worker **expires** after `AGENT_POOL_MAX_WAIT_S` (deploy-configurable via
+  `pool_max_wait_s`; default a day) and is not replaced — refill is claim-driven only, so a
+  pool that drains to empty stays empty until `fill_pool()` (the post-dispatch refill worker
+  just claims the pending dispatch itself).
 
 **Checkpoint / resume**
 - Conversation: the Claude SDK `SessionStore` (append/load) + `resume=session_id`. Our `GcsSessionStore`

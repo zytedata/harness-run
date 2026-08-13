@@ -214,6 +214,7 @@ def build_env(
     vertex_region: str = "global",
     warm_pool: bool = False,
     pool_subscription: str | None = None,
+    pool_max_wait_s: float | None = None,
 ) -> dict:
     """Build the engine ``env_vars`` dict from ``spec`` (generalizes the PoC ``_env_vars``).
 
@@ -231,7 +232,13 @@ def build_env(
             key in the agent env). Set ``False`` for API-key mode (key supplied per-invocation).
         warm_pool / pool_subscription: when both set, the engine acts as a pool worker that
             pulls turn assignments from ``pool_subscription``.
+        pool_max_wait_s: how long an idle pool worker waits for an assignment before it
+            exits (default: ``pool.DEFAULT_MAX_WAIT_S``, a day). Baked into the engine env
+            as ``AGENT_POOL_MAX_WAIT_S`` for the worker's wait loop to read; only
+            meaningful with ``warm_pool``.
     """
+    if pool_max_wait_s is not None and pool_max_wait_s <= 0:
+        raise ValueError(f"pool_max_wait_s must be positive; got {pool_max_wait_s!r}")
     env: dict = {
         # The engine refuses bypassPermissions under root; Agent Runtime may run as root.
         "IS_SANDBOX": "1",
@@ -271,6 +278,8 @@ def build_env(
     # Warm-pool worker config: a pooled job pulls turn assignments from this subscription.
     if warm_pool and pool_subscription:
         env["AGENT_POOL_SUBSCRIPTION"] = pool_subscription
+        if pool_max_wait_s is not None:
+            env["AGENT_POOL_MAX_WAIT_S"] = str(pool_max_wait_s)
 
     return env
 
@@ -388,6 +397,7 @@ def build_engine_config(
     vertex_region: str = "global",
     warm_pool: bool = False,
     pool_subscription: str | None = None,
+    pool_max_wait_s: float | None = None,
     min_instances: int = 0,
     max_instances: int = 1,
     resource_limits: dict[str, str] | None = None,
@@ -428,6 +438,7 @@ def build_engine_config(
             vertex_region=vertex_region,
             warm_pool=warm_pool,
             pool_subscription=pool_subscription,
+            pool_max_wait_s=pool_max_wait_s,
         ),
         "min_instances": min_instances,
         "max_instances": max_instances,

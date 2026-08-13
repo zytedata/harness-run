@@ -42,6 +42,15 @@ tag `vX.Y.Z`, push the commit and the tag.
 
 (all [#16])
 
+- `run(hooks=…)` / `send(hooks=…)` pass Claude Agent SDK hook callbacks for one
+  turn, so a caller can observe or gate every individual tool call — a
+  `PreToolUse` hook fires under every `permission_mode`, unlike the SDK's
+  `can_use_tool`, which the default `bypassPermissions` shadows entirely. Hooks
+  are live callables, so they ride the run plane next to `secrets` rather than a
+  config overlay (configs are serialized data) and are `local`-only: `gemini`
+  runs the turn in a remote worker and rejects them, and the Codex harness
+  reports them as unsupported with a `spec_warning` event ([#25]).
+
 ### Changed
 
 - Claude Code runs now pass `--strict-mcp-config`: MCP servers come from
@@ -100,6 +109,7 @@ tag `vX.Y.Z`, push the commit and the tag.
 [#21]: https://github.com/zytedata/remote-agent-toolkit/pull/21
 [#22]: https://github.com/zytedata/remote-agent-toolkit/pull/22
 [#24]: https://github.com/zytedata/remote-agent-toolkit/pull/24
+[#25]: https://github.com/zytedata/remote-agent-toolkit/pull/25
 
 ## 0.1.0 — 2026-08-07
 

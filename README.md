@@ -188,6 +188,24 @@ as disposable temp and tempts weaker models into `cd`-ing away, leaving delivera
 dir). The same `workspace/` cwd convention applies on `gemini`, but there the filesystem is remote, so
 `session.workspace` raises — seed via the prompt or `spec.repos`, collect via events or a repo push.
 
+**Observing or gating individual tool calls.** `run(hooks=...)` / `send(hooks=...)` take the Claude Agent
+SDK's [hooks](https://docs.claude.com/en/docs/claude-code/hooks) mapping for that turn, e.g. to watch every
+tool call as it is about to happen and stop the run at the first one you care about:
+
+```python
+from claude_agent_sdk import HookMatcher
+
+async def watch(input_data, tool_use_id, context):
+    print("about to run", input_data["tool_name"])
+    return {}
+
+run = session.run("…", hooks={"PreToolUse": [HookMatcher(hooks=[watch])]})
+```
+
+`PreToolUse` fires under every `permission_mode`, unlike the SDK's `can_use_tool`, which `bypassPermissions`
+(the toolkit default) shadows entirely. Hooks are live callables, so they are a `local`-only argument —
+`gemini` runs the turn in a remote worker and rejects them.
+
 ## Consuming a run: wait, stream, or poll
 
 `session.run(msg)` (and `session.send(msg)` to resume) returns a `Run` handle, consumable three ways — the

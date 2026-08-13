@@ -392,6 +392,10 @@ class CodexHarness:
                 "allowed_tools/disallowed_tools are Claude-specific and have no codex "
                 "equivalent; ignored"
             )
+        if ctx.hooks:
+            warnings.append(
+                "run(hooks=...) is Claude-specific and has no codex equivalent; ignored"
+            )
 
         mcp_overrides, mcp_env = self._mcp_overrides(spec, ctx)
         # The agent's shell env: Codex filters *KEY*/*SECRET*/*TOKEN*-named vars from the

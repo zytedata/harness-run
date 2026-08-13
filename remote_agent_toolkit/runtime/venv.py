@@ -16,6 +16,7 @@ Stdlib-only at import; ``uv`` is located lazily via its wheel (a direct toolkit 
 
 from __future__ import annotations
 
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -38,15 +39,24 @@ def _run(cmd: list[str], what: str) -> None:
 
 
 def provision_venv(root: Path, packages: tuple[str, ...], python: str = ENGINE_PYTHON) -> Path:
-    """Create ``root/venv`` with ``packages`` installed; return the venv path.
+    """Create — or reuse — ``root/venv`` with ``packages`` installed; return the venv path.
 
     Called by ``local.deploy()`` when the spec declares packages. Uses ``uv`` end to end:
     ``uv venv --python 3.12`` (downloads a managed interpreter if needed) then
     ``uv pip install`` (hardlinked from uv's global cache — warm installs take seconds).
+
+    Idempotent: a venv already provisioned in ``root`` is reused, not replaced. Re-attaching
+    to a session from another process goes through ``local.deploy()`` into the same workdir,
+    so replacing would discard an agent's mid-run installs (supported, see module docstring) —
+    and ``uv`` >= 0.12 errors on ``uv venv`` over an existing venv anyway. The declared
+    ``packages`` are (re)applied either way; a leftover directory that lacks an interpreter
+    is removed and provisioned from scratch.
     """
     venv = Path(root) / "venv"
     uv = _uv_bin()
-    _run([uv, "venv", str(venv), "--python", python], "uv venv")
+    if not (venv / "bin" / "python").exists():
+        shutil.rmtree(venv, ignore_errors=True)
+        _run([uv, "venv", str(venv), "--python", python], "uv venv")
     _run([uv, "pip", "install", "--python", str(venv / "bin" / "python"), *packages], "uv pip install")
     return venv
 

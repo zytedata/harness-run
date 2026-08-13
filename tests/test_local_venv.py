@@ -39,6 +39,39 @@ def test_provision_venv_uses_engine_python_and_surfaces_failure(monkeypatch, tmp
         venv_mod.provision_venv(tmp_path, ("nope-does-not-exist",))
 
 
+def test_provision_venv_reuses_existing_venv(monkeypatch, tmp_path):
+    """Re-deploy into the same workdir must not replace the venv (uv >= 0.12 errors on
+    an existing venv; replacing would also discard an agent's mid-run installs)."""
+    calls = []
+    monkeypatch.setattr(venv_mod, "_run", lambda cmd, what: calls.append(cmd))
+    monkeypatch.setattr(venv_mod, "_uv_bin", lambda: "/opt/uv")
+    marker = tmp_path / "venv" / "lib" / "mid-run-install"
+    py = tmp_path / "venv" / "bin" / "python"
+    for f in (marker, py):
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.touch()
+
+    got = venv_mod.provision_venv(tmp_path, ("scrapy",))
+    assert got == tmp_path / "venv"
+    assert [c[1] for c in calls] == ["pip"]  # no `uv venv` — the existing venv is reused
+    assert marker.exists()  # the venv's contents survived
+    # ...but the declared packages are still (re)applied on the reused venv.
+    assert calls[0][-1] == "scrapy"
+
+
+def test_provision_venv_replaces_dir_without_interpreter(monkeypatch, tmp_path):
+    calls = []
+    monkeypatch.setattr(venv_mod, "_run", lambda cmd, what: calls.append(cmd))
+    monkeypatch.setattr(venv_mod, "_uv_bin", lambda: "/opt/uv")
+    leftover = tmp_path / "venv" / "pyvenv.cfg"  # a venv dir with no bin/python: unusable
+    leftover.parent.mkdir(parents=True)
+    leftover.touch()
+
+    venv_mod.provision_venv(tmp_path, ("scrapy",))
+    assert [c[1] for c in calls] == ["venv", "pip"]  # provisioned from scratch
+    assert not leftover.exists()  # the unusable leftover was cleared first
+
+
 def test_venv_agent_env_composes_path():
     env = venv_mod.venv_agent_env(Path("/w/venv"), base_path="/custom:/usr/bin")
     assert env["VIRTUAL_ENV"] == "/w/venv"

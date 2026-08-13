@@ -42,6 +42,16 @@ tag `vX.Y.Z`, push the commit and the tag.
 
 (all [#16])
 
+- `run_harness_conformance()` is the `Harness` port's conformance suite, the
+  sibling of `run_session_store_conformance()`: hand it a callable that runs one
+  turn and it asserts what callers read off `AgentEvent.raw` beyond the event's
+  own fields — the `init` status event's backend payload under `raw["data"]`
+  (with the session id in it) and the terminal `result` event's spend, usage and
+  turn count. `raw` is documented as a pass-through, so a harness or SDK
+  reshaping it broke downstream readers silently; run this against your own
+  `Harness` implementation, or against the shipped one after a toolkit or SDK
+  upgrade, to catch that at test time ([#27]).
+
 ### Changed
 
 - Claude Code runs now pass `--strict-mcp-config`: MCP servers come from
@@ -100,6 +110,7 @@ tag `vX.Y.Z`, push the commit and the tag.
 [#21]: https://github.com/zytedata/remote-agent-toolkit/pull/21
 [#22]: https://github.com/zytedata/remote-agent-toolkit/pull/22
 [#24]: https://github.com/zytedata/remote-agent-toolkit/pull/24
+[#27]: https://github.com/zytedata/remote-agent-toolkit/pull/27
 
 ## 0.1.0 — 2026-08-07
 

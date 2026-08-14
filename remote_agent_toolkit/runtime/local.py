@@ -178,6 +178,7 @@ class LocalSession:
             session_store=self._session_store,
             blobs=self._blobs,
             interactive=spec.checkpoint if spec.interactive is None else spec.interactive,
+            workspace_dir=self._engine._workspace,
         )
         engine = self._engine
 
@@ -239,8 +240,11 @@ class LocalSession:
         and collect artifacts from it after — without deriving the layout themselves.
         The agent runs in this ``workspace`` leaf (not the anonymous ``jobs/<uuid>``
         session dir above it) so the cwd's own name says "this is your workspace".
+
+        An engine deployed with ``workspace=`` returns that directory instead, shared by
+        every session of the engine.
         """
-        ws = self._job_dir / "workspace"
+        ws = self._engine._workspace or self._job_dir / "workspace"
         ws.mkdir(parents=True, exist_ok=True)
         return ws
 
@@ -260,11 +264,14 @@ class LocalSession:
 class LocalEngine:
     """An in-process engine (implements ``runtime.base.Engine``; DESIGN.md §4)."""
 
-    def __init__(self, spec: AgentSpec, workdir: str | None = None) -> None:
+    def __init__(
+        self, spec: AgentSpec, workdir: str | None = None, workspace: str | None = None
+    ) -> None:
         self.spec = spec
         root = Path(workdir) if workdir else Path(tempfile.mkdtemp(prefix="ratk-"))
         root.mkdir(parents=True, exist_ok=True)
         self._root = root
+        self._workspace = Path(workspace) if workspace else None
         self._jobs_root = root / "jobs"
         self._blob_root = root / "blobs"
         self._jobs_root.mkdir(parents=True, exist_ok=True)
@@ -402,13 +409,18 @@ class LocalEngine:
         return f"local:{self.spec.name}"
 
 
-def deploy(spec: AgentSpec, *, workdir: str | None = None, **_: Any) -> LocalEngine:
+def deploy(
+    spec: AgentSpec, *, workdir: str | None = None, workspace: str | None = None, **_: Any
+) -> LocalEngine:
     """Stand up an in-process engine for ``spec`` (mirrors ``gemini.deploy``).
 
     ``workdir`` sets the root for per-session job dirs and the local blob store; omit it
     for a throwaway temp dir. The harness + local/in-memory adapters are wired here.
+
+    ``workspace`` runs the agent in a directory you choose instead of the per-session
+    ``<workdir>/jobs/<sid>/workspace`` — see the README on picking the agent's cwd.
     """
-    return LocalEngine(spec, workdir=workdir)
+    return LocalEngine(spec, workdir=workdir, workspace=workspace)
 
 
 def run(

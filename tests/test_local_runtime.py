@@ -185,6 +185,24 @@ def test_workspace_accessor_seed_and_collect(tmp_path):
     assert (session.workspace / "artifact.txt").read_text() == "produced"
 
 
+def test_deploy_workspace_is_shared_by_every_session(tmp_path):
+    # An engine deployed with workspace= runs its sessions in that directory instead of
+    # a per-session jobs/<sid>/workspace: the identical cwd keeps the system-prompt
+    # prefix identical across sessions, which is what the prompt cache keys on.
+    shared = tmp_path / "shared"
+    spec = AgentSpec(name="demo", model="m")
+    engine = local.deploy(spec, workdir=str(tmp_path / "wd"), workspace=str(shared))
+
+    cwds = []
+    engine._harness = FakeHarness([_result_ev()], on_run=lambda s, c: cwds.append(c.workspace))
+    sessions = [engine.start_session() for _ in range(2)]
+    for session in sessions:
+        assert session.workspace == shared
+        asyncio.run(_await(session.run("go")))
+    assert cwds == [shared, shared]
+    assert not (engine._jobs_root / sessions[0].session_id / "workspace").exists()
+
+
 def test_error_result_keeps_accounting(tmp_path):
     # Eval feedback: error results (error_max_turns) reported cost_usd=0.0 / num_turns=0 /
     # usage=None on last_result although the backend result event carried them — exactly the

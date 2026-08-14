@@ -51,6 +51,10 @@ class RunContext:
             ``None`` when checkpointing is off.
         interactive: Append the multi-turn "stop and await the operator" guidance to the
             system prompt (set by the runtime when checkpointing/interactive is on).
+        workspace_dir: A caller-chosen agent cwd, replacing the ``job_dir/workspace``
+            default (``None`` for the default). Set by the runtime from the engine's
+            ``workspace``; the directory is the caller's, and other sessions may be
+            running in it.
     """
 
     spec: AgentSpec
@@ -63,10 +67,11 @@ class RunContext:
     session_store: Any | None = None
     blobs: Any | None = None
     interactive: bool = False
+    workspace_dir: Path | None = None
 
     @property
     def workspace(self) -> Path:
-        """The agent's working directory: ``job_dir/workspace``.
+        """The agent's working directory: ``workspace_dir``, else ``job_dir/workspace``.
 
         The agent cwd is a leaf literally named ``workspace`` — a bare ``jobs/<uuid>``
         cwd reads as a disposable temp location, and models have been observed taking
@@ -75,4 +80,4 @@ class RunContext:
         (skills, cloned repos, checkpoint snapshot/restore) targets this path; callers
         seed inputs into and collect outputs from it (``Session.workspace``).
         """
-        return self.job_dir / "workspace"
+        return self.workspace_dir or self.job_dir / "workspace"

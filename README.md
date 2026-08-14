@@ -188,6 +188,15 @@ as disposable temp and tempts weaker models into `cd`-ing away, leaving delivera
 dir). The same `workspace/` cwd convention applies on `gemini`, but there the filesystem is remote, so
 `session.workspace` raises — seed via the prompt or `spec.repos`, collect via events or a repo push.
 
+**Picking the agent's cwd.** `local.deploy(spec, workspace="/path/of/your/choosing")` runs every session of
+that engine in the directory you name, and `session.workspace` returns it. The cwd is part of the agent's
+system prompt, so a per-session path means a per-session prompt prefix and no [prompt cache][cache] hit
+across sessions; pointing many sessions at one directory keeps the prefix identical and the cache warm. That
+is an explicit opt-out of isolation: the directory is yours, concurrent sessions share it, and the toolkit
+makes no promise that a session sees only its own files there.
+
+[cache]: https://docs.claude.com/en/docs/build-with-claude/prompt-caching
+
 ## Consuming a run: wait, stream, or poll
 
 `session.run(msg)` (and `session.send(msg)` to resume) returns a `Run` handle, consumable three ways — the

@@ -39,17 +39,27 @@ def test_provision_venv_uses_engine_python_and_surfaces_failure(monkeypatch, tmp
         venv_mod.provision_venv(tmp_path, ("nope-does-not-exist",))
 
 
+def _plant_venv(root, version="3.12.3"):
+    """A fake provisioned venv: interpreter, pyvenv.cfg (uv's layout), and a marker file
+    standing in for an agent's mid-run install."""
+    marker = root / "venv" / "lib" / "mid-run-install"
+    py = root / "venv" / "bin" / "python"
+    for f in (marker, py):
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.touch()
+    (root / "venv" / "pyvenv.cfg").write_text(
+        f"home = /usr/bin\nimplementation = CPython\nversion_info = {version}\n"
+    )
+    return marker
+
+
 def test_provision_venv_reuses_existing_venv(monkeypatch, tmp_path):
     """Re-deploy into the same workdir must not replace the venv (uv >= 0.12 errors on
     an existing venv; replacing would also discard an agent's mid-run installs)."""
     calls = []
     monkeypatch.setattr(venv_mod, "_run", lambda cmd, what: calls.append(cmd))
     monkeypatch.setattr(venv_mod, "_uv_bin", lambda: "/opt/uv")
-    marker = tmp_path / "venv" / "lib" / "mid-run-install"
-    py = tmp_path / "venv" / "bin" / "python"
-    for f in (marker, py):
-        f.parent.mkdir(parents=True, exist_ok=True)
-        f.touch()
+    marker = _plant_venv(tmp_path)
 
     got = venv_mod.provision_venv(tmp_path, ("scrapy",))
     assert got == tmp_path / "venv"
@@ -57,6 +67,33 @@ def test_provision_venv_reuses_existing_venv(monkeypatch, tmp_path):
     assert marker.exists()  # the venv's contents survived
     # ...but the declared packages are still (re)applied on the reused venv.
     assert calls[0][-1] == "scrapy"
+
+
+def test_provision_venv_replaces_wrong_python_version(monkeypatch, tmp_path):
+    """A venv whose interpreter doesn't match the engine contract's Python is re-provisioned:
+    a persistent workdir must not silently keep the old interpreter across an
+    ENGINE_PYTHON bump (local/gemini parity is the whole point of the venv)."""
+    calls = []
+    monkeypatch.setattr(venv_mod, "_run", lambda cmd, what: calls.append(cmd))
+    monkeypatch.setattr(venv_mod, "_uv_bin", lambda: "/opt/uv")
+    marker = _plant_venv(tmp_path, version="3.11.9")
+
+    venv_mod.provision_venv(tmp_path, ("scrapy",))
+    assert [c[1] for c in calls] == ["venv", "pip"]  # provisioned from scratch
+    assert not marker.exists()  # the out-of-contract venv was cleared
+    assert calls[0][3:] == ["--python", "3.12"]
+
+
+def test_provision_venv_replaces_venv_without_pyvenv_cfg(monkeypatch, tmp_path):
+    """An interpreter with no readable pyvenv.cfg version is treated as out of contract."""
+    calls = []
+    monkeypatch.setattr(venv_mod, "_run", lambda cmd, what: calls.append(cmd))
+    monkeypatch.setattr(venv_mod, "_uv_bin", lambda: "/opt/uv")
+    _plant_venv(tmp_path)
+    (tmp_path / "venv" / "pyvenv.cfg").unlink()
+
+    venv_mod.provision_venv(tmp_path, ("scrapy",))
+    assert [c[1] for c in calls] == ["venv", "pip"]
 
 
 def test_provision_venv_replaces_dir_without_interpreter(monkeypatch, tmp_path):

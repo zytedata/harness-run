@@ -81,7 +81,12 @@ tag `vX.Y.Z`, push the commit and the tag.
   venv), which broke cross-process re-attach — `get_session`, checkpoint
   resume — for specs with `packages`. The existing venv is now reused (declared
   packages are still re-applied onto it), so an agent's mid-run installs
-  survive re-attach; the `UV_VENV_CLEAR=1` workaround discarded them ([#23]).
+  survive re-attach; the `UV_VENV_CLEAR=1` workaround discarded them. Reuse
+  requires the venv's Python to match the engine contract's at major.minor
+  (checked via `pyvenv.cfg`) — an out-of-contract or interpreter-less venv is
+  re-provisioned from scratch. Note convergence is one-way: packages *removed*
+  from the spec stay installed in a reused venv; delete the workdir's `venv/`
+  to rebuild from the spec alone ([#23]).
 
 ### Backwards-incompatible
 

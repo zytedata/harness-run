@@ -16,6 +16,7 @@ Stdlib-only at import; ``uv`` is located lazily via its wheel (a direct toolkit 
 
 from __future__ import annotations
 
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -37,16 +38,49 @@ def _run(cmd: list[str], what: str) -> None:
         raise RuntimeError(f"{what} failed: {proc.stderr.strip()[-1000:]}")
 
 
+def _venv_python_version(venv: Path) -> str | None:
+    """The ``major.minor`` of the venv's interpreter, read from ``pyvenv.cfg``.
+
+    ``None`` when the file is missing or carries no version — such a venv is broken for
+    ``uv pip`` anyway, so callers treat it like a version mismatch.
+    """
+    try:
+        cfg = (venv / "pyvenv.cfg").read_text()
+    except OSError:
+        return None
+    for line in cfg.splitlines():
+        key, _, value = line.partition("=")
+        if key.strip() in ("version_info", "version"):  # uv writes version_info; stdlib venv, version
+            return ".".join(value.strip().split(".")[:2])
+    return None
+
+
 def provision_venv(root: Path, packages: tuple[str, ...], python: str = ENGINE_PYTHON) -> Path:
-    """Create ``root/venv`` with ``packages`` installed; return the venv path.
+    """Create — or reuse — ``root/venv`` with ``packages`` installed; return the venv path.
 
     Called by ``local.deploy()`` when the spec declares packages. Uses ``uv`` end to end:
     ``uv venv --python 3.12`` (downloads a managed interpreter if needed) then
     ``uv pip install`` (hardlinked from uv's global cache — warm installs take seconds).
+
+    Idempotent: a venv already provisioned in ``root`` is reused, not replaced. Re-attaching
+    to a session from another process goes through ``local.deploy()`` into the same workdir,
+    so replacing would discard an agent's mid-run installs (supported, see module docstring) —
+    and ``uv`` >= 0.12 errors on ``uv venv`` over an existing venv anyway. The declared
+    ``packages`` are (re)applied either way. Reuse requires a usable, in-contract venv: a
+    leftover without an interpreter (partial provision, dangling managed-interpreter symlink)
+    or whose Python doesn't match ``python`` at major.minor (a persistent workdir outliving an
+    ``ENGINE_PYTHON`` bump would otherwise silently keep the old interpreter forever) is
+    removed and provisioned from scratch. Convergence is one-way: packages *removed* from the
+    spec stay installed in a reused venv (``uv pip install`` never uninstalls) — delete
+    ``root/venv`` to rebuild from the spec alone.
     """
     venv = Path(root) / "venv"
     uv = _uv_bin()
-    _run([uv, "venv", str(venv), "--python", python], "uv venv")
+    wanted = ".".join(python.split(".")[:2])
+    usable = (venv / "bin" / "python").exists() and _venv_python_version(venv) == wanted
+    if not usable:
+        shutil.rmtree(venv, ignore_errors=True)
+        _run([uv, "venv", str(venv), "--python", python], "uv venv")
     _run([uv, "pip", "install", "--python", str(venv / "bin" / "python"), *packages], "uv pip install")
     return venv
 

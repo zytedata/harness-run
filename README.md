@@ -629,8 +629,15 @@ transcripts = await session.transcripts()   # {"main": [...], "subagents/<id>": 
 ```
 
 `checkpoint=True` implies it (resume needs the transcript), but `transcript=True` alone adds **no
-workspace snapshot** — a run with a multi-hundred-MB working directory pays for the transcript only. The
-`codex` harness keeps its conversation under `checkpoint` alone, so `transcripts()` reads back `{}` there.
+workspace snapshot** — a run with a multi-hundred-MB working directory pays for the transcript only. It is
+purely observational: continuing a conversation across turns (`send`) still takes `checkpoint=True`. The
+`codex` harness keeps its conversation under `checkpoint` alone, so `transcripts()` reads back `{}` there
+(the run says so, as a `spec_warning` status event). Without either flag `transcripts()` raises; `{}` means
+persistence is on and nothing has been written yet.
+
+Unlike events, a transcript is verbatim: prompts, tool inputs and outputs, anything the agent saw or
+echoed — including a secret a coerced agent printed. Treat the checkpoint prefix, and everything
+`transcripts()` returns, as sensitive.
 
 ## Monitoring job CPU/RAM (OOM forensics)
 

@@ -176,7 +176,11 @@ class LocalSession:
             session_id=self._session_id,
             secrets=dict(secrets) if secrets else {},
             env=self._engine._agent_env,
-            resume_sid=resume_sid if self._session_store is not None else None,
+            # Resume is checkpointing's, not the transcript's: a transcript-only spec is
+            # purely observational, so ``send()`` stays the documented fresh turn.
+            resume_sid=(
+                resume_sid if (spec.checkpoint and self._session_store is not None) else None
+            ),
             session_store=self._session_store,
             blobs=self._blobs,
             interactive=spec.checkpoint if spec.interactive is None else spec.interactive,
@@ -250,7 +254,7 @@ class LocalSession:
         """This session's persisted harness transcripts (see ``runtime.base.Session``)."""
         if self._session_store is None:
             raise RuntimeError(
-                "no transcript was persisted for this session — deploy the spec with "
+                "no transcript is persisted for this session — deploy the spec with "
                 "AgentSpec(transcript=True)"
             )
         return await self._session_store.load_all(self._session_id)

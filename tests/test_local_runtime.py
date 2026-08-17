@@ -337,3 +337,19 @@ def test_transcripts_without_persistence_raises(tmp_path):
                            workdir=str(tmp_path / "wd")).start_session()
     with pytest.raises(RuntimeError, match="transcript=True"):
         asyncio.run(session.transcripts())
+
+
+def test_transcript_only_send_does_not_resume(tmp_path):
+    # transcript=True is observational: it wires the store but leaves send() the documented
+    # fresh turn. Resume is checkpointing's, and stays in parity with gemini.
+    def resume_sid_of(spec, name):
+        seen = {}
+        engine = local.deploy(spec, workdir=str(tmp_path / name))
+        engine._harness = FakeHarness([_result_ev()], on_run=lambda s, c: seen.update(ctx=c))
+        session = engine.start_session()
+        asyncio.run(_await(session.send("go")))
+        assert seen["ctx"].session_store is not None
+        return seen["ctx"].resume_sid
+
+    assert resume_sid_of(AgentSpec(name="d", model="m", transcript=True), "t") is None
+    assert resume_sid_of(AgentSpec(name="d", model="m", checkpoint=True), "c") is not None

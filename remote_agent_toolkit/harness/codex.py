@@ -392,6 +392,12 @@ class CodexHarness:
                 "allowed_tools/disallowed_tools are Claude-specific and have no codex "
                 "equivalent; ignored"
             )
+        if spec.transcript and not spec.checkpoint:
+            warnings.append(
+                "transcript=True persists nothing on codex: it keeps its conversation as a "
+                "rollout blob written under checkpoint, not in the transcript store, so "
+                "transcripts() reads back empty"
+            )
 
         mcp_overrides, mcp_env = self._mcp_overrides(spec, ctx)
         # The agent's shell env: Codex filters *KEY*/*SECRET*/*TOKEN*-named vars from the

@@ -51,9 +51,15 @@ tag `vX.Y.Z`, push the commit and the tag.
   purely to get at a JSONL. `checkpoint=True` still implies `transcript`
   (resume needs the transcript), so existing specs are unaffected. On `gemini`
   the flag is what opens the checkpoint bucket, so a transcript-only spec needs
-  a redeploy with an `output_bucket`. The `codex` harness persists its
-  conversation under `checkpoint` alone, so `transcripts()` reads back `{}`
-  there ([#26]).
+  a redeploy with an `output_bucket`. `transcript` on its own is purely
+  observational: `send()` still needs `checkpoint=True` to continue a
+  conversation. `transcripts()` raises when the spec persists nothing and reads
+  `{}` when persistence is on but nothing is written yet, so an empty result is
+  never a misconfiguration in disguise; the `codex` harness persists its
+  conversation under `checkpoint` alone, so it reads `{}` there and the run says
+  so with a `spec_warning` event. Treat what `transcripts()` returns as
+  sensitive: unlike events, it is the verbatim record of everything the agent
+  saw ([#26]).
 
 ### Changed
 

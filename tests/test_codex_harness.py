@@ -107,6 +107,18 @@ def test_build_options_tool_lists_warn(tmp_path):
     assert any("allowed_tools" in w for w in opts.warnings)
 
 
+def test_build_options_transcript_only_warns(tmp_path):
+    # Codex keeps its conversation as a rollout blob written under checkpoint, so a
+    # transcript-only spec is a no-op here — say so during the run, not only in the docs.
+    spec = AgentSpec(name="a", model="gpt-5.6-luna", harness="codex", transcript=True)
+    opts = CodexHarness().build_options(spec, _ctx(tmp_path, spec))
+    assert any("transcript=True" in w for w in opts.warnings)
+
+    ckpt = AgentSpec(name="a", model="gpt-5.6-luna", harness="codex", checkpoint=True,
+                     transcript=True)
+    assert not CodexHarness().build_options(ckpt, _ctx(tmp_path / "b", ckpt)).warnings
+
+
 def test_build_options_mcp_servers(tmp_path):
     spec = AgentSpec(
         name="a", model="gpt-5.6-luna", harness="codex",

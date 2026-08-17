@@ -18,12 +18,12 @@ from __future__ import annotations
 import asyncio
 import os
 import re
-import uuid
 from pathlib import Path
 from typing import Any, AsyncGenerator
 
 from google.adk.agents import BaseAgent
 
+from ...checkpoint.session_store import _claude_session_id
 from ...events import AgentEvent
 
 _RESUME_DIRECTIVE = re.compile(r"^\s*AGENT_RESUME=(\S+)[ \t]*\r?\n", re.IGNORECASE)
@@ -119,23 +119,6 @@ def _fetch_secrets(secrets_uri: str | None) -> tuple[dict, AgentEvent | None]:
         summary="invocation secrets unavailable (staging object missing/unreadable); running without them",
         raw={"event": "secrets_unavailable"},
     )
-
-
-def _claude_session_id(session_id: str) -> str:
-    """Map a runtime session id to the canonical UUID the Claude Agent SDK requires.
-
-    The cold path's session id comes from ADK ``sessions.create`` and is NUMERIC (e.g.
-    ``1966652674296250368``); pinning it as the Claude session id makes the ``claude`` CLI
-    exit 1 with "Invalid session ID. Must be a valid UUID" — before emitting any event. A
-    sid that is already a canonical UUID (the warm path's client-chosen id) passes through
-    unchanged; anything else maps via uuid5, which is DETERMINISTIC so checkpoint keying and
-    resume stay stable across turns and workers.
-    """
-    try:
-        uuid.UUID(session_id)
-        return session_id
-    except ValueError:
-        return str(uuid.uuid5(uuid.NAMESPACE_URL, f"ratk-session:{session_id}"))
 
 
 def _parse_gcs_uri(uri: str) -> tuple[str, str]:
@@ -414,7 +397,7 @@ class ToolkitAgent(BaseAgent):
             secrets=secrets,
             resume_sid=(
                 _claude_session_id(resume_sid)
-                if (resume_sid and session_store is not None)
+                if (resume_sid and spec.checkpoint and session_store is not None)
                 else None
             ),
             session_store=session_store,

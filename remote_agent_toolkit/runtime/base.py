@@ -144,8 +144,9 @@ class Session(Protocol):
 
         Needs ``AgentSpec(transcript=True)`` (or ``checkpoint=True``). Unlike
         :meth:`history`, whose ``AgentEvent``s are deliberately lossy, this is the
-        harness's full record — what a caller scoring a run reads. ``{}`` when the
-        session persisted nothing.
+        harness's full record — what a caller scoring a run reads. Raises when
+        persistence was never enabled; reads ``{}`` when it is enabled but nothing is
+        persisted yet.
         """
         ...
 

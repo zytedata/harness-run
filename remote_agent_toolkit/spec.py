@@ -289,9 +289,10 @@ class AgentSpec:
         checkpoint: Enable checkpoint/resume (interactive pauses).
         transcript: Persist the harness's own transcript so ``Session.transcripts()`` can
             read it back (implied by ``checkpoint``, which needs it to resume). On its own
-            it adds no workspace snapshot, so a run whose working directory is large pays
-            only for the transcript. The ``codex`` harness persists its conversation under
-            ``checkpoint`` alone.
+            it is observational: no workspace snapshot, so a run whose working directory is
+            large pays only for the transcript, and no conversation continuity either —
+            ``send()`` still needs ``checkpoint``. The ``codex`` harness persists its
+            conversation under ``checkpoint`` alone.
         interactive: Append the "stop and await the operator" guidance to the system
             prompt. ``None`` (default) follows ``checkpoint`` — the historical coupling.
             Set ``False`` to checkpoint an autonomous loop without pause guidance, or

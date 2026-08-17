@@ -48,8 +48,8 @@ tag `vX.Y.Z`, push the commit and the tag.
   `can_use_tool`, which the default `bypassPermissions` shadows entirely. Hooks
   are live callables, so they ride the run plane next to `secrets` rather than a
   config overlay (configs are serialized data) and are `local`-only: `gemini`
-  runs the turn in a remote worker and rejects them, and the Codex harness
-  reports them as unsupported with a `spec_warning` event ([#25]).
+  runs the turn in a remote worker and rejects them, and the `codex` harness
+  fails the turn rather than run it with the hooks never called ([#25]).
 
 ### Changed
 
@@ -96,6 +96,10 @@ tag `vX.Y.Z`, push the commit and the tag.
   re-provisioned from scratch. Note convergence is one-way: packages *removed*
   from the spec stay installed in a reused venv; delete the workdir's `venv/`
   to rebuild from the spec alone ([#23]).
+- The synchronous `local.run(spec, message, …)` convenience now forwards
+  `config` and `hooks` to the turn it runs; both were silently swallowed by the
+  backend-symmetry `**_` catch-all, so a `TurnConfig` passed there had no
+  effect ([#25]).
 
 ### Backwards-incompatible
 

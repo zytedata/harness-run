@@ -429,18 +429,20 @@ def run(
     *,
     secrets: dict[str, str] | None = None,
     workdir: str | None = None,
+    config: TurnConfig | None = None,
+    hooks: Any | None = None,
     **_: Any,
 ) -> RunResult | None:
     """Convenience: ``deploy`` → ``start_session`` → ``await run(message)`` (sync).
 
-    Runs its own event loop, so call it from sync code. ``secrets`` is the per-invocation
-    name → value map (see :meth:`LocalSession.run`). For streaming/polling, or from inside an
-    event loop, use ``deploy`` and drive the ``Session``/``Run`` directly.
+    Runs its own event loop, so call it from sync code. ``secrets``, ``config`` and *hooks*
+    go to the single turn (see :meth:`LocalSession.run`). For streaming/polling, or from
+    inside an event loop, use ``deploy`` and drive the ``Session``/``Run`` directly.
     """
     async def _arun() -> RunResult | None:
         engine = deploy(spec, workdir=workdir)
         session = engine.start_session()
-        return await session.run(message, secrets=secrets)
+        return await session.run(message, secrets=secrets, config=config, hooks=hooks)
 
     try:
         asyncio.get_running_loop()

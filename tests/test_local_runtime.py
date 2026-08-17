@@ -106,6 +106,22 @@ def test_run_hooks_reach_the_harness(tmp_path):
     assert seen["hooks"] is hooks
 
 
+def test_sync_run_forwards_config_and_hooks(tmp_path, monkeypatch):
+    from remote_agent_toolkit.config import TurnConfig
+
+    seen = {}
+    spec = AgentSpec(name="demo", model="m")
+    hooks = {"PreToolUse": []}
+    monkeypatch.setattr(
+        local.LocalEngine, "_harness_for",
+        lambda self, s: FakeHarness([_result_ev()],
+                                    on_run=lambda s, c: seen.update(hooks=c.hooks, model=s.model)),
+    )
+    local.run(spec, "go", workdir=str(tmp_path / "wd"),
+              config=TurnConfig(model="m2"), hooks=hooks)
+    assert seen == {"hooks": hooks, "model": "m2"}
+
+
 def test_poll_until_done(tmp_path):
     spec = AgentSpec(name="demo", model="m")
     engine = local.deploy(spec, workdir=str(tmp_path / "wd"))

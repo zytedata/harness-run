@@ -42,6 +42,17 @@ tag `vX.Y.Z`, push the commit and the tag.
 
 (all [#16])
 
+- `local.deploy(spec, workspace=…)` (and `local.run(…, workspace=…)`) runs every
+  session of that engine in a directory you name instead of a per-session
+  `<workdir>/jobs/<session-id>/workspace`. The cwd is part of the agent's system
+  prompt, so a suite of short sessions pays prompt-cache creation on every one of
+  them; one shared cwd keeps the prefix identical and the cache warm (measured 2x
+  on a 111-attempt suite). The directory is yours: sessions are no longer isolated
+  from each other there, `repos` is rejected (they would all clone to the same
+  path), and `checkpoint=True` checkpoints the conversation only, so a resume
+  continues in the directory as it stands instead of restoring a snapshot over it.
+  `gemini.deploy(workspace=…)` raises — a worker's cwd is its own `/tmp` ([#29]).
+
 ### Changed
 
 - Claude Code runs now pass `--strict-mcp-config`: MCP servers come from
@@ -112,6 +123,7 @@ tag `vX.Y.Z`, push the commit and the tag.
 [#22]: https://github.com/zytedata/remote-agent-toolkit/pull/22
 [#23]: https://github.com/zytedata/remote-agent-toolkit/pull/23
 [#24]: https://github.com/zytedata/remote-agent-toolkit/pull/24
+[#29]: https://github.com/zytedata/remote-agent-toolkit/pull/29
 
 ## 0.1.0 — 2026-08-07
 

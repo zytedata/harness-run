@@ -36,6 +36,22 @@ if TYPE_CHECKING:
 _SESSION_CONFIG_KEY = "session-config/{sid}.json"
 
 
+def _reject_repos_in_chosen_workspace(spec: AgentSpec, workspace: Path | None) -> None:
+    """Refuse ``repos`` in a caller-chosen workspace: cloning there is not ours to do.
+
+    Provisioning clones each repo to a fixed ``<cwd>/<repo name>``, so the first session
+    takes the path and every later one fails on the existing checkout — and reusing what
+    is already there would mean deciding what to do with a dirty tree or a stale ref.
+    """
+    if workspace is not None and spec.repos:
+        raise ValueError(
+            "workspace= cannot be combined with repos: sessions sharing one directory "
+            f"would all clone into {workspace}, and only the first would succeed. Clone "
+            "the repos into that directory yourself (the agent finds them there), or drop "
+            "workspace= for a per-session cwd."
+        )
+
+
 class LocalSession:
     """An in-process session with the CMA-style lifecycle (DESIGN.md §4).
 
@@ -67,6 +83,8 @@ class LocalSession:
         # below (checkpoint wiring, turns) derives from THIS, not engine.spec.
         spec = apply_session_config(engine.spec, config)
         validate_harness_choice(engine.spec, spec)  # fail at bind, not mid-turn
+        # The effective spec, so a SessionConfig bringing its own repos is caught as well.
+        _reject_repos_in_chosen_workspace(spec, engine._workspace)
         self._spec = spec
         self._job_dir = engine._jobs_root / session_id
         # Wire checkpoint adapters only when the spec opts in (parity with gemini).
@@ -167,6 +185,10 @@ class LocalSession:
         from ..harness.context import RunContext
 
         spec = apply_turn_config(self._spec, turn_config)
+        # The session's bookkeeping dir (stderr.log, a codex home, and what
+        # list_sessions() reads) exists for every run, including the ones whose agent cwd
+        # lives elsewhere entirely.
+        self._job_dir.mkdir(parents=True, exist_ok=True)
         ctx = RunContext(
             spec=spec,
             prompt=message,
@@ -244,7 +266,9 @@ class LocalSession:
         An engine deployed with ``workspace=`` returns that directory instead, shared by
         every session of the engine.
         """
-        ws = self._engine._workspace or self._job_dir / "workspace"
+        from ..harness.context import _workspace_path
+
+        ws = _workspace_path(self._job_dir, self._engine._workspace)
         ws.mkdir(parents=True, exist_ok=True)
         return ws
 
@@ -272,6 +296,7 @@ class LocalEngine:
         root.mkdir(parents=True, exist_ok=True)
         self._root = root
         self._workspace = Path(workspace) if workspace else None
+        _reject_repos_in_chosen_workspace(spec, self._workspace)
         self._jobs_root = root / "jobs"
         self._blob_root = root / "blobs"
         self._jobs_root.mkdir(parents=True, exist_ok=True)
@@ -311,10 +336,12 @@ class LocalEngine:
         """Restore a prior workspace (resume) or stage skills + clone repos into a fresh cwd.
 
         On resume the repos/skills come back in the restored workspace, so we only stage on a
-        fresh cwd. Sync (runs off the event loop).
+        fresh cwd. A caller-chosen cwd is never restored into: it persists on its own, and
+        untarring a snapshot over it would roll its files back to whatever this session last
+        saw. Sync (runs off the event loop).
         """
         restored = False
-        if is_resume and ctx.blobs is not None and ctx.resume_sid:
+        if is_resume and ctx.workspace_dir is None and ctx.blobs is not None and ctx.resume_sid:
             from ..checkpoint.workspace import restore
 
             try:
@@ -418,7 +445,10 @@ def deploy(
     for a throwaway temp dir. The harness + local/in-memory adapters are wired here.
 
     ``workspace`` runs the agent in a directory you choose instead of the per-session
-    ``<workdir>/jobs/<sid>/workspace`` — see the README on picking the agent's cwd.
+    ``<workdir>/jobs/<sid>/workspace`` — see the README on picking the agent's cwd. It
+    rules out ``spec.repos`` (every session would clone into the same path) and it takes
+    the workspace out of checkpointing (the directory is yours and already durable, so
+    only the conversation is snapshotted).
     """
     return LocalEngine(spec, workdir=workdir, workspace=workspace)
 
@@ -429,16 +459,18 @@ def run(
     *,
     secrets: dict[str, str] | None = None,
     workdir: str | None = None,
+    workspace: str | None = None,
     **_: Any,
 ) -> RunResult | None:
     """Convenience: ``deploy`` → ``start_session`` → ``await run(message)`` (sync).
 
     Runs its own event loop, so call it from sync code. ``secrets`` is the per-invocation
-    name → value map (see :meth:`LocalSession.run`). For streaming/polling, or from inside an
-    event loop, use ``deploy`` and drive the ``Session``/``Run`` directly.
+    name → value map (see :meth:`LocalSession.run`). ``workdir`` and ``workspace`` are
+    :func:`deploy`'s. For streaming/polling, or from inside an event loop, use ``deploy``
+    and drive the ``Session``/``Run`` directly.
     """
     async def _arun() -> RunResult | None:
-        engine = deploy(spec, workdir=workdir)
+        engine = deploy(spec, workdir=workdir, workspace=workspace)
         session = engine.start_session()
         return await session.run(message, secrets=secrets)
 

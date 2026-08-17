@@ -193,7 +193,15 @@ that engine in the directory you name, and `session.workspace` returns it. The c
 system prompt, so a per-session path means a per-session prompt prefix and no [prompt cache][cache] hit
 across sessions; pointing many sessions at one directory keeps the prefix identical and the cache warm. That
 is an explicit opt-out of isolation: the directory is yours, concurrent sessions share it, and the toolkit
-makes no promise that a session sees only its own files there.
+makes no promise that a session sees only its own files there. Name it something that reads like a workspace,
+for the same reason the default leaf is called one — the path is what the agent sees, and a temp-looking cwd
+tempts weaker models into `cd`-ing away from it.
+
+Because the directory is yours, the toolkit stops writing to it on your behalf: `repos` is rejected (every
+session would clone into the same path), and `checkpoint=True` snapshots the conversation only, leaving the
+files alone — a resume continues the conversation in the directory as it stands now, and nothing rolls back
+to what the session last saw. This is `local`-only; `gemini.deploy(workspace=…)` raises, since a worker's cwd
+is its own `/tmp`.
 
 [cache]: https://docs.claude.com/en/docs/build-with-claude/prompt-caching
 

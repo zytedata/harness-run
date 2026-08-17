@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
+
 from remote_agent_toolkit import AgentSpec
 from remote_agent_toolkit.events import AgentEvent, RunStatus, StopReason
 from remote_agent_toolkit.ports.eventsink import InMemorySink
@@ -518,3 +520,13 @@ def test_warm_start_session_mints_canonical_uuid():
     sid = engine.start_session().session_id
     assert "-" in sid
     assert str(uuid.UUID(sid)) == sid
+
+
+def test_deploy_rejects_the_local_only_workspace_argument():
+    # A deployed engine has no host directory to run turns in, so the knob cannot mean
+    # anything there — say so instead of dropping it, which is how someone graduating a
+    # local script to gemini loses the shared cwd without noticing. Fails before any GCP
+    # import or billable side effect.
+    with pytest.raises(ValueError, match="local-only"):
+        backend.deploy(AgentSpec(name="w", model="m"), project="p", location="l",
+                       workspace="/some/dir")

@@ -260,6 +260,7 @@ def deploy(
     pool_size: int = 2,
     new_engine: bool = False,
     credentials: Any | None = None,
+    workspace: str | None = None,
     **_: Any,
 ) -> Engine:
     """Deploy ``spec`` to Gemini Agent Runtime, minting a **new revision** (ops/CI action).
@@ -302,6 +303,14 @@ def deploy(
     job runner can OOM-kill a worker mid-turn, losing the attempt's work and spend even
     though the retry (see the handoff docs) picks the turn up from scratch.
     """
+    if workspace is not None:
+        raise ValueError(
+            "workspace= is local-only: a deployed engine's filesystem is the worker's own "
+            "/tmp, one job at a time, so there is no host directory to point turns at and "
+            "nothing for sessions to share. Seed the agent's cwd through the prompt or "
+            "spec.repos instead."
+        )
+
     import dataclasses
     import os
 

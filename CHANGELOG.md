@@ -85,6 +85,17 @@ tag `vX.Y.Z`, push the commit and the tag.
   `SystemPrompt.inherit()` on both harnesses. Note the behavior change on
   redeploy: default-spec agents get the preset prompt and start honoring
   `CLAUDE.md` from cloned repos ([#22]).
+- A second `local.deploy()` into the same `workdir` no longer crashes on
+  provisioning the engine venv (uv ≥ 0.12 errors on `uv venv` over an existing
+  venv), which broke cross-process re-attach — `get_session`, checkpoint
+  resume — for specs with `packages`. The existing venv is now reused (declared
+  packages are still re-applied onto it), so an agent's mid-run installs
+  survive re-attach; the `UV_VENV_CLEAR=1` workaround discarded them. Reuse
+  requires the venv's Python to match the engine contract's at major.minor
+  (checked via `pyvenv.cfg`) — an out-of-contract or interpreter-less venv is
+  re-provisioned from scratch. Note convergence is one-way: packages *removed*
+  from the spec stay installed in a reused venv; delete the workdir's `venv/`
+  to rebuild from the spec alone ([#23]).
 
 ### Backwards-incompatible
 
@@ -108,6 +119,7 @@ tag `vX.Y.Z`, push the commit and the tag.
 [#20]: https://github.com/zytedata/remote-agent-toolkit/pull/20
 [#21]: https://github.com/zytedata/remote-agent-toolkit/pull/21
 [#22]: https://github.com/zytedata/remote-agent-toolkit/pull/22
+[#23]: https://github.com/zytedata/remote-agent-toolkit/pull/23
 [#24]: https://github.com/zytedata/remote-agent-toolkit/pull/24
 [#25]: https://github.com/zytedata/remote-agent-toolkit/pull/25
 

@@ -141,6 +141,17 @@ def test_cold_submit_stages_secrets_and_query_carries_only_pointer(monkeypatch):
     assert query.count("AGENT_SESSION=sid-3") == 1
 
 
+def test_submit_rejects_hooks():
+    # A hook is a callable in the caller's process; the turn runs in a remote worker.
+    spec = AgentSpec(name="g", model="m")
+    engine = backend.GeminiEngine(resource="r/reasoningEngines/1", spec=spec,
+                                  project=None, location=None, output_bucket=None)
+    session = backend.GeminiSession(engine, "sid")
+    import pytest
+    with pytest.raises(ValueError, match="local-only"):
+        session.run("go", hooks={"PreToolUse": []})
+
+
 def test_submit_with_secrets_requires_output_bucket():
     spec = AgentSpec(name="g", model="m")
     engine = backend.GeminiEngine(resource="r/reasoningEngines/1", spec=spec,

@@ -42,6 +42,14 @@ tag `vX.Y.Z`, push the commit and the tag.
 
 (all [#16])
 
+- `run(hooks=…)` / `send(hooks=…)` pass Claude Agent SDK hook callbacks for one
+  turn, so a caller can observe or gate every individual tool call — a
+  `PreToolUse` hook fires under every `permission_mode`, unlike the SDK's
+  `can_use_tool`, which the default `bypassPermissions` shadows entirely. Hooks
+  are live callables, so they ride the run plane next to `secrets` rather than a
+  config overlay (configs are serialized data) and are `local`-only: `gemini`
+  runs the turn in a remote worker and rejects them, and the `codex` harness
+  fails the turn rather than run it with the hooks never called ([#25]).
 - `local.deploy(spec, workspace=…)` (and `local.run(…, workspace=…)`) runs every
   session of that engine in a directory you name instead of a per-session
   `<workdir>/jobs/<session-id>/workspace`. The cwd is part of the agent's system
@@ -98,6 +106,10 @@ tag `vX.Y.Z`, push the commit and the tag.
   re-provisioned from scratch. Note convergence is one-way: packages *removed*
   from the spec stay installed in a reused venv; delete the workdir's `venv/`
   to rebuild from the spec alone ([#23]).
+- The synchronous `local.run(spec, message, …)` convenience now forwards
+  `config` and `hooks` to the turn it runs; both were silently swallowed by the
+  backend-symmetry `**_` catch-all, so a `TurnConfig` passed there had no
+  effect ([#25]).
 
 ### Backwards-incompatible
 
@@ -123,6 +135,7 @@ tag `vX.Y.Z`, push the commit and the tag.
 [#22]: https://github.com/zytedata/remote-agent-toolkit/pull/22
 [#23]: https://github.com/zytedata/remote-agent-toolkit/pull/23
 [#24]: https://github.com/zytedata/remote-agent-toolkit/pull/24
+[#25]: https://github.com/zytedata/remote-agent-toolkit/pull/25
 [#29]: https://github.com/zytedata/remote-agent-toolkit/pull/29
 
 ## 0.1.0 — 2026-08-07

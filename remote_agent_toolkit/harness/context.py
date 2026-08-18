@@ -61,6 +61,12 @@ class RunContext:
             ``None`` when checkpointing is off.
         interactive: Append the multi-turn "stop and await the operator" guidance to the
             system prompt (set by the runtime when checkpointing/interactive is on).
+        hooks: Claude Agent SDK hook callbacks (``{HookEvent: [HookMatcher, ...]}``) for
+            this turn, supplied by the caller at ``run``/``send`` time, or ``None``. Live
+            in-process callables, so they are neither part of the spec nor of a config
+            overlay (both are serialized data) and only the ``local`` runtime can carry
+            them. ``PreToolUse`` fires under every permission mode, including
+            ``bypassPermissions``, where ``can_use_tool`` is shadowed.
         workspace_dir: A caller-chosen agent cwd, replacing the ``job_dir/workspace``
             default (``None`` for the default). Set by the runtime from the engine's
             ``workspace``; the directory is the caller's, other sessions may be running
@@ -78,6 +84,7 @@ class RunContext:
     session_store: Any | None = None
     blobs: Any | None = None
     interactive: bool = False
+    hooks: Any | None = None
     workspace_dir: Path | None = None
 
     @property

@@ -42,6 +42,14 @@ tag `vX.Y.Z`, push the commit and the tag.
 
 (all [#16])
 
+- `gemini.deploy(..., pool_max_wait_s=...)` sets how long an idle warm-pool
+  worker waits for an assignment before exiting. The worker side always read
+  `AGENT_POOL_MAX_WAIT_S`, but nothing plumbed it into the engine env, so
+  the knob was unreachable; passing it without `warm_pool=True` now fails
+  loudly instead of being swallowed by `deploy()`'s kwargs catch-all, and
+  invalid values (zero, negative, NaN, infinity) are rejected at the
+  `deploy()` boundary — before the pub/sub ensure, so bad input never leaves
+  an orphaned topic/subscription behind ([#28]).
 - `AgentSpec(transcript=True)` persists the harness's own transcript — the full
   per-turn record: usage, tool statuses, subagent trees, permission denials —
   and `Session.transcripts()` reads it back on both runtimes, keyed by `"main"`
@@ -94,6 +102,13 @@ tag `vX.Y.Z`, push the commit and the tag.
   from now on (`uv sync` suffices); already-deployed engines are unaffected,
   the pin is baked into their image. Verified with a clean `make live-smoke`
   ([#24]).
+- The default idle life of a warm-pool worker is now a day, up from 30
+  minutes. An idle-expired worker exits **without replacement**, and a pool
+  that drains to empty never self-recovers (the post-dispatch refill worker
+  claims the pending dispatch itself) — so the short default silently turned
+  any pool quiet for half an hour permanently cold. Note the cost implication
+  on redeploy: idle workers now bill for up to a day; pass `pool_max_wait_s`
+  to dial it back for pools with steady traffic ([#28]).
 
 ### Fixed
 
@@ -155,6 +170,7 @@ tag `vX.Y.Z`, push the commit and the tag.
 [#24]: https://github.com/zytedata/remote-agent-toolkit/pull/24
 [#25]: https://github.com/zytedata/remote-agent-toolkit/pull/25
 [#26]: https://github.com/zytedata/remote-agent-toolkit/pull/26
+[#28]: https://github.com/zytedata/remote-agent-toolkit/pull/28
 [#29]: https://github.com/zytedata/remote-agent-toolkit/pull/29
 
 ## 0.1.0 — 2026-08-07

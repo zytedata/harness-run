@@ -870,10 +870,14 @@ tail poll; events then stream **~1–2 s** behind the agent for the rest of the 
 stream this number was ~10–20 s, dominated by Cloud Logging's ingestion lag.) On claim the pool refills, so
 the next turn is warm too.
 
-> _Keeping the pool full:_ warm workers are themselves long-running jobs and will eventually exit at the
-> platform's max-job-duration limit (whose exact value we haven't pinned down). Topping the pool back up
-> across that boundary is a future refinement; in practice the refill-on-claim cadence likely keeps enough
-> workers warm, so it shouldn't bite early on.
+> _Keeping the pool full:_ an idle worker waits `pool_max_wait_s` (a `deploy()` parameter; default a day)
+> for an assignment, then exits — **without replacement**. And a pool that has drained to empty does not
+> self-recover: the automatic one-worker refill after each dispatch just claims that pending dispatch
+> itself on an empty pool, so net pool size stays 0 and every turn goes cold (~2.5 min) until
+> `engine.fill_pool(n)` re-warms it by hand. Size `pool_max_wait_s` to your dispatch gaps — any quiet
+> stretch longer than it drains the pool. The platform's max **job** duration (7 days at the time of
+> writing — a platform limit that can change) caps the wait regardless: a worker that outlives it is
+> killed, also without replacement.
 
 **Event streaming scales with your fleet.** The stream you consume with `async for ev in run` is the
 session's **GCS event mirror**, tailed live: the worker writes small batches as events happen and the
@@ -896,9 +900,10 @@ depends on reading it.
 only the unused sync path while billing continuously). Warm workers are the exception: they are long-running
 jobs sitting idle waiting for work, so you **pay for that idle compute** continuously — `warm_pool=True`
 trades money for latency. Size the pool to your concurrency, and leave it off for batch / non-interactive
-agents where a ~2.5 min start is fine. Tear a pool down with `engine.delete(delete_pool_resources=True)` (it
-cancels the idle workers, which otherwise keep billing until they expire). Model token cost is the same either
-way and is reported per run as `result.cost_usd`.
+agents where a ~2.5 min start is fine. `deploy(..., pool_max_wait_s=...)` bounds an idle worker's life
+(default a day — see the pool-draining note above before lowering it). Tear a pool down with
+`engine.delete(delete_pool_resources=True)` (it cancels the idle workers, which otherwise keep billing until
+they expire). Model token cost is the same either way and is reported per run as `result.cost_usd`.
 
 ## Learn more
 

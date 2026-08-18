@@ -37,10 +37,41 @@ def test_pool_helpers(monkeypatch):
     monkeypatch.delenv("AGENT_POOL_SUBSCRIPTION", raising=False)
     assert pool.worker_dispatch_from_env() is None  # not a pool worker without the env
 
+    # Idle life: the default is a day (an expired worker is never replaced, so a short
+    # default silently drained pools over any quiet gap); deploy(pool_max_wait_s=...)
+    # overrides it via the env var build_env() bakes into the engine.
+    monkeypatch.delenv("AGENT_POOL_MAX_WAIT_S", raising=False)
+    assert pool.resolve_max_wait_s() == 24 * 3600
+    monkeypatch.setenv("AGENT_POOL_MAX_WAIT_S", "7200")
+    assert pool.resolve_max_wait_s() == 7200.0
+
     # Readiness pool-id is consistent: derived from the name (control plane) == from the
     # subscription (worker side), so both tail/emit the same Cloud Logging key.
     assert pool.pool_log_id("Spider-Builder") == "ratk-spider-builder-pool"
     assert pool.pool_log_id_from_subscription(sub) == pool.pool_log_id("Spider-Builder")
+
+
+def test_deploy_rejects_pool_max_wait_without_pool():
+    """The knob must fail loudly when it cannot take effect (deploy()'s **_ catch-all
+    would otherwise swallow it silently — the exact surprise the parameter removes)."""
+    import pytest
+
+    with pytest.raises(ValueError, match="warm_pool"):
+        backend.deploy(AgentSpec(name="x", model="m"), "proj", "loc", pool_max_wait_s=3600.0)
+
+
+def test_deploy_rejects_invalid_pool_max_wait_values():
+    """Value constraints hold at the deploy() boundary, BEFORE any side effect: rejected
+    only in build_env() (which runs after the pub/sub ensure), an invalid value left an
+    orphaned topic/sub behind. NaN is the nastiest of the four: it passes a bare `<= 0`
+    check, and a NaN deadline makes every worker idle-expire instantly — silently
+    recreating the permanently-cold pool this knob exists to prevent."""
+    import pytest
+
+    for bad in (0, -1.0, float("nan"), float("inf")):
+        with pytest.raises(ValueError, match="positive, finite"):
+            backend.deploy(AgentSpec(name="x", model="m"), "proj", "loc",
+                           warm_pool=True, pool_max_wait_s=bad)
 
 
 def test_warm_session_dispatches_and_tails(monkeypatch):
@@ -216,3 +247,30 @@ def test_pool_worker_claims_and_runs(monkeypatch):
                     "session_config_uri": "gs://bkt/session-config/dispatched-sid.json",
                     "turn_config_uri": "gs://bkt/turn-config/dispatched-sid-x.json",
                     "invocation_id": "e-inv-77"}
+
+
+def test_pool_worker_idle_expires_at_the_deadline(monkeypatch):
+    """Drive the wait loop to expiry offline: an empty dispatch and a tiny
+    ``AGENT_POOL_MAX_WAIT_S`` must end in ``pool_idle_expired`` — no turn, no crash. Pins
+    that the env knob actually bounds the wait (the deadline arithmetic the live probe
+    exercised) with only heartbeats before the expiry marker."""
+    spec = AgentSpec(name="w", model="m")
+    agent = adk_agent.build_agent(spec)
+
+    class EmptyDispatch:  # instant no-message long-poll; never a real 5s block in the test
+        def claim(self, timeout):
+            return None
+
+    monkeypatch.setattr(pool, "worker_dispatch_from_env", lambda *a, **k: EmptyDispatch())
+    monkeypatch.setenv("AGENT_POOL_MAX_WAIT_S", "0.05")
+    # Same fake sink as the claim test: _prewarm's readiness emit must not touch GCP.
+    import remote_agent_toolkit.ports.eventsink as eventsink_mod
+    monkeypatch.setattr(eventsink_mod, "CloudLoggingSink", lambda **kw: InMemorySink(**kw))
+
+    async def drive():
+        return [ev async for ev in agent._pool_worker(spec, "e-inv-88")]
+
+    events = asyncio.run(drive())
+    raws = [ev.custom_metadata["raw"] for ev in events]
+    assert raws[-1]["event"] == "pool_idle_expired"
+    assert raws[:-1] and all(r["event"] == "pool_waiting" for r in raws[:-1])

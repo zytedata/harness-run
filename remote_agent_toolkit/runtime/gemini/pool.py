@@ -23,9 +23,21 @@ from typing import Any
 POOL_WAIT_SENTINEL = "__POOL_WAIT__"
 
 
+# Default idle life of a warm worker. A worker that idle-expires is NOT replaced (the only
+# refill is claim-driven), so a short default silently drained pools that went quiet — a day
+# keeps a pool warm across working-hours gaps while still bounding runaway idle billing.
+# Query jobs support runs of up to 7 days (DESIGN.md §6), so a day is comfortably within
+# platform limits. Deploy-time override: ``gemini.deploy(..., pool_max_wait_s=...)``.
+DEFAULT_MAX_WAIT_S = 24 * 3600.0
+
+
 def resolve_max_wait_s() -> float:
-    """How long a warm worker waits for an assignment before exiting (bounds idle job life)."""
-    return float(os.environ.get("AGENT_POOL_MAX_WAIT_S", "1800"))
+    """How long a warm worker waits for an assignment before exiting (bounds idle job life).
+
+    Read in the WORKER process from ``AGENT_POOL_MAX_WAIT_S``, which ``build_env()`` bakes
+    into the engine when ``deploy(..., pool_max_wait_s=...)`` is set; otherwise the default.
+    """
+    return float(os.environ.get("AGENT_POOL_MAX_WAIT_S", str(DEFAULT_MAX_WAIT_S)))
 
 
 def _safe(name: str) -> str:

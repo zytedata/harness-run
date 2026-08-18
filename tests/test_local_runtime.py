@@ -414,3 +414,59 @@ def test_checkpoint_blobstore_gcs_env_selection(tmp_path, monkeypatch):
     monkeypatch.delenv("AGENT_CHECKPOINT_GCS")
     session2 = local.deploy(spec, workdir=str(tmp_path / "wd-local")).start_session()
     assert isinstance(session2._blobs, bs.LocalBlobStore)
+
+
+def test_transcript_wires_the_session_store_without_snapshotting(tmp_path):
+    # transcript=True alone gives a session store to mirror the transcript to — and the
+    # workspace snapshot stays off, so a huge working directory is not archived per turn.
+    from remote_agent_toolkit.harness._shared import finalize_checkpoint
+
+    spec = AgentSpec(name="demo", model="m", transcript=True)
+    engine = local.deploy(spec, workdir=str(tmp_path / "wd"))
+    session = engine.start_session()
+    assert session._session_store is not None
+
+    seen = {}
+    engine._harness = FakeHarness(
+        [_result_ev()], on_run=lambda s, c: seen.update(ctx=c))
+    asyncio.run(_await(session.run("go")))
+    ctx = seen["ctx"]
+    assert finalize_checkpoint(spec, ctx) is None          # nothing snapshotted
+    assert not session._blobs.list("workspace/")
+
+    # What the harness mirrors to the store reads back through transcripts().
+    entries = [{"uuid": "u1", "type": "user"}, {"uuid": "u2", "type": "assistant"}]
+    asyncio.run(ctx.session_store.append({"session_id": session.session_id}, entries))
+    asyncio.run(
+        ctx.session_store.append(
+            {"session_id": session.session_id, "subpath": "subagents/agent-X"},
+            [{"uuid": "u3", "type": "user"}],
+        )
+    )
+    assert asyncio.run(session.transcripts()) == {
+        "main": entries,
+        "subagents/agent-X": [{"uuid": "u3", "type": "user"}],
+    }
+
+
+def test_transcripts_without_persistence_raises(tmp_path):
+    session = local.deploy(AgentSpec(name="demo", model="m"),
+                           workdir=str(tmp_path / "wd")).start_session()
+    with pytest.raises(RuntimeError, match="transcript=True"):
+        asyncio.run(session.transcripts())
+
+
+def test_transcript_only_send_does_not_resume(tmp_path):
+    # transcript=True is observational: it wires the store but leaves send() the documented
+    # fresh turn. Resume is checkpointing's, and stays in parity with gemini.
+    def resume_sid_of(spec, name):
+        seen = {}
+        engine = local.deploy(spec, workdir=str(tmp_path / name))
+        engine._harness = FakeHarness([_result_ev()], on_run=lambda s, c: seen.update(ctx=c))
+        session = engine.start_session()
+        asyncio.run(_await(session.send("go")))
+        assert seen["ctx"].session_store is not None
+        return seen["ctx"].resume_sid
+
+    assert resume_sid_of(AgentSpec(name="d", model="m", transcript=True), "t") is None
+    assert resume_sid_of(AgentSpec(name="d", model="m", checkpoint=True), "c") is not None

@@ -87,10 +87,12 @@ class LocalSession:
         _reject_repos_in_chosen_workspace(spec, engine._workspace)
         self._spec = spec
         self._job_dir = engine._jobs_root / session_id
-        # Wire checkpoint adapters only when the spec opts in (parity with gemini).
+        # Wire the blob/session-store adapters only when the spec opts in (parity with
+        # gemini). ``transcript`` wires them for reading the transcript back; the workspace
+        # snapshot stays behind ``checkpoint`` alone (see ``_shared.finalize_checkpoint``).
         self._blobs: Any | None = None
         self._session_store: Any | None = None
-        if spec.checkpoint:
+        if spec.checkpoint or spec.transcript:
             from ..checkpoint.session_store import BlobSessionStore
 
             ckpt_gcs = os.environ.get("AGENT_CHECKPOINT_GCS")
@@ -207,7 +209,11 @@ class LocalSession:
             session_id=self._session_id,
             secrets=dict(secrets) if secrets else {},
             env=self._engine._agent_env,
-            resume_sid=resume_sid if self._session_store is not None else None,
+            # Resume is checkpointing's, not the transcript's: a transcript-only spec is
+            # purely observational, so ``send()`` stays the documented fresh turn.
+            resume_sid=(
+                resume_sid if (spec.checkpoint and self._session_store is not None) else None
+            ),
             session_store=self._session_store,
             blobs=self._blobs,
             interactive=spec.checkpoint if spec.interactive is None else spec.interactive,
@@ -283,6 +289,15 @@ class LocalSession:
         ws = _workspace_path(self._job_dir, self._engine._workspace)
         ws.mkdir(parents=True, exist_ok=True)
         return ws
+
+    async def transcripts(self) -> dict[str, list[dict]]:
+        """This session's persisted harness transcripts (see ``runtime.base.Session``)."""
+        if self._session_store is None:
+            raise RuntimeError(
+                "no transcript is persisted for this session — deploy the spec with "
+                "AgentSpec(transcript=True)"
+            )
+        return await self._session_store.load_all(self._session_id)
 
     def history(self) -> list[AgentEvent]:
         raise NotImplementedError(

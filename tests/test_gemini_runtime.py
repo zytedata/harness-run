@@ -22,6 +22,10 @@ async def _await(run):
     return await run
 
 
+async def _drain(agen):
+    return [ev async for ev in agen]
+
+
 def test_to_adk_event_kinds():
     msg = to_adk_event(AgentEvent(kind="message", summary="hi"), "agent")
     assert msg.partial is True and (msg.turn_complete in (None, False))
@@ -531,6 +535,96 @@ def test_warm_start_session_mints_canonical_uuid():
     sid = engine.start_session().session_id
     assert "-" in sid
     assert str(uuid.UUID(sid)) == sid
+
+
+def _transcript_engine(spec, monkeypatch, tmp_path):
+    """A gemini engine whose checkpoint prefix is a local blob store (no GCP)."""
+    import remote_agent_toolkit.ports.blobstore as bs
+
+    blobs = bs.LocalBlobStore(str(tmp_path))
+    monkeypatch.setattr(bs, "GcsBlobStore", lambda bucket, prefix: blobs)
+    engine = backend.GeminiEngine(resource="r/reasoningEngines/1", spec=spec,
+                                  project=None, location=None, output_bucket="gs://out")
+    return engine, blobs
+
+
+def _attached(engine, session_id):
+    session = backend.GeminiSession(engine, session_id)
+    session._session_config_resolved = True  # skip the (absent) persisted config's GCS read
+    return session
+
+
+def test_transcripts_read_the_id_the_worker_wrote_under(tmp_path, monkeypatch):
+    # Cold sessions carry a NUMERIC ADK id, and the worker keys the store by the canonical
+    # uuid5 the Claude SDK requires — so reading by the raw id finds nothing, which is
+    # indistinguishable from "the session persisted nothing".
+    from remote_agent_toolkit.checkpoint.session_store import (
+        BlobSessionStore,
+        _claude_session_id,
+    )
+
+    spec = AgentSpec(name="g", model="m", transcript=True)
+    engine, blobs = _transcript_engine(spec, monkeypatch, tmp_path)
+
+    raw_sid = "1966652674296250368"  # the cold-path shape
+    entries = [{"uuid": "u1", "type": "user"}, {"uuid": "u2", "type": "assistant"}]
+    store = BlobSessionStore(blobs)
+    asyncio.run(store.append({"session_id": _claude_session_id(raw_sid)}, entries))
+    asyncio.run(store.append(
+        {"session_id": _claude_session_id(raw_sid), "subpath": "subagents/agent-X"},
+        [{"uuid": "u3", "type": "user"}],
+    ))
+
+    assert asyncio.run(_attached(engine, raw_sid).transcripts()) == {
+        "main": entries,
+        "subagents/agent-X": [{"uuid": "u3", "type": "user"}],
+    }
+
+
+def test_transcripts_raise_only_when_the_spec_is_known_to_persist_nothing(tmp_path, monkeypatch):
+    import pytest
+
+    spec = AgentSpec(name="g", model="m")  # neither checkpoint nor transcript
+    engine, _ = _transcript_engine(spec, monkeypatch, tmp_path)
+    with pytest.raises(RuntimeError, match="transcript=True"):
+        asyncio.run(_attached(engine, "sid").transcripts())
+
+    # A get_engine handle's spec is addressing-only, so its defaults prove nothing about
+    # what the engine bakes: read and report the truth on the wire instead of guessing.
+    engine._spec_known = False
+    assert asyncio.run(_attached(engine, "sid").transcripts()) == {}
+
+
+def test_transcript_only_spec_does_not_resume_the_conversation(tmp_path, monkeypatch):
+    # transcript=True wires the session store, but resume stays checkpointing's: on gemini
+    # every turn starts on a fresh worker with no workspace snapshot to restore, so a
+    # resumed conversation would remember files that no longer exist.
+    monkeypatch.setenv("AGENT_JOBS_ROOT", str(tmp_path / "jobs"))
+    monkeypatch.setenv("AGENT_CHECKPOINT_GCS", "gs://out/checkpoints")
+    monkeypatch.chdir(tmp_path)  # no baked skills dir on the lookup paths
+    import remote_agent_toolkit.ports.blobstore as bs
+
+    monkeypatch.setattr(bs, "GcsBlobStore", lambda bucket, prefix: bs.LocalBlobStore(str(tmp_path)))
+    seen = {}
+
+    class RecordingHarness:
+        async def run(self, spec, rc):
+            seen["resume_sid"] = rc.resume_sid
+            seen["session_store"] = rc.session_store
+            yield AgentEvent(kind="result", summary="done",
+                             raw={"subtype": "success", "is_error": False, "session_id": "s"})
+
+    import remote_agent_toolkit.harness.claude_code as harness_mod
+    import remote_agent_toolkit.ports.eventsink as eventsink_mod
+    monkeypatch.setattr(harness_mod, "ClaudeCodeHarness", RecordingHarness)
+    monkeypatch.setattr(eventsink_mod, "CloudLoggingSink",
+                        lambda **kw: InMemorySink(session_id="sid-t"))
+
+    spec = AgentSpec(name="w", model="m", transcript=True)
+    agent = adk_agent.build_agent(spec)
+    asyncio.run(_drain(agent._run_turn(spec, "sid-t", "go", "sid-t")))
+    assert seen["session_store"] is not None  # the transcript is still mirrored
+    assert seen["resume_sid"] is None
 
 
 def test_deploy_rejects_the_local_only_workspace_argument():

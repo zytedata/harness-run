@@ -392,6 +392,12 @@ class CodexHarness:
                 "allowed_tools/disallowed_tools are Claude-specific and have no codex "
                 "equivalent; ignored"
             )
+        if spec.transcript and not spec.checkpoint:
+            warnings.append(
+                "transcript=True persists nothing on codex: it keeps its conversation as a "
+                "rollout blob written under checkpoint, not in the transcript store, so "
+                "transcripts() reads back empty"
+            )
         if ctx.hooks:
             # Fail the turn rather than warn: hooks gate tool calls, and a caller that
             # only awaits the result would never see a streamed warning telling them the

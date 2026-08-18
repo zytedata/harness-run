@@ -144,6 +144,18 @@ class Session(Protocol):
         """
         ...
 
+    async def transcripts(self) -> dict[str, list[dict]]:
+        """This session's persisted harness transcripts, keyed by ``"main"`` and each
+        subagent subpath, each a list of the harness's own transcript entries.
+
+        Needs ``AgentSpec(transcript=True)`` (or ``checkpoint=True``). Unlike
+        :meth:`history`, whose ``AgentEvent``s are deliberately lossy, this is the
+        harness's full record — what a caller scoring a run reads. Raises when
+        persistence was never enabled; reads ``{}`` when it is enabled but nothing is
+        persisted yet.
+        """
+        ...
+
     def fork(self) -> Session:
         """Fork this session into an independent branch sharing prior history."""
         ...

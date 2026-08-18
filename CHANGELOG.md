@@ -42,6 +42,24 @@ tag `vX.Y.Z`, push the commit and the tag.
 
 (all [#16])
 
+- `AgentSpec(transcript=True)` persists the harness's own transcript — the full
+  per-turn record: usage, tool statuses, subagent trees, permission denials —
+  and `Session.transcripts()` reads it back on both runtimes, keyed by `"main"`
+  plus each subagent subpath. Reading a transcript used to require
+  `checkpoint=True`, which also archives the entire working directory to blobs
+  at every turn: hundreds of MB per run for an agent that writes a lot, paid
+  purely to get at a JSONL. `checkpoint=True` still implies `transcript`
+  (resume needs the transcript), so existing specs are unaffected. On `gemini`
+  the flag is what opens the checkpoint bucket, so a transcript-only spec needs
+  a redeploy with an `output_bucket`. `transcript` on its own is purely
+  observational: `send()` still needs `checkpoint=True` to continue a
+  conversation. `transcripts()` raises when the spec persists nothing and reads
+  `{}` when persistence is on but nothing is written yet, so an empty result is
+  never a misconfiguration in disguise; the `codex` harness persists its
+  conversation under `checkpoint` alone, so it reads `{}` there and the run says
+  so with a `spec_warning` event. Treat what `transcripts()` returns as
+  sensitive: unlike events, it is the verbatim record of everything the agent
+  saw ([#26]).
 - `run(hooks=…)` / `send(hooks=…)` pass Claude Agent SDK hook callbacks for one
   turn, so a caller can observe or gate every individual tool call — a
   `PreToolUse` hook fires under every `permission_mode`, unlike the SDK's
@@ -136,6 +154,7 @@ tag `vX.Y.Z`, push the commit and the tag.
 [#23]: https://github.com/zytedata/remote-agent-toolkit/pull/23
 [#24]: https://github.com/zytedata/remote-agent-toolkit/pull/24
 [#25]: https://github.com/zytedata/remote-agent-toolkit/pull/25
+[#26]: https://github.com/zytedata/remote-agent-toolkit/pull/26
 [#29]: https://github.com/zytedata/remote-agent-toolkit/pull/29
 
 ## 0.1.0 — 2026-08-07

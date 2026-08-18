@@ -548,6 +548,7 @@ def get_engine(
         topic=topic,
         subscription=subscription,
         version=pinned,
+        spec_known=False,
     )
 
 
@@ -919,6 +920,38 @@ class GeminiSession:
             credentials=engine._credentials,
         )
 
+    async def transcripts(self) -> dict[str, list[dict]]:
+        """This session's persisted harness transcripts (see ``runtime.base.Session``).
+
+        Read straight from the engine's checkpoint prefix, so it works for a session
+        re-attached from another process — the same objects the worker mirrored the
+        transcript to during the run.
+        """
+        from ...checkpoint.session_store import BlobSessionStore, _claude_session_id
+        from ...ports.blobstore import GcsBlobStore, parse_gcs_uri
+
+        engine = self._engine
+        if not engine._output_bucket:
+            raise RuntimeError(
+                "transcripts() reads the engine's checkpoint prefix under its output "
+                "bucket; construct the engine with output_bucket/project set."
+            )
+        # Fail loudly on a spec that persists nothing, rather than returning the same ``{}``
+        # a persisting session reads before its first turn. Only when the deployed spec is
+        # known: a ``get_engine`` handle carries an addressing-only spec whose defaults say
+        # nothing about what the engine bakes.
+        spec = self._client_spec()
+        if engine._spec_known and not (spec.checkpoint or spec.transcript):
+            raise RuntimeError(
+                "no transcript is persisted for this session — deploy the spec with "
+                "AgentSpec(transcript=True)"
+            )
+        bucket, prefix = parse_gcs_uri(f"{engine._output_bucket}/checkpoints")
+        blobs = GcsBlobStore(bucket, (prefix + "/") if prefix else "")
+        # The worker keys the store by the SDK-canonical id, not the raw (numeric, on the
+        # cold path) session id.
+        return await BlobSessionStore(blobs).load_all(_claude_session_id(self._session_id))
+
     def resource_samples(self) -> list[dict]:
         """This session's worker CPU/RAM samples, oldest first (OOM forensics).
 
@@ -999,13 +1032,16 @@ class GeminiEngine:
         topic: str | None = None,
         subscription: str | None = None,
         version: str | None = None,
+        spec_known: bool = True,
     ) -> None:
         self._resource = resource
         # The deploy handle carries the real deployed spec; a get_engine handle carries a
-        # minimal fallback (addressing only). Either way runs execute the engine's baked
-        # spec overlaid with the session/turn configs — the client uses this spec only as
-        # the base of its own view for result parsing.
+        # minimal fallback (addressing only), flagged by ``spec_known=False`` so nothing
+        # client-side reads its defaults as the deployed truth. Either way runs execute the
+        # engine's baked spec overlaid with the session/turn configs — the client uses this
+        # spec only as the base of its own view for result parsing.
         self.spec = spec
+        self._spec_known = spec_known
         self._project = project
         self._location = location
         self._output_bucket = output_bucket

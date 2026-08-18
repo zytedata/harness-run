@@ -18,12 +18,12 @@ from __future__ import annotations
 import asyncio
 import os
 import re
-import uuid
 from pathlib import Path
 from typing import Any, AsyncGenerator
 
 from google.adk.agents import BaseAgent
 
+from ...checkpoint.session_store import _claude_session_id
 from ...events import AgentEvent
 
 _RESUME_DIRECTIVE = re.compile(r"^\s*AGENT_RESUME=(\S+)[ \t]*\r?\n", re.IGNORECASE)
@@ -121,23 +121,6 @@ def _fetch_secrets(secrets_uri: str | None) -> tuple[dict, AgentEvent | None]:
     )
 
 
-def _claude_session_id(session_id: str) -> str:
-    """Map a runtime session id to the canonical UUID the Claude Agent SDK requires.
-
-    The cold path's session id comes from ADK ``sessions.create`` and is NUMERIC (e.g.
-    ``1966652674296250368``); pinning it as the Claude session id makes the ``claude`` CLI
-    exit 1 with "Invalid session ID. Must be a valid UUID" — before emitting any event. A
-    sid that is already a canonical UUID (the warm path's client-chosen id) passes through
-    unchanged; anything else maps via uuid5, which is DETERMINISTIC so checkpoint keying and
-    resume stay stable across turns and workers.
-    """
-    try:
-        uuid.UUID(session_id)
-        return session_id
-    except ValueError:
-        return str(uuid.uuid5(uuid.NAMESPACE_URL, f"ratk-session:{session_id}"))
-
-
 def _parse_gcs_uri(uri: str) -> tuple[str, str]:
     from ...ports.blobstore import parse_gcs_uri
 
@@ -156,9 +139,13 @@ def _find_baked_skills() -> Path | None:
 
 
 def _checkpoint_ports(spec: Any) -> tuple[Any | None, Any | None]:
-    """Build (BlobStore, SessionStore) from ``AGENT_CHECKPOINT_GCS`` when checkpointing is on."""
+    """Build (BlobStore, SessionStore) from ``AGENT_CHECKPOINT_GCS`` when checkpointing is on.
+
+    Also built for a transcript-only spec: the transcript is mirrored to the store, while
+    the workspace snapshot stays behind ``spec.checkpoint`` (``_shared.finalize_checkpoint``).
+    """
     ckpt = os.environ.get("AGENT_CHECKPOINT_GCS")
-    if not (spec.checkpoint and ckpt):
+    if not ((spec.checkpoint or spec.transcript) and ckpt):
         return None, None
     from ...checkpoint.session_store import BlobSessionStore
     from ...ports.blobstore import GcsBlobStore
@@ -179,7 +166,7 @@ def _prewarm(spec: Any) -> None:
     from ...ports.eventsink import CloudLoggingSink
     from .pool import pool_log_id_from_subscription
 
-    if spec.checkpoint and os.environ.get("AGENT_CHECKPOINT_GCS"):
+    if (spec.checkpoint or spec.transcript) and os.environ.get("AGENT_CHECKPOINT_GCS"):
         try:
             from google.cloud import storage
 
@@ -410,7 +397,7 @@ class ToolkitAgent(BaseAgent):
             secrets=secrets,
             resume_sid=(
                 _claude_session_id(resume_sid)
-                if (resume_sid and session_store is not None)
+                if (resume_sid and spec.checkpoint and session_store is not None)
                 else None
             ),
             session_store=session_store,

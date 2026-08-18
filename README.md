@@ -875,7 +875,9 @@ the next turn is warm too.
 > self-recover: the automatic one-worker refill after each dispatch just claims that pending dispatch
 > itself on an empty pool, so net pool size stays 0 and every turn goes cold (~2.5 min) until
 > `engine.fill_pool(n)` re-warms it by hand. Size `pool_max_wait_s` to your dispatch gaps — any quiet
-> stretch longer than it drains the pool.
+> stretch longer than it drains the pool. The platform's max **job** duration (7 days at the time of
+> writing — a platform limit that can change) caps the wait regardless: a worker that outlives it is
+> killed, also without replacement.
 
 **Event streaming scales with your fleet.** The stream you consume with `async for ev in run` is the
 session's **GCS event mirror**, tailed live: the worker writes small batches as events happen and the

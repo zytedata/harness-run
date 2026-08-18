@@ -296,7 +296,10 @@ def deploy(
     until :meth:`GeminiEngine.fill_pool` is called by hand. Idle workers bill while they
     wait, so ``pool_max_wait_s`` is the idle-cost/latency dial: lower it for engines that
     are dispatched to constantly (expiry never fires), keep or raise it for pools that must
-    stay warm across quiet gaps.
+    stay warm across quiet gaps. Whatever you pass, the platform's **max job duration**
+    (7 days at the time of writing — a platform contract that can move; DESIGN.md §6) is
+    the effective ceiling: a worker that outlives it is killed like any job and, as above,
+    not replaced.
 
     ``use_vertex`` (default) routes the model through Vertex, so the engine authenticates as its
     own GCP identity and **no LLM API key is ever in the agent's environment** (the recommended,
@@ -326,6 +329,16 @@ def deploy(
         # Loud on purpose: a silently-ignored idle-life knob is exactly the operational
         # surprise this parameter exists to remove.
         raise ValueError("pool_max_wait_s only applies to warm-pool engines; pass warm_pool=True")
+    if pool_max_wait_s is not None:
+        import math
+
+        # Value check HERE, not only in build_env(): build_env runs after the pub/sub
+        # ensure, so a bad value rejected there would leave an orphaned topic/sub behind.
+        if not (math.isfinite(pool_max_wait_s) and pool_max_wait_s > 0):
+            raise ValueError(
+                f"pool_max_wait_s must be a positive, finite number of seconds; "
+                f"got {pool_max_wait_s!r}"
+            )
 
     import dataclasses
     import os

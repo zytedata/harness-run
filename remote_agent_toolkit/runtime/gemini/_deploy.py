@@ -29,6 +29,7 @@ import time (stdlib only at module scope; any third-party import is lazy inside 
 
 from __future__ import annotations
 
+import math
 import shutil
 import tempfile
 from pathlib import Path
@@ -237,8 +238,16 @@ def build_env(
             as ``AGENT_POOL_MAX_WAIT_S`` for the worker's wait loop to read; only
             meaningful with ``warm_pool``.
     """
-    if pool_max_wait_s is not None and pool_max_wait_s <= 0:
-        raise ValueError(f"pool_max_wait_s must be positive; got {pool_max_wait_s!r}")
+    # NaN would pass a bare `<= 0` check and make the worker's deadline arithmetic always
+    # false — every worker idle-expires instantly, silently recreating the permanently-cold
+    # pool this knob exists to prevent; inf would defeat the documented billing bound.
+    if pool_max_wait_s is not None and not (
+        math.isfinite(pool_max_wait_s) and pool_max_wait_s > 0
+    ):
+        raise ValueError(
+            f"pool_max_wait_s must be a positive, finite number of seconds; "
+            f"got {pool_max_wait_s!r}"
+        )
     env: dict = {
         # The engine refuses bypassPermissions under root; Agent Runtime may run as root.
         "IS_SANDBOX": "1",

@@ -159,8 +159,9 @@ def test_build_env_pool_max_wait() -> None:
     # Not a pool worker -> the knob is meaningless; never baked.
     assert "AGENT_POOL_MAX_WAIT_S" not in deploy.build_env(_spec(), pool_max_wait_s=7200)
 
-    with pytest.raises(ValueError, match="pool_max_wait_s"):
-        deploy.build_env(_spec(), **pool_kw, pool_max_wait_s=0)
+    for bad in (0, -1.0, float("nan"), float("inf")):
+        with pytest.raises(ValueError, match="pool_max_wait_s"):
+            deploy.build_env(_spec(), **pool_kw, pool_max_wait_s=bad)
 
 
 def test_stage_skills_local(tmp_path: Path) -> None:

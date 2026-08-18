@@ -46,7 +46,10 @@ tag `vX.Y.Z`, push the commit and the tag.
   worker waits for an assignment before exiting. The worker side always read
   `AGENT_POOL_MAX_WAIT_S`, but nothing plumbed it into the engine env, so
   the knob was unreachable; passing it without `warm_pool=True` now fails
-  loudly instead of being swallowed by `deploy()`'s kwargs catch-all ([#28]).
+  loudly instead of being swallowed by `deploy()`'s kwargs catch-all, and
+  invalid values (zero, negative, NaN, infinity) are rejected at the
+  `deploy()` boundary — before the pub/sub ensure, so bad input never leaves
+  an orphaned topic/subscription behind ([#28]).
 - `AgentSpec(transcript=True)` persists the harness's own transcript — the full
   per-turn record: usage, tool statuses, subagent trees, permission denials —
   and `Session.transcripts()` reads it back on both runtimes, keyed by `"main"`

@@ -260,6 +260,7 @@ def deploy(
     pool_size: int = 2,
     new_engine: bool = False,
     credentials: Any | None = None,
+    workspace: str | None = None,
     **_: Any,
 ) -> Engine:
     """Deploy ``spec`` to Gemini Agent Runtime, minting a **new revision** (ops/CI action).
@@ -302,6 +303,14 @@ def deploy(
     job runner can OOM-kill a worker mid-turn, losing the attempt's work and spend even
     though the retry (see the handoff docs) picks the turn up from scratch.
     """
+    if workspace is not None:
+        raise ValueError(
+            "workspace= is local-only: a deployed engine's filesystem is the worker's own "
+            "/tmp, one job at a time, so there is no host directory to point turns at and "
+            "nothing for sessions to share. Seed the agent's cwd through the prompt or "
+            "spec.repos instead."
+        )
+
     import dataclasses
     import os
 
@@ -600,6 +609,7 @@ class GeminiSession:
         *,
         secrets: dict[str, str] | None = None,
         config: TurnConfig | None = None,
+        hooks: Any | None = None,
     ) -> DrivenRun:
         """Start a fresh turn (submits a ``run_query_job``).
 
@@ -613,8 +623,13 @@ class GeminiSession:
         ``config`` is this turn's :class:`~remote_agent_toolkit.config.TurnConfig` — a
         sparse overlay of the invocation knobs (model, budgets, tool policy, output
         schema) on top of the session's effective spec, for this turn only.
+
+        *hooks* are rejected here: the turn runs in a remote worker, and a hook is a live
+        callable in this process (see :meth:`~remote_agent_toolkit.runtime.base.Session.run`).
         """
-        return self._submit(message, resume=False, secrets=secrets, turn_config=config)
+        return self._submit(
+            message, resume=False, secrets=secrets, turn_config=config, hooks=hooks
+        )
 
     def send(
         self,
@@ -622,6 +637,7 @@ class GeminiSession:
         *,
         secrets: dict[str, str] | None = None,
         config: TurnConfig | None = None,
+        hooks: Any | None = None,
     ) -> DrivenRun:
         """Resume this session with ``message``. Pass ``secrets`` again (not persisted).
 
@@ -629,7 +645,9 @@ class GeminiSession:
         :meth:`run`). There is deliberately no session config here: the session's world
         was bound at ``start_session`` and cannot change mid-conversation.
         """
-        return self._submit(message, resume=True, secrets=secrets, turn_config=config)
+        return self._submit(
+            message, resume=True, secrets=secrets, turn_config=config, hooks=hooks
+        )
 
     def _stage_secrets(self, secrets: dict[str, str] | None) -> str | None:
         """Stage per-invocation secrets to a nonce-keyed GCS object; return its gs:// URI."""
@@ -706,9 +724,17 @@ class GeminiSession:
         resume: bool,
         secrets: dict[str, str] | None = None,
         turn_config: TurnConfig | None = None,
+        hooks: Any | None = None,
     ) -> DrivenRun:
         engine = self._engine
         sid = self._session_id
+        if hooks:
+            raise ValueError(
+                "run(hooks=...) is local-only: a hook is a callable in this process, and "
+                "this turn executes in a remote worker, so there is nothing to call it "
+                "there. Observe the turn through its event stream (async for) or "
+                "Session.history() instead."
+            )
         if not engine._output_bucket:
             raise ValueError(
                 "running a turn requires the engine's output bucket (events stream through "

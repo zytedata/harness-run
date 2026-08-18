@@ -261,6 +261,7 @@ class ClaudeCodeHarness:
             # the only channel that reaches the agent: no project `.mcp.json`, no host
             # config, no plugin-provided server.
             strict_mcp_config=True,
+            hooks=ctx.hooks,
             system_prompt=self._system_prompt(spec, ctx.interactive),
             **extra,
         )

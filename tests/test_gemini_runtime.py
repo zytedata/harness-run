@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
+
 from remote_agent_toolkit import AgentSpec
 from remote_agent_toolkit.events import AgentEvent, RunStatus, StopReason
 from remote_agent_toolkit.ports.eventsink import InMemorySink
@@ -141,6 +143,17 @@ def test_cold_submit_stages_secrets_and_query_carries_only_pointer(monkeypatch):
     assert parsed["class_method"] == "async_stream_query"
     assert "session_id" not in parsed["input"]
     assert query.count("AGENT_SESSION=sid-3") == 1
+
+
+def test_submit_rejects_hooks():
+    # A hook is a callable in the caller's process; the turn runs in a remote worker.
+    spec = AgentSpec(name="g", model="m")
+    engine = backend.GeminiEngine(resource="r/reasoningEngines/1", spec=spec,
+                                  project=None, location=None, output_bucket=None)
+    session = backend.GeminiSession(engine, "sid")
+    import pytest
+    with pytest.raises(ValueError, match="local-only"):
+        session.run("go", hooks={"PreToolUse": []})
 
 
 def test_submit_with_secrets_requires_output_bucket():
@@ -612,3 +625,13 @@ def test_transcript_only_spec_does_not_resume_the_conversation(tmp_path, monkeyp
     asyncio.run(_drain(agent._run_turn(spec, "sid-t", "go", "sid-t")))
     assert seen["session_store"] is not None  # the transcript is still mirrored
     assert seen["resume_sid"] is None
+
+
+def test_deploy_rejects_the_local_only_workspace_argument():
+    # A deployed engine has no host directory to run turns in, so the knob cannot mean
+    # anything there — say so instead of dropping it, which is how someone graduating a
+    # local script to gemini loses the shared cwd without noticing. Fails before any GCP
+    # import or billable side effect.
+    with pytest.raises(ValueError, match="local-only"):
+        backend.deploy(AgentSpec(name="w", model="m"), project="p", location="l",
+                       workspace="/some/dir")

@@ -104,9 +104,24 @@ def finalize_checkpoint(spec: AgentSpec, ctx: Any) -> AgentEvent | None:
     Done as a direct side-effect (not post-loop): the async Agent Engine executor
     stops draining the generator after the final event, so post-loop work is dead
     code in-cloud. Best-effort — a checkpoint failure never fails the run.
+
+    A caller-owned cwd (``ctx.workspace_dir``) is checkpointed as conversation only: the
+    directory is already durable, so there is nothing to preserve, while snapshotting it
+    would archive whatever else lives there, restoring it would roll files back over newer
+    work, and the pre-archive scrub would rewrite the caller's own ``.git/config`` files.
     """
     if not (spec.checkpoint and ctx.blobs is not None and ctx.session_store is not None):
         return None
+    if ctx.workspace_dir is not None:
+        return AgentEvent(
+            kind="status",
+            summary=f"checkpoint saved, conversation only ({ctx.session_id})",
+            raw={
+                "event": "checkpoint_saved",
+                "workspace_key": None,
+                "session_id": ctx.session_id,
+            },
+        )
     from ..checkpoint.workspace import snapshot
     from ..integrations.git import scrub_repo_tokens
 

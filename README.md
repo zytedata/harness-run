@@ -188,6 +188,45 @@ as disposable temp and tempts weaker models into `cd`-ing away, leaving delivera
 dir). The same `workspace/` cwd convention applies on `gemini`, but there the filesystem is remote, so
 `session.workspace` raises — seed via the prompt or `spec.repos`, collect via events or a repo push.
 
+**Picking the agent's cwd.** `local.deploy(spec, workspace="/path/of/your/choosing")` runs every session of
+that engine in the directory you name, and `session.workspace` returns it. The cwd is part of the agent's
+system prompt, so a per-session path means a per-session prompt prefix and no [prompt cache][cache] hit
+across sessions; pointing many sessions at one directory keeps the prefix identical and the cache warm. That
+is an explicit opt-out of isolation: the directory is yours, concurrent sessions share it, and the toolkit
+makes no promise that a session sees only its own files there. Name it something that reads like a workspace,
+for the same reason the default leaf is called one — the path is what the agent sees, and a temp-looking cwd
+tempts weaker models into `cd`-ing away from it.
+
+Because the directory is yours, the toolkit stops writing to it on your behalf: `repos` is rejected (every
+session would clone into the same path), and `checkpoint=True` snapshots the conversation only, leaving the
+files alone — a resume continues the conversation in the directory as it stands now, and nothing rolls back
+to what the session last saw. This is `local`-only; `gemini.deploy(workspace=…)` raises, since a worker's cwd
+is its own `/tmp`.
+
+[cache]: https://docs.claude.com/en/docs/build-with-claude/prompt-caching
+
+**Observing or gating individual tool calls.** `run(hooks=...)` / `send(hooks=...)` take the Claude Agent
+SDK's [hooks](https://docs.claude.com/en/docs/claude-code/hooks) mapping for that turn, e.g. to see every
+tool call as it is about to happen and block the ones you do not want:
+
+```python
+from claude_agent_sdk import HookMatcher
+
+async def gate(input_data, tool_use_id, context):
+    print("about to run", input_data["tool_name"])
+    if input_data["tool_name"] == "WebFetch":
+        return {"hookSpecificOutput": {"hookEventName": "PreToolUse",
+                                       "permissionDecision": "deny",
+                                       "permissionDecisionReason": "no network from this run"}}
+    return {}
+
+run = session.run("…", hooks={"PreToolUse": [HookMatcher(hooks=[gate])]})
+```
+
+`PreToolUse` fires under every `permission_mode`, unlike the SDK's `can_use_tool`, which `bypassPermissions`
+(the toolkit default) shadows entirely. Hooks are live callables, so they are a `local`-only argument —
+`gemini` runs the turn in a remote worker and rejects them, as does the `codex` harness.
+
 ## Consuming a run: wait, stream, or poll
 
 `session.run(msg)` (and `session.send(msg)` to resume) returns a `Run` handle, consumable three ways — the
@@ -616,6 +655,28 @@ Where the record lives (what `history()` reads, in order of preference):
 result exists — poll `run.done` for in-flight runs, not this. Caveats: `list_sessions`'s GCS layers are
 bucket-wide, so engines sharing an output bucket see each other's sessions; the `local` runtime keeps no
 durable event log (`list_sessions` shows its workdir's session dirs; `history()` raises).
+
+### Reading the harness transcript
+
+`AgentEvent`s are summaries. When you need the harness's own record — per-turn usage, tool statuses,
+subagent trees, permission denials — deploy with `transcript=True` and read it back on both runtimes:
+
+```python
+spec = AgentSpec(name="scorer", model="claude-sonnet-4-6", transcript=True)
+...
+transcripts = await session.transcripts()   # {"main": [...], "subagents/<id>": [...], ...}
+```
+
+`checkpoint=True` implies it (resume needs the transcript), but `transcript=True` alone adds **no
+workspace snapshot** — a run with a multi-hundred-MB working directory pays for the transcript only. It is
+purely observational: continuing a conversation across turns (`send`) still takes `checkpoint=True`. The
+`codex` harness keeps its conversation under `checkpoint` alone, so `transcripts()` reads back `{}` there
+(the run says so, as a `spec_warning` status event). Without either flag `transcripts()` raises; `{}` means
+persistence is on and nothing has been written yet.
+
+Unlike events, a transcript is verbatim: prompts, tool inputs and outputs, anything the agent saw or
+echoed — including a secret a coerced agent printed. Treat the checkpoint prefix, and everything
+`transcripts()` returns, as sensitive.
 
 ## Monitoring job CPU/RAM (OOM forensics)
 

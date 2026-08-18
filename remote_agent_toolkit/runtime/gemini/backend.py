@@ -261,6 +261,7 @@ def deploy(
     pool_max_wait_s: float | None = None,
     new_engine: bool = False,
     credentials: Any | None = None,
+    workspace: str | None = None,
     **_: Any,
 ) -> Engine:
     """Deploy ``spec`` to Gemini Agent Runtime, minting a **new revision** (ops/CI action).
@@ -314,6 +315,13 @@ def deploy(
     though the retry (see the handoff docs) picks the turn up from scratch.
     """
     # Fail fast BEFORE any side effect (pub/sub ensure, staging, the ~4 min billable build).
+    if workspace is not None:
+        raise ValueError(
+            "workspace= is local-only: a deployed engine's filesystem is the worker's own "
+            "/tmp, one job at a time, so there is no host directory to point turns at and "
+            "nothing for sessions to share. Seed the agent's cwd through the prompt or "
+            "spec.repos instead."
+        )
     if pool_max_wait_s is not None and not warm_pool:
         # Loud on purpose: a silently-ignored idle-life knob is exactly the operational
         # surprise this parameter exists to remove.
@@ -556,6 +564,7 @@ def get_engine(
         topic=topic,
         subscription=subscription,
         version=pinned,
+        spec_known=False,
     )
 
 
@@ -616,6 +625,7 @@ class GeminiSession:
         *,
         secrets: dict[str, str] | None = None,
         config: TurnConfig | None = None,
+        hooks: Any | None = None,
     ) -> DrivenRun:
         """Start a fresh turn (submits a ``run_query_job``).
 
@@ -629,8 +639,13 @@ class GeminiSession:
         ``config`` is this turn's :class:`~remote_agent_toolkit.config.TurnConfig` — a
         sparse overlay of the invocation knobs (model, budgets, tool policy, output
         schema) on top of the session's effective spec, for this turn only.
+
+        *hooks* are rejected here: the turn runs in a remote worker, and a hook is a live
+        callable in this process (see :meth:`~remote_agent_toolkit.runtime.base.Session.run`).
         """
-        return self._submit(message, resume=False, secrets=secrets, turn_config=config)
+        return self._submit(
+            message, resume=False, secrets=secrets, turn_config=config, hooks=hooks
+        )
 
     def send(
         self,
@@ -638,6 +653,7 @@ class GeminiSession:
         *,
         secrets: dict[str, str] | None = None,
         config: TurnConfig | None = None,
+        hooks: Any | None = None,
     ) -> DrivenRun:
         """Resume this session with ``message``. Pass ``secrets`` again (not persisted).
 
@@ -645,7 +661,9 @@ class GeminiSession:
         :meth:`run`). There is deliberately no session config here: the session's world
         was bound at ``start_session`` and cannot change mid-conversation.
         """
-        return self._submit(message, resume=True, secrets=secrets, turn_config=config)
+        return self._submit(
+            message, resume=True, secrets=secrets, turn_config=config, hooks=hooks
+        )
 
     def _stage_secrets(self, secrets: dict[str, str] | None) -> str | None:
         """Stage per-invocation secrets to a nonce-keyed GCS object; return its gs:// URI."""
@@ -722,9 +740,17 @@ class GeminiSession:
         resume: bool,
         secrets: dict[str, str] | None = None,
         turn_config: TurnConfig | None = None,
+        hooks: Any | None = None,
     ) -> DrivenRun:
         engine = self._engine
         sid = self._session_id
+        if hooks:
+            raise ValueError(
+                "run(hooks=...) is local-only: a hook is a callable in this process, and "
+                "this turn executes in a remote worker, so there is nothing to call it "
+                "there. Observe the turn through its event stream (async for) or "
+                "Session.history() instead."
+            )
         if not engine._output_bucket:
             raise ValueError(
                 "running a turn requires the engine's output bucket (events stream through "
@@ -910,6 +936,38 @@ class GeminiSession:
             credentials=engine._credentials,
         )
 
+    async def transcripts(self) -> dict[str, list[dict]]:
+        """This session's persisted harness transcripts (see ``runtime.base.Session``).
+
+        Read straight from the engine's checkpoint prefix, so it works for a session
+        re-attached from another process — the same objects the worker mirrored the
+        transcript to during the run.
+        """
+        from ...checkpoint.session_store import BlobSessionStore, _claude_session_id
+        from ...ports.blobstore import GcsBlobStore, parse_gcs_uri
+
+        engine = self._engine
+        if not engine._output_bucket:
+            raise RuntimeError(
+                "transcripts() reads the engine's checkpoint prefix under its output "
+                "bucket; construct the engine with output_bucket/project set."
+            )
+        # Fail loudly on a spec that persists nothing, rather than returning the same ``{}``
+        # a persisting session reads before its first turn. Only when the deployed spec is
+        # known: a ``get_engine`` handle carries an addressing-only spec whose defaults say
+        # nothing about what the engine bakes.
+        spec = self._client_spec()
+        if engine._spec_known and not (spec.checkpoint or spec.transcript):
+            raise RuntimeError(
+                "no transcript is persisted for this session — deploy the spec with "
+                "AgentSpec(transcript=True)"
+            )
+        bucket, prefix = parse_gcs_uri(f"{engine._output_bucket}/checkpoints")
+        blobs = GcsBlobStore(bucket, (prefix + "/") if prefix else "")
+        # The worker keys the store by the SDK-canonical id, not the raw (numeric, on the
+        # cold path) session id.
+        return await BlobSessionStore(blobs).load_all(_claude_session_id(self._session_id))
+
     def resource_samples(self) -> list[dict]:
         """This session's worker CPU/RAM samples, oldest first (OOM forensics).
 
@@ -990,13 +1048,16 @@ class GeminiEngine:
         topic: str | None = None,
         subscription: str | None = None,
         version: str | None = None,
+        spec_known: bool = True,
     ) -> None:
         self._resource = resource
         # The deploy handle carries the real deployed spec; a get_engine handle carries a
-        # minimal fallback (addressing only). Either way runs execute the engine's baked
-        # spec overlaid with the session/turn configs — the client uses this spec only as
-        # the base of its own view for result parsing.
+        # minimal fallback (addressing only), flagged by ``spec_known=False`` so nothing
+        # client-side reads its defaults as the deployed truth. Either way runs execute the
+        # engine's baked spec overlaid with the session/turn configs — the client uses this
+        # spec only as the base of its own view for result parsing.
         self.spec = spec
+        self._spec_known = spec_known
         self._project = project
         self._location = location
         self._output_bucket = output_bucket

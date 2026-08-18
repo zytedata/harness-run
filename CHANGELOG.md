@@ -47,6 +47,42 @@ tag `vX.Y.Z`, push the commit and the tag.
   `AGENT_POOL_MAX_WAIT_S`, but nothing plumbed it into the engine env, so
   the knob was unreachable; passing it without `warm_pool=True` now fails
   loudly instead of being swallowed by `deploy()`'s kwargs catch-all ([#28]).
+- `AgentSpec(transcript=True)` persists the harness's own transcript — the full
+  per-turn record: usage, tool statuses, subagent trees, permission denials —
+  and `Session.transcripts()` reads it back on both runtimes, keyed by `"main"`
+  plus each subagent subpath. Reading a transcript used to require
+  `checkpoint=True`, which also archives the entire working directory to blobs
+  at every turn: hundreds of MB per run for an agent that writes a lot, paid
+  purely to get at a JSONL. `checkpoint=True` still implies `transcript`
+  (resume needs the transcript), so existing specs are unaffected. On `gemini`
+  the flag is what opens the checkpoint bucket, so a transcript-only spec needs
+  a redeploy with an `output_bucket`. `transcript` on its own is purely
+  observational: `send()` still needs `checkpoint=True` to continue a
+  conversation. `transcripts()` raises when the spec persists nothing and reads
+  `{}` when persistence is on but nothing is written yet, so an empty result is
+  never a misconfiguration in disguise; the `codex` harness persists its
+  conversation under `checkpoint` alone, so it reads `{}` there and the run says
+  so with a `spec_warning` event. Treat what `transcripts()` returns as
+  sensitive: unlike events, it is the verbatim record of everything the agent
+  saw ([#26]).
+- `run(hooks=…)` / `send(hooks=…)` pass Claude Agent SDK hook callbacks for one
+  turn, so a caller can observe or gate every individual tool call — a
+  `PreToolUse` hook fires under every `permission_mode`, unlike the SDK's
+  `can_use_tool`, which the default `bypassPermissions` shadows entirely. Hooks
+  are live callables, so they ride the run plane next to `secrets` rather than a
+  config overlay (configs are serialized data) and are `local`-only: `gemini`
+  runs the turn in a remote worker and rejects them, and the `codex` harness
+  fails the turn rather than run it with the hooks never called ([#25]).
+- `local.deploy(spec, workspace=…)` (and `local.run(…, workspace=…)`) runs every
+  session of that engine in a directory you name instead of a per-session
+  `<workdir>/jobs/<session-id>/workspace`. The cwd is part of the agent's system
+  prompt, so a suite of short sessions pays prompt-cache creation on every one of
+  them; one shared cwd keeps the prefix identical and the cache warm (measured 2x
+  on a 111-attempt suite). The directory is yours: sessions are no longer isolated
+  from each other there, `repos` is rejected (they would all clone to the same
+  path), and `checkpoint=True` checkpoints the conversation only, so a resume
+  continues in the directory as it stands instead of restoring a snapshot over it.
+  `gemini.deploy(workspace=…)` raises — a worker's cwd is its own `/tmp` ([#29]).
 
 ### Changed
 
@@ -89,6 +125,21 @@ tag `vX.Y.Z`, push the commit and the tag.
   `SystemPrompt.inherit()` on both harnesses. Note the behavior change on
   redeploy: default-spec agents get the preset prompt and start honoring
   `CLAUDE.md` from cloned repos ([#22]).
+- A second `local.deploy()` into the same `workdir` no longer crashes on
+  provisioning the engine venv (uv ≥ 0.12 errors on `uv venv` over an existing
+  venv), which broke cross-process re-attach — `get_session`, checkpoint
+  resume — for specs with `packages`. The existing venv is now reused (declared
+  packages are still re-applied onto it), so an agent's mid-run installs
+  survive re-attach; the `UV_VENV_CLEAR=1` workaround discarded them. Reuse
+  requires the venv's Python to match the engine contract's at major.minor
+  (checked via `pyvenv.cfg`) — an out-of-contract or interpreter-less venv is
+  re-provisioned from scratch. Note convergence is one-way: packages *removed*
+  from the spec stay installed in a reused venv; delete the workdir's `venv/`
+  to rebuild from the spec alone ([#23]).
+- The synchronous `local.run(spec, message, …)` convenience now forwards
+  `config` and `hooks` to the turn it runs; both were silently swallowed by the
+  backend-symmetry `**_` catch-all, so a `TurnConfig` passed there had no
+  effect ([#25]).
 
 ### Backwards-incompatible
 
@@ -112,8 +163,12 @@ tag `vX.Y.Z`, push the commit and the tag.
 [#20]: https://github.com/zytedata/remote-agent-toolkit/pull/20
 [#21]: https://github.com/zytedata/remote-agent-toolkit/pull/21
 [#22]: https://github.com/zytedata/remote-agent-toolkit/pull/22
+[#23]: https://github.com/zytedata/remote-agent-toolkit/pull/23
 [#24]: https://github.com/zytedata/remote-agent-toolkit/pull/24
+[#25]: https://github.com/zytedata/remote-agent-toolkit/pull/25
+[#26]: https://github.com/zytedata/remote-agent-toolkit/pull/26
 [#28]: https://github.com/zytedata/remote-agent-toolkit/pull/28
+[#29]: https://github.com/zytedata/remote-agent-toolkit/pull/29
 
 ## 0.1.0 — 2026-08-07
 

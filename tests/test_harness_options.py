@@ -69,6 +69,15 @@ def test_mcp_config_is_strict():
     assert ClaudeCodeHarness().build_options(spec, _ctx(spec)).strict_mcp_config is True
 
 
+def test_hooks_passed_through():
+    # PreToolUse fires under every permission mode — including bypassPermissions, which
+    # shadows can_use_tool — so hooks are the seam for observing every tool call.
+    spec = AgentSpec(name="a", model="m")
+    hooks = {"PreToolUse": []}
+    assert ClaudeCodeHarness().build_options(spec, _ctx(spec, hooks=hooks)).hooks is hooks
+    assert ClaudeCodeHarness().build_options(spec, _ctx(spec)).hooks is None
+
+
 def test_remote_mcp_passthrough():
     spec = AgentSpec(name="a", model="m",
                      mcp_servers=[McpServer.remote("zyte", "https://mcp.zyte.com", {"X-Key": "v"})])

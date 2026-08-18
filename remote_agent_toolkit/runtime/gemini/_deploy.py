@@ -258,10 +258,11 @@ def build_env(
         # Logging is emit-only (ops/debug), never tailed.
         env["AGENT_EVENTS_GCS"] = f"{output_bucket}/events"
 
-    # Checkpoint/resume mirrors each turn's conversation + workspace to GCS. It needs a
-    # bucket to write to, so we only enable it when an output_bucket is supplied; otherwise
-    # the flag is silently a no-op (no place to checkpoint to).
-    if spec.checkpoint and output_bucket:
+    # Checkpoint/resume mirrors each turn's conversation + workspace to GCS, and a
+    # transcript-only spec mirrors the conversation alone. Either needs a bucket to write
+    # to, so we only enable it when an output_bucket is supplied; otherwise the flag is
+    # silently a no-op (no place to write to).
+    if (spec.checkpoint or spec.transcript) and output_bucket:
         env["AGENT_CHECKPOINT_GCS"] = f"{output_bucket}/checkpoints"
 
     # Claude model auth. Default: route Claude through Vertex, so the engine authenticates as

@@ -6,7 +6,7 @@ both implement identically, so app code is backend-agnostic.
 
 from __future__ import annotations
 
-from typing import AsyncIterator, Protocol, TYPE_CHECKING, runtime_checkable
+from typing import Any, AsyncIterator, Protocol, TYPE_CHECKING, runtime_checkable
 
 from ..events import AgentEvent, RunResult, RunStatus, StopReason
 
@@ -67,13 +67,17 @@ class Session(Protocol):
         *,
         secrets: dict[str, str] | None = None,
         config: TurnConfig | None = None,
+        hooks: Any | None = None,
     ) -> Run:
         """Start a run from ``message`` (kicks off a fresh turn).
 
         ``secrets`` is a per-invocation name → value map (the agent's own keys, any repo
         ``auth`` / GitHub MCP token). Values are never baked into the spec or logged.
         ``config`` is this turn's :class:`~remote_agent_toolkit.config.TurnConfig` — a
-        sparse overlay of the invocation knobs on the session's effective spec.
+        sparse overlay of the invocation knobs on the session's effective spec. *hooks*
+        are Claude Agent SDK hook callbacks (``{HookEvent: [HookMatcher, ...]}``) — live
+        callables in the caller's process, so ``local`` only; a backend that runs the turn
+        elsewhere (``gemini``) rejects them.
         """
         ...
 
@@ -83,6 +87,7 @@ class Session(Protocol):
         *,
         secrets: dict[str, str] | None = None,
         config: TurnConfig | None = None,
+        hooks: Any | None = None,
     ) -> Run:
         """Resume an idle session with ``message`` (e.g. answer a ``needs_input`` pause).
 
@@ -90,6 +95,7 @@ class Session(Protocol):
         are not persisted across turns, so repo push auth is re-embedded on resume. ``config``
         is a per-turn :class:`~remote_agent_toolkit.config.TurnConfig`; the SESSION config
         cannot change here (bound at :meth:`Engine.start_session`, world snapshot-restored).
+        *hooks* are per-turn like ``secrets`` (see :meth:`run`).
         """
         ...
 
@@ -135,6 +141,18 @@ class Session(Protocol):
 
         Works for re-attached sessions long after the run (``gemini``: mirrored GCS events →
         platform job output → Cloud Logging). Empty when nothing was persisted.
+        """
+        ...
+
+    async def transcripts(self) -> dict[str, list[dict]]:
+        """This session's persisted harness transcripts, keyed by ``"main"`` and each
+        subagent subpath, each a list of the harness's own transcript entries.
+
+        Needs ``AgentSpec(transcript=True)`` (or ``checkpoint=True``). Unlike
+        :meth:`history`, whose ``AgentEvent``s are deliberately lossy, this is the
+        harness's full record — what a caller scoring a run reads. Raises when
+        persistence was never enabled; reads ``{}`` when it is enabled but nothing is
+        persisted yet.
         """
         ...
 

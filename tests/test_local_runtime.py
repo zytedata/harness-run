@@ -10,6 +10,8 @@ from __future__ import annotations
 import asyncio
 from typing import AsyncIterator
 
+import pytest
+
 from remote_agent_toolkit import AgentSpec, SkillSource, local
 from remote_agent_toolkit.events import AgentEvent, RunStatus, StopReason
 
@@ -89,6 +91,37 @@ def test_async_iter_streams_events(tmp_path):
     # leading workspace_ready status, then the harness events
     assert kinds[0] == "status"
     assert kinds[1:] == ["tool_use", "message", "result"]
+
+
+def test_run_hooks_reach_the_harness(tmp_path):
+    seen = {}
+    spec = AgentSpec(name="demo", model="m")
+    engine = local.deploy(spec, workdir=str(tmp_path / "wd"))
+    engine._harness = FakeHarness([_result_ev()], on_run=lambda s, c: seen.update(hooks=c.hooks))
+    hooks = {"PreToolUse": []}
+    session = engine.start_session()
+
+    async def go():
+        await session.run("go", hooks=hooks)
+
+    asyncio.run(go())
+    assert seen["hooks"] is hooks
+
+
+def test_sync_run_forwards_config_and_hooks(tmp_path, monkeypatch):
+    from remote_agent_toolkit.config import TurnConfig
+
+    seen = {}
+    spec = AgentSpec(name="demo", model="m")
+    hooks = {"PreToolUse": []}
+    monkeypatch.setattr(
+        local.LocalEngine, "_harness_for",
+        lambda self, s: FakeHarness([_result_ev()],
+                                    on_run=lambda s, c: seen.update(hooks=c.hooks, model=s.model)),
+    )
+    local.run(spec, "go", workdir=str(tmp_path / "wd"),
+              config=TurnConfig(model="m2"), hooks=hooks)
+    assert seen == {"hooks": hooks, "model": "m2"}
 
 
 def test_poll_until_done(tmp_path):
@@ -183,6 +216,92 @@ def test_workspace_accessor_seed_and_collect(tmp_path):
     asyncio.run(_await(session.run("go")))
     assert seen == {"cwd_name": "workspace", "same_dir": True, "seeded": "seeded"}
     assert (session.workspace / "artifact.txt").read_text() == "produced"
+
+
+def test_deploy_workspace_is_shared_by_every_session(tmp_path):
+    # An engine deployed with workspace= runs its sessions in that directory instead of
+    # a per-session jobs/<sid>/workspace: the identical cwd keeps the system-prompt
+    # prefix identical across sessions, which is what the prompt cache keys on.
+    shared = tmp_path / "shared"
+    spec = AgentSpec(name="demo", model="m")
+    engine = local.deploy(spec, workdir=str(tmp_path / "wd"), workspace=str(shared))
+
+    cwds = []
+    engine._harness = FakeHarness([_result_ev()], on_run=lambda s, c: cwds.append(c.workspace))
+    sessions = [engine.start_session() for _ in range(2)]
+    for session in sessions:
+        assert session.workspace == shared
+        asyncio.run(_await(session.run("go")))
+    assert cwds == [shared, shared]
+    assert not (engine._jobs_root / sessions[0].session_id / "workspace").exists()
+    # jobs/<sid>/ is bookkeeping, not the agent cwd: it exists per session even when the
+    # agent ran elsewhere, so re-attach discovery still finds these sessions.
+    assert [s["session_id"] for s in engine.list_sessions()] == sorted(
+        s.session_id for s in sessions
+    )
+
+
+def test_run_forwards_the_chosen_workspace(tmp_path, monkeypatch):
+    # local.run() is deploy + start_session + await in one call, so it has to forward the
+    # cwd choice; absorbing it would run the agent somewhere the caller never named.
+    import remote_agent_toolkit.harness as harness_mod
+
+    shared = tmp_path / "shared"
+    seen = {}
+    monkeypatch.setattr(
+        harness_mod,
+        "resolve_harness",
+        lambda spec: FakeHarness([_result_ev()], on_run=lambda s, c: seen.update(cwd=c.workspace)),
+    )
+    local.run(AgentSpec(name="demo", model="m"), "go",
+              workdir=str(tmp_path / "wd"), workspace=str(shared))
+    assert seen["cwd"] == shared
+
+
+def test_chosen_workspace_rejects_repos(tmp_path):
+    # Repo provisioning clones to a fixed <cwd>/<repo name>, so sharing one cwd across
+    # sessions can only work for the first: refuse the combination up front, at deploy and
+    # at the session bind that could still introduce repos via its config.
+    from remote_agent_toolkit import RepoSource
+    from remote_agent_toolkit.config import SessionConfig
+
+    repos = [RepoSource.git("https://github.com/o/r")]
+    shared = str(tmp_path / "shared")
+    with pytest.raises(ValueError, match="workspace="):
+        local.deploy(AgentSpec(name="demo", model="m", repos=repos),
+                     workdir=str(tmp_path / "wd"), workspace=shared)
+
+    engine = local.deploy(AgentSpec(name="demo", model="m"),
+                          workdir=str(tmp_path / "wd2"), workspace=shared)
+    with pytest.raises(ValueError, match="workspace="):
+        engine.start_session(config=SessionConfig(repos=repos))
+
+
+def test_chosen_workspace_is_never_restored_over(tmp_path):
+    # A caller-owned cwd outlives the session and may hold files no session wrote, so a
+    # resume continues in the directory as it stands: no snapshot is untarred over it,
+    # which would roll files back to whatever this session last saw.
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    spec = AgentSpec(name="demo", model="m", checkpoint=True)
+    engine = local.deploy(spec, workdir=str(tmp_path / "wd"), workspace=str(shared))
+
+    from remote_agent_toolkit.checkpoint.workspace import snapshot
+    from remote_agent_toolkit.ports.blobstore import LocalBlobStore
+
+    stale = tmp_path / "stale"
+    stale.mkdir()
+    (stale / "notes.txt").write_text("as session 'fixedsid' last saw it")
+    snapshot(LocalBlobStore(str(engine._blob_root)), "fixedsid", str(stale))
+    (shared / "notes.txt").write_text("newer")
+
+    seen = {}
+    engine._harness = FakeHarness(
+        [_result_ev()],
+        on_run=lambda s, c: seen.update(notes=(c.workspace / "notes.txt").read_text()),
+    )
+    asyncio.run(_await(engine.get_session("fixedsid").send("continue please")))
+    assert seen["notes"] == "newer"
 
 
 def test_error_result_keeps_accounting(tmp_path):
@@ -295,3 +414,59 @@ def test_checkpoint_blobstore_gcs_env_selection(tmp_path, monkeypatch):
     monkeypatch.delenv("AGENT_CHECKPOINT_GCS")
     session2 = local.deploy(spec, workdir=str(tmp_path / "wd-local")).start_session()
     assert isinstance(session2._blobs, bs.LocalBlobStore)
+
+
+def test_transcript_wires_the_session_store_without_snapshotting(tmp_path):
+    # transcript=True alone gives a session store to mirror the transcript to — and the
+    # workspace snapshot stays off, so a huge working directory is not archived per turn.
+    from remote_agent_toolkit.harness._shared import finalize_checkpoint
+
+    spec = AgentSpec(name="demo", model="m", transcript=True)
+    engine = local.deploy(spec, workdir=str(tmp_path / "wd"))
+    session = engine.start_session()
+    assert session._session_store is not None
+
+    seen = {}
+    engine._harness = FakeHarness(
+        [_result_ev()], on_run=lambda s, c: seen.update(ctx=c))
+    asyncio.run(_await(session.run("go")))
+    ctx = seen["ctx"]
+    assert finalize_checkpoint(spec, ctx) is None          # nothing snapshotted
+    assert not session._blobs.list("workspace/")
+
+    # What the harness mirrors to the store reads back through transcripts().
+    entries = [{"uuid": "u1", "type": "user"}, {"uuid": "u2", "type": "assistant"}]
+    asyncio.run(ctx.session_store.append({"session_id": session.session_id}, entries))
+    asyncio.run(
+        ctx.session_store.append(
+            {"session_id": session.session_id, "subpath": "subagents/agent-X"},
+            [{"uuid": "u3", "type": "user"}],
+        )
+    )
+    assert asyncio.run(session.transcripts()) == {
+        "main": entries,
+        "subagents/agent-X": [{"uuid": "u3", "type": "user"}],
+    }
+
+
+def test_transcripts_without_persistence_raises(tmp_path):
+    session = local.deploy(AgentSpec(name="demo", model="m"),
+                           workdir=str(tmp_path / "wd")).start_session()
+    with pytest.raises(RuntimeError, match="transcript=True"):
+        asyncio.run(session.transcripts())
+
+
+def test_transcript_only_send_does_not_resume(tmp_path):
+    # transcript=True is observational: it wires the store but leaves send() the documented
+    # fresh turn. Resume is checkpointing's, and stays in parity with gemini.
+    def resume_sid_of(spec, name):
+        seen = {}
+        engine = local.deploy(spec, workdir=str(tmp_path / name))
+        engine._harness = FakeHarness([_result_ev()], on_run=lambda s, c: seen.update(ctx=c))
+        session = engine.start_session()
+        asyncio.run(_await(session.send("go")))
+        assert seen["ctx"].session_store is not None
+        return seen["ctx"].resume_sid
+
+    assert resume_sid_of(AgentSpec(name="d", model="m", transcript=True), "t") is None
+    assert resume_sid_of(AgentSpec(name="d", model="m", checkpoint=True), "c") is not None

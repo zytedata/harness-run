@@ -24,6 +24,16 @@ if TYPE_CHECKING:
     from ..spec import AgentSpec
 
 
+def _workspace_path(job_dir: Path, workspace_dir: Path | None) -> Path:
+    """The agent cwd: ``workspace_dir`` when the caller chose one, else ``job_dir/workspace``.
+
+    The single derivation of the path, shared by :attr:`RunContext.workspace` (what the
+    agent runs in) and the runtime's caller-facing ``Session.workspace`` accessor (what
+    callers seed and collect) — the two must never disagree.
+    """
+    return workspace_dir or job_dir / "workspace"
+
+
 @dataclass
 class RunContext:
     """Everything the harness needs to run one turn against an :class:`AgentSpec`.
@@ -57,6 +67,11 @@ class RunContext:
             overlay (both are serialized data) and only the ``local`` runtime can carry
             them. ``PreToolUse`` fires under every permission mode, including
             ``bypassPermissions``, where ``can_use_tool`` is shadowed.
+        workspace_dir: A caller-chosen agent cwd, replacing the ``job_dir/workspace``
+            default (``None`` for the default). Set by the runtime from the engine's
+            ``workspace``; the directory is the caller's, other sessions may be running
+            in it, and it outlives the session, so a checkpoint neither snapshots nor
+            credential-scrubs it — only the conversation is checkpointed.
     """
 
     spec: AgentSpec
@@ -70,10 +85,11 @@ class RunContext:
     blobs: Any | None = None
     interactive: bool = False
     hooks: Any | None = None
+    workspace_dir: Path | None = None
 
     @property
     def workspace(self) -> Path:
-        """The agent's working directory: ``job_dir/workspace``.
+        """The agent's working directory: ``workspace_dir``, else ``job_dir/workspace``.
 
         The agent cwd is a leaf literally named ``workspace`` — a bare ``jobs/<uuid>``
         cwd reads as a disposable temp location, and models have been observed taking
@@ -82,4 +98,4 @@ class RunContext:
         (skills, cloned repos, checkpoint snapshot/restore) targets this path; callers
         seed inputs into and collect outputs from it (``Session.workspace``).
         """
-        return self.job_dir / "workspace"
+        return _workspace_path(self.job_dir, self.workspace_dir)

@@ -310,7 +310,16 @@ These are facts measured during the PoC. The library encodes them so consumers i
   fight the path instead of fixing it. The leaf also keeps `jobs/<sid>/` itself free for session
   bookkeeping the agent shouldn't see. Derived in ONE place (`RunContext.workspace`); callers use the
   `Session.workspace` accessor (local: host `Path`, created on access, seed-before/collect-after; gemini:
-  raises — the filesystem is remote) instead of hand-building `workdir/jobs/<sid>`.
+  raises — the filesystem is remote) instead of hand-building `workdir/jobs/<sid>`. `local.deploy(spec,
+  workspace=...)` swaps that leaf for a caller-owned directory: a per-session path is a per-session system
+  prompt, so suites of short sessions pay prompt-cache creation on every one of them (measured 2x on a
+  111-attempt trigger suite); one shared cwd is an identical prefix and a cache read. Isolation is the
+  caller's to give up — but only isolation: everything that would have the toolkit *write* the shared
+  directory is off there, because a caller-owned dir is already durable and holds files no session owns.
+  `repos` is rejected (a fixed clone destination admits one session), and a checkpoint snapshots the
+  conversation alone — no workspace tar, no credential scrub over the caller's `.git/config`s, no restore
+  rolling files back to what one session last saw. `jobs/<sid>/` is still created per session, for the
+  bookkeeping (`stderr.log`, the codex home, `list_sessions()`) that never was agent-visible.
 - **Finalize inline at the terminal `result` event.** The async executor **stops draining the generator
   after the result event**, so post-loop checkpoint/artifact code is dead in-cloud — it must run as a
   side-effect at the terminal event, with Cloud Logging as the reliable emit channel.

@@ -392,6 +392,15 @@ class CodexHarness:
                 "allowed_tools/disallowed_tools are Claude-specific and have no codex "
                 "equivalent; ignored"
             )
+        if ctx.hooks:
+            # Fail the turn rather than warn: hooks gate tool calls, and a caller that
+            # only awaits the result would never see a streamed warning telling them the
+            # gate is not in place.
+            raise ValueError(
+                "run(hooks=...) is Claude-specific and has no codex equivalent; the "
+                "turn would run with the hooks never called. Drop them, or run this "
+                "turn on the claude-code harness."
+            )
 
         mcp_overrides, mcp_env = self._mcp_overrides(spec, ctx)
         # The agent's shell env: Codex filters *KEY*/*SECRET*/*TOKEN*-named vars from the

@@ -127,6 +127,7 @@ class LocalSession:
         *,
         secrets: dict[str, str] | None = None,
         config: TurnConfig | None = None,
+        hooks: Any | None = None,
     ) -> DrivenRun:
         """Start a fresh turn from ``message``.
 
@@ -134,8 +135,12 @@ class LocalSession:
         ``auth`` / GitHub MCP token). Values live only for this run; they are never baked into
         the spec and never logged. ``config`` is this turn's
         :class:`~remote_agent_toolkit.config.TurnConfig` overlay (invocation knobs only).
+        *hooks* are Claude Agent SDK hook callbacks for this turn
+        (``{HookEvent: [HookMatcher, ...]}``); see :meth:`~remote_agent_toolkit.runtime.base.Session.run`.
         """
-        return self._start(message, resume_sid=None, secrets=secrets, turn_config=config)
+        return self._start(
+            message, resume_sid=None, secrets=secrets, turn_config=config, hooks=hooks
+        )
 
     def send(
         self,
@@ -143,17 +148,22 @@ class LocalSession:
         *,
         secrets: dict[str, str] | None = None,
         config: TurnConfig | None = None,
+        hooks: Any | None = None,
     ) -> DrivenRun:
         """Resume this session with ``message`` (continues the conversation).
 
         Conversation + workspace continuity requires ``spec.checkpoint=True``; without it
         this runs a fresh turn with no memory of the prior one. Pass ``secrets`` again (they
-        are not persisted across turns) so repo push auth is re-embedded on resume.
-        ``config`` is a per-turn :class:`~remote_agent_toolkit.config.TurnConfig`; the
+        are not persisted across turns) so repo push auth is re-embedded on resume, and
+        *hooks* again for the same reason. ``config`` is a per-turn :class:`~remote_agent_toolkit.config.TurnConfig`; the
         SESSION config cannot change here (bound at ``start_session``).
         """
         return self._start(
-            message, resume_sid=self._session_id, secrets=secrets, turn_config=config
+            message,
+            resume_sid=self._session_id,
+            secrets=secrets,
+            turn_config=config,
+            hooks=hooks,
         )
 
     def _start(
@@ -162,6 +172,7 @@ class LocalSession:
         resume_sid: str | None,
         secrets: dict[str, str] | None = None,
         turn_config: TurnConfig | None = None,
+        hooks: Any | None = None,
     ) -> DrivenRun:
         from ..config import apply_turn_config
         from ..harness.context import RunContext
@@ -178,6 +189,7 @@ class LocalSession:
             session_store=self._session_store,
             blobs=self._blobs,
             interactive=spec.checkpoint if spec.interactive is None else spec.interactive,
+            hooks=hooks,
         )
         engine = self._engine
 
@@ -417,18 +429,20 @@ def run(
     *,
     secrets: dict[str, str] | None = None,
     workdir: str | None = None,
+    config: TurnConfig | None = None,
+    hooks: Any | None = None,
     **_: Any,
 ) -> RunResult | None:
     """Convenience: ``deploy`` → ``start_session`` → ``await run(message)`` (sync).
 
-    Runs its own event loop, so call it from sync code. ``secrets`` is the per-invocation
-    name → value map (see :meth:`LocalSession.run`). For streaming/polling, or from inside an
-    event loop, use ``deploy`` and drive the ``Session``/``Run`` directly.
+    Runs its own event loop, so call it from sync code. ``secrets``, ``config`` and *hooks*
+    go to the single turn (see :meth:`LocalSession.run`). For streaming/polling, or from
+    inside an event loop, use ``deploy`` and drive the ``Session``/``Run`` directly.
     """
     async def _arun() -> RunResult | None:
         engine = deploy(spec, workdir=workdir)
         session = engine.start_session()
-        return await session.run(message, secrets=secrets)
+        return await session.run(message, secrets=secrets, config=config, hooks=hooks)
 
     try:
         asyncio.get_running_loop()

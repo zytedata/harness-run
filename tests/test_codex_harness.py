@@ -107,6 +107,14 @@ def test_build_options_tool_lists_warn(tmp_path):
     assert any("allowed_tools" in w for w in opts.warnings)
 
 
+def test_build_options_rejects_hooks(tmp_path):
+    # Fail closed: a gating hook codex cannot call must not let the turn run.
+    spec = AgentSpec(name="a", model="gpt-5.6-luna", harness="codex")
+    ctx = _ctx(tmp_path, spec, hooks={"PreToolUse": []})
+    with pytest.raises(ValueError, match="no codex equivalent"):
+        CodexHarness().build_options(spec, ctx)
+
+
 def test_build_options_mcp_servers(tmp_path):
     spec = AgentSpec(
         name="a", model="gpt-5.6-luna", harness="codex",

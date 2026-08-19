@@ -29,6 +29,7 @@ import time (stdlib only at module scope; any third-party import is lazy inside 
 
 from __future__ import annotations
 
+import math
 import shutil
 import tempfile
 from pathlib import Path
@@ -214,6 +215,7 @@ def build_env(
     vertex_region: str = "global",
     warm_pool: bool = False,
     pool_subscription: str | None = None,
+    pool_max_wait_s: float | None = None,
 ) -> dict:
     """Build the engine ``env_vars`` dict from ``spec`` (generalizes the PoC ``_env_vars``).
 
@@ -231,7 +233,21 @@ def build_env(
             key in the agent env). Set ``False`` for API-key mode (key supplied per-invocation).
         warm_pool / pool_subscription: when both set, the engine acts as a pool worker that
             pulls turn assignments from ``pool_subscription``.
+        pool_max_wait_s: how long an idle pool worker waits for an assignment before it
+            exits (default: ``pool.DEFAULT_MAX_WAIT_S``, a day). Baked into the engine env
+            as ``AGENT_POOL_MAX_WAIT_S`` for the worker's wait loop to read; only
+            meaningful with ``warm_pool``.
     """
+    # NaN would pass a bare `<= 0` check and make the worker's deadline arithmetic always
+    # false — every worker idle-expires instantly, silently recreating the permanently-cold
+    # pool this knob exists to prevent; inf would defeat the documented billing bound.
+    if pool_max_wait_s is not None and not (
+        math.isfinite(pool_max_wait_s) and pool_max_wait_s > 0
+    ):
+        raise ValueError(
+            f"pool_max_wait_s must be a positive, finite number of seconds; "
+            f"got {pool_max_wait_s!r}"
+        )
     env: dict = {
         # The engine refuses bypassPermissions under root; Agent Runtime may run as root.
         "IS_SANDBOX": "1",
@@ -251,10 +267,11 @@ def build_env(
         # Logging is emit-only (ops/debug), never tailed.
         env["AGENT_EVENTS_GCS"] = f"{output_bucket}/events"
 
-    # Checkpoint/resume mirrors each turn's conversation + workspace to GCS. It needs a
-    # bucket to write to, so we only enable it when an output_bucket is supplied; otherwise
-    # the flag is silently a no-op (no place to checkpoint to).
-    if spec.checkpoint and output_bucket:
+    # Checkpoint/resume mirrors each turn's conversation + workspace to GCS, and a
+    # transcript-only spec mirrors the conversation alone. Either needs a bucket to write
+    # to, so we only enable it when an output_bucket is supplied; otherwise the flag is
+    # silently a no-op (no place to write to).
+    if (spec.checkpoint or spec.transcript) and output_bucket:
         env["AGENT_CHECKPOINT_GCS"] = f"{output_bucket}/checkpoints"
 
     # Claude model auth. Default: route Claude through Vertex, so the engine authenticates as
@@ -271,6 +288,8 @@ def build_env(
     # Warm-pool worker config: a pooled job pulls turn assignments from this subscription.
     if warm_pool and pool_subscription:
         env["AGENT_POOL_SUBSCRIPTION"] = pool_subscription
+        if pool_max_wait_s is not None:
+            env["AGENT_POOL_MAX_WAIT_S"] = str(pool_max_wait_s)
 
     return env
 
@@ -388,6 +407,7 @@ def build_engine_config(
     vertex_region: str = "global",
     warm_pool: bool = False,
     pool_subscription: str | None = None,
+    pool_max_wait_s: float | None = None,
     min_instances: int = 0,
     max_instances: int = 1,
     resource_limits: dict[str, str] | None = None,
@@ -428,6 +448,7 @@ def build_engine_config(
             vertex_region=vertex_region,
             warm_pool=warm_pool,
             pool_subscription=pool_subscription,
+            pool_max_wait_s=pool_max_wait_s,
         ),
         "min_instances": min_instances,
         "max_instances": max_instances,

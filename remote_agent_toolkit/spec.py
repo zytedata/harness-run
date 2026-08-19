@@ -287,6 +287,12 @@ class AgentSpec:
             produced, plus a ``task_wait_timeout`` status event. Size it to the longest
             background job the agent legitimately waits on (e.g. a verification crawl).
         checkpoint: Enable checkpoint/resume (interactive pauses).
+        transcript: Persist the harness's own transcript so ``Session.transcripts()`` can
+            read it back (implied by ``checkpoint``, which needs it to resume). On its own
+            it is observational: no workspace snapshot, so a run whose working directory is
+            large pays only for the transcript, and no conversation continuity either —
+            ``send()`` still needs ``checkpoint``. The ``codex`` harness persists its
+            conversation under ``checkpoint`` alone.
         interactive: Append the "stop and await the operator" guidance to the system
             prompt. ``None`` (default) follows ``checkpoint`` — the historical coupling.
             Set ``False`` to checkpoint an autonomous loop without pause guidance, or
@@ -319,6 +325,7 @@ class AgentSpec:
     reasoning_effort: str | None = None
     background_task_timeout: float = 3600.0
     checkpoint: bool = False
+    transcript: bool = False
     interactive: bool | None = None
     output_schema: Any = None
     env: Mapping[str, str] | None = field(default=None)
@@ -363,6 +370,7 @@ class AgentSpec:
             "max_budget_usd": self.max_budget_usd,
             "background_task_timeout": self.background_task_timeout,
             "checkpoint": self.checkpoint,
+            "transcript": self.transcript,
             "packages": list(self.packages),
         }
         if isinstance(self.system_prompt, SystemPrompt):
@@ -416,6 +424,7 @@ class AgentSpec:
             reasoning_effort=d.get("reasoning_effort"),
             background_task_timeout=float(d.get("background_task_timeout", 3600.0)),
             checkpoint=bool(d.get("checkpoint", False)),
+            transcript=bool(d.get("transcript", False)),
             interactive=None if d.get("interactive") is None else bool(d["interactive"]),
             output_schema=d.get("output_schema"),
             env=dict(d["env"]) if d.get("env") is not None else None,

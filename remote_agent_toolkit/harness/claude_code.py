@@ -255,6 +255,11 @@ class ClaudeCodeHarness:
             permission_mode=spec.permission_mode,
             max_turns=spec.max_turns,
             max_budget_usd=spec.max_budget_usd,
+            # The SDK's own default is 1 MiB per stdout message, and it raises from inside
+            # the read loop when a message exceeds it — the turn ends with no result and
+            # the run's work is lost (an in-context image Read is enough to trip it). See
+            # `spec.DEFAULT_MAX_BUFFER_SIZE`.
+            max_buffer_size=spec.max_buffer_size,
             env=runtime_env(spec, ctx),
             mcp_servers=self._mcp_servers(spec, ctx),
             # MCP config is loaded outside the setting sources, so `spec.mcp_servers` is

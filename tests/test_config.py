@@ -84,6 +84,19 @@ def test_turn_config_layers_over_the_session():
     assert apply_turn_config(session_eff, None) is session_eff
 
 
+def test_max_buffer_size_is_tunable_per_session_and_per_turn():
+    # An agent that reads big things (an image, a huge tool result) can be given room
+    # without a redeploy — and one turn can ask for more than its session's default.
+    spec = _spec()
+    session_eff = apply_session_config(spec, SessionConfig(max_buffer_size=8 * 1024 * 1024))
+    assert session_eff.max_buffer_size == 8 * 1024 * 1024
+    turn_eff = apply_turn_config(session_eff, TurnConfig(max_buffer_size=64 * 1024 * 1024))
+    assert turn_eff.max_buffer_size == 64 * 1024 * 1024
+    # Validation applies to an overlaid value too (the overlay rebuilds the spec).
+    with pytest.raises(ValueError, match="max_buffer_size must be > 0"):
+        apply_turn_config(spec, TurnConfig(max_buffer_size=0))
+
+
 # ---------------------------------------------------------------- serialization
 
 

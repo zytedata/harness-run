@@ -13,6 +13,15 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal, Mapping
 
+# Cap on ONE NDJSON message read from the Claude Code CLI's stdout (``AgentSpec
+# .max_buffer_size``). The SDK's own default is 1 MiB, which real runs exceed — a ``Read``
+# of a screenshot arrives base64-encoded, and a big tool result is one line — and over the
+# cap it raises *inside the read loop*, so the turn dies mid-stream with no result and the
+# whole run is discarded. 32 MiB is high enough that only a pathological message trips it,
+# and still bounds the worker's per-stream memory (the SDK checks the partial line too, so
+# this is the ceiling on what one message can buffer, not just on what it accepts).
+DEFAULT_MAX_BUFFER_SIZE = 32 * 1024 * 1024
+
 
 @dataclass(frozen=True)
 class SystemPrompt:
@@ -273,6 +282,13 @@ class AgentSpec:
             background tasks may consume more turns in total — ``RunResult.num_turns``
             reports the cumulative count. ``max_budget_usd`` is cumulative regardless.
         max_budget_usd: Hard cap on spend.
+        max_buffer_size: Largest single message the harness will accept from the CLI's
+            stdout stream, in bytes (default :data:`DEFAULT_MAX_BUFFER_SIZE`, 32 MiB).
+            ``claude-code`` only — the Codex binding frames its own stream and ignores
+            this. Raise it for an agent whose tool results are genuinely huge; a run that
+            exceeds it fails the turn outright (the transport raises mid-stream, so there
+            is no partial result to keep), which is why the default is generous rather
+            than tight. Must be > 0.
         reasoning_effort: How much reasoning the model spends per response, or ``None``
             for the harness default. The union of both harnesses' vocabularies is
             accepted — ``"none" | "minimal" | "low" | "medium" | "high" | "xhigh" |
@@ -322,6 +338,7 @@ class AgentSpec:
     permission_mode: str = "bypassPermissions"
     max_turns: int = 120
     max_budget_usd: float = 10.0
+    max_buffer_size: int = DEFAULT_MAX_BUFFER_SIZE
     reasoning_effort: str | None = None
     background_task_timeout: float = 3600.0
     checkpoint: bool = False
@@ -343,6 +360,13 @@ class AgentSpec:
             raise ValueError(
                 f"harness {self.harness!r} (the default) must be in harnesses="
                 f"{list(self.harnesses)} — the default must be one of the baked CLIs"
+            )
+        if self.max_buffer_size <= 0:
+            # A non-positive cap rejects EVERY message, so the first turn dies with a
+            # buffer error that reads like the payload's fault. Fail at construction.
+            raise ValueError(
+                f"max_buffer_size must be > 0 (got {self.max_buffer_size}); it is a byte "
+                "ceiling on one stdout message, not a switch"
             )
         if self.allowed_tools is not None:
             object.__setattr__(self, "allowed_tools", tuple(self.allowed_tools))
@@ -368,6 +392,7 @@ class AgentSpec:
             "permission_mode": self.permission_mode,
             "max_turns": self.max_turns,
             "max_budget_usd": self.max_budget_usd,
+            "max_buffer_size": self.max_buffer_size,
             "background_task_timeout": self.background_task_timeout,
             "checkpoint": self.checkpoint,
             "transcript": self.transcript,
@@ -421,6 +446,7 @@ class AgentSpec:
             permission_mode=d.get("permission_mode", "bypassPermissions"),
             max_turns=int(d.get("max_turns", 120)),
             max_budget_usd=float(d.get("max_budget_usd", 10.0)),
+            max_buffer_size=int(d.get("max_buffer_size", DEFAULT_MAX_BUFFER_SIZE)),
             reasoning_effort=d.get("reasoning_effort"),
             background_task_timeout=float(d.get("background_task_timeout", 3600.0)),
             checkpoint=bool(d.get("checkpoint", False)),

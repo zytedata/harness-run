@@ -31,9 +31,11 @@ jobs:
         uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
-          cache-dependency-glob: pyproject.toml  # no lockfile — key the cache off deps
+          cache-dependency-glob: |
+            pyproject.toml
+            remote_agent_toolkit/runtime/gemini/constraints.txt
       - name: Install (runtime + dev group)
-        run: uv pip install --system -e . --group dev
+        run: uv pip install --system -e . --group dev -c remote_agent_toolkit/runtime/gemini/constraints.txt
       - name: Lint
         run: ruff check .
       - name: Test

@@ -26,7 +26,7 @@
 # Pickle-coupled to the DEPLOY venv: the engine build unpickles the AdkApp object the
 # deploying client pickled, so these must match the operator's venv (fail-fast checked
 # by verify_deploy_env() before the ~4 min billable build).
-google-cloud-aiplatform==1.164.0
+google-cloud-aiplatform==1.165.0
 cloudpickle==3.1.2
 pydantic==2.13.4
 

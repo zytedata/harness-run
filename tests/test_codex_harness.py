@@ -514,6 +514,50 @@ def test_unknown_openrouter_model_skips_context_window(tmp_path):
     assert "model_context_window" not in ovr  # codex's fallback metadata applies
 
 
+def test_openrouter_output_schema_is_also_asked_for_in_words(tmp_path):
+    """OpenRouter accepts the json_schema format but doesn't enforce it (GLM-5.3 ignored it)."""
+    schema = {"type": "object", "properties": {"answer": {"type": "integer"}}}
+    spec = _or_spec(output_schema=schema)
+    opts = CodexHarness().build_options(spec, _ctx(tmp_path, spec, secrets={"OPENROUTER_API_KEY": "k"}))
+
+    assert opts.run_args["output_schema"] == schema  # still sent, in case it starts enforcing
+    dev = opts.thread_args["developer_instructions"]
+    assert "FINAL MESSAGE FORMAT" in dev
+    assert '"answer"' in dev  # the schema itself is in the instruction
+
+
+def test_openrouter_schema_instruction_appends_to_existing_prompt(tmp_path):
+    """It must not clobber SystemPrompt.append or the interactive suffix."""
+    schema = {"type": "object", "properties": {"a": {"type": "string"}}}
+    spec = _or_spec(system_prompt=SystemPrompt.inherit(append="HOUSE RULE."), output_schema=schema)
+    ctx = _ctx(tmp_path, spec, secrets={"OPENROUTER_API_KEY": "k"}, interactive=True)
+    dev = CodexHarness().build_options(spec, ctx).thread_args["developer_instructions"]
+
+    assert dev.startswith("HOUSE RULE.")
+    assert "INTERACTIVE MODE" in dev
+    assert dev.index("HOUSE RULE.") < dev.index("FINAL MESSAGE FORMAT")
+
+
+def test_openai_output_schema_is_not_steered(tmp_path):
+    """The OpenAI path enforces the format server-side; no prompt text is added."""
+    spec = AgentSpec(
+        name="a", model="gpt-5.6-luna", harness="codex",
+        output_schema={"type": "object", "properties": {"a": {"type": "string"}}},
+    )
+    opts = CodexHarness().build_options(spec, _ctx(tmp_path, spec))
+    assert "developer_instructions" not in opts.thread_args
+
+
+def test_openrouter_and_mcp_overrides_coexist(tmp_path):
+    """Provider config and MCP config share one override list — neither may drop the other."""
+    spec = _or_spec(mcp_servers=(McpServer.remote("docs", "https://example.test/mcp"),))
+    ctx = _ctx(tmp_path, spec, secrets={"OPENROUTER_API_KEY": "k"})
+    ovr = "\n".join(CodexHarness().build_options(spec, ctx).codex_config.config_overrides)
+
+    assert 'model_provider="openrouter"' in ovr
+    assert "mcp_servers.docs.url" in ovr
+
+
 async def test_openrouter_run_skips_login(tmp_path, monkeypatch):
     """Auth is the provider's env_key; `codex login` would store OpenAI credentials."""
     spec = _or_spec()

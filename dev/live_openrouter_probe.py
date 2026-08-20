@@ -20,9 +20,15 @@ What it validates per model, on the LOCAL runtime (no GCP, no engine build):
     price, which is also what makes ``max_budget_usd`` enforceable
   * ``num_turns`` is counted (one per token-usage notification)
 
-Then one resume check on the cheapest model: a second turn via ``send()`` must remember a
-token from the first. ``thread_resume`` re-applies the thread args, so this is where a
-provider config that only works on a fresh thread would show up.
+Then two checks that pin gaps found the hard way:
+
+  * **resume** (cheapest model): a second turn via ``send()`` must remember a token from
+    the first. ``thread_resume`` re-applies the thread args, so a provider config that
+    only works on a fresh thread shows up here.
+  * **structured output** (GLM-5.3): OpenRouter accepts Codex's json_schema format but
+    does not enforce it, and GLM-5.3 ignored it 3/3 times before the harness started
+    stating the schema in the developer instructions too. This is the model that catches
+    a regression there.
 
 Pass criteria: every model passes every check, and the resume check passes. Exit code is
 non-zero otherwise.
@@ -65,6 +71,15 @@ TASK = 'Run `python3 -c "print(6 * 7)"` in the shell and reply with just the num
 # The resume check runs on the cheapest model — it exercises the harness, not the model.
 RESUME_MODEL = "openrouter/deepseek/deepseek-v4-flash"
 TOKEN = "BANANA-77"
+
+# The strictest structured-output case we know: this model ignores the unenforced schema.
+SCHEMA_MODEL = "openrouter/z-ai/glm-5.3"
+SCHEMA = {
+    "type": "object",
+    "properties": {"answer": {"type": "integer"}, "note": {"type": "string"}},
+    "required": ["answer", "note"],
+    "additionalProperties": False,
+}
 
 
 async def _probe(model: str, key: str) -> dict:
@@ -147,6 +162,38 @@ async def _probe_resume(model: str, key: str) -> dict:
     return row
 
 
+async def _probe_schema(model: str, key: str) -> dict:
+    """``output_schema`` must yield a parsed object, not prose."""
+    label = f"{model.removeprefix('openrouter/')} (schema)"
+    spec = AgentSpec(
+        name="ratk-openrouter-schema",
+        model=model,
+        harness="codex",
+        max_turns=6,
+        max_budget_usd=0.40,
+        output_schema=SCHEMA,
+    )
+    row = {"model": label, "ok": False, "tools": True, "cost": None, "turns": 0, "note": ""}
+    try:
+        run = local.deploy(spec).start_session().run(
+            'Run `python3 -c "print(6 * 7)"`. Return the number as `answer` and a one-word `note`.',
+            secrets={"OPENROUTER_API_KEY": key},
+        )
+        async for _ in run:
+            pass
+        r = run.result
+        row.update(cost=r.cost_usd, turns=r.num_turns or 0)
+        out = r.structured_output
+        row["ok"] = bool(not r.is_error and isinstance(out, dict) and out.get("answer") == 42)
+        if not row["ok"]:
+            row["note"] = f"structured_output={out!r} text={(r.text or '')[:60]!r}"
+        print(f"[{label}] structured_output={out!r}", flush=True)
+    except Exception as exc:  # noqa: BLE001 — report, don't hide
+        row["note"] = f"{type(exc).__name__}: {exc}"
+        traceback.print_exc()
+    return row
+
+
 async def main() -> int:
     key = os.environ.get("OPENROUTER_API_KEY")
     if not key:
@@ -160,6 +207,7 @@ async def main() -> int:
         # provider doesn't get blamed on another.
         rows.append(await _probe(model, key))
     rows.append(await _probe_resume(RESUME_MODEL, key))
+    rows.append(await _probe_schema(SCHEMA_MODEL, key))
 
     print("\n=== VERDICTS ===")
     for row in rows:

@@ -74,6 +74,11 @@ is needed (all four settings were established live against OpenRouter, 2026-08-2
   leaves ``reasoning_effort`` unset the binding sends ``low`` rather than letting the
   turn fail.
 
+``output_schema`` needs the same treatment: OpenRouter accepts Codex's json_schema
+response format but does not enforce it, so the schema is ALSO stated in the developer
+instructions (see :data:`_OPENROUTER_SCHEMA_INSTRUCTION`). Without that, a model that
+ignores the unenforced format returns prose and ``structured_output`` comes back ``None``.
+
 Codex ships no catalog entry for these models, so it falls back to generic metadata and
 warns that this "can degrade performance". :data:`_OPENROUTER_CONTEXT_WINDOW` carries the
 context window for the models we vouch for, which is passed as ``model_context_window``
@@ -133,6 +138,17 @@ _OPENROUTER_WIRE_API = "responses"
 # OpenRouter's Responses endpoint refuses a turn with reasoning disabled, and Codex sends
 # effort "none" for a model it has no metadata for.
 _OPENROUTER_MIN_EFFORT = "low"
+
+# OpenRouter accepts Codex's json_schema response format and echoes it back, but does NOT
+# enforce it — compliance is left to the model, and some ignore it (measured 2026-08-20:
+# DeepSeek v4 Flash/Pro and Kimi K3 returned clean JSON, GLM-5.3 returned prose 3/3 times,
+# which parses to structured_output=None). So the schema is also asked for in words. The
+# toolkit's own parse already tolerates a fenced block, but not prose.
+_OPENROUTER_SCHEMA_INSTRUCTION = (
+    "\n\nFINAL MESSAGE FORMAT: your last message of the turn must be ONLY a single JSON "
+    "object conforming to this schema — no prose before or after it, no code fence, no "
+    "explanation:\n{schema}"
+)
 
 # Context window for the OpenRouter models this binding vouches for, passed as
 # `model_context_window` because Codex's catalog has no entry for them (it would fall back
@@ -559,6 +575,18 @@ class CodexHarness:
             schema = _output_schema_to_dict(spec.output_schema)
             if isinstance(schema, dict):
                 run_args["output_schema"] = schema
+                if openrouter:
+                    # Sent as well as asked for: if OpenRouter starts enforcing the
+                    # format, the request already carries it.
+                    steer = _OPENROUTER_SCHEMA_INSTRUCTION.format(
+                        schema=json.dumps(schema, separators=(",", ":"))
+                    )
+                    existing = thread_args.get("developer_instructions", "")
+                    # The steer carries its own leading blank line for appending; with
+                    # nothing to append to it would just indent the instructions.
+                    thread_args["developer_instructions"] = (
+                        existing + steer if existing else steer.lstrip("\n")
+                    )
 
         return _CodexOptions(
             codex_config=CodexConfig(env=env, config_overrides=tuple(overrides)),

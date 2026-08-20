@@ -1,10 +1,12 @@
 """Live probe — the OpenRouter models on the **Gemini Agent Runtime**, with the remote-only
 visibility surface checked alongside them.
 
-COSTS REAL MONEY (~$0.30: one ~5 min engine build plus ~$0.08 of turns). The checks run
-**concurrently** (the engine is deployed with room for them), so a pass is the build plus
-roughly one turn's cold start — about **8-12 min**, where the original serial version took
-~35-40. `SERIAL=1` restores lockstep for debugging one check. Give it a generous timeout
+COSTS REAL MONEY (~$0.30: one engine build plus ~$0.08 of turns). The checks run
+**concurrently** (the engine is deployed with room for them), so the run is dominated by the
+build, not the turns: measured **26 checks in ~113 s** against a build that took 300 s, 300 s
+and 601 s across three runs. Budget **~8-15 min** end to end and give it a generous timeout;
+the serial version of the same checks took ~35-40 min. `SERIAL=1` restores lockstep for
+debugging one check. Give it a generous timeout
 either way; see the teardown note below for what happens if you don't. Run it by hand,
 locally, sparingly — never in CI. The companion
 `dev/live_openrouter_probe.py` covers the same models on the local runtime and is the

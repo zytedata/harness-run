@@ -9,7 +9,7 @@ can only break in ways the earlier rungs can't see.
 | Install parity | `make parity-build` / `-check` | dependency/install/glibc breakage | ~1 min, free |
 | **Live validation** | `make live-smoke` | **platform-contract breakage** | ~10 min, ~$0.10 + build |
 | Model-provider check | `make live-openrouter` | provider-contract breakage (OpenRouter) | ~1 min, a few cents |
-| Model-provider check, remote | `make live-openrouter-remote` | the same models + remote visibility on Agent Runtime | ~8-12 min, ~$0.30 |
+| Model-provider check, remote | `make live-openrouter-remote` | the same models + remote visibility on Agent Runtime | ~8-15 min, ~$0.30 |
 | Model attribution | `make live-attribution` | did the turn run the model we asked for — both harnesses | ~10 s, a few cents |
 
 ## 1. Offline tests (`make test`)
@@ -148,11 +148,11 @@ one check reports SKIP rather than failing.
 The engine is deleted in `finally`; a failed teardown prints loudly, because an engine
 bills while it exists. `KEEP=1` leaves it up for debugging and hands you the cleanup.
 
-**Costs real money** (~$0.30, mostly the build) and takes **~35-40 min** — measured: a ~5 min
-build plus seven turns each paying cold-start latency (100-420 s apiece; platform variance is
-wide). Give it a generous timeout. Teardown also runs on SIGTERM/SIGINT, because a `timeout`
-that fires mid-run would otherwise leave an engine billing — that happened while writing this
-probe, which is why the handler exists.
+**Costs real money** (~$0.30, mostly the build) and takes **~8-15 min**. The 26 checks run
+concurrently and land in ~2 min; the rest is the engine build, which measured 300 s, 300 s and
+601 s across three runs — platform variance is wide, so give it a generous timeout. Teardown
+also runs on SIGTERM/SIGINT, because a `timeout` that fires mid-run would otherwise leave an
+engine billing — that happened while writing this probe, which is why the handler exists.
 
 ### Model attribution: did we run what we asked for?
 

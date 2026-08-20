@@ -39,8 +39,8 @@ live-openrouter:
 # Same models on Gemini Agent Runtime, plus the remote-only visibility surface
 # (effective_spec echo, resource samples, memory peak, history, traces). One throwaway
 # engine serves all four models (model is a per-turn knob), deleted in `finally`.
-# COSTS REAL MONEY (~$0.30) and takes ~35-40 min: a ~5 min build plus seven turns that each
-# pay cold-start latency. Give it a generous timeout — by hand, never in CI.
+# COSTS REAL MONEY (~$0.30) and takes ~8-15 min, nearly all of it the engine build (the 26
+# checks run concurrently in ~2 min). Give it a generous timeout — by hand, never in CI.
 live-openrouter-remote:
 	$(VENV)/bin/python dev/live_openrouter_remote_probe.py
 

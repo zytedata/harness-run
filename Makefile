@@ -6,7 +6,7 @@ VENV ?= .venv
 IMAGE ?= ratk-dev
 PACKAGES ?=
 
-.PHONY: test lint live-smoke live-revisions parity-build parity-shell parity-check
+.PHONY: test lint live-smoke live-revisions live-openrouter parity-build parity-shell parity-check
 
 test:
 	$(VENV)/bin/python -m pytest -q
@@ -23,6 +23,12 @@ live-smoke:
 # Two SEQUENTIAL builds — ~10 min; run it when you touch deploy/versioning.
 live-revisions:
 	$(VENV)/bin/python dev/live_revisions.py
+
+# Live check of the OpenRouter models on the codex harness (local runtime, no cloud).
+# COSTS REAL MONEY (a few cents) and needs OPENROUTER_API_KEY — run it by hand, sparingly,
+# never in CI. Run it when you touch the harness's provider wiring or the model list.
+live-openrouter:
+	$(VENV)/bin/python dev/live_openrouter_probe.py
 
 # Build the parity image. Pass the agent's spec.packages so they install exactly as on the
 # engine, e.g.:  make parity-build PACKAGES="pandas==2.2.* httpx>=0.27"

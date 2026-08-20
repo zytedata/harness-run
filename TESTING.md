@@ -8,6 +8,7 @@ can only break in ways the earlier rungs can't see.
 | Offline tests | `make test` | logic, event plumbing, contracts we encode | seconds, free |
 | Install parity | `make parity-build` / `-check` | dependency/install/glibc breakage | ~1 min, free |
 | **Live validation** | `make live-smoke` | **platform-contract breakage** | ~10 min, ~$0.10 + build |
+| Model-provider check | `make live-openrouter` | provider-contract breakage (OpenRouter) | ~1 min, a few cents |
 
 ## 1. Offline tests (`make test`)
 
@@ -90,6 +91,26 @@ a turn still runs, that `get_engine(version=…)` accepts the serving revision a
 non-serving one, and that `delete_version` prunes. Run it when you touch deploy, versioning,
 or traffic config. ~10 min: the two builds are **sequential** (the second is the update under
 test), so it costs about the same wall-clock as the smoke test's parallel pair.
+
+### The OpenRouter model check
+
+```bash
+OPENROUTER_API_KEY=... make live-openrouter           # all four models + a resume check
+MODELS=openrouter/z-ai/glm-5.3 make live-openrouter   # just one
+```
+
+`dev/live_openrouter_probe.py` runs each OpenRouter model the Codex harness vouches for
+through a real tool-using turn on the **local** runtime (no GCP, no engine build), then
+checks that a second turn on one session still remembers the first. It exists because every
+setting the harness sends to OpenRouter — the Responses wire, mandatory reasoning, Codex's
+web-search tool disabled — was chosen because the provider rejected the alternative, and a
+provider can change that server-side with no diff on our end. Run it when you touch the
+harness's provider wiring or the model list.
+
+**It costs real money** (a few cents a pass) and needs a key, so run it **by hand,
+sparingly, locally**. It must never run in CI: `pytest -q` stays free and credential-less
+(see §1 and `.github/workflows/ci.yml`) — the offline tests pin the config the harness
+emits, and that is what CI checks.
 
 ### Writing a bespoke live probe
 

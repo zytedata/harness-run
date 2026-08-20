@@ -12,6 +12,8 @@ Spec translation (parity notes):
                          ``OPENAI_API_KEY`` secret (or ambient env), routed to ``codex
                          login`` inside the per-job ``CODEX_HOME`` — the OpenAI API is
                          called directly (there is no Vertex path for OpenAI models).
+                         An ``openrouter/<vendor>/<model>`` id instead routes the turn
+                         through OpenRouter (see "OpenRouter models" below).
 * ``permission_mode``  → sandbox + approval policy (see ``_PERMISSION_MAP``).
 * ``system_prompt``    → plain ``str`` replaces Codex's base instructions;
                          ``SystemPrompt.append`` becomes developer instructions.
@@ -41,6 +43,44 @@ Spec translation (parity notes):
                          itself is persisted by copying the thread's rollout file to the
                          BlobStore and restoring it into ``CODEX_HOME`` before
                          ``thread_resume`` (Codex's own session store is a local file).
+
+OpenRouter models
+-----------------
+
+A model id prefixed ``openrouter/`` (e.g. ``openrouter/moonshotai/kimi-k3``) runs the
+turn on OpenRouter instead of the OpenAI API, so non-OpenAI models — Kimi, GLM,
+DeepSeek — reach the same Engine/Session/Run surface. The prefix is the whole API: no
+new spec field, so the model stays a per-turn knob (``TurnConfig(model=...)``) and one
+session can move between OpenAI and OpenRouter models.
+
+Codex reaches a non-OpenAI provider through ``model_providers.*`` config overrides, the
+same ``--config`` channel the MCP servers use. What the binding emits, and why each part
+is needed (all four settings were established live against OpenRouter, 2026-08-20):
+
+* ``base_url``/``env_key`` — the key is referenced by env var NAME; its value goes into
+  the app-server's process env, never onto the argv-visible ``--config`` flags. Auth is
+  the per-invocation ``OPENROUTER_API_KEY`` secret; ``codex login`` is NOT used (it
+  writes OpenAI credentials, which this path never consults).
+* ``wire_api="responses"`` — Codex 0.147 dropped ``"chat"`` ("no longer supported"), and
+  OpenRouter serves a Responses endpoint, so this is the only wire left.
+* ``web_search="disabled"`` — Codex otherwise sends its server-side web-search tool as
+  ``{"type": "web_search", "external_web_access": true}``, and OpenRouter rejects that
+  extra field with ``400 Server tool request failed``, which kills the turn before the
+  first token. Web search is off for OpenRouter turns; agents get their normal shell and
+  file tools.
+* a non-``none`` reasoning effort — OpenRouter's Responses endpoint answers
+  ``400 Reasoning is mandatory for this endpoint and cannot be disabled``, and Codex
+  sends ``effort: "none"`` for a model whose metadata it does not know. When the spec
+  leaves ``reasoning_effort`` unset the binding sends ``low`` rather than letting the
+  turn fail.
+
+Codex ships no catalog entry for these models, so it falls back to generic metadata and
+warns that this "can degrade performance". :data:`_OPENROUTER_CONTEXT_WINDOW` carries the
+context window for the models we vouch for, which is passed as ``model_context_window``
+so the agent is not compacted at a guessed limit. Any other ``openrouter/*`` id still
+runs — it just keeps Codex's fallback metadata, and prices only if
+:mod:`pricing` knows it (otherwise ``max_budget_usd`` cannot be enforced, as for any
+unpriced model).
 """
 
 from __future__ import annotations
@@ -83,6 +123,27 @@ _PERMISSION_MAP = {
 _GITHUB_MCP_TOKEN_ENV = "RATK_GITHUB_MCP_TOKEN"
 _GITHUB_MCP_URL = "https://api.githubcopilot.com/mcp/"
 
+# OpenRouter routing (see "OpenRouter models" in the module docstring). The prefix is
+# stripped before the id reaches Codex: OpenRouter's own ids are `<vendor>/<model>`.
+_OPENROUTER_PREFIX = "openrouter/"
+_OPENROUTER_PROVIDER = "openrouter"
+_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+_OPENROUTER_KEY_ENV = "OPENROUTER_API_KEY"
+_OPENROUTER_WIRE_API = "responses"
+# OpenRouter's Responses endpoint refuses a turn with reasoning disabled, and Codex sends
+# effort "none" for a model it has no metadata for.
+_OPENROUTER_MIN_EFFORT = "low"
+
+# Context window for the OpenRouter models this binding vouches for, passed as
+# `model_context_window` because Codex's catalog has no entry for them (it would fall back
+# to generic metadata and warn). Keep in sync with the prices in `pricing`.
+_OPENROUTER_CONTEXT_WINDOW: dict[str, int] = {
+    "openrouter/moonshotai/kimi-k3": 1_048_576,
+    "openrouter/z-ai/glm-5.3": 1_048_576,
+    "openrouter/deepseek/deepseek-v4-flash": 1_048_576,
+    "openrouter/deepseek/deepseek-v4-pro": 1_048_576,
+}
+
 # Tool-result content kept in events is truncated: command output can be megabytes, and
 # events ride Cloud Logging on gemini (per-entry size limits).
 _CONTENT_CAP = 4000
@@ -101,6 +162,9 @@ class _CodexOptions:
     api_key: str | None
     codex_home: Path
     warnings: list[str] = field(default_factory=list)
+    # True when the model routes through OpenRouter: auth is the provider's env_key, so
+    # `run` must not call `codex login` (that path stores OpenAI credentials).
+    openrouter: bool = False
 
 
 class _RunAccounting:
@@ -373,6 +437,30 @@ class CodexHarness:
                     overrides.append(f"mcp_servers.{name}.args=[{arr}]")
         return overrides, env
 
+    def _openrouter_overrides(self, model: str) -> list[str]:
+        """``--config`` overrides that point Codex at OpenRouter for ``model``.
+
+        Values are literals here; the API key is referenced by env var NAME only (its
+        value goes into the process env), as with the github MCP token.
+        """
+        overrides = [
+            f"model_provider={json.dumps(_OPENROUTER_PROVIDER)}",
+            f"model_providers.{_OPENROUTER_PROVIDER}.name=\"OpenRouter\"",
+            f"model_providers.{_OPENROUTER_PROVIDER}.base_url="
+            f"{json.dumps(_OPENROUTER_BASE_URL)}",
+            f"model_providers.{_OPENROUTER_PROVIDER}.env_key="
+            f"{json.dumps(_OPENROUTER_KEY_ENV)}",
+            f"model_providers.{_OPENROUTER_PROVIDER}.wire_api="
+            f"{json.dumps(_OPENROUTER_WIRE_API)}",
+            # Codex's server-side web-search tool carries a field OpenRouter rejects
+            # outright (400 before the first token), so it is off for these turns.
+            'web_search="disabled"',
+        ]
+        window = _OPENROUTER_CONTEXT_WINDOW.get(model)
+        if window is not None:
+            overrides.append(f"model_context_window={window}")
+        return overrides
+
     def build_options(self, spec: AgentSpec, ctx: RunContext) -> _CodexOptions:
         """Build ``openai_codex`` config + thread/turn args from ``spec`` + runtime ``ctx``."""
         from openai_codex import ApprovalMode, CodexConfig, Sandbox
@@ -412,23 +500,32 @@ class CodexHarness:
             )
 
         mcp_overrides, mcp_env = self._mcp_overrides(spec, ctx)
+        model = spec.model or ""
+        openrouter = model.startswith(_OPENROUTER_PREFIX)
         # The agent's shell env: Codex filters *KEY*/*SECRET*/*TOKEN*-named vars from the
         # shell by default — the opposite of the toolkit's contract (the caller's own
-        # secrets ARE for the agent). Lift the default excludes, but keep the two the
+        # secrets ARE for the agent). Lift the default excludes, but keep the ones the
         # harness consumes itself out of the shell explicitly.
         overrides = [
             "shell_environment_policy.ignore_default_excludes=true",
-            f'shell_environment_policy.exclude=["OPENAI_API_KEY", "{_GITHUB_MCP_TOKEN_ENV}"]',
+            'shell_environment_policy.exclude=['
+            f'"OPENAI_API_KEY", "{_OPENROUTER_KEY_ENV}", "{_GITHUB_MCP_TOKEN_ENV}"]',
+            *(self._openrouter_overrides(model) if openrouter else []),
             *mcp_overrides,
         ]
         env = runtime_env(spec, ctx)
         env["CODEX_HOME"] = str(codex_home)
         env.update(mcp_env)
 
-        api_key = ctx.secrets.get("OPENAI_API_KEY") or os.environ.get("OPENAI_API_KEY")
+        key_env = _OPENROUTER_KEY_ENV if openrouter else "OPENAI_API_KEY"
+        api_key = ctx.secrets.get(key_env) or os.environ.get(key_env)
+        if openrouter and api_key:
+            # The provider reads its key from the app-server's env (env_key), so unlike
+            # the OpenAI path there is no login step — the value must be in the env.
+            env[_OPENROUTER_KEY_ENV] = api_key
 
         thread_args: dict[str, Any] = {
-            "model": spec.model or None,
+            "model": model[len(_OPENROUTER_PREFIX) :] if openrouter else (model or None),
             "cwd": str(ctx.workspace),
             "sandbox": Sandbox[sandbox_name],
             "approval_mode": ApprovalMode[approval_name],
@@ -440,10 +537,22 @@ class CodexHarness:
             if effort == "max":  # Claude-only level; xhigh is Codex's ceiling
                 warnings.append("reasoning_effort 'max' has no codex level; using 'xhigh'")
                 effort = "xhigh"
+            if openrouter and effort == "none":
+                # OpenRouter's Responses endpoint fails the turn outright with reasoning
+                # disabled, so 'none' is not an option we can honor here.
+                warnings.append(
+                    "reasoning_effort 'none' is rejected by OpenRouter (reasoning is "
+                    f"mandatory on its Responses endpoint); using {_OPENROUTER_MIN_EFFORT!r}"
+                )
+                effort = _OPENROUTER_MIN_EFFORT
             # A plain str, not openai_codex.types.ReasoningEffort: the enum is a str
             # subclass whose validation accepts arbitrary strings, so unknown levels
             # pass through to the SDK/CLI to reject in one place.
             run_args["effort"] = effort
+        elif openrouter:
+            # Codex sends effort "none" for a model it has no metadata for, which
+            # OpenRouter refuses — send its lowest real level instead of failing.
+            run_args["effort"] = _OPENROUTER_MIN_EFFORT
         if spec.output_schema is not None:
             from ..spec import _output_schema_to_dict
 
@@ -458,6 +567,7 @@ class CodexHarness:
             api_key=api_key,
             codex_home=codex_home,
             warnings=warnings,
+            openrouter=openrouter,
         )
 
     # -- conversation persistence (checkpoint/resume) ---------------------------
@@ -590,7 +700,17 @@ class CodexHarness:
                     ),
                     raw={"event": "cost_unknown", "model": spec.model},
                 )
-            if options.api_key and not (options.codex_home / "auth.json").exists():
+            if options.openrouter:
+                # OpenRouter auth is the provider's env_key (already in the app-server's
+                # env), so there is nothing to log in with — `codex login` would store
+                # OpenAI credentials this path never reads.
+                if not options.api_key:
+                    raise RuntimeError(
+                        "codex harness has no OpenRouter credentials: pass "
+                        f"{_OPENROUTER_KEY_ENV} in the per-invocation secrets (or set it "
+                        "in the environment)"
+                    )
+            elif options.api_key and not (options.codex_home / "auth.json").exists():
                 await codex.login_api_key(options.api_key)
             elif not options.api_key and not (options.codex_home / "auth.json").exists():
                 raise RuntimeError(

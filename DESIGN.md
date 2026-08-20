@@ -25,8 +25,11 @@ without re-learning the platform's sharp edges.
 **Non-goals (for now)**
 - Custom-LLM harnesses beyond the two that ship. We design the **seam** (a `Harness` protocol) and ship
   the **Claude Code (Agent SDK)** binding (default) and the **Codex (openai-codex SDK)** binding
-  (`spec.harness="codex"`, OpenAI models called directly). Other providers for Codex (e.g. OpenRouter
-  via a `model_provider` config override) are a later, separate step.
+  (`spec.harness="codex"`, OpenAI models called directly, or non-OpenAI models through OpenRouter via
+  `model_providers.*` config overrides when the model id carries the `openrouter/` prefix). Providers
+  beyond OpenRouter are a later, separate step — and note that the provider is carried by the model
+  id, deliberately not by a new spec/config field, so it stays a per-turn knob and old engines are
+  unaffected.
 - Non-GCP backends. We design the **ports** (storage, events, dispatch, secrets) as protocols, but ship
   GCP adapters (GCS, Cloud Logging, Pub/Sub, Secret Manager) plus local/in-memory adapters for dev.
 - Replacing Scrapy-Cloud / monitoring logic — that stays in `gemini-agent-runtime` behind the seam.

@@ -23,6 +23,16 @@ tag `vX.Y.Z`, push the commit and the tag.
 
 ### Added
 
+- The Codex harness can run models through **OpenRouter**: a model id prefixed
+  `openrouter/` (e.g. `openrouter/moonshotai/kimi-k3`) is routed to OpenRouter
+  instead of the OpenAI API, with auth from an `OPENROUTER_API_KEY`
+  per-invocation secret. Kimi K3, GLM-5.3 and DeepSeek v4 Flash/Pro ship with
+  baked prices, so `cost_usd` and `max_budget_usd` work for them offline; any
+  other `openrouter/*` id runs as well. The provider rides the model id rather
+  than a new spec/config field, so it stays a per-turn knob (`TurnConfig`) and
+  needs no engine redeploy beyond the usual toolkit bump. Validated live on all
+  four models.
+
 - Configuration now has three scopes, one type each: the `AgentSpec` baked at
   deploy, a `SessionConfig` bound once at `engine.start_session(config=…)`
   (the conversation's world: `repos`, `skills`, `mcp_servers`,

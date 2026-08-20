@@ -106,7 +106,45 @@ What to know when running Codex:
   warning), and Codex has no background-task re-invocation, so `background_task_timeout` is inert.
   `permission_mode` maps onto Codex's sandbox+approval pairs (`bypassPermissions` → full access,
   never ask; `default` → workspace-write with Codex's auto-reviewer).
-- Other model providers for Codex (e.g. OpenRouter) are planned as a follow-up.
+- **OpenRouter models** reach the same surface — see below.
+
+### OpenRouter models (Codex harness)
+
+Prefix a model id with `openrouter/` and the Codex harness routes the turn through
+[OpenRouter](https://openrouter.ai) instead of the OpenAI API, so non-OpenAI models run on the same
+Engine/Session/Run surface:
+
+```python
+spec = AgentSpec(
+    name="kimi-agent",
+    model="openrouter/moonshotai/kimi-k3",   # openrouter/<vendor>/<model>
+    harness="codex",
+)
+result = await engine.start_session().run(
+    "scrape https://books.toscrape.com for title, price",
+    secrets={"OPENROUTER_API_KEY": os.environ["OPENROUTER_API_KEY"]},
+)
+```
+
+The prefix is the whole API — there is no new spec field, so the model stays a per-turn knob and one
+session can move between providers: `session.send(task, config=TurnConfig(model="openrouter/z-ai/glm-5.3"))`.
+
+- **Auth** is the per-invocation `OPENROUTER_API_KEY` secret (local runs fall back to the ambient env
+  var). It reaches the provider through Codex's `env_key` indirection, never on the command line, and
+  is kept out of the agent's shell like `OPENAI_API_KEY`.
+- **Models with baked prices** — so `max_budget_usd` is enforceable offline and `cost_usd` is real:
+  `openrouter/moonshotai/kimi-k3`, `openrouter/z-ai/glm-5.3`,
+  `openrouter/deepseek/deepseek-v4-flash`, `openrouter/deepseek/deepseek-v4-pro`. Any other
+  `openrouter/*` id runs too — it just prices only if LiteLLM's dataset knows it, and otherwise
+  reports `cost_unknown` and cannot enforce a budget (as for any unpriced model). Because OpenRouter
+  spreads requests over upstream providers whose prices differ slightly, cost is an estimate.
+- **Web search is off** for these turns: Codex sends its server-side web-search tool in a shape
+  OpenRouter rejects outright. Shell and file tools are unaffected.
+- **Reasoning** is always on — OpenRouter's Responses endpoint requires it — so an unset
+  `reasoning_effort` becomes `low` rather than Codex's `none`.
+- On the `claude-code` harness an `openrouter/` model fails fast, pointing you at `harness="codex"`.
+- Only the OpenRouter *account* decides which upstream providers may serve a request (ours is
+  restricted to zero-retention, no-training routes); the toolkit does not pick routes.
 
 ## Dev: run locally, in-process
 

@@ -217,6 +217,15 @@ class ClaudeCodeHarness:
         """Build ``ClaudeAgentOptions`` from ``spec`` + runtime ``ctx``."""
         from claude_agent_sdk import ClaudeAgentOptions
 
+        if (spec.model or "").startswith("openrouter/"):
+            # Fail closed rather than hand the id to the Claude CLI, which would try it
+            # against the Anthropic API and fail with an opaque model error. OpenRouter
+            # routing lives in the codex binding (harness="codex").
+            raise ValueError(
+                f"model {spec.model!r} routes through OpenRouter, which the claude-code "
+                'harness cannot reach; run this turn with harness="codex"'
+            )
+
         extra: dict[str, Any] = {}
         if ctx.session_store is not None:
             # Mirror the transcript to the store (flush at end) so this conversation is

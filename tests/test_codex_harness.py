@@ -432,6 +432,200 @@ async def test_resume_without_persisted_thread_starts_fresh(tmp_path, monkeypatc
     assert client.thread_starts and not client.thread_resumes
 
 
+# -- openrouter provider ------------------------------------------------------
+
+# Every override asserted here was validated live against OpenRouter on 2026-08-20 (all
+# four blessed models completed a tool-using turn); these tests pin the wiring so a
+# refactor can't silently drop a piece the provider requires.
+
+_OR_MODEL = "openrouter/moonshotai/kimi-k3"
+
+
+def _or_spec(**kw):
+    return AgentSpec(name="a", model=_OR_MODEL, harness="codex", **kw)
+
+
+def test_openrouter_build_options_emits_provider_config(tmp_path):
+    spec = _or_spec()
+    ctx = _ctx(tmp_path, spec, secrets={"OPENROUTER_API_KEY": "sk-or-1"})
+    opts = CodexHarness().build_options(spec, ctx)
+    ovr = "\n".join(opts.codex_config.config_overrides)
+
+    assert opts.openrouter is True
+    assert 'model_provider="openrouter"' in ovr
+    assert 'model_providers.openrouter.base_url="https://openrouter.ai/api/v1"' in ovr
+    assert 'model_providers.openrouter.env_key="OPENROUTER_API_KEY"' in ovr
+    # Codex 0.147 dropped wire_api="chat"; responses is the only wire left.
+    assert 'model_providers.openrouter.wire_api="responses"' in ovr
+    # Codex's web-search tool carries a field OpenRouter 400s on.
+    assert 'web_search="disabled"' in ovr
+    # The prefix is ours, not OpenRouter's: codex gets the provider-relative id.
+    assert opts.thread_args["model"] == "moonshotai/kimi-k3"
+    # Known model → real context window instead of codex's fallback metadata.
+    assert "model_context_window=1048576" in ovr
+
+
+def test_openrouter_key_rides_env_never_argv(tmp_path):
+    spec = _or_spec()
+    ctx = _ctx(tmp_path, spec, secrets={"OPENROUTER_API_KEY": "sk-or-secret"})
+    opts = CodexHarness().build_options(spec, ctx)
+
+    assert opts.api_key == "sk-or-secret"
+    # env_key indirection: the provider reads the value from the app-server's env.
+    assert opts.codex_config.env["OPENROUTER_API_KEY"] == "sk-or-secret"
+    assert "sk-or-secret" not in "\n".join(opts.codex_config.config_overrides)
+    # ...and it stays out of the agent's own shell.
+    assert "OPENROUTER_API_KEY" in [
+        o for o in opts.codex_config.config_overrides if o.startswith("shell_environment_policy.exclude")
+    ][0]
+
+
+def test_openrouter_defaults_reasoning_effort(tmp_path):
+    """OpenRouter's Responses endpoint refuses a turn with reasoning disabled."""
+    spec = _or_spec()
+    opts = CodexHarness().build_options(spec, _ctx(tmp_path, spec, secrets={"OPENROUTER_API_KEY": "k"}))
+    assert opts.run_args["effort"] == "low"  # spec left it unset
+
+    spec = _or_spec(reasoning_effort="none")
+    opts = CodexHarness().build_options(spec, _ctx(tmp_path, spec, secrets={"OPENROUTER_API_KEY": "k"}))
+    assert opts.run_args["effort"] == "low"
+    assert any("mandatory" in w for w in opts.warnings)
+
+    spec = _or_spec(reasoning_effort="high")
+    opts = CodexHarness().build_options(spec, _ctx(tmp_path, spec, secrets={"OPENROUTER_API_KEY": "k"}))
+    assert opts.run_args["effort"] == "high"  # a real level passes through
+
+
+def test_openai_model_gets_no_openrouter_config(tmp_path):
+    spec = AgentSpec(name="a", model="gpt-5.6-luna", harness="codex")
+    opts = CodexHarness().build_options(spec, _ctx(tmp_path, spec))
+    ovr = "\n".join(opts.codex_config.config_overrides)
+    assert opts.openrouter is False
+    assert "model_provider" not in ovr and "web_search" not in ovr
+    assert opts.thread_args["model"] == "gpt-5.6-luna"
+    assert "effort" not in opts.run_args  # unchanged for the OpenAI path
+
+
+def test_unknown_openrouter_model_skips_context_window(tmp_path):
+    spec = AgentSpec(name="a", model="openrouter/some/other-model", harness="codex")
+    opts = CodexHarness().build_options(spec, _ctx(tmp_path, spec, secrets={"OPENROUTER_API_KEY": "k"}))
+    ovr = "\n".join(opts.codex_config.config_overrides)
+    assert 'model_provider="openrouter"' in ovr  # still routed
+    assert "model_context_window" not in ovr  # codex's fallback metadata applies
+
+
+async def test_openrouter_run_skips_login(tmp_path, monkeypatch):
+    """Auth is the provider's env_key; `codex login` would store OpenAI credentials."""
+    spec = _or_spec()
+    ctx = _ctx(tmp_path, spec, secrets={"OPENROUTER_API_KEY": "sk-or-1"})
+    script = [turn_started(), agent_message("done"), token_usage(), turn_completed()]
+    events, client = await _events_of(script, tmp_path, monkeypatch, spec=spec, ctx=ctx)
+
+    assert client.login_keys == []
+    assert events[-1].kind == "result" and events[-1].raw["is_error"] is False
+    assert events[-1].raw["model"] == _OR_MODEL  # the result reports the caller's id
+
+
+async def test_openrouter_run_without_key_raises(tmp_path, monkeypatch):
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    spec = _or_spec()
+    ctx = _ctx(tmp_path, spec, secrets={})
+    with pytest.raises(RuntimeError, match="no OpenRouter credentials"):
+        await _events_of([turn_completed()], tmp_path, monkeypatch, spec=spec, ctx=ctx)
+
+
+async def test_openrouter_budget_is_enforceable(tmp_path, monkeypatch):
+    """The baked prices exist so max_budget_usd works for these models."""
+    spec = _or_spec(max_budget_usd=0.01)
+    ctx = _ctx(tmp_path, spec, secrets={"OPENROUTER_API_KEY": "k"})
+    script = [
+        turn_started(),
+        agent_message("partial"),
+        token_usage(in_tok=10_000, out_tok=10_000),  # kimi-k3: well past $0.01
+        turn_completed("completed"),
+    ]
+    events, client = await _events_of(script, tmp_path, monkeypatch, spec=spec, ctx=ctx)
+    assert client.interrupted
+    assert any(e.raw and e.raw.get("event") == "limit_interrupt" for e in events)
+    assert events[-1].raw["subtype"] == "error_budget_exceeded"
+    assert not any(e.raw and e.raw.get("event") == "cost_unknown" for e in events)
+
+
+def test_openrouter_builtin_prices():
+    for model, per_mtok in (
+        ("openrouter/moonshotai/kimi-k3", (3.00, 0.30, 15.00)),
+        ("openrouter/z-ai/glm-5.3", (1.40, 0.26, 4.40)),
+        ("openrouter/deepseek/deepseek-v4-flash", (0.084, 0.0168, 0.168)),
+        ("openrouter/deepseek/deepseek-v4-pro", (1.60, 0.135, 3.20)),
+    ):
+        price = pricing.model_price(model)
+        assert price is not None and price.source == "builtin", model
+        assert price.cost_usd(1_000_000, 0, 1_000_000) == pytest.approx(
+            per_mtok[0] + per_mtok[2]
+        ), model
+    assert pricing.model_price("openrouter/nobody/nothing") is None
+
+
+def test_openrouter_litellm_dataset_wins(monkeypatch):
+    """LiteLLM keys OpenRouter models the same way, so a dataset entry overrides ours."""
+    monkeypatch.setattr(
+        pricing,
+        "_litellm_prices",
+        lambda: {
+            "openrouter/moonshotai/kimi-k3": {
+                "input_cost_per_token": 9e-6,
+                "output_cost_per_token": 9e-5,
+                "cache_read_input_token_cost": 9e-7,
+            }
+        },
+    )
+    price = pricing.model_price("openrouter/moonshotai/kimi-k3")
+    assert price is not None and price.source == "litellm"
+    assert price.input_per_token == 9e-6
+
+
+def test_openrouter_model_rejected_by_claude_harness(tmp_path):
+    from remote_agent_toolkit.harness.claude_code import ClaudeCodeHarness
+
+    spec = AgentSpec(name="a", model=_OR_MODEL)  # default harness: claude-code
+    ctx = _ctx(tmp_path, spec)
+    with pytest.raises(ValueError, match='harness="codex"'):
+        ClaudeCodeHarness().build_options(spec, ctx)
+
+
+def test_openrouter_key_is_harness_consumed(tmp_path):
+    """The key reaches the provider, not the agent's shell.
+
+    Two mechanisms, both needed: ``runtime_env`` never forwards a harness-consumed
+    secret (so an unused one can't leak either), while the key this turn DOES use is put
+    back deliberately for ``env_key`` — and kept out of the agent's shell by
+    ``shell_environment_policy.exclude``.
+    """
+    from remote_agent_toolkit.harness._shared import harness_consumed_secret_names, runtime_env
+
+    spec = _or_spec()
+    assert harness_consumed_secret_names(spec) == {"OPENAI_API_KEY", "OPENROUTER_API_KEY"}
+    ctx = _ctx(tmp_path, spec, secrets={"OPENROUTER_API_KEY": "k", "MY_TOKEN": "visible"})
+    assert "OPENROUTER_API_KEY" not in runtime_env(spec, ctx)
+
+    opts = CodexHarness().build_options(spec, ctx)
+    assert opts.codex_config.env["OPENROUTER_API_KEY"] == "k"  # for env_key
+    assert opts.codex_config.env["MY_TOKEN"] == "visible"  # caller's own secret: agent's
+    excludes = [
+        o for o in opts.codex_config.config_overrides
+        if o.startswith("shell_environment_policy.exclude")
+    ][0]
+    assert "OPENROUTER_API_KEY" in excludes
+
+
+def test_unused_model_auth_key_never_reaches_the_agent(tmp_path):
+    """An OpenAI key passed on an OpenRouter turn (or vice versa) is still not the agent's."""
+    spec = _or_spec()
+    ctx = _ctx(tmp_path, spec, secrets={"OPENROUTER_API_KEY": "k", "OPENAI_API_KEY": "sk-unused"})
+    env = CodexHarness().build_options(spec, ctx).codex_config.env
+    assert "OPENAI_API_KEY" not in env
+
+
 # -- wiring -------------------------------------------------------------------
 
 

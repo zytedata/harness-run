@@ -21,21 +21,27 @@ if TYPE_CHECKING:
 # Conventional GitHub token names a ``github`` MCP server pulls from the per-invocation secrets.
 GITHUB_MCP_TOKEN_KEYS = ("GH_TOKEN", "GITHUB_TOKEN", "GH_PAT")
 
+# Model-auth secrets the Codex binding routes itself: OpenAI directly, or OpenRouter for an
+# ``openrouter/``-prefixed model (see ``harness.codex``).
+CODEX_MODEL_AUTH_KEYS = ("OPENAI_API_KEY", "OPENROUTER_API_KEY")
+
 
 def harness_consumed_secret_names(spec: AgentSpec) -> set[str]:
     """Secret names the *harness* consumes on the agent's behalf, so they stay OUT of its env.
 
     A repo's ``auth`` token is embedded into ``origin`` (git uses it), and a GitHub MCP's token
     goes into the server's headers — neither needs to be a plain environment variable the agent
-    (or a prompt-injection) can read. The Codex binding additionally consumes ``OPENAI_API_KEY``
-    (routed to ``codex login`` for model auth, not the agent's shell). Everything else the
+    (or a prompt-injection) can read. The Codex binding additionally consumes its model-auth
+    keys: ``OPENAI_API_KEY`` (routed to ``codex login``) and ``OPENROUTER_API_KEY`` (routed to
+    the OpenRouter provider config). Both are listed whichever model the turn runs, so passing
+    one the turn doesn't use still doesn't leak it into the agent's shell. Everything else the
     caller passes is the agent's own to use.
     """
     names: set[str] = {r.auth for r in spec.repos if getattr(r, "auth", None)}
     if any(m.kind == "github" for m in spec.mcp_servers):
         names.update(GITHUB_MCP_TOKEN_KEYS)
     if getattr(spec, "harness", "claude-code") == "codex":
-        names.add("OPENAI_API_KEY")
+        names.update(CODEX_MODEL_AUTH_KEYS)
     return names
 
 
@@ -68,7 +74,8 @@ def runtime_env(spec: AgentSpec, ctx: RunContext) -> dict[str, str]:
     Layering (later wins): per-invocation secrets → ``spec.env`` (caller's static config)
     → ``ctx.env`` (runtime-resolved, e.g. the local deploy-time packages venv). Only the
     caller's own secrets land here — those consumed by the harness (repo push tokens,
-    GitHub MCP token, Codex's OPENAI_API_KEY) are routed to git/MCP/login and excluded,
+    GitHub MCP token, Codex's model-auth keys) are routed to git/MCP/the model provider
+    and excluded,
     so they never appear as environment variables the agent can read.
 
     SECURITY: returns secret *values* — callers must never log this dict.

@@ -9,6 +9,7 @@ can only break in ways the earlier rungs can't see.
 | Install parity | `make parity-build` / `-check` | dependency/install/glibc breakage | ~1 min, free |
 | **Live validation** | `make live-smoke` | **platform-contract breakage** | ~10 min, ~$0.10 + build |
 | Model-provider check | `make live-openrouter` | provider-contract breakage (OpenRouter) | ~1 min, a few cents |
+| Model-provider check, remote | `make live-openrouter-remote` | the same models + remote visibility on Agent Runtime | ~35-40 min, ~$0.30 |
 
 ## 1. Offline tests (`make test`)
 
@@ -111,6 +112,40 @@ harness's provider wiring or the model list.
 sparingly, locally**. It must never run in CI: `pytest -q` stays free and credential-less
 (see §1 and `.github/workflows/ci.yml`) — the offline tests pin the config the harness
 emits, and that is what CI checks.
+
+### The OpenRouter model check on Agent Runtime
+
+```bash
+OPENROUTER_API_KEY=... make live-openrouter-remote
+```
+
+`dev/live_openrouter_remote_probe.py` is the remote half. The local probe proves the
+provider wiring; this one proves the same turn survives being packaged into an engine,
+unpickled by a worker, handed its key through the GCS secrets handoff and streamed back —
+and that the platform's visibility carries an OpenRouter model the same way it carries a
+GPT or Claude one.
+
+**One engine serves all four models.** `model` is a per-turn knob, so the probe deploys
+once and overrides per turn with `TurnConfig(model=...)` — one ~4 min build instead of
+four, and it demonstrates that a session can change provider with no redeploy.
+
+Beyond the per-model turn (answer, tool call, priced cost) it checks the remote-only
+surface: the worker's `effective_spec` echo names the model actually executed,
+`session.resource_samples()` returns worker CPU/RAM, `memory_peak_bytes` is stamped on the
+terminal result, `session.history()` replays the events, and **that session's** Cloud Trace
+root span carries the model and its cost. The trace lookup is scoped to the session on
+purpose: "some `invoke_agent` traces exist" proves nothing in a shared project. It needs
+`uv pip install google-cloud-trace` (dev-only, not a toolkit dependency); without it that
+one check reports SKIP rather than failing.
+
+The engine is deleted in `finally`; a failed teardown prints loudly, because an engine
+bills while it exists. `KEEP=1` leaves it up for debugging and hands you the cleanup.
+
+**Costs real money** (~$0.30, mostly the build) and takes **~35-40 min** — measured: a ~5 min
+build plus seven turns each paying cold-start latency (100-420 s apiece; platform variance is
+wide). Give it a generous timeout. Teardown also runs on SIGTERM/SIGINT, because a `timeout`
+that fires mid-run would otherwise leave an engine billing — that happened while writing this
+probe, which is why the handler exists.
 
 ### Writing a bespoke live probe
 

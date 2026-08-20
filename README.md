@@ -7,8 +7,9 @@ checkpoint/resume and warm starts, without re-learning the platform's sharp edge
 per agent role, then customize **per session** (`SessionConfig`: repo/ref, prompt, model, skills) and
 **per turn** (`TurnConfig`: budgets, model, output schema) without redeploying — see
 [Deploy / session / turn](#deploy--session--turn-the-three-configuration-scopes). Two agent harnesses
-ship behind the same API: **Claude Code** (the default) and **Codex** (OpenAI models; see
-[Choosing the harness](#choosing-the-harness-claude-code-or-codex)).
+ship behind the same API — **Claude Code** (the default) and **Codex** — between them running Claude,
+OpenAI GPT, and (through OpenRouter) Kimi, GLM and DeepSeek models; see
+[Harnesses and models](#harnesses-and-models).
 
 > **Status: `local` and Gemini Agent Runtime both work — validated live.** Define an `AgentSpec` and run it
 > in-process (`local.deploy`), or deploy + run on Agent Runtime (`gemini.deploy` / `gemini.get_engine`), with
@@ -63,9 +64,48 @@ Every field except `name` and `model` has a sensible default (see [`spec.py`](re
 a two-line spec (`AgentSpec(name=..., model=...)`) is a valid agent. For **structured output**, see the
 section below.
 
-## Choosing the harness: Claude Code or Codex
+## Harnesses and models
 
-`harness="claude-code"` (the default) runs the Claude Code loop via the Claude Agent SDK.
+A **harness** is the coding-agent loop; the **model** is what it calls. Two harnesses ship, and
+both run on both backends (`local` and `gemini`) through the same Engine/Session/Run API.
+
+| Harness | Agent loop | Models it runs | Per-invocation secret |
+| --- | --- | --- | --- |
+| `claude-code` (default) | Claude Code, via the Claude Agent SDK | Claude models (`claude-sonnet-4-6`, `claude-haiku-4-5`, …) | none on Vertex (the default), else `ANTHROPIC_API_KEY` |
+| `codex` | OpenAI Codex, via the `openai-codex` SDK | OpenAI models (`gpt-5.6-sol` / `-terra` / `-luna`, `gpt-5.3-codex`) | `OPENAI_API_KEY` |
+| `codex` | the same loop, pointed at OpenRouter | `openrouter/<vendor>/<model>` — Kimi, GLM, DeepSeek (see [below](#openrouter-models-codex-harness)) | `OPENROUTER_API_KEY` |
+
+The harness is a **session**-scoped choice and its CLI must be baked at deploy
+(`AgentSpec(harnesses=("claude-code", "codex"))` bakes both, then each session picks). The **model**
+is a **turn**-scoped knob, so one deployed engine can serve several models — including across
+providers — with no redeploy:
+
+```python
+# One engine, several models — no redeploy:
+session.run(task, config=TurnConfig(model="gpt-5.6-luna"))
+session.send(task, config=TurnConfig(model="openrouter/z-ai/glm-5.3"))
+
+# To let sessions pick the harness too, bake both CLIs at deploy:
+spec = AgentSpec(name="either", model="claude-sonnet-4-6", harnesses=("claude-code", "codex"))
+engine.start_session(config=SessionConfig(harness="codex"))   # selects among what is baked
+```
+
+Model ids are free-form strings passed to the harness — any id the underlying CLI accepts works, so a
+new model needs no toolkit release. The ids listed above are the ones we price offline (and therefore
+can enforce `max_budget_usd` against) and, for OpenRouter, have validated live.
+
+### Claude Code (the default)
+
+Omit `harness` entirely. Auth resolves in the order documented under
+[Secrets & security](#secrets--security) — deployed engines route to Vertex by default, so no key is
+needed; locally, `ANTHROPIC_API_KEY` or a logged-in `claude` CLI both work.
+
+```python
+spec = AgentSpec(name="spider-builder", model="claude-sonnet-4-6")   # harness defaults to claude-code
+```
+
+### Codex
+
 `harness="codex"` runs OpenAI's Codex instead — same spec, same Engine/Session/Run surface,
 both backends:
 
@@ -129,15 +169,27 @@ result = await engine.start_session().run(
 The prefix is the whole API — there is no new spec field, so the model stays a per-turn knob and one
 session can move between providers: `session.send(task, config=TurnConfig(model="openrouter/z-ai/glm-5.3"))`.
 
+**The models we support here** — validated live on both runtimes, and priced offline so `cost_usd`
+is real and `max_budget_usd` is enforceable:
+
+| Model id | USD / 1M in → out | Context |
+| --- | --- | --- |
+| `openrouter/moonshotai/kimi-k3` | 3.00 → 15.00 | ~1M |
+| `openrouter/z-ai/glm-5.3` | 1.40 → 4.40 | ~1M |
+| `openrouter/deepseek/deepseek-v4-flash` | 0.084 → 0.168 | ~1M |
+| `openrouter/deepseek/deepseek-v4-pro` | 1.60 → 3.20 | ~1M |
+
+Any other `openrouter/*` id runs too — it just prices only if LiteLLM's dataset knows it, and
+otherwise reports `cost_unknown` and cannot enforce a budget (as for any unpriced model). Because
+OpenRouter spreads requests over upstream providers whose prices differ slightly, cost is an
+estimate. Notable: DeepSeek v4 Pro through OpenRouter costs several times its first-party price —
+the zero-retention routing restriction is what you are paying for.
+
+Other notes:
+
 - **Auth** is the per-invocation `OPENROUTER_API_KEY` secret (local runs fall back to the ambient env
   var). It reaches the provider through Codex's `env_key` indirection, never on the command line, and
   is kept out of the agent's shell like `OPENAI_API_KEY`.
-- **Models with baked prices** — so `max_budget_usd` is enforceable offline and `cost_usd` is real:
-  `openrouter/moonshotai/kimi-k3`, `openrouter/z-ai/glm-5.3`,
-  `openrouter/deepseek/deepseek-v4-flash`, `openrouter/deepseek/deepseek-v4-pro`. Any other
-  `openrouter/*` id runs too — it just prices only if LiteLLM's dataset knows it, and otherwise
-  reports `cost_unknown` and cannot enforce a budget (as for any unpriced model). Because OpenRouter
-  spreads requests over upstream providers whose prices differ slightly, cost is an estimate.
 - **Web search is off** for these turns: Codex sends its server-side web-search tool in a shape
   OpenRouter rejects outright. Shell and file tools are unaffected.
 - **Reasoning** is always on — OpenRouter's Responses endpoint requires it — so an unset
@@ -145,6 +197,13 @@ session can move between providers: `session.send(task, config=TurnConfig(model=
 - On the `claude-code` harness an `openrouter/` model fails fast, pointing you at `harness="codex"`.
 - Only the OpenRouter *account* decides which upstream providers may serve a request (ours is
   restricted to zero-retention, no-training routes); the toolkit does not pick routes.
+- **Structured output**: OpenRouter accepts Codex's json_schema format but does not enforce it, so
+  the harness also states the schema in the developer instructions. `output_schema` works, but the
+  guarantee is the model's cooperation rather than the API's.
+- Everything else is at parity with the OpenAI path on both runtimes — cost, budgets, resume,
+  MCP, skills, and on Agent Runtime the `effective_spec` echo, resource samples, history and the
+  Cloud Trace span (which carries the OpenRouter model id and its cost). `make live-openrouter`
+  and `make live-openrouter-remote` are the checks.
 
 ## Dev: run locally, in-process
 

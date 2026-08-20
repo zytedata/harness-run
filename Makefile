@@ -6,7 +6,7 @@ VENV ?= .venv
 IMAGE ?= ratk-dev
 PACKAGES ?=
 
-.PHONY: test lint live-smoke live-revisions live-openrouter parity-build parity-shell parity-check
+.PHONY: test lint live-smoke live-revisions live-openrouter live-openrouter-remote parity-build parity-shell parity-check
 
 test:
 	$(VENV)/bin/python -m pytest -q
@@ -29,6 +29,14 @@ live-revisions:
 # never in CI. Run it when you touch the harness's provider wiring or the model list.
 live-openrouter:
 	$(VENV)/bin/python dev/live_openrouter_probe.py
+
+# Same models on Gemini Agent Runtime, plus the remote-only visibility surface
+# (effective_spec echo, resource samples, memory peak, history, traces). One throwaway
+# engine serves all four models (model is a per-turn knob), deleted in `finally`.
+# COSTS REAL MONEY (~$0.30) and takes ~35-40 min: a ~5 min build plus seven turns that each
+# pay cold-start latency. Give it a generous timeout — by hand, never in CI.
+live-openrouter-remote:
+	$(VENV)/bin/python dev/live_openrouter_remote_probe.py
 
 # Build the parity image. Pass the agent's spec.packages so they install exactly as on the
 # engine, e.g.:  make parity-build PACKAGES="pandas==2.2.* httpx>=0.27"

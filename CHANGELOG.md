@@ -31,7 +31,12 @@ tag `vX.Y.Z`, push the commit and the tag.
   other `openrouter/*` id runs as well. The provider rides the model id rather
   than a new spec/config field, so it stays a per-turn knob (`TurnConfig`) and
   needs no engine redeploy beyond the usual toolkit bump. Validated live on all
-  four models.
+  four models, on both runtimes: `dev/live_openrouter_probe.py` (local) and
+  `dev/live_openrouter_remote_probe.py` (Gemini Agent Runtime, which also checks
+  that the remote visibility surface — `effective_spec` echo, resource samples,
+  `memory_peak_bytes`, history, and the session's Cloud Trace root span with its
+  model and cost — carries an OpenRouter model exactly as it carries a GPT or
+  Claude one).
 
 - Configuration now has three scopes, one type each: the `AgentSpec` baked at
   deploy, a `SessionConfig` bound once at `engine.start_session(config=…)`

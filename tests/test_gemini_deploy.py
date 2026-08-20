@@ -264,6 +264,35 @@ def test_build_env_codex_skips_vertex_routing() -> None:
     assert "OPENAI_API_KEY" not in env  # never baked
 
 
+def test_build_env_openrouter_bakes_no_credentials() -> None:
+    """An OpenRouter model changes nothing at deploy time: the key travels per-invocation."""
+    spec = _spec(model="openrouter/moonshotai/kimi-k3", harness="codex")
+    env = deploy.build_env(spec, project="p", use_vertex=True)
+
+    assert "OPENROUTER_API_KEY" not in env  # never baked into the engine
+    assert "CLAUDE_CODE_USE_VERTEX" not in env  # no Vertex path for a codex engine
+    # The model id reaches the worker through the pickled spec; this env var is the
+    # informational copy, and it must carry the caller's full id (prefix included).
+    assert env["CLAUDE_AGENT_MODEL"] == "openrouter/moonshotai/kimi-k3"
+
+
+def test_build_requirements_openrouter_needs_only_the_codex_sdk() -> None:
+    """OpenRouter is reached through codex's config, so no extra wheel is baked."""
+    reqs = deploy.build_requirements(
+        _spec(model="openrouter/z-ai/glm-5.3", harness="codex")
+    )
+    assert any(r.startswith("openai-codex") for r in reqs)
+    assert not any("openrouter" in r.lower() for r in reqs)
+
+
+def test_openrouter_model_round_trips_through_the_baked_spec() -> None:
+    """The worker rebuilds the spec from a dict; the prefix must survive that trip."""
+    from remote_agent_toolkit import AgentSpec
+
+    spec = _spec(model="openrouter/deepseek/deepseek-v4-pro", harness="codex")
+    assert AgentSpec.from_dict(spec.to_dict()).model == "openrouter/deepseek/deepseek-v4-pro"
+
+
 def test_deploy_submodule_import_does_not_shadow_the_deploy_function() -> None:
     """``gemini.deploy`` must stay callable after any submodule import.
 

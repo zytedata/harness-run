@@ -100,6 +100,26 @@ def test_max_buffer_size_is_tunable_per_session_and_per_turn():
 # ---------------------------------------------------------------- serialization
 
 
+def test_openrouter_model_switches_per_turn_on_a_codex_engine():
+    """One deployed engine, several providers: the model override is all it takes.
+
+    This is the mechanism the remote probe drives live — a codex engine baked with one
+    OpenRouter model serving turns on the others, with no redeploy.
+    """
+    baked = AgentSpec(
+        name="a", model="openrouter/deepseek/deepseek-v4-flash", harness="codex",
+        harnesses=("codex",),
+    )
+    session_eff = apply_session_config(baked, SessionConfig(harness="codex"))
+    turn_eff = apply_turn_config(session_eff, TurnConfig(model="openrouter/moonshotai/kimi-k3"))
+
+    assert turn_eff.model == "openrouter/moonshotai/kimi-k3"
+    assert turn_eff.harness == "codex"
+    validate_harness_choice(baked, turn_eff)  # the harness is baked; the model is free
+    # An OpenAI model on the same engine is just another override.
+    assert apply_turn_config(session_eff, TurnConfig(model="gpt-5.6-luna")).model == "gpt-5.6-luna"
+
+
 def test_sparse_round_trip_preserves_set_and_only_set_fields():
     cfg = SessionConfig(
         repos=[RepoSource.git("https://h/r.git", ref="heal-1", auth="tok")],

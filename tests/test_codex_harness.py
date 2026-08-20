@@ -670,6 +670,98 @@ def test_unused_model_auth_key_never_reaches_the_agent(tmp_path):
     assert "OPENAI_API_KEY" not in env
 
 
+def test_openrouter_preset_id_passes_through_and_warns(tmp_path):
+    """`openrouter/@preset/<slug>` is how a caller pins routing we cannot express."""
+    spec = AgentSpec(name="a", model="openrouter/@preset/kimi-firstparty", harness="codex")
+    opts = CodexHarness().build_options(
+        spec, _ctx(tmp_path, spec, secrets={"OPENROUTER_API_KEY": "k"})
+    )
+    ovr = "\n".join(opts.codex_config.config_overrides)
+
+    assert opts.thread_args["model"] == "@preset/kimi-firstparty"  # prefix ours, not theirs
+    assert 'model_provider="openrouter"' in ovr
+    # A preset can pin the model, so we cannot know what will answer → say so loudly.
+    assert any("cannot be priced" in w for w in opts.warnings)
+    assert "model_context_window" not in ovr
+
+
+# -- routing attribution ------------------------------------------------------
+
+# The result event otherwise reports what we ASKED for. `thread.read()` is the app-server's
+# own record, so it is the only non-circular answer to "did the override take effect" —
+# which matters because on the Responses wire OpenRouter never names the upstream provider.
+
+
+def _routing_of(events):
+    return next((e.raw for e in events if (e.raw or {}).get("event") == "model_routing"), None)
+
+
+async def test_routing_event_reports_the_resolved_provider(tmp_path, monkeypatch):
+    import openai_codex
+
+    spec = _or_spec()
+    ctx = _ctx(tmp_path, spec, secrets={"OPENROUTER_API_KEY": "k"})
+    cls = make_async_codex(
+        [turn_started(), agent_message("hi"), token_usage(), turn_completed()],
+        resolved={"model_provider": "openrouter", "model": "moonshotai/kimi-k3"},
+    )
+    monkeypatch.setattr(openai_codex, "AsyncCodex", cls)
+    events = [ev async for ev in CodexHarness().run(spec, ctx)]
+
+    routing = _routing_of(events)
+    assert routing is not None
+    assert routing["resolved_model_provider"] == "openrouter"
+    assert routing["resolved_model"] == "moonshotai/kimi-k3"
+    assert routing["asked_provider"] == "openrouter"
+    assert routing["matches_request"] is True
+
+
+async def test_routing_event_flags_a_mismatch(tmp_path, monkeypatch):
+    """The failure this exists to catch: config ignored, turn silently served elsewhere."""
+    import openai_codex
+
+    spec = _or_spec()
+    ctx = _ctx(tmp_path, spec, secrets={"OPENROUTER_API_KEY": "k"})
+    cls = make_async_codex(
+        [turn_started(), agent_message("hi"), token_usage(), turn_completed()],
+        resolved={"model_provider": "openai", "model": "gpt-5.6-luna"},
+    )
+    monkeypatch.setattr(openai_codex, "AsyncCodex", cls)
+    events = [ev async for ev in CodexHarness().run(spec, ctx)]
+
+    routing = _routing_of(events)
+    assert routing["resolved_model_provider"] == "openai"
+    assert routing["asked_provider"] == "openrouter"
+    assert routing["matches_request"] is False
+
+
+async def test_openai_path_reports_its_own_routing(tmp_path, monkeypatch):
+    events, _ = await _events_of(
+        [turn_started(), agent_message("hi"), token_usage(), turn_completed()],
+        tmp_path, monkeypatch,
+    )
+    routing = _routing_of(events)
+    assert routing["asked_provider"] == "openai"
+    assert routing["matches_request"] is True
+
+
+async def test_attribution_failure_never_fails_the_turn(tmp_path, monkeypatch):
+    """A server that won't answer `read()` costs us the event, not the run."""
+    import openai_codex
+
+    spec = _or_spec()
+    ctx = _ctx(tmp_path, spec, secrets={"OPENROUTER_API_KEY": "k"})
+    cls = make_async_codex(
+        [turn_started(), agent_message("done"), token_usage(), turn_completed()],
+        resolved=None,  # read() raises
+    )
+    monkeypatch.setattr(openai_codex, "AsyncCodex", cls)
+    events = [ev async for ev in CodexHarness().run(spec, ctx)]
+
+    assert _routing_of(events) is None
+    assert events[-1].kind == "result" and events[-1].raw["is_error"] is False
+
+
 # -- wiring -------------------------------------------------------------------
 
 

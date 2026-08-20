@@ -32,6 +32,8 @@ from openai_codex.generated.v2_all import (
 )
 
 _TID = "thr-fake"
+# What `thread.read()` reports unless a test overrides it (mirrors an OpenAI-path thread).
+_DEFAULT_RESOLVED = {"model_provider": "openai", "model": "gpt-5.6-luna"}
 _TURN_ID = "turn-fake"
 
 
@@ -128,7 +130,7 @@ def codex_error(message: str, will_retry: bool = True) -> SimpleNamespace:
     )
 
 
-def make_async_codex(script: list) -> type:
+def make_async_codex(script: list, resolved: dict | None = _DEFAULT_RESOLVED) -> type:
     """A fake ``AsyncCodex`` class whose turn stream plays ``script``.
 
     Records every instance on ``instances``; each instance records ``login_keys``,
@@ -163,11 +165,28 @@ def make_async_codex(script: list) -> type:
             self._client.turns.append((prompt, kwargs))
             return FakeHandle(self._client)
 
+        async def read(self, **_kw):
+            """The app-server's record of this thread — routing attribution.
+
+            Shaped like ``ThreadReadResponse``: ``.thread.model_provider`` plus
+            ``.thread.settings.model``. ``make_async_codex(..., resolved=...)`` sets what
+            it reports; ``resolved=None`` makes it raise, standing in for a server that
+            does not answer — attribution must degrade, not fail the turn.
+            """
+            resolved = self._client.resolved
+            if resolved is None:
+                raise RuntimeError("thread.read unavailable")
+            return SimpleNamespace(thread=SimpleNamespace(
+                model_provider=resolved.get("model_provider"),
+                settings=SimpleNamespace(model=resolved.get("model")),
+            ))
+
     class FakeAsyncCodex:
         instances: list[FakeAsyncCodex] = []
 
         def __init__(self, config=None) -> None:
             self.config = config
+            self.resolved = resolved
             self.login_keys: list[str] = []
             self.thread_starts: list[dict] = []
             self.thread_resumes: list[tuple[str, dict]] = []

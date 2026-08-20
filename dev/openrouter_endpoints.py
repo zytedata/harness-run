@@ -1,0 +1,127 @@
+"""List the upstream endpoints OpenRouter can route a model to — free, no model call.
+
+OpenRouter serves one model id from many providers, and they are not equivalent: they
+differ in quantization, context and output caps, price, and whether they support tool
+calling at all. The toolkit cannot pin the choice (provider selection is a request-body
+field the harness's CLI builds), so the first step in any routing question is seeing what
+the pool actually contains.
+
+This reads the public catalogue plus, with a key, what your account can reach. It makes no
+model calls and costs nothing.
+
+Run:
+  .venv/bin/python dev/openrouter_endpoints.py                       # the models we ship
+  .venv/bin/python dev/openrouter_endpoints.py z-ai/glm-5.3          # a specific model
+  .venv/bin/python dev/openrouter_endpoints.py --probe moonshotai/kimi-k3 -n 12
+
+``--probe`` sends N tiny identical completions and reports which provider served each —
+the only way to see routing from outside, since the provider is absent from the Responses
+wire the Codex harness uses. **That part costs money** (a fraction of a cent per call).
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+import urllib.error
+import urllib.request
+from collections import Counter
+
+API = "https://openrouter.ai/api/v1"
+DEFAULT_MODELS = [
+    "moonshotai/kimi-k3",
+    "z-ai/glm-5.3",
+    "deepseek/deepseek-v4-flash",
+    "deepseek/deepseek-v4-pro",
+]
+
+
+def _get(path: str, key: str | None) -> dict:
+    req = urllib.request.Request(f"{API}{path}")
+    if key:
+        req.add_header("Authorization", f"Bearer {key}")
+    with urllib.request.urlopen(req, timeout=30) as r:  # noqa: S310 — fixed host
+        return json.loads(r.read())
+
+
+def _post(body: dict, key: str) -> dict:
+    req = urllib.request.Request(f"{API}/chat/completions", data=json.dumps(body).encode())
+    req.add_header("Authorization", f"Bearer {key}")
+    req.add_header("Content-Type", "application/json")
+    try:
+        with urllib.request.urlopen(req, timeout=120) as r:  # noqa: S310 — fixed host
+            return json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        return {"error": {"message": e.read().decode()[:200]}}
+
+
+def show_endpoints(model: str, key: str | None) -> None:
+    try:
+        data = _get(f"/models/{model}/endpoints", key).get("data", {})
+    except urllib.error.HTTPError as e:
+        print(f"{model}: HTTP {e.code} {e.read().decode()[:120]}")
+        return
+    eps = data.get("endpoints", [])
+    print(f"\n{model} — {len(eps)} endpoint(s)")
+    print(f"  {'provider':<20} {'quant':<9} {'context':>10} {'max_out':>10}  {'$/Mtok in':>10}  tools")
+    for e in sorted(eps, key=lambda x: str(x.get("provider_name"))):
+        params = e.get("supported_parameters") or []
+        price = e.get("pricing", {}).get("prompt")
+        per_mtok = f"{float(price) * 1e6:.2f}" if price not in (None, "") else "?"
+        print(
+            f"  {str(e.get('provider_name')):<20} {str(e.get('quantization')):<9} "
+            f"{str(e.get('context_length')):>10} {str(e.get('max_completion_tokens')):>10}  "
+            f"{per_mtok:>10}  {'yes' if 'tools' in params else 'NO'}"
+        )
+    quants = {str(e.get("quantization")) for e in eps}
+    if len(quants) > 1:
+        print(f"  ! mixed quantization across providers: {sorted(quants)}")
+    if any("tools" not in (e.get("supported_parameters") or []) for e in eps):
+        print("  ! some endpoints do not support tool calling (an agent needs it)")
+
+
+def probe(model: str, n: int, key: str) -> None:
+    """Send N identical tiny completions; report who served them. Costs money."""
+    print(f"\nprobing {model} with {n} identical request(s) — this spends real money")
+    seen: Counter[str] = Counter()
+    for i in range(n):
+        d = _post(
+            {
+                "model": model,
+                "max_tokens": 8,
+                "messages": [{"role": "user", "content": "ok"}],
+            },
+            key,
+        )
+        who = d.get("provider") or f"ERROR {str(d.get('error', {}).get('message'))[:60]}"
+        seen[who] += 1
+        print(f"  {i + 1:>3}. {who}")
+    print(f"  distinct providers: {len(seen)} — {dict(seen)}")
+    if len(seen) > 1:
+        print("  ! routing is not deterministic; pin it if you need comparable runs")
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("models", nargs="*", default=DEFAULT_MODELS)
+    ap.add_argument("--probe", action="store_true", help="also send N identical calls (COSTS MONEY)")
+    ap.add_argument("-n", type=int, default=12, help="probe count (default 12)")
+    args = ap.parse_args()
+
+    key = os.environ.get("OPENROUTER_API_KEY")
+    if not key:
+        print("note: OPENROUTER_API_KEY unset — showing the public catalogue only\n")
+    for model in args.models or DEFAULT_MODELS:
+        show_endpoints(model, key)
+        if args.probe:
+            if not key:
+                print("  (skipping probe: no OPENROUTER_API_KEY)")
+            else:
+                probe(model, args.n, key)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

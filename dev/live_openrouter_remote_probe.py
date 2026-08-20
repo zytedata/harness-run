@@ -1,11 +1,12 @@
 """Live probe — the OpenRouter models on the **Gemini Agent Runtime**, with the remote-only
 visibility surface checked alongside them.
 
-COSTS REAL MONEY (~$0.30: one ~5 min engine build plus ~$0.08 of turns) and takes
-**~35-40 min** — measured, not estimated: the build is ~5 min and each of the seven turns
-pays cold-start latency (100-420 s apiece, and the platform's variance is wide). Give it a
-generous timeout; see the teardown note below for what happens if you don't. Run it by
-hand, locally, sparingly — never in CI. The companion
+COSTS REAL MONEY (~$0.30: one ~5 min engine build plus ~$0.08 of turns). The checks run
+**concurrently** (the engine is deployed with room for them), so a pass is the build plus
+roughly one turn's cold start — about **8-12 min**, where the original serial version took
+~35-40. `SERIAL=1` restores lockstep for debugging one check. Give it a generous timeout
+either way; see the teardown note below for what happens if you don't. Run it by hand,
+locally, sparingly — never in CI. The companion
 `dev/live_openrouter_probe.py` covers the same models on the local runtime and is the
 cheaper first check; this one exists for what only the remote path has.
 
@@ -85,6 +86,8 @@ MODELS = [
 BAKED_MODEL = "openrouter/deepseek/deepseek-v4-flash"
 SCHEMA_MODEL = "openrouter/z-ai/glm-5.3"  # ignores the unenforced json_schema format
 TOKEN = "BANANA-77"
+# Room for the concurrent checks; the default of 1 would serialize them.
+MAX_INSTANCES = int(os.environ.get("MAX_INSTANCES", "6"))
 
 TASK = 'Run `python3 -c "print(6 * 7)"` in the shell and reply with just the number it prints.'
 SCHEMA = {
@@ -320,19 +323,42 @@ async def main() -> int:
         max_turns=8,
         max_budget_usd=0.50,
     )
-    print(f"{time.strftime('%H:%M:%S')} deploying {NAME} (~4 min build) ...", flush=True)
+    print(f"{time.strftime('%H:%M:%S')} deploying {NAME} (~5 min build) ...", flush=True)
     t0 = time.time()
     engine = await asyncio.to_thread(
-        gemini.deploy, spec, PROJECT, LOCATION, credentials=credentials
+        gemini.deploy, spec, PROJECT, LOCATION, credentials=credentials,
+        # The checks run concurrently, so the engine needs room to serve them in parallel;
+        # with the default max_instances=1 they queue and the probe is back to ~40 min.
+        max_instances=MAX_INSTANCES,
     )
     print(f"{time.strftime('%H:%M:%S')} deployed in {time.time() - t0:.0f}s", flush=True)
     _install_signal_teardown(engine)
 
     try:
-        for model in MODELS:
-            await _check_model(engine, model, key)
-        await _check_structured_output(engine, key)
-        last_session, final_raw = await _check_resume(engine, key)
+        # Concurrent: every check is an independent session, and serially each one pays a
+        # cold start (100-420 s measured), which is what made this a ~40 min probe. The
+        # resume check is internally sequential (run, then send) but runs alongside the
+        # rest. SERIAL=1 restores lockstep for debugging.
+        if os.environ.get("SERIAL") == "1":
+            for model in MODELS:
+                await _check_model(engine, model, key)
+            await _check_structured_output(engine, key)
+            last_session, final_raw = await _check_resume(engine, key)
+        else:
+            results = await asyncio.gather(
+                *(_check_model(engine, m, key) for m in MODELS),
+                _check_structured_output(engine, key),
+                _check_resume(engine, key),
+                return_exceptions=True,
+            )
+            for r in results:
+                if isinstance(r, BaseException):
+                    traceback.print_exception(type(r), r, r.__traceback__)
+                    check("all concurrent checks completed", False, f"{type(r).__name__}: {r}")
+            resume = results[-1]
+            if isinstance(resume, BaseException):
+                raise RuntimeError("resume check failed; skipping visibility") from resume
+            last_session, final_raw = resume
         await _check_visibility(last_session, final_raw, BAKED_MODEL)
     except Exception:  # noqa: BLE001 — always reach teardown
         traceback.print_exc()

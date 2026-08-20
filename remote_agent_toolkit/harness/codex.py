@@ -183,6 +183,11 @@ class _CodexOptions:
     openrouter: bool = False
 
 
+def thread_args_model(options: _CodexOptions) -> str | None:
+    """The model id handed to Codex (prefix already stripped for OpenRouter)."""
+    return options.thread_args.get("model")
+
+
 class _RunAccounting:
     """Per-run cost/turn accounting from ``thread/tokenUsage/updated`` notifications.
 
@@ -477,6 +482,45 @@ class CodexHarness:
             overrides.append(f"model_context_window={window}")
         return overrides
 
+    @staticmethod
+    def _is_preset(model: str) -> bool:
+        """An ``openrouter/@preset/<slug>`` id: routing/params defined in the account.
+
+        Presets are how a caller pins provider routing, which the toolkit cannot express
+        itself (it is a request-body field the CLI builds). The trade-off is that a preset
+        can also pin the model, so we cannot know which model will answer and therefore
+        cannot price the run.
+        """
+        return model.removeprefix(_OPENROUTER_PREFIX).startswith("@preset/")
+
+    async def _resolved_routing(self, thread: Any) -> dict[str, Any]:
+        """What the app-server says this thread is actually bound to.
+
+        ``thread.read()`` returns Codex's own record, so this is the one non-circular
+        answer to "did the provider override take effect" — everything else in the result
+        event is what we *asked* for, which proves nothing. It matters most on the
+        OpenRouter path, where the Responses wire never names the upstream at all.
+
+        What comes back today is ``model_provider``; the SDK's ``Thread`` carries no
+        settings block, so ``resolved_model`` is normally absent (the read is attempted
+        anyway, so it starts working if the SDK gains it). Best-effort throughout:
+        attribution must never fail a turn.
+        """
+        try:
+            resp = await thread.read()
+            thread_obj = getattr(resp, "thread", None)
+            provider = getattr(thread_obj, "model_provider", None)
+            out: dict[str, Any] = {}
+            if provider is not None:
+                out["resolved_model_provider"] = provider
+            settings = getattr(thread_obj, "settings", None)
+            model = getattr(settings, "model", None)
+            if model is not None:
+                out["resolved_model"] = model
+            return out
+        except Exception:  # noqa: BLE001 — observability, never load-bearing
+            return {}
+
     def build_options(self, spec: AgentSpec, ctx: RunContext) -> _CodexOptions:
         """Build ``openai_codex`` config + thread/turn args from ``spec`` + runtime ``ctx``."""
         from openai_codex import ApprovalMode, CodexConfig, Sandbox
@@ -518,6 +562,13 @@ class CodexHarness:
         mcp_overrides, mcp_env = self._mcp_overrides(spec, ctx)
         model = spec.model or ""
         openrouter = model.startswith(_OPENROUTER_PREFIX)
+        if openrouter and self._is_preset(model):
+            warnings.append(
+                "OpenRouter preset selected: the preset owns provider routing (and may "
+                "pin the model), so this run cannot be priced — cost_usd will be unknown "
+                "and max_budget_usd cannot be enforced. Use an explicit "
+                "openrouter/<vendor>/<model> id if you need a budget cap."
+            )
         # The agent's shell env: Codex filters *KEY*/*SECRET*/*TOKEN*-named vars from the
         # shell by default — the opposite of the toolkit's contract (the caller's own
         # secrets ARE for the agent). Lift the default excludes, but keep the ones the
@@ -764,6 +815,24 @@ class CodexHarness:
             else:
                 thread = await codex.thread_start(**options.thread_args)
             thread_id = thread.id
+
+            routing = await self._resolved_routing(thread)
+            if routing:
+                asked = _OPENROUTER_PROVIDER if options.openrouter else "openai"
+                got = routing.get("resolved_model_provider")
+                yield AgentEvent(
+                    kind="status",
+                    summary=(
+                        f"model routing: provider={got or 'unreported'} "
+                        f"model={routing.get('resolved_model') or thread_args_model(options)}"
+                    ),
+                    raw={
+                        "event": "model_routing",
+                        "asked_provider": asked,
+                        **routing,
+                        "matches_request": got is None or got == asked,
+                    },
+                )
 
             handle = await thread.turn(ctx.prompt, **options.run_args)
             async for notification in handle.stream():

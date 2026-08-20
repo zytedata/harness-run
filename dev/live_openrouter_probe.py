@@ -33,9 +33,14 @@ Then two checks that pin gaps found the hard way:
 Pass criteria: every model passes every check, and the resume check passes. Exit code is
 non-zero otherwise.
 
+All checks run **concurrently** (they are independent turns against different upstreams),
+so a pass is roughly one turn's wall clock rather than six. Set ``SERIAL=1`` to run them in
+lockstep when debugging one model.
+
 Configure via env:
   OPENROUTER_API_KEY   required — the key the turns bill to
   MODELS               optional comma-separated override of the model list
+  SERIAL=1             run checks one at a time instead of concurrently
 
 Run:
   make live-openrouter                              # or:
@@ -201,13 +206,23 @@ async def main() -> int:
         return 2
     print(f"probing {len(MODELS)} model(s) — this spends real money", flush=True)
 
-    rows = []
-    for model in MODELS:
-        # Sequential on purpose: the output stays readable, and a rate limit on one
-        # provider doesn't get blamed on another.
-        rows.append(await _probe(model, key))
-    rows.append(await _probe_resume(RESUME_MODEL, key))
-    rows.append(await _probe_schema(SCHEMA_MODEL, key))
+    # Parallel: these are independent turns against different upstreams, and the wall
+    # clock is otherwise the sum of four cold starts. Each line is prefixed with its model
+    # so interleaved output stays readable, and one model's failure cannot mask another's
+    # (every check returns a row rather than raising). SERIAL=1 restores lockstep output
+    # for debugging a single model.
+    if os.environ.get("SERIAL") == "1":
+        rows = [await _probe(m, key) for m in MODELS]
+        rows.append(await _probe_resume(RESUME_MODEL, key))
+        rows.append(await _probe_schema(SCHEMA_MODEL, key))
+    else:
+        rows = list(
+            await asyncio.gather(
+                *(_probe(m, key) for m in MODELS),
+                _probe_resume(RESUME_MODEL, key),
+                _probe_schema(SCHEMA_MODEL, key),
+            )
+        )
 
     print("\n=== VERDICTS ===")
     for row in rows:

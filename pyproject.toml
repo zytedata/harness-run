@@ -38,6 +38,9 @@ dev = [
     # that flag ~76 pre-existing spots. Bump together with that cleanup.
     "ruff<0.16",
     "mypy",
+    # `make test` runs -n auto; the suite is process-parallel safe (each worker is its own
+    # process, so the autouse fixtures and the signal test stay isolated).
+    "pytest-xdist",
 ]
 
 [tool.hatch.build.targets.wheel]

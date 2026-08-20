@@ -5,13 +5,20 @@ can only break in ways the earlier rungs can't see.
 
 | Rung | Command | Catches | Cost |
 |---|---|---|---|
-| Offline tests | `make test` | logic, event plumbing, contracts we encode | seconds, free |
+| Offline tests | `make test` | logic, event plumbing, contracts we encode | ~40 s (parallel), free |
 | Install parity | `make parity-build` / `-check` | dependency/install/glibc breakage | ~1 min, free |
 | **Live validation** | `make live-smoke` | **platform-contract breakage** | ~10 min, ~$0.10 + build |
 | Model-provider check | `make live-openrouter` | provider-contract breakage (OpenRouter) | ~1 min, a few cents |
-| Model-provider check, remote | `make live-openrouter-remote` | the same models + remote visibility on Agent Runtime | ~35-40 min, ~$0.30 |
+| Model-provider check, remote | `make live-openrouter-remote` | the same models + remote visibility on Agent Runtime | ~8-12 min, ~$0.30 |
+| Model attribution | `make live-attribution` | did the turn run the model we asked for — both harnesses | ~10 s, a few cents |
 
 ## 1. Offline tests (`make test`)
+
+`make test` runs with `-n auto` (pytest-xdist). Each worker is its own process, so the
+autouse fixtures, the pricing cache and the signal-handler test stay isolated; `make
+test-serial` gives readable output when debugging. The wall clock is bounded by a few
+deliberate poll-cadence tests (the slowest is ~15 s), so expect ~40 s rather than a linear
+speedup.
 
 The pytest suite makes **no network calls**: no GCP, no model, no subprocesses talking to
 real services. Backends are exercised against the fakes in [`tests/fakes.py`](tests/fakes.py) /
@@ -146,6 +153,32 @@ build plus seven turns each paying cold-start latency (100-420 s apiece; platfor
 wide). Give it a generous timeout. Teardown also runs on SIGTERM/SIGINT, because a `timeout`
 that fires mid-run would otherwise leave an engine billing — that happened while writing this
 probe, which is why the handler exists.
+
+### Model attribution: did we run what we asked for?
+
+```bash
+OPENROUTER_API_KEY=... OPENAI_API_KEY=... make live-attribution
+```
+
+`dev/live_model_attribution.py` answers the question the result event cannot:
+`result.raw["model"]` is what the *caller asked for*, so asserting on it is circular. The
+probe only accepts evidence that comes back from the CLI, the app-server or the provider,
+and it covers **both harnesses**:
+
+- **claude-code** — the CLI's `system/init` message names the model it resolved.
+- **codex** — the app-server's `thread.read()` names the thread's bound `model_provider`,
+  surfaced as a `model_routing` event. This is what proves an OpenRouter override took
+  effect; a mismatch is reported as `matches_request: false`.
+- **OpenRouter, out of band** — a chat-wire canary, because that wire returns both `model`
+  and `provider` while the Responses wire the codex harness uses returns neither.
+
+**The limit is stated, not hidden:** on the codex/OpenRouter path the upstream provider for
+the agent's own turn is not observable. The routing event plus the canary bound the question
+(the thread is bound to openrouter; the account serves that model id) but do not identify
+which upstream answered a given turn. Pin routing if you need that — see the README.
+
+All checks run concurrently (~10 s for 14 of them). Costs a few cents. `SERIAL=1` for
+lockstep output.
 
 ### Writing a bespoke live probe
 

@@ -185,13 +185,23 @@ DeepSeek v4 Pro through OpenRouter costs several times its first-party price —
 routing restriction is what you are paying for.
 
 **Routing is not deterministic, and that is worth knowing before you compare runs.** OpenRouter
-serves one model id from many upstream providers — `moonshotai/kimi-k3` has 14 endpoints across 12
-providers — which differ in **price**, in **quantization** (fp4 / fp8 / bf16 / mxfp4 / undisclosed),
-in context and output caps, and in whether they support tool calling at all. Routing genuinely varies
-run to run: twelve byte-identical requests for `moonshotai/kimi-k3` were served by **three different
-providers** (Chutes ×5, Fireworks ×4, Phala ×3; the first-party Moonshot endpoint came up none of the
-twelve times). So `cost_usd` is an estimate, and published benchmark figures for these models — which
-are generally measured against the vendor's first-party API — should not be expected to transfer.
+serves one model id from many upstream providers, which differ in **price**, in **quantization**
+(fp4 / fp8 / bf16 / mxfp4 / undisclosed), in context and output caps, and in whether they support
+tool calling at all. How much this bites is per-model — `dev/openrouter_endpoints.py` prints the pool
+for any id, free and without a model call:
+
+| Model | Endpoints | Quantizations in the pool |
+| --- | --- | --- |
+| `openrouter/moonshotai/kimi-k3` | 14 | bf16, fp4, fp8, mxfp4, undisclosed — and some without tool support |
+| `openrouter/z-ai/glm-5.3` | **1** (Z.AI, fp8) | deterministic by construction |
+| `openrouter/deepseek/deepseek-v4-flash` | 18 | fp4, fp8, undisclosed |
+| `openrouter/deepseek/deepseek-v4-pro` | 18 | fp4, fp8, undisclosed |
+
+Where there is a pool, routing genuinely varies: twelve byte-identical requests for
+`moonshotai/kimi-k3` were served by **three different providers** (Chutes ×5, Fireworks ×4,
+Phala ×3), and the first-party Moonshot endpoint came up in none of the twelve. So `cost_usd` is an
+estimate, and published benchmark figures for these models — generally measured against the vendor's
+first-party API — should not be expected to transfer.
 
 The toolkit cannot pin this for you: provider selection is a request-body field that the harness's
 CLI builds, and a provider suffix on the model id is silently ignored rather than rejected
@@ -200,6 +210,22 @@ experiments, A/B of a prompt change — pin routing **outside** the toolkit, eit
 provider preferences or with an [OpenRouter preset](https://openrouter.ai/docs), which *is*
 addressable from the model id (`@preset/<slug>`). Several of these models, Kimi K3 included, offer
 their first-party vendor as one of the OpenRouter providers, at effectively the same price.
+
+A preset is addressable straight from the spec, so routing becomes a per-turn choice:
+
+```python
+AgentSpec(name="pinned", model="openrouter/@preset/kimi-firstparty", harness="codex")
+```
+
+The trade-off is explicit: a preset can pin the model too, so the toolkit cannot know what will
+answer and therefore cannot price the run — you get a `cost_unknown` status event and no
+`max_budget_usd` enforcement. Use an explicit `openrouter/<vendor>/<model>` id when you need a
+budget cap, and account-level preferences when you need both.
+
+**What the toolkit does tell you.** Every codex turn emits a `model_routing` status event carrying
+the provider the app-server actually bound the thread to (`resolved_model_provider`) and whether it
+matches what was asked (`matches_request`). That is the one non-circular check available — the rest
+of the result event echoes your own request. `make live-attribution` asserts it for both harnesses.
 
 **Checking that a pin is actually in force.** The provider that served a turn is not visible on the
 Responses wire the Codex harness uses, so verify out of band on the chat wire, where OpenRouter does

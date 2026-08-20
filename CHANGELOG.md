@@ -36,14 +36,14 @@ tag `vX.Y.Z`, push the commit and the tag.
   that the remote visibility surface — `effective_spec` echo, resource samples,
   `memory_peak_bytes`, history, and the session's Cloud Trace root span with its
   model and cost — carries an OpenRouter model exactly as it carries a GPT or
-  Claude one).
+  Claude one). ([#34])
 - Every Codex turn now emits a `model_routing` status event carrying the provider
   the app-server actually bound the thread to (`resolved_model_provider`) and
   whether it matches the request (`matches_request`) — the only real answer to
   "did the override take effect", since everything else in the result event just
   repeats the caller's own request. OpenRouter routing can also be pinned
   per turn with an `openrouter/@preset/<slug>` model id (the preset owns routing;
-  the run is then unpriced, and says so).
+  the run is then unpriced, and says so). ([#34])
 
 - Configuration now has three scopes, one type each: the `AgentSpec` baked at
   deploy, a `SessionConfig` bound once at `engine.start_session(config=…)`
@@ -205,6 +205,7 @@ tag `vX.Y.Z`, push the commit and the tag.
 [#26]: https://github.com/zytedata/remote-agent-toolkit/pull/26
 [#28]: https://github.com/zytedata/remote-agent-toolkit/pull/28
 [#29]: https://github.com/zytedata/remote-agent-toolkit/pull/29
+[#34]: https://github.com/zytedata/remote-agent-toolkit/pull/34
 
 ## 0.1.0 — 2026-08-07
 

@@ -187,10 +187,11 @@ routing restriction is what you are paying for.
 **Routing is not deterministic, and that is worth knowing before you compare runs.** OpenRouter
 serves one model id from many upstream providers — `moonshotai/kimi-k3` has 14 endpoints across 12
 providers — which differ in **price**, in **quantization** (fp4 / fp8 / bf16 / mxfp4 / undisclosed),
-in context and output caps, and in whether they support tool calling at all. Identical requests land
-on different providers run to run (observed: Chutes, then DigitalOcean, then Fireworks, then Modal).
-So `cost_usd` is an estimate, and published benchmark figures for these models — which are generally
-measured against the vendor's first-party API — should not be expected to transfer.
+in context and output caps, and in whether they support tool calling at all. Routing genuinely varies
+run to run: twelve byte-identical requests for `moonshotai/kimi-k3` were served by **three different
+providers** (Chutes ×5, Fireworks ×4, Phala ×3; the first-party Moonshot endpoint came up none of the
+twelve times). So `cost_usd` is an estimate, and published benchmark figures for these models — which
+are generally measured against the vendor's first-party API — should not be expected to transfer.
 
 The toolkit cannot pin this for you: provider selection is a request-body field that the harness's
 CLI builds, and a provider suffix on the model id is silently ignored rather than rejected
@@ -199,6 +200,28 @@ experiments, A/B of a prompt change — pin routing **outside** the toolkit, eit
 provider preferences or with an [OpenRouter preset](https://openrouter.ai/docs), which *is*
 addressable from the model id (`@preset/<slug>`). Several of these models, Kimi K3 included, offer
 their first-party vendor as one of the OpenRouter providers, at effectively the same price.
+
+**Checking that a pin is actually in force.** The provider that served a turn is not visible on the
+Responses wire the Codex harness uses, so verify out of band on the chat wire, where OpenRouter does
+return it. Account-level preferences apply account-wide, so a one-line canary is representative:
+
+```bash
+# what served it (chat wire returns a top-level `provider`):
+curl -s https://openrouter.ai/api/v1/chat/completions \
+  -H "Authorization: Bearer $OPENROUTER_API_KEY" -H "Content-Type: application/json" \
+  -d '{"model":"moonshotai/kimi-k3","max_tokens":8,"messages":[{"role":"user","content":"ok"}]}' \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["provider"])'
+
+# negative test — demand a provider the pin should forbid; expect an error, not a completion:
+curl -s https://openrouter.ai/api/v1/chat/completions \
+  -H "Authorization: Bearer $OPENROUTER_API_KEY" -H "Content-Type: application/json" \
+  -d '{"model":"moonshotai/kimi-k3","max_tokens":8,"provider":{"only":["chutes"],
+       "allow_fallbacks":false},"messages":[{"role":"user","content":"ok"}]}'
+```
+
+Run the canary a handful of times, not once — unpinned routing is a lottery, so a single draw can
+land on the provider you wanted by luck. The negative test is the stronger signal: with no pin in
+place it currently returns a completion from Chutes.
 
 Other notes:
 

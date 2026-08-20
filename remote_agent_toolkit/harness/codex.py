@@ -496,10 +496,10 @@ class CodexHarness:
     async def _resolved_routing(self, thread: Any) -> dict[str, Any]:
         """What the app-server says this thread is actually bound to.
 
-        ``thread.read()`` returns Codex's own record, so this is the one non-circular
-        answer to "did the provider override take effect" — everything else in the result
-        event is what we *asked* for, which proves nothing. It matters most on the
-        OpenRouter path, where the Responses wire never names the upstream at all.
+        ``thread.read()`` returns Codex's own record. Everything else in the result event
+        just repeats what we asked for, so this is the only real answer to "did the
+        provider override take effect". It matters most on the OpenRouter path: the
+        Responses wire never names the upstream provider at all.
 
         What comes back today is ``model_provider``; the SDK's ``Thread`` carries no
         settings block, so ``resolved_model`` is normally absent (the read is attempted
@@ -518,7 +518,7 @@ class CodexHarness:
             if model is not None:
                 out["resolved_model"] = model
             return out
-        except Exception:  # noqa: BLE001 — observability, never load-bearing
+        except Exception:  # noqa: BLE001 — reporting only; must not fail the turn
             return {}
 
     def build_options(self, spec: AgentSpec, ctx: RunContext) -> _CodexOptions:

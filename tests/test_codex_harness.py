@@ -688,8 +688,8 @@ def test_openrouter_preset_id_passes_through_and_warns(tmp_path):
 # -- routing attribution ------------------------------------------------------
 
 # The result event otherwise reports what we ASKED for. `thread.read()` is the app-server's
-# own record, so it is the only non-circular answer to "did the override take effect" —
-# which matters because on the Responses wire OpenRouter never names the upstream provider.
+# own record, so it is the only real answer to "did the override take effect" — which
+# matters because on the Responses wire OpenRouter never names the upstream provider.
 
 
 def _routing_of(events):

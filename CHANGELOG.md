@@ -39,9 +39,9 @@ tag `vX.Y.Z`, push the commit and the tag.
   Claude one).
 - Every Codex turn now emits a `model_routing` status event carrying the provider
   the app-server actually bound the thread to (`resolved_model_provider`) and
-  whether it matches the request (`matches_request`) — the one non-circular
-  answer to "did the override take effect", since everything else in the result
-  event echoes the caller's own request. OpenRouter routing can also be pinned
+  whether it matches the request (`matches_request`) — the only real answer to
+  "did the override take effect", since everything else in the result event just
+  repeats the caller's own request. OpenRouter routing can also be pinned
   per turn with an `openrouter/@preset/<slug>` model id (the preset owns routing;
   the run is then unpriced, and says so).
 

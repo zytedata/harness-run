@@ -7,8 +7,8 @@ checkpoint/resume and warm starts, without re-learning the platform's sharp edge
 per agent role, then customize **per session** (`SessionConfig`: repo/ref, prompt, model, skills) and
 **per turn** (`TurnConfig`: budgets, model, output schema) without redeploying — see
 [Deploy / session / turn](#deploy--session--turn-the-three-configuration-scopes). Two agent harnesses
-ship behind the same API — **Claude Code** (the default) and **Codex** — between them running Claude,
-OpenAI GPT, and (through OpenRouter) Kimi, GLM and DeepSeek models; see
+ship behind the same API: **Claude Code** (the default) and **Codex**. Between them they run Claude
+models, OpenAI GPT models, and — through OpenRouter — Kimi, GLM and DeepSeek. See
 [Harnesses and models](#harnesses-and-models).
 
 > **Status: `local` and Gemini Agent Runtime both work — validated live.** Define an `AgentSpec` and run it
@@ -179,57 +179,59 @@ is real and `max_budget_usd` is enforceable:
 | `openrouter/deepseek/deepseek-v4-flash` | 0.084 → 0.168 | ~1M |
 | `openrouter/deepseek/deepseek-v4-pro` | 1.60 → 3.20 | ~1M |
 
-Any other `openrouter/*` id runs too — it just prices only if LiteLLM's dataset knows it, and
-otherwise reports `cost_unknown` and cannot enforce a budget (as for any unpriced model). Notable:
-DeepSeek v4 Pro through OpenRouter costs several times its first-party price — the zero-retention
-routing restriction is what you are paying for.
+Any other `openrouter/*` id runs too. It only gets a price if LiteLLM's dataset knows it. Otherwise
+you get a `cost_unknown` event and no budget enforcement, as with any unpriced model. One note on
+price: DeepSeek v4 Pro through OpenRouter costs several times its first-party price. The
+zero-retention routing restriction is what you are paying for.
 
-**Routing is not deterministic, and that is worth knowing before you compare runs.** OpenRouter
-serves one model id from many upstream providers, which differ in **price**, in **quantization**
-(fp4 / fp8 / bf16 / mxfp4 / undisclosed), in context and output caps, and in whether they support
-tool calling at all. How much this bites is per-model — `dev/openrouter_endpoints.py` prints the pool
-for any id, free and without a model call:
+**Which upstream serves your request is not fixed.** OpenRouter offers one model id from many
+upstream providers. They differ in price, in quantization (fp4, fp8, bf16, mxfp4, or undisclosed),
+in context and output caps, and in whether they support tool calling at all. How much that matters
+depends on the model. `dev/openrouter_endpoints.py` prints the endpoints for any id — free, and
+without calling the model:
 
-| Model | Endpoints | Quantizations in the pool |
+| Model | Endpoints | Quantizations offered |
 | --- | --- | --- |
-| `openrouter/moonshotai/kimi-k3` | 14 | bf16, fp4, fp8, mxfp4, undisclosed — and some without tool support |
-| `openrouter/z-ai/glm-5.3` | **1** (Z.AI, fp8) | deterministic by construction |
+| `openrouter/moonshotai/kimi-k3` | 14 | bf16, fp4, fp8, mxfp4, undisclosed. Some support no tools |
+| `openrouter/z-ai/glm-5.3` | **1** (Z.AI, fp8) | only one, so it never varies |
 | `openrouter/deepseek/deepseek-v4-flash` | 18 | fp4, fp8, undisclosed |
 | `openrouter/deepseek/deepseek-v4-pro` | 18 | fp4, fp8, undisclosed |
 
-Where there is a pool, routing genuinely varies: twelve byte-identical requests for
-`moonshotai/kimi-k3` were served by **three different providers** (Chutes ×5, Fireworks ×4,
-Phala ×3), and the first-party Moonshot endpoint came up in none of the twelve. So `cost_usd` is an
-estimate, and published benchmark figures for these models — generally measured against the vendor's
-first-party API — should not be expected to transfer.
+When a model has several endpoints, the one you get changes between runs. Twelve identical
+requests for `moonshotai/kimi-k3` were served by **three different providers** (Chutes ×5,
+Fireworks ×4, Phala ×3). The first-party Moonshot endpoint served none of the twelve. Two
+consequences: `cost_usd` is an estimate, and published scores for these models may not match what
+you get, because they are usually measured against the vendor's own API.
 
-The toolkit cannot pin this for you: provider selection is a request-body field that the harness's
-CLI builds, and a provider suffix on the model id is silently ignored rather than rejected
-(`…/kimi-k3:moonshotai` routed to Fireworks). If you need run-to-run comparability — replay,
-experiments, A/B of a prompt change — pin routing **outside** the toolkit, either with account-level
-provider preferences or with an [OpenRouter preset](https://openrouter.ai/docs), which *is*
-addressable from the model id (`@preset/<slug>`). Several of these models, Kimi K3 included, offer
-their first-party vendor as one of the OpenRouter providers, at effectively the same price.
+The toolkit cannot choose the provider for you. That choice is a field in the request body, and the
+request body is built by the harness's CLI. Putting a provider name in the model id does not work
+either: the suffix is accepted and ignored, with no error (`…/kimi-k3:moonshotai` was served by
+Fireworks).
 
-A preset is addressable straight from the spec, so routing becomes a per-turn choice:
+Two things do work, both set up outside the toolkit. **Account-level provider preferences** apply to
+every request. An **[OpenRouter preset](https://openrouter.ai/docs)** can be named from the model id,
+which makes routing a per-turn choice:
 
 ```python
 AgentSpec(name="pinned", model="openrouter/@preset/kimi-firstparty", harness="codex")
 ```
 
-The trade-off is explicit: a preset can pin the model too, so the toolkit cannot know what will
-answer and therefore cannot price the run — you get a `cost_unknown` status event and no
-`max_budget_usd` enforcement. Use an explicit `openrouter/<vendor>/<model>` id when you need a
-budget cap, and account-level preferences when you need both.
+A preset costs you cost tracking. It can pin the model as well as the provider, so the toolkit cannot
+tell which model will answer, and cannot price the run. You get a `cost_unknown` status event and no
+`max_budget_usd` enforcement. So: use a plain `openrouter/<vendor>/<model>` id when you want a budget
+cap, and account preferences when you want both. Several of these models — Kimi K3 among them — list
+their own vendor as an OpenRouter provider, at about the same price.
 
-**What the toolkit does tell you.** Every codex turn emits a `model_routing` status event carrying
-the provider the app-server actually bound the thread to (`resolved_model_provider`) and whether it
-matches what was asked (`matches_request`). That is the one non-circular check available — the rest
-of the result event echoes your own request. `make live-attribution` asserts it for both harnesses.
+**What the toolkit reports.** Every codex turn emits a `model_routing` status event. It carries the
+provider the app-server actually bound the thread to (`resolved_model_provider`) and whether that
+matches the request (`matches_request`). Everything else in the result event just repeats what you
+asked for, so this event is the only real check. `make live-attribution` asserts it for both
+harnesses.
 
-**Checking that a pin is actually in force.** The provider that served a turn is not visible on the
-Responses wire the Codex harness uses, so verify out of band on the chat wire, where OpenRouter does
-return it. Account-level preferences apply account-wide, so a one-line canary is representative:
+**Checking that a pin is working.** The provider that served a turn is invisible on the Responses
+wire the Codex harness uses. Check with a separate request on the chat wire, which does return it.
+Account preferences apply to the whole account, so one cheap request tells you what the account is
+doing:
 
 ```bash
 # what served it (chat wire returns a top-level `provider`):
@@ -238,16 +240,16 @@ curl -s https://openrouter.ai/api/v1/chat/completions \
   -d '{"model":"moonshotai/kimi-k3","max_tokens":8,"messages":[{"role":"user","content":"ok"}]}' \
   | python3 -c 'import json,sys; print(json.load(sys.stdin)["provider"])'
 
-# negative test — demand a provider the pin should forbid; expect an error, not a completion:
+# demand a provider the pin should forbid; a working pin makes this fail:
 curl -s https://openrouter.ai/api/v1/chat/completions \
   -H "Authorization: Bearer $OPENROUTER_API_KEY" -H "Content-Type: application/json" \
   -d '{"model":"moonshotai/kimi-k3","max_tokens":8,"provider":{"only":["chutes"],
        "allow_fallbacks":false},"messages":[{"role":"user","content":"ok"}]}'
 ```
 
-Run the canary a handful of times, not once — unpinned routing is a lottery, so a single draw can
-land on the provider you wanted by luck. The negative test is the stronger signal: with no pin in
-place it currently returns a completion from Chutes.
+Run the first request several times. Without a pin the provider varies, so one attempt can land on
+the provider you wanted by luck. The second request tells you more: with no pin in place it succeeds
+and reports Chutes.
 
 Other notes:
 
@@ -262,12 +264,12 @@ Other notes:
 - Only the OpenRouter *account* decides which upstream providers may serve a request (ours is
   restricted to zero-retention, no-training routes); the toolkit does not pick routes.
 - **Structured output**: OpenRouter accepts Codex's json_schema format but does not enforce it, so
-  the harness also states the schema in the developer instructions. `output_schema` works, but the
-  guarantee is the model's cooperation rather than the API's.
-- Everything else is at parity with the OpenAI path on both runtimes — cost, budgets, resume,
-  MCP, skills, and on Agent Runtime the `effective_spec` echo, resource samples, history and the
-  Cloud Trace span (which carries the OpenRouter model id and its cost). `make live-openrouter`
-  and `make live-openrouter-remote` are the checks.
+  the harness also states the schema in the developer instructions. `output_schema` works, but it
+  depends on the model following the instruction — the API will not enforce it.
+- **Everything else matches the OpenAI path**, on both runtimes: cost, budgets, resume, MCP and
+  skills. On Agent Runtime that also covers the `effective_spec` echo, resource samples, history,
+  and the Cloud Trace span — the span carries the OpenRouter model id and its cost. The checks are
+  `make live-openrouter` and `make live-openrouter-remote`.
 
 ## Dev: run locally, in-process
 

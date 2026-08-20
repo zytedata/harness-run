@@ -14,16 +14,15 @@ provider:
     proves an OpenRouter override actually took effect. It reports the *provider* only:
     the SDK's `Thread` has no settings block, so the model id is not independently
     confirmable on this path — hence the canary below.
-  * **OpenRouter, out of band** — the chat wire returns both `model` and `provider` in the
-    body, so a canary confirms the account really serves the id we name, and *which*
-    upstream served it. The Responses wire the codex harness uses returns neither, which is
-    exactly why the canary is needed.
+  * **OpenRouter, checked separately** — the chat wire returns both `model` and `provider`
+    in the body, so one cheap request confirms the account really serves the id we name,
+    and which upstream served it. The Responses wire the codex harness uses returns
+    neither, which is why this extra request exists.
 
-Known limit, stated rather than papered over: on the codex/OpenRouter path there is **no
-way to see the upstream provider for the agent's own turn**. The canary and the routing
-event together bound the question (the account serves this model id; the thread is bound to
-the openrouter provider), but the specific upstream that answered a given turn is not
-observable. Pin routing if you need that certainty — see the README.
+One limit worth stating plainly: on the codex/OpenRouter path there is **no way to see the
+upstream provider for the agent's own turn**. The two checks get close — the thread is bound
+to the openrouter provider, and the account does serve that model id — but neither names the
+upstream that answered a given turn. Pin the routing if you need that — see the README.
 
 Configure via env:
   OPENROUTER_API_KEY   required for the OpenRouter checks
@@ -159,7 +158,7 @@ def _canary(model_id: str, key: str) -> tuple[str | None, str | None, str | None
 
 
 async def check_openrouter_canary(model: str, key: str) -> None:
-    """Out of band on the chat wire, which does name the model and the upstream."""
+    """A separate request on the chat wire, which does name the model and the upstream."""
     bare = model.removeprefix("openrouter/")
     served, provider, err = await asyncio.to_thread(_canary, bare, key)
     check(

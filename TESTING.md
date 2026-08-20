@@ -156,11 +156,12 @@ concurrently and land in ~2 min; the rest is the engine build, which measured 30
 also runs on SIGTERM/SIGINT, because a `timeout` that fires mid-run would otherwise leave an
 engine billing — that happened while writing this probe, which is why the handler exists.
 
-One thing to expect: these models are noticeably less reliable under Claude Code, which
-carries a much larger system prompt than Codex. About one turn in eight came back with no
-final message, or echoed a fragment of the scaffolding, across all four models. Codex did not
-show this. The probe therefore retries a soft miss once and says so in the verdict, so its
-signal stays about the wiring rather than the model's mood.
+One thing to expect: `deepseek-v4-flash` under Claude Code returns no final message in
+roughly one turn in four (24 of 33 across batches). The other three models measured 6/6 on
+both harnesses, and flash is 6/6 under Codex, so this is one model on one harness rather than
+a general problem. Prompt size and concurrency were both measured and ruled out as the cause.
+The probe retries a soft miss once and says so in the verdict, so its signal stays about the
+wiring rather than the model's mood.
 
 ### Model attribution: did we run what we asked for?
 

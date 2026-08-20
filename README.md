@@ -267,10 +267,29 @@ Other notes:
   bakes `CLAUDE_CODE_USE_VERTEX=1`, and that outranks the OpenRouter token, so the harness blanks it
   (along with the Bedrock and Foundry switches) for the turn. No action needed; this is why an
   OpenRouter turn works on an engine that also serves Claude models.
-- **These models are occasionally unreliable under Claude Code**, which carries a much larger system
-  prompt than Codex. About one turn in eight returned no final message, or echoed a fragment of the
-  scaffolding, across all four models. Codex did not show this. Retry, or prefer Codex for short
-  tasks; the live probe retries once for this reason.
+- **One model is flaky on one harness**: `deepseek-v4-flash` under Claude Code returned no final
+  message in roughly one turn in four (24 of 33 turns succeeded across several batches; 4/6 in a
+  controlled run). The other three models were 6/6 on both harnesses, and flash itself is 6/6 under
+  Codex. Retry, or use Codex for that model; the live probe retries a soft miss once.
+
+  Two plausible explanations, both measured and **rejected**: it is not prompt size (replacing Claude
+  Code's preset with a short prompt cut the input from ~43k tokens to ~11k and reliability stayed at
+  7/10 versus 6/10), and it is not concurrency (7/10 sequential versus 8/10 in parallel). The model
+  simply ends some turns without a final assistant message.
+- **You can replace the system prompt, and on this path it halves the bill.** A plain string in
+  `spec.system_prompt` replaces Claude Code's preset instead of appending to it, which took a
+  `deepseek-v4-flash` turn from ~43k input tokens to ~11k and from $0.0040 to $0.0019. Worth it when
+  you do not need Claude Code's own tool guidance:
+
+  ```python
+  AgentSpec(
+      name="lean",
+      model="openrouter/moonshotai/kimi-k3",
+      system_prompt="You are a coding agent working in a shell. Be terse.",  # replaces the preset
+  )
+  ```
+
+  `SystemPrompt.inherit(append=...)` keeps the preset and adds to it, which is the default shape.
 - **On Codex only, web search is off** for these turns: Codex sends its server-side web-search tool
   in a shape OpenRouter rejects outright. Shell and file tools are unaffected.
 - **On Codex only, reasoning is always on**: OpenRouter's Responses endpoint requires it, so an unset

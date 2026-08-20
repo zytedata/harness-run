@@ -180,10 +180,25 @@ is real and `max_budget_usd` is enforceable:
 | `openrouter/deepseek/deepseek-v4-pro` | 1.60 → 3.20 | ~1M |
 
 Any other `openrouter/*` id runs too — it just prices only if LiteLLM's dataset knows it, and
-otherwise reports `cost_unknown` and cannot enforce a budget (as for any unpriced model). Because
-OpenRouter spreads requests over upstream providers whose prices differ slightly, cost is an
-estimate. Notable: DeepSeek v4 Pro through OpenRouter costs several times its first-party price —
-the zero-retention routing restriction is what you are paying for.
+otherwise reports `cost_unknown` and cannot enforce a budget (as for any unpriced model). Notable:
+DeepSeek v4 Pro through OpenRouter costs several times its first-party price — the zero-retention
+routing restriction is what you are paying for.
+
+**Routing is not deterministic, and that is worth knowing before you compare runs.** OpenRouter
+serves one model id from many upstream providers — `moonshotai/kimi-k3` has 14 endpoints across 12
+providers — which differ in **price**, in **quantization** (fp4 / fp8 / bf16 / mxfp4 / undisclosed),
+in context and output caps, and in whether they support tool calling at all. Identical requests land
+on different providers run to run (observed: Chutes, then DigitalOcean, then Fireworks, then Modal).
+So `cost_usd` is an estimate, and published benchmark figures for these models — which are generally
+measured against the vendor's first-party API — should not be expected to transfer.
+
+The toolkit cannot pin this for you: provider selection is a request-body field that the harness's
+CLI builds, and a provider suffix on the model id is silently ignored rather than rejected
+(`…/kimi-k3:moonshotai` routed to Fireworks). If you need run-to-run comparability — replay,
+experiments, A/B of a prompt change — pin routing **outside** the toolkit, either with account-level
+provider preferences or with an [OpenRouter preset](https://openrouter.ai/docs), which *is*
+addressable from the model id (`@preset/<slug>`). Several of these models, Kimi K3 included, offer
+their first-party vendor as one of the OpenRouter providers, at effectively the same price.
 
 Other notes:
 

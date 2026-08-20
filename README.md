@@ -73,7 +73,7 @@ both run on both backends (`local` and `gemini`) through the same Engine/Session
 | --- | --- | --- | --- |
 | `claude-code` (default) | Claude Code, via the Claude Agent SDK | Claude models (`claude-sonnet-4-6`, `claude-haiku-4-5`, …) | none on Vertex (the default), else `ANTHROPIC_API_KEY` |
 | `codex` | OpenAI Codex, via the `openai-codex` SDK | OpenAI models (`gpt-5.6-sol` / `-terra` / `-luna`, `gpt-5.3-codex`) | `OPENAI_API_KEY` |
-| `codex` | the same loop, pointed at OpenRouter | `openrouter/<vendor>/<model>` — Kimi, GLM, DeepSeek (see [below](#openrouter-models-codex-harness)) | `OPENROUTER_API_KEY` |
+| **either one** | the same loop, pointed at OpenRouter | `openrouter/<vendor>/<model>` — Kimi, GLM, DeepSeek (see [below](#openrouter-models-either-harness)) | `OPENROUTER_API_KEY` |
 
 The harness is a **session**-scoped choice and its CLI must be baked at deploy
 (`AgentSpec(harnesses=("claude-code", "codex"))` bakes both, then each session picks). The **model**
@@ -148,17 +148,18 @@ What to know when running Codex:
   never ask; `default` → workspace-write with Codex's auto-reviewer).
 - **OpenRouter models** reach the same surface — see below.
 
-### OpenRouter models (Codex harness)
+### OpenRouter models (either harness)
 
-Prefix a model id with `openrouter/` and the Codex harness routes the turn through
-[OpenRouter](https://openrouter.ai) instead of the OpenAI API, so non-OpenAI models run on the same
-Engine/Session/Run surface:
+Prefix a model id with `openrouter/` and the turn runs on [OpenRouter](https://openrouter.ai), so
+non-OpenAI models reach the same Engine/Session/Run surface. **Both harnesses can do this**, by
+different routes: Codex through a provider config, and Claude Code through OpenRouter's
+Anthropic-compatible endpoint. Pick whichever agent loop you want:
 
 ```python
 spec = AgentSpec(
     name="kimi-agent",
     model="openrouter/moonshotai/kimi-k3",   # openrouter/<vendor>/<model>
-    harness="codex",
+    harness="codex",                         # or "claude-code" — both work
 )
 result = await engine.start_session().run(
     "scrape https://books.toscrape.com for title, price",
@@ -253,19 +254,35 @@ and reports Chutes.
 
 Other notes:
 
-- **Auth** is the per-invocation `OPENROUTER_API_KEY` secret (local runs fall back to the ambient env
-  var). It reaches the provider through Codex's `env_key` indirection, never on the command line, and
-  is kept out of the agent's shell like `OPENAI_API_KEY`.
-- **Web search is off** for these turns: Codex sends its server-side web-search tool in a shape
-  OpenRouter rejects outright. Shell and file tools are unaffected.
-- **Reasoning** is always on — OpenRouter's Responses endpoint requires it — so an unset
-  `reasoning_effort` becomes `low` rather than Codex's `none`.
-- On the `claude-code` harness an `openrouter/` model fails fast, pointing you at `harness="codex"`.
+- **Auth** is the per-invocation `OPENROUTER_API_KEY` secret on both harnesses (local runs fall back
+  to the ambient env var). Codex takes it through its `env_key` indirection, so it never reaches the
+  command line; Claude Code takes it as `ANTHROPIC_AUTH_TOKEN`. Either way the harness consumes it,
+  so it stays out of the agent's own shell.
+- **Cost on the Claude Code route is recomputed by the toolkit.** The CLI prices these models from
+  its own catalogue, which has no entry for them, and the figure is badly wrong — measured 60x over
+  for `deepseek-v4-flash`, so `max_budget_usd` would fire almost immediately. The harness replaces it
+  with a figure computed from the reported tokens, and keeps the CLI's number in the result event as
+  `cli_reported_cost_usd` if you want to compare.
+- **On a deployed engine, Claude Code needs its Vertex switch off for these turns.** `gemini.deploy`
+  bakes `CLAUDE_CODE_USE_VERTEX=1`, and that outranks the OpenRouter token, so the harness blanks it
+  (along with the Bedrock and Foundry switches) for the turn. No action needed; this is why an
+  OpenRouter turn works on an engine that also serves Claude models.
+- **These models are occasionally unreliable under Claude Code**, which carries a much larger system
+  prompt than Codex. About one turn in eight returned no final message, or echoed a fragment of the
+  scaffolding, across all four models. Codex did not show this. Retry, or prefer Codex for short
+  tasks; the live probe retries once for this reason.
+- **On Codex only, web search is off** for these turns: Codex sends its server-side web-search tool
+  in a shape OpenRouter rejects outright. Shell and file tools are unaffected.
+- **On Codex only, reasoning is always on**: OpenRouter's Responses endpoint requires it, so an unset
+  `reasoning_effort` becomes `low` instead of Codex's `none`. Claude Code uses a different endpoint
+  and has no such requirement.
 - Only the OpenRouter *account* decides which upstream providers may serve a request (ours is
   restricted to zero-retention, no-training routes); the toolkit does not pick routes.
-- **Structured output**: OpenRouter accepts Codex's json_schema format but does not enforce it, so
-  the harness also states the schema in the developer instructions. `output_schema` works, but it
-  depends on the model following the instruction — the API will not enforce it.
+- **Structured output needs the schema in the prompt**, and both harnesses now put it there for these
+  models. OpenRouter accepts Codex's json_schema format but does not enforce it, and nothing steered
+  the model on the Claude Code path at all. GLM-5.3 replied in prose in both cases, which parses to
+  `structured_output=None`. With the schema stated in the prompt it returns a bare JSON object.
+  `output_schema` therefore works here, but it rests on the model following the instruction.
 - **Everything else matches the OpenAI path**, on both runtimes: cost, budgets, resume, MCP and
   skills. On Agent Runtime that also covers the `effective_spec` echo, resource samples, history,
   and the Cloud Trace span — the span carries the OpenRouter model id and its cost. The checks are

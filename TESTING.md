@@ -107,9 +107,11 @@ OPENROUTER_API_KEY=... make live-openrouter           # all four models + a resu
 MODELS=openrouter/z-ai/glm-5.3 make live-openrouter   # just one
 ```
 
-`dev/live_openrouter_probe.py` runs each OpenRouter model the Codex harness vouches for
-through a real tool-using turn on the **local** runtime (no GCP, no engine build), then
-checks that a second turn on one session still remembers the first. It exists because every
+`dev/live_openrouter_probe.py` runs every OpenRouter model through a real turn on the
+**local** runtime (no GCP, no engine build), **on both harnesses** — codex reaches OpenRouter
+through a provider config, claude-code through its Anthropic-compatible endpoint. It also
+checks resume, structured output, and that an `@preset/<slug>` id arrives at OpenRouter as a
+preset (the pinning mechanism), each on both harnesses. It exists because every
 setting the harness sends to OpenRouter — the Responses wire, mandatory reasoning, Codex's
 web-search tool disabled — was chosen because the provider rejected the alternative, and a
 provider can change that server-side with no diff on our end. Run it when you touch the
@@ -153,6 +155,12 @@ concurrently and land in ~2 min; the rest is the engine build, which measured 30
 601 s across three runs — platform variance is wide, so give it a generous timeout. Teardown
 also runs on SIGTERM/SIGINT, because a `timeout` that fires mid-run would otherwise leave an
 engine billing — that happened while writing this probe, which is why the handler exists.
+
+One thing to expect: these models are noticeably less reliable under Claude Code, which
+carries a much larger system prompt than Codex. About one turn in eight came back with no
+final message, or echoed a fragment of the scaffolding, across all four models. Codex did not
+show this. The probe therefore retries a soft miss once and says so in the verdict, so its
+signal stays about the wiring rather than the model's mood.
 
 ### Model attribution: did we run what we asked for?
 

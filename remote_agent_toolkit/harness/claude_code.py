@@ -13,6 +13,7 @@ third-party deps.
 from __future__ import annotations
 
 import asyncio
+import os
 from collections import deque
 from enum import Enum
 from pathlib import Path
@@ -21,6 +22,7 @@ from typing import Any, AsyncIterator, Sequence, TYPE_CHECKING
 from ..events import AgentEvent
 from ..spec import SystemPrompt
 from ..structured import parse_structured_output
+from . import pricing
 from ._shared import (
     GITHUB_MCP_TOKEN_KEYS as _GITHUB_MCP_TOKEN_KEYS,
     INTERACTIVE_SUFFIX as _INTERACTIVE_SUFFIX,
@@ -39,6 +41,48 @@ if TYPE_CHECKING:
 # tools skills depend on. The Skill tool is enabled separately via the ``skills`` option,
 # not listed here (passing "Skill" in allowed_tools is deprecated in the SDK).
 DEFAULT_ALLOWED_TOOLS = ("Read", "Write", "Edit", "Bash", "Glob", "Grep", "TodoWrite")
+
+# OpenRouter support (see "OpenRouter models" in the module docstring). OpenRouter serves an
+# Anthropic-compatible endpoint, so the Claude CLI can talk to it: point it at the base URL,
+# hand it the OpenRouter key as a bearer token, and register the model as a custom catalogue
+# entry so the CLI stops rejecting the id as unrecognized.
+_OPENROUTER_PREFIX = "openrouter/"
+_OPENROUTER_KEY_ENV = "OPENROUTER_API_KEY"
+# The Anthropic-compatible base: the CLI appends /v1/messages itself.
+_OPENROUTER_ANTHROPIC_BASE = "https://openrouter.ai/api"
+
+
+# OpenRouter models are not steered toward JSON by anything else on this path: the Claude
+# binding only PARSES the final text (see `structured.py`), and unlike the Anthropic models
+# these do not reliably volunteer a bare JSON object. Measured: GLM-5.3 answered
+# "`answer`: 42" prose with `output_schema` set, which parses to None. So the schema is
+# stated in the prompt for these models, matching what the codex binding does.
+_OPENROUTER_SCHEMA_INSTRUCTION = (
+    "\n\nFINAL MESSAGE FORMAT: your last message of the turn must be ONLY a single JSON "
+    "object conforming to this schema — no prose before or after it, no code fence, no "
+    "explanation:\n{schema}"
+)
+
+
+def _openrouter_env(model: str, api_key: str) -> dict[str, str]:
+    """Env that points the Claude CLI at OpenRouter for ``model``.
+
+    ``ANTHROPIC_CUSTOM_MODEL_OPTION`` is what lets the real id through: without it the CLI
+    refuses the turn with ``unrecognized_model``. The Vertex/Bedrock/Foundry switches and
+    ``ANTHROPIC_API_KEY`` are blanked because they outrank ``ANTHROPIC_AUTH_TOKEN`` in the
+    CLI's auth order, and a deployed engine bakes the Vertex ones in.
+    """
+    bare = model[len(_OPENROUTER_PREFIX) :]
+    return {
+        "ANTHROPIC_BASE_URL": _OPENROUTER_ANTHROPIC_BASE,
+        "ANTHROPIC_AUTH_TOKEN": api_key,
+        "ANTHROPIC_CUSTOM_MODEL_OPTION": bare,
+        "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME": bare,
+        "ANTHROPIC_API_KEY": "",
+        "CLAUDE_CODE_USE_VERTEX": "",
+        "CLAUDE_CODE_USE_BEDROCK": "",
+        "CLAUDE_CODE_USE_FOUNDRY": "",
+    }
 
 
 class _StderrCapture:
@@ -171,6 +215,21 @@ class ClaudeCodeHarness:
 
     # -- option building -------------------------------------------------------
 
+    def _schema_steer(self, spec: AgentSpec) -> str:
+        """Prompt text asking for a bare JSON object, for OpenRouter models only."""
+        if not (spec.model or "").startswith(_OPENROUTER_PREFIX) or spec.output_schema is None:
+            return ""
+        from ..spec import _output_schema_to_dict
+
+        schema = _output_schema_to_dict(spec.output_schema)
+        if not isinstance(schema, dict):
+            return ""
+        import json
+
+        return _OPENROUTER_SCHEMA_INSTRUCTION.format(
+            schema=json.dumps(schema, separators=(",", ":"))
+        )
+
     def _system_prompt(self, spec: AgentSpec, interactive: bool) -> Any:
         """Resolve ``spec.system_prompt`` (+ interactive suffix) to an SDK value.
 
@@ -180,7 +239,7 @@ class ClaudeCodeHarness:
           system prompt (``--system-prompt ""``): no preset, no ``CLAUDE.md``, no
           environment block, so the agent would not be Claude Code at all.
         """
-        suffix = _INTERACTIVE_SUFFIX if interactive else ""
+        suffix = (_INTERACTIVE_SUFFIX if interactive else "") + self._schema_steer(spec)
         sp = spec.system_prompt
         if isinstance(sp, str):
             return sp + suffix if suffix else sp
@@ -217,15 +276,6 @@ class ClaudeCodeHarness:
         """Build ``ClaudeAgentOptions`` from ``spec`` + runtime ``ctx``."""
         from claude_agent_sdk import ClaudeAgentOptions
 
-        if (spec.model or "").startswith("openrouter/"):
-            # Fail closed rather than hand the id to the Claude CLI, which would try it
-            # against the Anthropic API and fail with an opaque model error. OpenRouter
-            # routing lives in the codex binding (harness="codex").
-            raise ValueError(
-                f"model {spec.model!r} routes through OpenRouter, which the claude-code "
-                'harness cannot reach; run this turn with harness="codex"'
-            )
-
         extra: dict[str, Any] = {}
         if ctx.session_store is not None:
             # Mirror the transcript to the store (flush at end) so this conversation is
@@ -253,9 +303,24 @@ class ClaudeCodeHarness:
                 spec.reasoning_effort, spec.reasoning_effort
             )
 
+        model = spec.model or ""
+        openrouter = model.startswith(_OPENROUTER_PREFIX)
+        env = runtime_env(spec, ctx)
+        if openrouter:
+            api_key = ctx.secrets.get(_OPENROUTER_KEY_ENV) or os.environ.get(_OPENROUTER_KEY_ENV)
+            if not api_key:
+                raise RuntimeError(
+                    "claude-code harness has no OpenRouter credentials: pass "
+                    f"{_OPENROUTER_KEY_ENV} in the per-invocation secrets (or set it in the "
+                    "environment)"
+                )
+            env.update(_openrouter_env(model, api_key))
+            # The CLI wants the provider-relative id; the prefix is the toolkit's own.
+            model = model[len(_OPENROUTER_PREFIX) :]
+
         return ClaudeAgentOptions(
             cwd=str(ctx.workspace),
-            model=spec.model or None,
+            model=model or None,
             allowed_tools=allowed,
             # Load project-level settings (.claude/ in the job cwd) so staged skills are
             # discovered, while staying isolated from the host's ~/.claude user settings.
@@ -269,7 +334,7 @@ class ClaudeCodeHarness:
             # the run's work is lost (an in-context image Read is enough to trip it). See
             # `spec.DEFAULT_MAX_BUFFER_SIZE`.
             max_buffer_size=spec.max_buffer_size,
-            env=runtime_env(spec, ctx),
+            env=env,
             mcp_servers=self._mcp_servers(spec, ctx),
             # MCP config is loaded outside the setting sources, so `spec.mcp_servers` is
             # the only channel that reaches the agent: no project `.mcp.json`, no host
@@ -287,13 +352,45 @@ class ClaudeCodeHarness:
         return finalize_checkpoint(spec, ctx)
 
     def _final_result(
-        self, event: AgentEvent, turns_total: int, segment_summaries: Sequence[str] = ()
+        self,
+        event: AgentEvent,
+        turns_total: int,
+        segment_summaries: Sequence[str] = (),
+        price: Any | None = None,
+        unpriced_openrouter: bool = False,
     ) -> AgentEvent:
-        """Stamp the cumulative turn count onto the turn's final result event."""
+        """Stamp the cumulative turn count onto the turn's final result event.
+
+        ``price`` is set only for OpenRouter models, where the CLI's own ``total_cost_usd``
+        cannot be trusted: it prices from its catalogue, which has no entry for these
+        models, so it bills them at a default rate (measured 1.67x over Kimi K3's real
+        rate). The token counts it reports are fine, so the cost is recomputed from those.
+        """
         if event.raw is not None:
             event.raw["num_turns"] = turns_total
             if segment_summaries:
                 event.raw["segment_summaries"] = list(segment_summaries)
+        if price is None and unpriced_openrouter:
+            # No price for this id (an @preset, or a model neither we nor LiteLLM know).
+            # The CLI's own number is not the OpenRouter cost, so report nothing rather
+            # than something wrong — same contract as the codex binding.
+            if event.raw is not None:
+                event.raw["cli_reported_cost_usd"] = event.cost_usd
+            event.cost_usd = None
+        if price is not None:
+            usage = event.usage or {}
+            cached = int(usage.get("cache_read_input_tokens") or 0)
+            # Anthropic reports fresh input, cache writes and cache reads separately; cache
+            # writes bill as input here (the small write premium is not distinguishable).
+            fresh = int(usage.get("input_tokens") or 0) + int(
+                usage.get("cache_creation_input_tokens") or 0
+            )
+            output = int(usage.get("output_tokens") or 0)
+            recomputed = price.cost_usd(fresh + cached, cached, output)
+            if event.raw is not None:
+                event.raw["cli_reported_cost_usd"] = event.cost_usd
+                event.raw["price_source"] = price.source
+            event.cost_usd = recomputed
         return event
 
     async def run(self, spec: AgentSpec, ctx: RunContext) -> AsyncIterator[AgentEvent]:
@@ -358,6 +455,23 @@ class ClaudeCodeHarness:
                     break
             return out
 
+        # OpenRouter models are priced by us, not by the CLI (see `_final_result`). One
+        # fetch per process, off the event loop.
+        is_openrouter = (spec.model or "").startswith(_OPENROUTER_PREFIX)
+        price = await asyncio.to_thread(pricing.model_price, spec.model) if is_openrouter else None
+        unpriced_openrouter = is_openrouter and price is None
+
+        if unpriced_openrouter:
+            yield AgentEvent(
+                kind="status",
+                summary=(
+                    f"no price data for model {spec.model!r}: cost_usd will be unknown and "
+                    "max_budget_usd cannot be enforced (the CLI's own figure prices these "
+                    "models from its catalogue and is not the OpenRouter cost)"
+                ),
+                raw={"event": "cost_unknown", "model": spec.model},
+            )
+
         client = ClaudeSDKClient(options=options)
         try:
             await client.connect()
@@ -413,7 +527,10 @@ class ClaudeCodeHarness:
                     if reason is None:
                         fin = self._finalize(spec, ctx)
                         finalized = True
-                        yield self._final_result(event, turns_total, segment_summaries(event))
+                        yield self._final_result(
+                            event, turns_total, segment_summaries(event), price,
+                            unpriced_openrouter,
+                        )
                         if fin is not None:
                             yield fin
                         return

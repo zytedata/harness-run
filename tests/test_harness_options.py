@@ -11,6 +11,10 @@ from remote_agent_toolkit import (
     RepoSource,
     SystemPrompt,
 )
+import pytest
+
+from remote_agent_toolkit.events import AgentEvent
+from remote_agent_toolkit.harness._shared import harness_consumed_secret_names
 from remote_agent_toolkit.harness.claude_code import ClaudeCodeHarness
 from remote_agent_toolkit.harness.context import RunContext
 
@@ -162,3 +166,113 @@ def test_interactive_false_omits_suffix():
     opts = ClaudeCodeHarness().build_options(spec, _ctx(spec, interactive=False))
     # Claude Code's own prompt, with no INTERACTIVE MODE injection.
     assert opts.system_prompt == {"type": "preset", "preset": "claude_code"}
+
+# -- openrouter models --------------------------------------------------------
+
+# OpenRouter serves an Anthropic-compatible endpoint, so the Claude CLI can reach it. Two
+# things make it work: the base URL plus a bearer token, and a custom catalogue entry (the
+# CLI otherwise refuses the id with `unrecognized_model`). Verified live on all four models.
+
+_OR = "openrouter/moonshotai/kimi-k3"
+
+
+def test_openrouter_points_the_cli_at_openrouter():
+    spec = AgentSpec(name="a", model=_OR)
+    ctx = _ctx(spec, secrets={"OPENROUTER_API_KEY": "sk-or-1"})
+    opts = ClaudeCodeHarness().build_options(spec, ctx)
+
+    assert opts.env["ANTHROPIC_BASE_URL"] == "https://openrouter.ai/api"
+    assert opts.env["ANTHROPIC_AUTH_TOKEN"] == "sk-or-1"
+    # Without this the CLI rejects the id outright.
+    assert opts.env["ANTHROPIC_CUSTOM_MODEL_OPTION"] == "moonshotai/kimi-k3"
+    # The prefix is the toolkit's; the CLI gets the provider-relative id.
+    assert opts.model == "moonshotai/kimi-k3"
+
+
+def test_openrouter_blanks_the_auth_sources_that_outrank_the_token():
+    """A deployed engine bakes CLAUDE_CODE_USE_VERTEX, which would win over the token."""
+    spec = AgentSpec(name="a", model=_OR, env={"CLAUDE_CODE_USE_VERTEX": "1"})
+    ctx = _ctx(spec, secrets={"OPENROUTER_API_KEY": "k"})
+    env = ClaudeCodeHarness().build_options(spec, ctx).env
+
+    assert env["CLAUDE_CODE_USE_VERTEX"] == ""
+    assert env["CLAUDE_CODE_USE_BEDROCK"] == ""
+    assert env["CLAUDE_CODE_USE_FOUNDRY"] == ""
+    assert env["ANTHROPIC_API_KEY"] == ""
+
+
+def test_openrouter_without_a_key_raises(monkeypatch):
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    spec = AgentSpec(name="a", model=_OR)
+    with pytest.raises(RuntimeError, match="no OpenRouter credentials"):
+        ClaudeCodeHarness().build_options(spec, _ctx(spec, secrets={}))
+
+
+def test_openrouter_key_is_harness_consumed():
+    """The key belongs to the harness, so it stays out of the agent's own env."""
+    spec = AgentSpec(name="a", model=_OR)
+    assert harness_consumed_secret_names(spec) == {"OPENROUTER_API_KEY"}
+    ctx = _ctx(spec, secrets={"OPENROUTER_API_KEY": "k", "MY_TOKEN": "visible"})
+    env = ClaudeCodeHarness().build_options(spec, ctx).env
+    assert env["MY_TOKEN"] == "visible"  # the caller's own secret still reaches the agent
+    assert env["ANTHROPIC_AUTH_TOKEN"] == "k"  # routed, not forwarded blindly
+
+
+def test_claude_model_is_untouched_by_any_of_this():
+    spec = AgentSpec(name="a", model="claude-haiku-4-5")
+    env = ClaudeCodeHarness().build_options(spec, _ctx(spec)).env
+    assert "ANTHROPIC_BASE_URL" not in env
+    assert "ANTHROPIC_CUSTOM_MODEL_OPTION" not in env
+
+
+def test_openrouter_cost_is_recomputed_from_usage():
+    """The CLI prices these models from its own catalogue and gets it badly wrong.
+
+    Measured live: for deepseek-v4-flash the CLI reported $0.271 on a turn that really
+    cost $0.0045 — 60x over. Left alone, `max_budget_usd` would fire almost immediately.
+    """
+    from remote_agent_toolkit.harness import pricing
+
+    price = pricing.model_price("openrouter/deepseek/deepseek-v4-flash")
+    assert price is not None
+    event = AgentEvent(
+        kind="result",
+        summary="done",
+        cost_usd=0.271,  # what the CLI claimed
+        usage={"input_tokens": 20_000, "output_tokens": 100, "cache_read_input_tokens": 500,
+               "cache_creation_input_tokens": 0},
+        raw={"subtype": "success"},
+    )
+    out = ClaudeCodeHarness()._final_result(event, turns_total=2, price=price)
+
+    # 20000 fresh + 500 cached input, 100 output, at flash rates.
+    expected = (20_000 * 0.084 + 500 * 0.0168 + 100 * 0.168) / 1e6
+    assert out.cost_usd == pytest.approx(expected)
+    assert out.raw["cli_reported_cost_usd"] == 0.271  # kept for comparison
+    assert out.raw["price_source"] == "builtin"
+
+
+def test_claude_models_keep_the_cli_cost():
+    """Only the OpenRouter path is repriced; Claude's own number is authoritative."""
+    event = AgentEvent(kind="result", summary="done", cost_usd=0.42, usage={}, raw={})
+    out = ClaudeCodeHarness()._final_result(event, turns_total=1, price=None)
+    assert out.cost_usd == 0.42
+    assert "cli_reported_cost_usd" not in out.raw
+
+
+def test_openrouter_preset_is_passed_through_on_claude_too():
+    """`openrouter/@preset/<slug>` is how a caller pins routing; the CLI takes the id."""
+    spec = AgentSpec(name="a", model="openrouter/@preset/kimi-firstparty")
+    opts = ClaudeCodeHarness().build_options(spec, _ctx(spec, secrets={"OPENROUTER_API_KEY": "k"}))
+    assert opts.model == "@preset/kimi-firstparty"
+    assert opts.env["ANTHROPIC_CUSTOM_MODEL_OPTION"] == "@preset/kimi-firstparty"
+
+
+def test_unpriced_openrouter_model_reports_no_cost():
+    """A preset (or an unknown id) has no price, so the CLI's invented figure is dropped."""
+    event = AgentEvent(kind="result", summary="done", cost_usd=0.271, usage={}, raw={})
+    out = ClaudeCodeHarness()._final_result(
+        event, turns_total=1, price=None, unpriced_openrouter=True
+    )
+    assert out.cost_usd is None
+    assert out.raw["cli_reported_cost_usd"] == 0.271

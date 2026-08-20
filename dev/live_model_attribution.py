@@ -8,7 +8,9 @@ proves nothing. This probe only accepts evidence that comes back from the harnes
 provider:
 
   * **claude-code** — the CLI's `system/init` message carries the model it resolved
-    (`raw["data"]["model"]`). Independent of our request.
+    (`raw["data"]["model"]`). Independent of our request, and checked for a Claude model
+    and for every OpenRouter model, where the same check also confirms the harness
+    replaced the CLI's own (wrong) cost figure with one computed from the real prices.
   * **codex** — the app-server's `thread.read()` reports the thread's bound
     `model_provider`, surfaced by the harness as a `model_routing` event. This is what
     proves an OpenRouter override actually took effect. It reports the *provider* only:
@@ -75,18 +77,47 @@ async def _events(spec: AgentSpec, secrets: dict[str, str]) -> tuple[list, objec
     return events, run.result
 
 
+def _init_model(events) -> str | None:
+    init = next((e.raw for e in events if (e.raw or {}).get("subtype") == "init"), None)
+    return ((init or {}).get("data") or {}).get("model")
+
+
 async def check_claude(key: str | None) -> None:
     """The claude CLI reports the model it resolved in its init message."""
     spec = AgentSpec(name="attr-claude", model=CLAUDE_MODEL, max_turns=4, max_budget_usd=0.20)
     events, result = await _events(spec, {"ANTHROPIC_API_KEY": key} if key else {})
-    init = next(
-        (e.raw for e in events if (e.raw or {}).get("subtype") == "init"), None
-    )
-    reported = ((init or {}).get("data") or {}).get("model")
+    reported = _init_model(events)
     check(
         f"claude-code: CLI ran {CLAUDE_MODEL}",
         reported is not None and CLAUDE_MODEL in str(reported),
         f"init reported model={reported!r}, error={result.is_error}",
+    )
+
+
+async def check_claude_openrouter(model: str, key: str) -> None:
+    """claude-code reaching OpenRouter: the CLI must name the model we asked for.
+
+    Also checks the cost the toolkit reports. The CLI prices these models from its own
+    catalogue and gets it wrong (60x over for deepseek-v4-flash), so the harness recomputes
+    from the reported tokens. A `cli_reported_cost_usd` in the result raw is that original
+    figure, kept for comparison.
+    """
+    bare = model.removeprefix("openrouter/")
+    spec = AgentSpec(name="attr-cc-or", model=model, max_turns=4, max_budget_usd=0.50)
+    events, result = await _events(spec, {"OPENROUTER_API_KEY": key})
+    reported = _init_model(events)
+    check(
+        f"claude-code+{bare}: CLI ran the model we asked for",
+        reported is not None and bare in str(reported),
+        f"init reported model={reported!r}, error={result.is_error}",
+    )
+    final = next((e for e in reversed(events) if e.kind == "result"), None)
+    raw = (final.raw or {}) if final else {}
+    cli = raw.get("cli_reported_cost_usd")
+    check(
+        f"claude-code+{bare}: cost recomputed, not the CLI's figure",
+        isinstance(result.cost_usd, float) and cli is not None and result.cost_usd != cli,
+        f"ours=${result.cost_usd or 0:.6f} cli=${cli or 0:.6f} source={raw.get('price_source')}",
     )
 
 
@@ -185,6 +216,7 @@ async def main() -> int:
     if ork:
         for m in OR_MODELS:
             tasks.append((f"codex+{m}", check_codex_openrouter(m, ork)))
+            tasks.append((f"claude-code+{m}", check_claude_openrouter(m, ork)))
             tasks.append((f"canary {m}", check_openrouter_canary(m, ork)))
     else:
         skip("openrouter checks", "OPENROUTER_API_KEY unset")

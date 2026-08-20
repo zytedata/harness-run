@@ -285,6 +285,32 @@ def test_build_requirements_openrouter_needs_only_the_codex_sdk() -> None:
     assert not any("openrouter" in r.lower() for r in reqs)
 
 
+def test_claude_openrouter_engine_bakes_vertex_but_the_harness_blanks_it() -> None:
+    """The risky interaction on the remote runtime, pinned.
+
+    A claude-code engine bakes `CLAUDE_CODE_USE_VERTEX=1`, and that switch outranks
+    `ANTHROPIC_AUTH_TOKEN` in the CLI's auth order. So an OpenRouter turn on a deployed
+    engine only works because the harness blanks it in the subprocess env.
+    """
+    from pathlib import Path
+
+    from remote_agent_toolkit.harness.claude_code import ClaudeCodeHarness
+    from remote_agent_toolkit.harness.context import RunContext
+
+    spec = _spec(model="openrouter/moonshotai/kimi-k3")  # claude-code, the default
+    baked = deploy.build_env(spec, project="p", use_vertex=True)
+    assert baked["CLAUDE_CODE_USE_VERTEX"] == "1"  # deploy still bakes it
+    assert "OPENROUTER_API_KEY" not in baked  # and never the key
+
+    ctx = RunContext(
+        spec=spec, prompt="hi", job_dir=Path("/tmp/x"), session_id="sid",
+        secrets={"OPENROUTER_API_KEY": "k"}, env=baked,
+    )
+    env = ClaudeCodeHarness().build_options(spec, ctx).env
+    assert env["CLAUDE_CODE_USE_VERTEX"] == ""  # blanked for the turn
+    assert env["ANTHROPIC_AUTH_TOKEN"] == "k"
+
+
 def test_openrouter_model_round_trips_through_the_baked_spec() -> None:
     """The worker rebuilds the spec from a dict; the prefix must survive that trip."""
     from remote_agent_toolkit import AgentSpec

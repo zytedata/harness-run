@@ -33,7 +33,8 @@ def harness_consumed_secret_names(spec: AgentSpec) -> set[str]:
     goes into the server's headers — neither needs to be a plain environment variable the agent
     (or a prompt-injection) can read. The Codex binding additionally consumes its model-auth
     keys: ``OPENAI_API_KEY`` (routed to ``codex login``) and ``OPENROUTER_API_KEY`` (routed to
-    the OpenRouter provider config). Both are listed whichever model the turn runs, so passing
+    the OpenRouter provider config). The Claude binding consumes ``OPENROUTER_API_KEY`` too
+    when the model is an ``openrouter/`` one (routed to ``ANTHROPIC_AUTH_TOKEN``). Both are listed whichever model the turn runs, so passing
     one the turn doesn't use still doesn't leak it into the agent's shell. Everything else the
     caller passes is the agent's own to use.
     """
@@ -42,6 +43,10 @@ def harness_consumed_secret_names(spec: AgentSpec) -> set[str]:
         names.update(GITHUB_MCP_TOKEN_KEYS)
     if getattr(spec, "harness", "claude-code") == "codex":
         names.update(CODEX_MODEL_AUTH_KEYS)
+    elif (getattr(spec, "model", "") or "").startswith("openrouter/"):
+        # claude-code reaches OpenRouter through ANTHROPIC_AUTH_TOKEN, so the key is the
+        # harness's to route here too.
+        names.add("OPENROUTER_API_KEY")
     return names
 
 

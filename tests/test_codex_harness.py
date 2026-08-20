@@ -628,15 +628,6 @@ def test_openrouter_litellm_dataset_wins(monkeypatch):
     assert price.input_per_token == 9e-6
 
 
-def test_openrouter_model_rejected_by_claude_harness(tmp_path):
-    from remote_agent_toolkit.harness.claude_code import ClaudeCodeHarness
-
-    spec = AgentSpec(name="a", model=_OR_MODEL)  # default harness: claude-code
-    ctx = _ctx(tmp_path, spec)
-    with pytest.raises(ValueError, match='harness="codex"'):
-        ClaudeCodeHarness().build_options(spec, ctx)
-
-
 def test_openrouter_key_is_harness_consumed(tmp_path):
     """The key reaches the provider, not the agent's shell.
 

@@ -23,7 +23,7 @@ tag `vX.Y.Z`, push the commit and the tag.
 
 ### Added
 
-- The Codex harness can run models through **OpenRouter**: a model id prefixed
+- **Both harnesses** can run models through **OpenRouter**: a model id prefixed
   `openrouter/` (e.g. `openrouter/moonshotai/kimi-k3`) is routed to OpenRouter
   instead of the OpenAI API, with auth from an `OPENROUTER_API_KEY`
   per-invocation secret. Kimi K3, GLM-5.3 and DeepSeek v4 Flash/Pro ship with
@@ -31,7 +31,15 @@ tag `vX.Y.Z`, push the commit and the tag.
   other `openrouter/*` id runs as well. The provider rides the model id rather
   than a new spec/config field, so it stays a per-turn knob (`TurnConfig`) and
   needs no engine redeploy beyond the usual toolkit bump. Validated live on all
-  four models, on both runtimes: `dev/live_openrouter_probe.py` (local) and
+  four models on both harnesses and both runtimes. Claude Code reaches OpenRouter
+  through its Anthropic-compatible endpoint (`ANTHROPIC_BASE_URL` plus a custom
+  model-catalogue entry, without which the CLI refuses the id), and the harness
+  recomputes the run's cost, because the CLI prices these models from its own
+  catalogue and gets it badly wrong — 60x over for `deepseek-v4-flash`, which
+  would make `max_budget_usd` fire almost immediately. On a deployed engine it
+  also blanks `CLAUDE_CODE_USE_VERTEX`, which would otherwise outrank the
+  OpenRouter token. Validated live on
+  `dev/live_openrouter_probe.py` (local) and
   `dev/live_openrouter_remote_probe.py` (Gemini Agent Runtime, which also checks
   that the remote visibility surface — `effective_spec` echo, resource samples,
   `memory_peak_bytes`, history, and the session's Cloud Trace root span with its

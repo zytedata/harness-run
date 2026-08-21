@@ -8,9 +8,14 @@ can only break in ways the earlier rungs can't see.
 | Offline tests | `make test` | logic, event plumbing, contracts we encode | ~40 s (parallel), free |
 | Install parity | `make parity-build` / `-check` | dependency/install/glibc breakage | ~1 min, free |
 | **Live validation** | `make live-smoke` | **platform-contract breakage** | ~10 min, ~$0.10 + build |
-| Model-provider check | `make live-openrouter` | provider-contract breakage (OpenRouter) | ~1 min, a few cents |
+| Model-provider check | `make live-openrouter` | provider-contract breakage (OpenRouter) | ~4 min, ~$0.60 |
 | Model-provider check, remote | `make live-openrouter-remote` | the same models + remote visibility on Agent Runtime | ~8-15 min, ~$0.30 |
-| Model attribution | `make live-attribution` | did the turn run the model we asked for — both harnesses | ~10 s, a few cents |
+| Model attribution | `make live-attribution` | did the turn run the model we asked for — both harnesses | ~10 s, ~$0.06 |
+
+The two OpenRouter figures are measured (2026-08-21, all four models on both harnesses).
+Most of `live-openrouter` is the big models: one Kimi K3 probe on claude-code cost $0.088
+and one DeepSeek v4 Pro probe $0.082, while DeepSeek v4 Flash on codex cost $0.0015. Set
+`MODELS=openrouter/deepseek/deepseek-v4-flash` to check the plumbing for well under a cent.
 
 ## 1. Offline tests (`make test`)
 
@@ -112,6 +117,15 @@ return its output, produce schema-valid structured output, hide provider credent
 tool, report its selected upstream, and use OpenRouter's exact cost. It also checks resume, a
 strict provider choice, and a tiny budget cap on both harnesses.
 
+Every model call goes through the local proxy (`harness/_openrouter_proxy.py`), so the test
+also requires an `http_status` on every `openrouter_request` event. Only the proxy reports
+one, which is what proves no call went straight to OpenRouter. One row per harness runs with
+no provider pinned, because that case used to skip the proxy entirely.
+
+Three checks retry once on a soft miss: the basic turn, resume, and structured output. Models
+occasionally answer without running the command they were asked to run. Measured on DeepSeek
+v4 Pro under codex: one run answered 6 for `print(6 * 7)`, two immediate re-runs answered 42.
+
 Every model request selects one known provider and disables fallbacks. Kimi uses Moonshot AI,
 GLM uses Z.AI, and both DeepSeek models use Novita because the shared account's ZDR policy
 excludes DeepSeek's own endpoint. The test fails if OpenRouter reports a different provider.
@@ -128,7 +142,7 @@ make live-openrouter
 The test reads every `openrouter_request` event and fails if the provider differs. Set
 `SERIAL=1` for ordered output while debugging.
 
-**It costs real money** (a few cents a pass) and needs a key, so run it **by hand,
+**It costs real money** (about $0.60 a pass) and needs a key, so run it **by hand,
 sparingly, locally**. It must never run in CI: `pytest -q` stays free and credential-less
 (see §1 and `.github/workflows/ci.yml`) — the offline tests pin the config the harness
 emits, and that is what CI checks.

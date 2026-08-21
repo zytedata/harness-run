@@ -547,6 +547,15 @@ Each is a `typing.Protocol`; concrete adapters ship for prod (GCP) and dev (loca
   it before `thread_resume` on any worker. No Codex equivalent of Claude Code's background-task
   re-invocation exists (`spec.background_task_timeout` is inert); `allowed_tools`/`disallowed_tools`
   have no mapping and are ignored with a status warning.
+- **`openrouter/` models go through a per-run localhost relay** (`harness/_openrouter_proxy.py`), on
+  **both** bindings. Neither CLI exposes OpenRouter's `provider` request field or reports what
+  OpenRouter charged, so the relay is where both live: it adds `spec.openrouter_provider` to the
+  request body (`only` + no fallbacks), forwards the response stream unchanged while reading
+  OpenRouter's routing metadata and billed cost out of it, and emits one `openrouter_request` event
+  per response — error responses included, which is the only place a retried 429 is visible. The CLI
+  receives a random per-run token instead of the account key. The exact charge becomes the result's
+  `cost_usd` (`price_source="openrouter"`, the CLI's own figure kept as `cli_reported_cost_usd`) and
+  the budget is measured against it, with a relay-side 402 as the backstop once the cap is spent.
 - **Background-task semantics are honored** (eval feedback: a model armed the Monitor tool and ended its
   turn — correct, trained behavior — and the one-shot `query()` tore the CLI down, firing the advertised
   notification into the void; the run was scored no-deliverable). The CLI itself re-invokes the model when
@@ -639,6 +648,8 @@ remote-agent-toolkit/
 │   │   ├── claude_code.py         # ClaudeCodeHarness (drives a ClaudeSDKClient stream; ADK-free)
 │   │   ├── codex.py               # CodexHarness (drives an openai-codex AsyncCodex app-server)
 │   │   ├── _shared.py             # policy shared by the bindings (secret routing, env, checkpoint)
+│   │   ├── _openrouter_proxy.py   # per-run localhost relay for openrouter/ models (both bindings)
+│   │   ├── pricing.py             # LiteLLM price lookup + baked fallbacks and context windows
 │   │   └── translate.py           # Claude SDK message → AgentEvent (codex's lives in codex.py)
 │   ├── runtime/
 │   │   ├── base.py                # Engine + Session protocol + state machine + Run handle

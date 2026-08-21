@@ -8,6 +8,30 @@ ADK / Agent Engine wrapping is a ``gemini``-side concern, not the harness's.
 
 ``claude_agent_sdk`` is imported lazily inside methods, so importing this module needs no
 third-party deps.
+
+OpenRouter models
+-----------------
+
+An ``openrouter/<vendor>/<model>`` id runs on this harness too: OpenRouter serves an
+Anthropic-compatible endpoint, so the CLI can talk to it (see :func:`_openrouter_env`).
+
+Every such turn goes through the toolkit's own relay (:mod:`._openrouter_proxy`), started
+in :meth:`ClaudeCodeHarness.run` and torn down with the turn. The CLI is pointed at
+``127.0.0.1`` and handed a random per-run token, so the OpenRouter key stays in this
+process. The relay is also the only source of what OpenRouter did with each request:
+
+* ``spec.openrouter_provider`` reaches the request body through it — the CLI has no field
+  for OpenRouter's provider rules;
+* each response yields an ``openrouter_request`` status event (selected provider, model,
+  region, HTTP status) and its exact charge, which the result reports as ``cost_usd``
+  with ``price_source="openrouter"``. The CLI's own estimate prices these ids from a
+  catalogue that has no entry for them, and is kept as ``cli_reported_cost_usd``;
+* ``max_budget_usd`` is checked against that running total between responses, and the
+  relay refuses the next request with 402 as a backstop — a turn stopped that way ends
+  as ``error_budget_exceeded``.
+
+A turn that ends with no final assistant message becomes ``error_no_final_text``: some
+model/harness pairings finish cleanly at the protocol level without answering.
 """
 
 from __future__ import annotations

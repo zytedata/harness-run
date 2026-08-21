@@ -30,11 +30,13 @@ tag `vX.Y.Z`, push the commit and the tag.
   checks use the exact charge when available. `openrouter_provider` selects one
   OpenRouter provider per agent, session, or turn and disables fallbacks. Paid local
   and Gemini Agent Runtime checks cover both harnesses. ([#34])
-- Codex emits a `model_routing` status event from the app-server's thread record.
-  Codex model calls pass through a per-run localhost relay because the app-server
-  omits OpenRouter response metadata. The relay records routing and cost fields,
-  keeps the provider key in the parent process, enforces the selected model and provider,
-  budget, and forwards the response stream unchanged. ([#34])
+- Codex emits a `model_routing` status event from the app-server's thread record. ([#34])
+- Every OpenRouter model call, on both harnesses, passes through a per-run localhost
+  relay. Neither CLI can send OpenRouter's provider field or report what OpenRouter
+  charged, so the relay does both: it applies the provider choice, records routing,
+  HTTP status and cost for each response, enforces the selected model and the budget,
+  and forwards the response stream unchanged. The CLI receives a random per-run token,
+  so the provider key stays in the parent process. ([#34])
 
 - Configuration now has three scopes, one type each: the `AgentSpec` baked at
   deploy, a `SessionConfig` bound once at `engine.start_session(config=…)`
@@ -143,8 +145,8 @@ tag `vX.Y.Z`, push the commit and the tag.
   output format and preserves `ResultMessage.structured_output` in the terminal event.
   Earlier versions only parsed the final text on the client, so the model received no
   schema constraint and SDK-provided structured data was discarded. OpenRouter turns
-   also receive the schema in their prompt because its selected model may be responsible
-   for following it. ([#34])
+  also receive the schema in their prompt because its selected model may be responsible
+  for following it. ([#34])
 - Structured output is no longer lost when a background-task notification arrives
   after the agent has already delivered its answer: the model's reply to the stale
   notification became the turn's final message, and structured parsing — which reads

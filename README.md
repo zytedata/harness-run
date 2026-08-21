@@ -163,22 +163,6 @@ result = await engine.start_session().run(
 )
 ```
 
-To run the same model with Claude Code, change only the harness:
-
-```python
-claude_spec = AgentSpec(
-    name="kimi-agent",
-    model="openrouter/moonshotai/kimi-k3",
-    harness="claude-code",
-)
-```
-
-The model can change on each turn:
-
-```python
-await session.send(task, config=TurnConfig(model="openrouter/z-ai/glm-5.3"))
-```
-
 The table summarizes the paid local and Gemini Agent Runtime tests. Each model was tested
 separately on both harnesses:
 
@@ -216,11 +200,16 @@ problem return `error_no_final_text`, which allows the caller to retry or switch
 Other `openrouter/*` model ids also work. Codex uses generic context metadata for an unknown
 model. Exact cost reporting still works when OpenRouter supplies it.
 
-Each OpenRouter response uses [router metadata](https://openrouter.ai/docs/guides/features/router-metadata)
-and emits an `openrouter_request` status event. It includes the selected
-upstream provider, the provider's model name, region when available, and exact request cost.
-The terminal result uses the sum of those exact costs. `max_budget_usd` is checked between model
-responses, so one response may take the total above the cap.
+Every model call goes through a local relay the toolkit runs for the turn. That is how the
+provider choice reaches OpenRouter and how the exact charge comes back, on either harness.
+The CLI is given a random per-run token, so the OpenRouter key never enters it.
+
+Each response uses [router metadata](https://openrouter.ai/docs/guides/features/router-metadata)
+and emits an `openrouter_request` status event. It includes the selected upstream provider,
+the provider's model name, region when available, the HTTP status, and the exact request cost.
+Failed responses are reported too, so a retried request is visible. The terminal result uses
+the sum of the exact costs. `max_budget_usd` is checked between model responses, so one response
+may take the total above the cap; the relay then refuses the next request.
 
 ```python
 run = session.run(task, secrets={"OPENROUTER_API_KEY": key})
@@ -310,8 +299,9 @@ and the reported provider details with experimental results.
 
 Important details:
 
-- The `OPENROUTER_API_KEY` is passed per invocation. Both harnesses remove provider credentials
-  from the tool environment. Codex also disables its automatic login shell because it could reload
+- The `OPENROUTER_API_KEY` is passed per invocation and stays in the calling process: the CLI
+  gets the relay's per-run token instead. Both harnesses also remove provider credentials from
+  the tool environment, and Codex disables its automatic login shell because it could reload
   keys from `~/.bashrc`.
 - Claude Code's own dollar estimate is wrong for these custom models. The result uses OpenRouter's
   exact reported charge and keeps the CLI value as `cli_reported_cost_usd` for comparison.

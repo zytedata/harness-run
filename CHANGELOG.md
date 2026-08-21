@@ -32,12 +32,12 @@ tag `vX.Y.Z`, push the commit and the tag.
   and Gemini Agent Runtime checks cover both harnesses. ([#34])
 - Codex emits a `model_routing` status event from the app-server's thread record. ([#34])
 - Every OpenRouter model call, on both harnesses, passes through a per-run localhost
-  relay. Neither CLI can send OpenRouter's provider field or report what OpenRouter
-  charged, so the relay does both: it applies the provider choice, records routing,
-  HTTP status, cost, and OpenRouter's message when a request is rejected, enforces
-  the selected model and the budget,
-  and forwards the response stream unchanged. The CLI receives a random per-run token,
-  so the provider key stays in the parent process. ([#34])
+  proxy. The CLIs cannot send OpenRouter's provider field and cannot report what
+  OpenRouter charged; the proxy supplies both. It applies the provider choice and
+  records the routing, HTTP status, cost, and OpenRouter's message when a request is
+  rejected. It enforces the selected model and the budget, and passes the response
+  through unchanged. The CLI holds a random per-run token, so the provider key stays
+  in the parent process. ([#34])
 
 - Configuration now has three scopes, one type each: the `AgentSpec` baked at
   deploy, a `SessionConfig` bound once at `engine.start_session(config=…)`

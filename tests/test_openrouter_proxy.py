@@ -1,4 +1,4 @@
-"""OpenRouter relay: metadata parsing, and the localhost server with a faked upstream.
+"""OpenRouter proxy: metadata parsing, and the localhost server with a faked upstream.
 
 The server tests bind a real socket on 127.0.0.1 and monkeypatch ``HTTPSConnection``, so
 nothing leaves the machine.
@@ -137,7 +137,7 @@ def test_wait_until_idle_reports_timeout_and_completion():
     assert proxy.wait_until_idle(0.001) is True
 
 
-def test_model_scoped_relay_rejects_missing_or_different_model():
+def test_model_scoped_proxy_rejects_missing_or_different_model():
     assert _model_matches(None, None)
     assert _model_matches("vendor/model", "vendor/model")
     assert not _model_matches("vendor/model", "other/model")
@@ -180,8 +180,8 @@ def test_provider_name_matching_accepts_openrouter_display_names():
     assert _provider_matches_request(None, "Together") is None
 
 
-def test_relay_sends_provider_choice_to_openrouter(monkeypatch):
-    """The live relay path must send the provider rule, with no fallback."""
+def test_proxy_sends_provider_choice_to_openrouter(monkeypatch):
+    """The live proxy path must send the provider rule, with no fallback."""
     upstream_requests = []
 
     class Response:
@@ -280,7 +280,7 @@ class _FakeResponse:
 
 
 def _fake_upstream(monkeypatch, response=None, raises=None, calls=None):
-    """Point the relay's upstream at a canned response, or make connecting fail."""
+    """Point the proxy's upstream at a canned response, or make connecting fail."""
 
     class Upstream:
         def __init__(self, host, timeout):
@@ -301,8 +301,8 @@ def _fake_upstream(monkeypatch, response=None, raises=None, calls=None):
     monkeypatch.setattr(proxy_module.http.client, "HTTPSConnection", Upstream)
 
 
-def _relay_post(proxy, body=None, headers=None, path="/api/v1/responses"):
-    """POST to the running relay and return (status, body-bytes)."""
+def _proxy_post(proxy, body=None, headers=None, path="/api/v1/responses"):
+    """POST to the running proxy and return (status, body-bytes)."""
     target = urlsplit(proxy.base_url)
     conn = http.client.HTTPConnection(target.hostname, target.port, timeout=5)
     sent = {"Authorization": f"Bearer {proxy.client_token}", "Content-Type": "application/json"}
@@ -320,13 +320,13 @@ def test_upstream_failure_returns_502_json(monkeypatch):
     _fake_upstream(monkeypatch, raises=ConnectionRefusedError("no route"))
 
     with OpenRouterProxy("real-key", expected_model="moonshotai/kimi-k3") as proxy:
-        status, payload = _relay_post(
+        status, payload = _proxy_post(
             proxy, body=json.dumps({"model": "moonshotai/kimi-k3", "input": "hi"})
         )
         assert proxy.wait_until_idle()
 
     assert status == 502
-    assert json.loads(payload)["error"]["type"] == "relay_upstream_error"
+    assert json.loads(payload)["error"]["type"] == "proxy_upstream_error"
     assert "ConnectionRefusedError" in json.loads(payload)["error"]["message"]
     assert proxy.drain_events() == []
 
@@ -337,7 +337,7 @@ def test_chunked_request_body_is_rejected_with_411(monkeypatch):
     _fake_upstream(monkeypatch, calls=calls)
 
     with OpenRouterProxy("real-key", expected_model="moonshotai/kimi-k3") as proxy:
-        status, payload = _relay_post(proxy, headers={"Transfer-Encoding": "chunked"})
+        status, payload = _proxy_post(proxy, headers={"Transfer-Encoding": "chunked"})
 
     assert status == 411
     assert "chunked" in json.loads(payload)["error"]["message"]
@@ -354,7 +354,7 @@ def test_error_status_response_is_recorded(monkeypatch):
     with OpenRouterProxy(
         "real-key", expected_model="moonshotai/kimi-k3", provider="moonshotai"
     ) as proxy:
-        status, _ = _relay_post(
+        status, _ = _proxy_post(
             proxy, body=json.dumps({"model": "moonshotai/kimi-k3", "input": "hi"})
         )
         assert proxy.wait_until_idle()

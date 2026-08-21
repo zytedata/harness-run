@@ -688,7 +688,7 @@ async def test_openrouter_run_skips_login(tmp_path, monkeypatch):
     assert events[-1].raw["model"] == _OR_MODEL  # the result reports the caller's id
 
 
-async def test_openrouter_run_passes_provider_to_relay(tmp_path, monkeypatch):
+async def test_openrouter_run_passes_provider_to_proxy(tmp_path, monkeypatch):
     seen = []
     spec = _or_spec(openrouter_provider="moonshotai")
     ctx = _ctx(tmp_path, spec, secrets={"OPENROUTER_API_KEY": "sk-or-1"})

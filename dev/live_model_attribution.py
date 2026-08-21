@@ -90,9 +90,9 @@ async def check_claude_openrouter(model: str, key: str) -> None:
         if isinstance(request.get("cost_usd"), (int, float))
     ]
     check(
-        f"claude-code+{bare}: every model call went through the relay",
-        # This spec pins no provider, so the relay is carrying the turn for its own sake:
-        # the exact charge below is only available because it did.
+        f"claude-code+{bare}: every model call went through the proxy",
+        # This spec pins no provider. The proxy runs anyway, and the exact charge
+        # checked below is only available because it did.
         bool(requests)
         and all("http_status" in request for request in requests)
         and all(request.get("requested_provider") is None for request in requests),

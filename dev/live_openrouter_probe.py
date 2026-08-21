@@ -144,17 +144,17 @@ async def _probe_once(model: str, key: str, harness: str = "codex") -> dict:
             print(f"[{label}] {time.strftime('%H:%M:%S')} {ev.kind:11} {summary}", flush=True)
         r = run.result
         text = " ".join((r.text or "").split())
-        # Only the relay reports an HTTP status, so its presence proves the call went
-        # through it. Error responses are recorded too; they carry no provider or cost,
-        # so the routing and accounting checks look at successful ones.
-        relayed = all("http_status" in req for req in requests)
-        served = [req for req in requests if req.get("http_status") == 200]
-        providers = [req.get("provider") for req in served]
-        requested_providers = [req.get("requested_provider") for req in served]
-        provider_matches = [req.get("provider_matches_request") for req in served]
-        requested_models = [req.get("requested_model") for req in served]
+        # Only the proxy reports an HTTP status, so its presence proves the call went
+        # through it. Failed responses are recorded too. They have no provider and no
+        # cost, so the routing and accounting checks use the successful ones.
+        through_proxy = all("http_status" in req for req in requests)
+        succeeded = [req for req in requests if req.get("http_status") == 200]
+        providers = [req.get("provider") for req in succeeded]
+        requested_providers = [req.get("requested_provider") for req in succeeded]
+        provider_matches = [req.get("provider_matches_request") for req in succeeded]
+        requested_models = [req.get("requested_model") for req in succeeded]
         exact_costs = [
-            float(req["cost_usd"]) for req in served if isinstance(req.get("cost_usd"), (int, float))
+            float(req["cost_usd"]) for req in succeeded if isinstance(req.get("cost_usd"), (int, float))
         ]
         bare_model = model.removeprefix("openrouter/")
         row.update(cost=r.cost_usd, turns=r.num_turns or 0)
@@ -164,8 +164,8 @@ async def _probe_once(model: str, key: str, harness: str = "codex") -> dict:
             and EXPECTED in text
             and row["tools"]
             and isinstance(r.cost_usd, float)
-            and relayed
-            and bool(served)
+            and through_proxy
+            and bool(succeeded)
             and all(providers)
             and all(provider == _provider_for(model) for provider in requested_providers)
             and all(match is True for match in provider_matches)
@@ -283,7 +283,7 @@ async def _probe_schema(model: str, key: str, harness: str = "codex") -> dict:
 
 
 async def _probe_unpinned(model: str, key: str, harness: str) -> dict:
-    """No provider pin: the turn still goes through the relay, which is where cost is."""
+    """No provider pin: the turn still goes through the proxy, which is where cost is."""
     label = f"{model.removeprefix('openrouter/')} unpinned [{harness}]"
     spec = AgentSpec(
         name="ratk-openrouter-unpinned",
@@ -306,25 +306,25 @@ async def _probe_unpinned(model: str, key: str, harness: str) -> dict:
                 price_source = (event.raw or {}).get("price_source")
         result = run.result
         row.update(cost=result.cost_usd, turns=result.num_turns or 0)
-        served = [req for req in requests if req.get("http_status") == 200]
+        succeeded = [req for req in requests if req.get("http_status") == 200]
         costs = [
-            float(req["cost_usd"]) for req in served if isinstance(req.get("cost_usd"), (int, float))
+            float(req["cost_usd"]) for req in succeeded if isinstance(req.get("cost_usd"), (int, float))
         ]
         row["ok"] = bool(
             not result.is_error
             and all("http_status" in req for req in requests)
-            and bool(served)
-            and all(req.get("provider") for req in served)
+            and bool(succeeded)
+            and all(req.get("provider") for req in succeeded)
             # Nothing was asked for, so nothing is claimed about what was selected.
-            and all(req.get("requested_provider") is None for req in served)
-            and all(req.get("provider_matches_request") is None for req in served)
+            and all(req.get("requested_provider") is None for req in succeeded)
+            and all(req.get("provider_matches_request") is None for req in succeeded)
             and isinstance(result.cost_usd, float)
             and bool(costs)
             and math.isclose(result.cost_usd, sum(costs), rel_tol=1e-9, abs_tol=1e-12)
             and price_source == "openrouter"
         )
         row["note"] = (
-            f"providers={[req.get('provider') for req in served]} "
+            f"providers={[req.get('provider') for req in succeeded]} "
             f"statuses={[req.get('http_status') for req in requests]} source={price_source}"
         )
     except Exception as exc:  # noqa: BLE001 — report, don't hide
@@ -350,10 +350,10 @@ async def _probe_budget(harness: str, key: str) -> dict:
         session = local.deploy(spec).start_session()
         run = session.run("Reply with only: ok", secrets={"OPENROUTER_API_KEY": key})
         final = None
-        relayed = []
+        through_proxy = []
         async for event in run:
             if (event.raw or {}).get("event") == "openrouter_request":
-                relayed.append("http_status" in event.raw)
+                through_proxy.append("http_status" in event.raw)
             if event.kind == "result":
                 final = event
         result = run.result
@@ -368,8 +368,8 @@ async def _probe_budget(harness: str, key: str) -> dict:
             and isinstance(result.cost_usd, float)
             and result.cost_usd > spec.max_budget_usd
             and source == "openrouter"
-            and bool(relayed)
-            and all(relayed)
+            and bool(through_proxy)
+            and all(through_proxy)
         )
         row["note"] = (
             f"stop={session.stop_reason} cost={result.cost_usd:.6f} source={source} "

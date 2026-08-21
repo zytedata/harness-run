@@ -195,7 +195,7 @@ def test_openrouter_points_the_cli_at_openrouter():
 
     assert opts.env["ANTHROPIC_BASE_URL"] == "https://openrouter.ai/api"
     assert opts.env["ANTHROPIC_AUTH_TOKEN"] == "sk-or-1"
-    # Metadata is read by the relay, which sets the header on its own request.
+    # Metadata is read by the proxy, which sets the header on its own request.
     assert "ANTHROPIC_CUSTOM_HEADERS" not in opts.env
     # Without this the CLI rejects the id outright.
     assert opts.env["ANTHROPIC_CUSTOM_MODEL_OPTION"] == "moonshotai/kimi-k3"
@@ -247,7 +247,7 @@ def test_openrouter_blanks_the_auth_sources_that_outrank_the_token():
     assert env["CLAUDE_CODE_USE_FOUNDRY"] == ""
     assert env["ANTHROPIC_API_KEY"] == ""
     # The SDK layers this env over the worker's own, so an ambient key would otherwise
-    # reach the CLI process even when the relay holds the real one.
+    # reach the CLI process even when the proxy holds the real one.
     assert env["OPENROUTER_API_KEY"] == ""
 
 
@@ -359,8 +359,8 @@ def test_claude_models_keep_the_cli_cost():
 
 
 @pytest.mark.parametrize("provider", ["moonshotai", None])
-def test_openrouter_turns_use_the_local_relay_on_claude(provider):
-    """Pinned or not, the CLI talks to the relay and never holds the account key."""
+def test_openrouter_turns_use_the_local_proxy_on_claude(provider):
+    """Pinned or not, the CLI talks to the proxy and never holds the account key."""
     spec = AgentSpec(name="a", model=_OR, openrouter_provider=provider)
     opts = ClaudeCodeHarness().build_options(
         spec,
@@ -374,7 +374,7 @@ def test_openrouter_turns_use_the_local_relay_on_claude(provider):
     assert "real-key" not in opts.env.values()
 
 
-def test_relay_402_is_reported_as_a_budget_failure():
+def test_proxy_402_is_reported_as_a_budget_failure():
     """Whatever the CLI made of the 402, the run stopped because of the cap."""
     event = AgentEvent(
         kind="result",
@@ -387,7 +387,7 @@ def test_relay_402_is_reported_as_a_budget_failure():
         event, turns_total=1, exact_openrouter_cost=0.02, budget_blocked=True
     )
     assert out.raw["subtype"] == "error_budget_exceeded"
-    assert out.raw["budget_enforcement"] == "relay_402"
+    assert out.raw["budget_enforcement"] == "proxy_402"
     assert out.raw["cli_reported_subtype"] == "error_during_execution"
 
 

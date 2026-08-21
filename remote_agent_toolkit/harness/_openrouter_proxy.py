@@ -1,19 +1,22 @@
-"""Local OpenRouter relay: the path every OpenRouter model call takes, on both harnesses.
+"""Local HTTP proxy for OpenRouter. Every OpenRouter model call goes through it.
 
-Neither CLI exposes OpenRouter's ``provider`` request field, and neither reports what
-OpenRouter charged. The relay is where the toolkit gets both. It binds to localhost, hands
-the CLI a random per-run token instead of the account key, and for each call it:
+The CLI is pointed at this proxy instead of ``openrouter.ai``. Two things make it
+necessary. The CLIs offer no way to send OpenRouter's ``provider`` request field, and they
+do not report what OpenRouter charged. The proxy supplies both.
+
+For each call it:
 
 * adds the caller's provider choice to the request body (``_request_with_provider``);
-* forwards the response stream to the CLI unchanged, while keeping a rolling tail to read
-  OpenRouter's routing metadata and billed cost out of (``_capture_request``);
-* records one :class:`OpenRouterRequest` per response — including error responses, which
-  is the one place a retried 429 or a provider-rejected request is visible at all;
-* refuses the next call with 402 once ``max_budget_usd`` is spent.
+* swaps the CLI's per-run token for the real account key;
+* passes the response through to the CLI as it arrives, keeping the last few MB to read
+  the routing metadata and the charge out of (``_capture_request``);
+* records one :class:`OpenRouterRequest` per response. Failed responses are recorded too.
+  Nothing else in the toolkit can see a retried 429 or a rejected request;
+* answers 402 once ``max_budget_usd`` is spent, so the next call never reaches OpenRouter.
 
-Response bytes are held in memory only while the stream is parsed. Only GET and POST are
-served: that is all either CLI sends, and ``BaseHTTPRequestHandler`` answers anything else
-with 501 rather than forwarding it blind.
+Response bytes stay in memory only while they are parsed. Only GET and POST are served.
+That is all either CLI sends, and ``BaseHTTPRequestHandler`` answers anything else with
+501 instead of forwarding it blind.
 """
 
 from __future__ import annotations
@@ -192,7 +195,7 @@ def _append_capture(buffer: bytearray, chunk: bytes, limit: int = _CAPTURE_LIMIT
 
 
 def _model_matches(expected: str | None, requested: Any) -> bool:
-    """Whether a request may pass through a model-scoped relay."""
+    """Whether a request may pass through a model-scoped proxy."""
     return expected is None or (isinstance(requested, str) and requested == expected)
 
 
@@ -228,7 +231,7 @@ def _request_with_provider(body: bytes | None, provider: str | None) -> bytes | 
 
 
 class OpenRouterProxy:
-    """Threaded localhost relay with a random child-facing token."""
+    """Threaded localhost proxy with a random child-facing token."""
 
     def __init__(
         self,
@@ -340,12 +343,12 @@ class OpenRouterProxy:
                     return
 
                 if "chunked" in (self.headers.get("Transfer-Encoding") or "").lower():
-                    # The body is framed by the chunk protocol, not Content-Length, so the
-                    # read below would silently produce an empty body. Neither CLI sends
-                    # one (both use Content-Length for JSON); say so instead of guessing.
+                    # A chunked body is framed by the chunk protocol. The read below goes
+                    # by Content-Length, so it would come back empty and the request would
+                    # be forwarded with nothing in it. Neither CLI sends one. Say so.
                     self._send_json(
                         411,
-                        {"error": {"message": "the relay does not accept chunked request bodies"}},
+                        {"error": {"message": "the proxy does not accept chunked request bodies"}},
                     )
                     return
                 length = int(self.headers.get("Content-Length") or 0)
@@ -362,7 +365,7 @@ class OpenRouterProxy:
                 ):
                     self._send_json(
                         400,
-                        {"error": {"message": "model does not match this relay run"}},
+                        {"error": {"message": "model does not match this proxy run"}},
                     )
                     return
                 try:
@@ -391,14 +394,14 @@ class OpenRouterProxy:
                         )
                         response = upstream.getresponse()
                     except (OSError, http.client.HTTPException) as exc:
-                        # Nothing has been written to the CLI yet, so a readable error is
+                        # Nothing has been sent to the CLI yet, so a readable error is
                         # still possible. Without this the handler thread dies and the CLI
-                        # sees a closed connection with nothing to diagnose it by.
+                        # gets a closed connection with nothing to explain it.
                         self._send_json(
                             502,
                             {
                                 "error": {
-                                    "type": "relay_upstream_error",
+                                    "type": "proxy_upstream_error",
                                     "message": f"{type(exc).__name__}: {exc}",
                                 }
                             },
@@ -418,10 +421,9 @@ class OpenRouterProxy:
                             self.wfile.write(chunk)
                             self.wfile.flush()
                     except OSError:
-                        # The headers are already sent, so there is no way to report this
-                        # to the CLI — and the CLI hanging up mid-stream is one of the ways
-                        # it happens. Keep whatever was captured: a partial body records
-                        # nothing, a complete one still yields its cost.
+                        # The headers are already sent, so the CLI cannot be told. One
+                        # cause is the CLI itself hanging up. Keep what was captured. A
+                        # partial body records nothing; a complete one still has its cost.
                         pass
                     found = _capture_request(
                         bytes(captured),
@@ -431,10 +433,10 @@ class OpenRouterProxy:
                         response.status,
                     )
                     if found is None and response.status >= 400:
-                        # An error response carries no metadata and no cost, and is exactly
-                        # what the harness cannot see any other way (a retried 429, a
-                        # provider refusing a request feature). Keep OpenRouter's own
-                        # message: the status alone does not say what it objected to.
+                        # An error response has no metadata and no cost, so nothing above
+                        # recorded it. It is also the case nothing else in the toolkit can
+                        # see: a retried 429, a provider refusing a request feature. Keep
+                        # OpenRouter's message; the status alone does not say what failed.
                         found = OpenRouterRequest(
                             requested_model=requested_model,
                             requested_provider=owner._provider,

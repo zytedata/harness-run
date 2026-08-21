@@ -12,26 +12,27 @@ third-party deps.
 OpenRouter models
 -----------------
 
-An ``openrouter/<vendor>/<model>`` id runs on this harness too: OpenRouter serves an
+An ``openrouter/<vendor>/<model>`` id runs on this harness too. OpenRouter serves an
 Anthropic-compatible endpoint, so the CLI can talk to it (see :func:`_openrouter_env`).
 
-Every such turn goes through the toolkit's own relay (:mod:`._openrouter_proxy`), started
-in :meth:`ClaudeCodeHarness.run` and torn down with the turn. The CLI is pointed at
-``127.0.0.1`` and handed a random per-run token, so the OpenRouter key stays in this
-process. The relay is also the only source of what OpenRouter did with each request:
+Those turns go through the toolkit's own proxy (:mod:`._openrouter_proxy`).
+:meth:`ClaudeCodeHarness.run` starts one per turn and closes it at the end. The CLI is
+pointed at ``127.0.0.1`` and gets a random token, so the OpenRouter key never leaves this
+process. What the proxy sees is the only record of what OpenRouter did:
 
-* ``spec.openrouter_provider`` reaches the request body through it — the CLI has no field
-  for OpenRouter's provider rules;
-* each response yields an ``openrouter_request`` status event (selected provider, model,
-  region, HTTP status) and its exact charge, which the result reports as ``cost_usd``
-  with ``price_source="openrouter"``. The CLI's own estimate prices these ids from a
-  catalogue that has no entry for them, and is kept as ``cli_reported_cost_usd``;
-* ``max_budget_usd`` is checked against that running total between responses, and the
-  relay refuses the next request with 402 as a backstop — a turn stopped that way ends
-  as ``error_budget_exceeded``.
+* ``spec.openrouter_provider`` reaches the request body through it. The CLI has no field
+  for it.
+* Each response becomes an ``openrouter_request`` event: selected provider, model, region,
+  HTTP status, and the charge. The result reports the summed charges as ``cost_usd`` with
+  ``price_source="openrouter"``. The CLI's own estimate is wrong here, because it prices
+  these ids from a catalogue that has no entry for them. It is kept as
+  ``cli_reported_cost_usd``.
+* ``max_budget_usd`` is checked against that total between responses. If a request gets
+  through anyway, the proxy answers it with 402. Either way the turn ends as
+  ``error_budget_exceeded``.
 
-A turn that ends with no final assistant message becomes ``error_no_final_text``: some
-model/harness pairings finish cleanly at the protocol level without answering.
+A turn that ends with no final assistant message becomes ``error_no_final_text``. Some
+model and harness pairings finish cleanly at the protocol level without answering.
 """
 
 from __future__ import annotations
@@ -116,8 +117,8 @@ def _openrouter_env(
     ``ANTHROPIC_API_KEY`` are blanked because they outrank ``ANTHROPIC_AUTH_TOKEN`` in the
     CLI's auth order, and a deployed engine bakes the Vertex ones in.
 
-    ``api_key`` is the relay's per-run token, not the account key: ``run`` always starts a
-    relay when a key is available. The default ``base_url`` is only reachable by a caller
+    ``api_key`` is the proxy's per-run token, not the account key: ``run`` always starts a
+    proxy when a key is available. The default ``base_url`` is only reachable by a caller
     that builds options directly.
     """
     bare = model[len(_OPENROUTER_PREFIX) :]
@@ -130,7 +131,7 @@ def _openrouter_env(
         # original shell command as its sole argument and removes auth before running it.
         "CLAUDE_CODE_SHELL_PREFIX": str(shell_wrapper),
         # The SDK layers this env OVER the worker's own, so an ambient OpenRouter key
-        # would otherwise reach the CLI process even though the relay holds the real one.
+        # would otherwise reach the CLI process even though the proxy holds the real one.
         _OPENROUTER_KEY_ENV: "",
         "ANTHROPIC_API_KEY": "",
         "CLAUDE_CODE_USE_VERTEX": "",
@@ -515,16 +516,16 @@ class ClaudeCodeHarness:
             event.raw["is_error"] = True
             event.raw["budget_enforcement"] = "after_model_response"
         elif budget_blocked and event.raw is not None:
-            # The relay refused a request with 402 after the cap was spent. Whatever the
+            # The proxy refused a request with 402 after the cap was spent. Whatever the
             # CLI made of that error, the run stopped because of the budget.
             event.raw["cli_reported_subtype"] = event.raw.get("subtype")
             event.raw["subtype"] = "error_budget_exceeded"
             event.raw["is_error"] = True
-            event.raw["budget_enforcement"] = "relay_402"
+            event.raw["budget_enforcement"] = "proxy_402"
         return event
 
     async def run(self, spec: AgentSpec, ctx: RunContext) -> AsyncIterator[AgentEvent]:
-        """Run one Claude Code turn, with a local metadata relay for OpenRouter turns."""
+        """Run one Claude Code turn, with a local metadata proxy for OpenRouter turns."""
         from ._openrouter_proxy import OpenRouterProxy
 
         proxy = None
@@ -621,13 +622,13 @@ class ClaudeCodeHarness:
         price = await asyncio.to_thread(pricing.model_price, spec.model) if is_openrouter else None
         unpriced_openrouter = is_openrouter and price is None
 
-        def relay_cost() -> float | None:
+        def proxy_cost_usd() -> float | None:
             return proxy.exact_cost_usd if proxy is not None else None
 
-        async def settle_relay() -> AsyncIterator[AgentEvent]:
-            """Let the relay finish recording before the result quotes its total.
+        async def drain_proxy() -> AsyncIterator[AgentEvent]:
+            """Let the proxy finish recording before the result quotes its total.
 
-            The CLI sees the last response bytes before the relay's handler has parsed
+            The CLI sees the last response bytes before the proxy's handler has parsed
             them, so a result built immediately can miss the final request's charge.
             """
             if proxy is None:
@@ -681,8 +682,8 @@ class ClaudeCodeHarness:
                     )
                     break
                 if proxy is not None:
-                    for relay_event in proxy.drain_events():
-                        yield relay_event
+                    for proxy_event in proxy.drain_events():
+                        yield proxy_event
                 translated = list(translator.translate(message))
                 for event in translated:
                     tracker.observe(event)
@@ -700,9 +701,9 @@ class ClaudeCodeHarness:
                     if reason is None:
                         fin = self._finalize(spec, ctx)
                         finalized = True
-                        async for relay_event in settle_relay():
-                            yield relay_event
-                        if unpriced_openrouter and relay_cost() is None:
+                        async for proxy_event in drain_proxy():
+                            yield proxy_event
+                        if unpriced_openrouter and proxy_cost_usd() is None:
                             yield _openrouter_cost_unknown(spec.model)
                         yield self._final_result(
                             event,
@@ -710,7 +711,7 @@ class ClaudeCodeHarness:
                             segment_summaries(event),
                             price,
                             unpriced_openrouter,
-                            relay_cost(),
+                            proxy_cost_usd(),
                             spec.max_budget_usd if is_openrouter else None,
                             proxy.budget_blocked if proxy is not None else False,
                         )
@@ -743,8 +744,8 @@ class ClaudeCodeHarness:
                 if (
                     is_openrouter
                     and not budget_interrupted
-                    and relay_cost() is not None
-                    and relay_cost() >= spec.max_budget_usd
+                    and proxy_cost_usd() is not None
+                    and proxy_cost_usd() >= spec.max_budget_usd
                 ):
                     budget_interrupted = True
                     yield AgentEvent(
@@ -781,9 +782,9 @@ class ClaudeCodeHarness:
                 fin = self._finalize(spec, ctx)
                 finalized = True
                 last = demoted[-1]
-                async for relay_event in settle_relay():
-                    yield relay_event
-                if unpriced_openrouter and relay_cost() is None:
+                async for proxy_event in drain_proxy():
+                    yield proxy_event
+                if unpriced_openrouter and proxy_cost_usd() is None:
                     yield _openrouter_cost_unknown(spec.model)
                 yield self._final_result(
                     last,
@@ -791,7 +792,7 @@ class ClaudeCodeHarness:
                     segment_summaries(last),
                     price,
                     unpriced_openrouter,
-                    relay_cost(),
+                    proxy_cost_usd(),
                     spec.max_budget_usd if is_openrouter else None,
                     proxy.budget_blocked if proxy is not None else False,
                 )
@@ -815,9 +816,9 @@ class ClaudeCodeHarness:
             fin = self._finalize(spec, ctx)
             finalized = True
             last = demoted[-1]
-            async for relay_event in settle_relay():
-                yield relay_event
-            if unpriced_openrouter and relay_cost() is None:
+            async for proxy_event in drain_proxy():
+                yield proxy_event
+            if unpriced_openrouter and proxy_cost_usd() is None:
                 yield _openrouter_cost_unknown(spec.model)
             yield self._final_result(
                 last,
@@ -825,7 +826,7 @@ class ClaudeCodeHarness:
                 segment_summaries(last),
                 price,
                 unpriced_openrouter,
-                relay_cost(),
+                proxy_cost_usd(),
                 spec.max_budget_usd if is_openrouter else None,
                 proxy.budget_blocked if proxy is not None else False,
             )

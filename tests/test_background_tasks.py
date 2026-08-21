@@ -30,9 +30,9 @@ from remote_agent_toolkit.harness.translate import EventTranslator
 
 
 def _install_fake_proxy(monkeypatch, *, cost=None, events=(), idle=True, blocked=False):
-    """Replace the localhost relay with a scriptable stand-in; no socket is bound.
+    """Replace the localhost proxy with a scriptable stand-in; no socket is bound.
 
-    Returns the list of constructor arguments, one entry per relay created.
+    Returns the list of constructor arguments, one entry per proxy created.
     """
     from remote_agent_toolkit.harness import _openrouter_proxy
 
@@ -81,7 +81,7 @@ def _events_of(script, tmp_path, monkeypatch, spec=None, secrets=None):
         from remote_agent_toolkit.harness import _openrouter_proxy
 
         if _openrouter_proxy.OpenRouterProxy.__module__.startswith("remote_agent_toolkit"):
-            # Every OpenRouter turn starts a relay; keep the offline suite off sockets.
+            # Every OpenRouter turn starts a proxy; keep the offline suite off sockets.
             _install_fake_proxy(monkeypatch)
     ctx = RunContext(
         spec=spec,
@@ -427,7 +427,7 @@ def test_promoted_stash_excludes_its_own_text_from_summaries(tmp_path, monkeypat
 
 
 def test_openrouter_exact_budget_interrupts_before_another_request(tmp_path, monkeypatch):
-    """The relay's running total is what the cap is measured against."""
+    """The proxy's running total is what the cap is measured against."""
     spec = AgentSpec(
         name="a",
         model="openrouter/deepseek/deepseek-v4-flash",
@@ -448,7 +448,7 @@ def test_openrouter_exact_budget_interrupts_before_another_request(tmp_path, mon
     assert events[-1].cost_usd == 0.0123
 
 
-def test_openrouter_run_passes_provider_to_relay(tmp_path, monkeypatch):
+def test_openrouter_run_passes_provider_to_proxy(tmp_path, monkeypatch):
     created = _install_fake_proxy(monkeypatch, cost=0.001)
     spec = AgentSpec(
         name="a",
@@ -469,16 +469,16 @@ def test_openrouter_run_passes_provider_to_relay(tmp_path, monkeypatch):
     assert events[-1].kind == "result"
 
 
-def test_openrouter_relays_without_a_provider(tmp_path, monkeypatch):
-    """An unpinned turn still goes through the relay: that is where cost comes from."""
+def test_openrouter_proxies_without_a_provider(tmp_path, monkeypatch):
+    """An unpinned turn still goes through the proxy: that is where cost comes from."""
     from remote_agent_toolkit.events import AgentEvent
 
-    relay_event = AgentEvent(
+    proxy_event = AgentEvent(
         kind="status",
         summary="OpenRouter request: provider=Z.AI model=z-ai/glm-5.3",
         raw={"event": "openrouter_request", "http_status": 200, "cost_usd": 0.004},
     )
-    created = _install_fake_proxy(monkeypatch, cost=0.004, events=[relay_event])
+    created = _install_fake_proxy(monkeypatch, cost=0.004, events=[proxy_event])
     spec = AgentSpec(name="a", model="openrouter/z-ai/glm-5.3")
 
     events, client_cls = _events_of(
@@ -495,14 +495,14 @@ def test_openrouter_relays_without_a_provider(tmp_path, monkeypatch):
     assert env["ANTHROPIC_AUTH_TOKEN"] == "local-token"
     assert env["OPENROUTER_API_KEY"] == ""
     assert [e for e in events if (e.raw or {}).get("event") == "openrouter_request"] == [
-        relay_event
+        proxy_event
     ]
     assert events[-1].cost_usd == 0.004
     assert events[-1].raw["price_source"] == "openrouter"
 
 
-def test_relay_402_maps_to_budget_exceeded(tmp_path, monkeypatch):
-    """The CLI reports its own failure; the relay knows the cap was the cause."""
+def test_proxy_402_maps_to_budget_exceeded(tmp_path, monkeypatch):
+    """The CLI reports its own failure; the proxy knows the cap was the cause."""
     _install_fake_proxy(monkeypatch, cost=0.02, blocked=True)
     spec = AgentSpec(name="a", model="openrouter/z-ai/glm-5.3", max_budget_usd=10.0)
 
@@ -515,7 +515,7 @@ def test_relay_402_maps_to_budget_exceeded(tmp_path, monkeypatch):
     )
 
     assert events[-1].raw["subtype"] == "error_budget_exceeded"
-    assert events[-1].raw["budget_enforcement"] == "relay_402"
+    assert events[-1].raw["budget_enforcement"] == "proxy_402"
 
 
 def test_metadata_timeout_is_reported_before_the_result(tmp_path, monkeypatch):

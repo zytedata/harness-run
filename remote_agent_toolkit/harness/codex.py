@@ -595,7 +595,7 @@ class CodexHarness:
             # the OpenAI path there is no login step — the value must be in the env.
             if openrouter_client_token:
                 # Keep the real provider credential out of the CLI process. The random
-                # token only authenticates this run to its localhost relay.
+                # token only authenticates this run to its localhost proxy.
                 env[_OPENROUTER_KEY_ENV] = ""
                 env[_OPENROUTER_PROXY_KEY_ENV] = openrouter_client_token
             else:
@@ -759,7 +759,7 @@ class CodexHarness:
         )
 
     async def run(self, spec: AgentSpec, ctx: RunContext) -> AsyncIterator[AgentEvent]:
-        """Run Codex, with a local metadata relay for OpenRouter turns."""
+        """Run Codex, with a local metadata proxy for OpenRouter turns."""
         from ._openrouter_proxy import OpenRouterProxy
 
         proxy = None
@@ -912,7 +912,7 @@ class CodexHarness:
                 if notification.method == "turn/completed":
                     metadata_complete = True
                     if proxy is not None:
-                        # The relay forwards the final bytes before it records their
+                        # The proxy forwards the final bytes before it records their
                         # metadata. Give that handler a brief chance to finish so the
                         # terminal result consistently carries the exact charge.
                         metadata_complete = await asyncio.to_thread(proxy.wait_until_idle, 5.0)

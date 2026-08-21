@@ -179,21 +179,35 @@ The model can change on each turn:
 await session.send(task, config=TurnConfig(model="openrouter/z-ai/glm-5.3"))
 ```
 
-These four models have a known context size and a fallback price. The fallback is used only
-when OpenRouter does not return the exact charge. OpenRouter may charge a different rate for
-the selected provider.
+The table summarizes the paid local and Gemini Agent Runtime tests:
 
-| Model id | Fallback USD / 1M input → output | Context | Recommended harness | Claude Code test result |
-| --- | --- | --- | --- | --- |
-| `openrouter/moonshotai/kimi-k3` | 3.00 → 15.00 | ~1M | Either | Local and remote tests passed |
-| `openrouter/z-ai/glm-5.3` | 1.40 → 4.40 | ~1M | Either | Local and remote tests passed |
-| `openrouter/deepseek/deepseek-v4-flash` | 0.084 → 0.168 | ~1M | Codex | Some turns ended without a final answer |
-| `openrouter/deepseek/deepseek-v4-pro` | 1.60 → 3.20 | ~1M | Codex | Final remote test ended without an answer in 2/2 attempts |
+- ✅ passed locally and remotely
+- ⚠️ supported with the caveat described below
+- ❌ unavailable
+
+| Model | Codex | Claude Code | Structured output | Shell tools | Exact cost | Choose provider | Notes |
+| --- | :---: | :---: | :---: | :---: | :---: | :---: | --- |
+| **Kimi K3**<br>`openrouter/moonshotai/kimi-k3` | ✅ | ✅ | ✅ | ✅ | ✅ | ⚠️ | ~1M context; $3/$15 fallback price |
+| **GLM-5.3**<br>`openrouter/z-ai/glm-5.3` | ✅ | ✅ | ✅ | ✅ | ✅ | ⚠️ | ~1M context; $1.40/$4.40 fallback price |
+| **DeepSeek v4 Flash**<br>`openrouter/deepseek/deepseek-v4-flash` | ✅ | ⚠️ | ✅ | ✅ | ✅ | ⚠️ | Use Codex; ~1M context; $0.084/$0.168 fallback price |
+| **DeepSeek v4 Pro**<br>`openrouter/deepseek/deepseek-v4-pro` | ✅ | ⚠️ | ✅ | ✅ | ✅ | ⚠️ | Use Codex; ~1M context; $1.60/$3.20 fallback price |
+
+**Shell tools** means the agent can run commands in its workspace, such as Python, `git`, or a
+test command, and read the output. The tests also confirm that model-provider credentials are
+absent from the command's environment.
+
+**Choose provider** uses an OpenRouter preset. Preset handling is tested on both harnesses. A real
+provider pin still needs a preset in the shared OpenRouter account, and that account currently has
+none. The paid test can verify the chosen provider after a preset is created.
+
+Fallback prices are USD per 1M input/output tokens. They are used only when OpenRouter does not
+return the exact charge. OpenRouter may charge a different rate for the selected provider.
 
 Both harnesses can run all four models. Use Codex for DeepSeek v4 Flash and Pro when reliable
-completion matters. During testing, both DeepSeek models sometimes finished a Claude Code turn
-without returning a final answer. The controlled Codex runs completed normally. Claude Code turns
-with this problem return `error_no_final_text`, which allows the caller to retry or switch harness.
+completion matters. DeepSeek Flash returned no final answer after two attempts in the latest local
+and remote Claude Code tests. DeepSeek Pro passed the latest tests but failed both attempts in an
+earlier remote test. The controlled Codex runs completed normally. Claude Code turns with this
+problem return `error_no_final_text`, which allows the caller to retry or switch harness.
 
 Other `openrouter/*` model ids also work. Codex uses generic context metadata for an unknown
 model. Exact cost reporting still works when OpenRouter supplies it.

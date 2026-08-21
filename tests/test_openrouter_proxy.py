@@ -365,4 +365,6 @@ def test_error_status_response_is_recorded(monkeypatch):
     assert event.raw["provider"] is None
     assert event.raw["cost_usd"] is None
     assert event.raw["requested_provider"] == "moonshotai"
+    # The status says a request failed; only the message says what was wrong with it.
+    assert event.raw["summary"] == "rate limited"
     assert proxy.exact_cost_usd is None

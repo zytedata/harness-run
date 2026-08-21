@@ -34,7 +34,8 @@ tag `vX.Y.Z`, push the commit and the tag.
 - Every OpenRouter model call, on both harnesses, passes through a per-run localhost
   relay. Neither CLI can send OpenRouter's provider field or report what OpenRouter
   charged, so the relay does both: it applies the provider choice, records routing,
-  HTTP status and cost for each response, enforces the selected model and the budget,
+  HTTP status, cost, and OpenRouter's message when a request is rejected, enforces
+  the selected model and the budget,
   and forwards the response stream unchanged. The CLI receives a random per-run token,
   so the provider key stays in the parent process. ([#34])
 

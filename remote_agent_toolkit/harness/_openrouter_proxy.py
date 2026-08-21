@@ -168,6 +168,21 @@ def _capture_request(
     )
 
 
+def _error_message(body: bytes, content_type: str) -> str | None:
+    """The message OpenRouter gave for a rejected request, if it gave one.
+
+    Without this an error response records only its status, which says a request failed
+    but not why — and a rejected request is the case with nothing else to read.
+    """
+    for value in _json_objects(body, content_type):
+        error = value.get("error")
+        if isinstance(error, dict) and error.get("message"):
+            return str(error["message"])[:300]
+        if isinstance(error, str) and error:
+            return error[:300]
+    return None
+
+
 def _append_capture(buffer: bytearray, chunk: bytes, limit: int = _CAPTURE_LIMIT) -> None:
     """Keep the newest response bytes, where streaming APIs put final usage metadata."""
     buffer.extend(chunk)
@@ -418,7 +433,8 @@ class OpenRouterProxy:
                     if found is None and response.status >= 400:
                         # An error response carries no metadata and no cost, and is exactly
                         # what the harness cannot see any other way (a retried 429, a
-                        # provider refusing a request feature).
+                        # provider refusing a request feature). Keep OpenRouter's own
+                        # message: the status alone does not say what it objected to.
                         found = OpenRouterRequest(
                             requested_model=requested_model,
                             requested_provider=owner._provider,
@@ -426,7 +442,7 @@ class OpenRouterProxy:
                             provider_model=None,
                             region=None,
                             attempt=None,
-                            summary=None,
+                            summary=_error_message(bytes(captured), content_type),
                             cost_usd=None,
                             status=response.status,
                         )

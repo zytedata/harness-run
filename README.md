@@ -297,6 +297,11 @@ Choosing a fixed provider removes one important source of variation. Model outpu
 between requests, and a provider may update its serving software or model version. Record the date
 and the reported provider details with experimental results.
 
+A pin also disables fallbacks, so a request the chosen provider rejects fails instead of moving to
+another one. The harness reports that as an `openrouter_request` event with the HTTP status and
+OpenRouter's message, and the CLI retries. Observed with Novita on DeepSeek v4 Flash: one rejected
+request, then a normal completion.
+
 Important details:
 
 - The `OPENROUTER_API_KEY` is passed per invocation and stays in the calling process: the CLI

@@ -294,9 +294,11 @@ For a repeatable comparison:
 - Run the provider check below before a larger experiment. It fails if OpenRouter reports a
   different provider.
 
-The provider-list command prints both the display name and provider slug. Use the slug as the
-`openrouter_provider` value. The paid check selects one known provider for every included model
-and fails if OpenRouter reports a different provider:
+The provider-list command prints a base provider slug and an exact endpoint slug. A base slug such
+as `moonshotai` allows every endpoint for that provider. A full slug such as
+`moonshotai/mxfp4` selects that endpoint only. Either form works as the `openrouter_provider`
+value. The paid check selects one known provider for every included model and fails if OpenRouter
+reports a different provider:
 
 ```bash
 make live-openrouter

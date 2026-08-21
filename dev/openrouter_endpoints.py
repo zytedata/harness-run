@@ -36,6 +36,11 @@ DEFAULT_MODELS = [
 ]
 
 
+def _base_provider_slug(endpoint_slug: object) -> str:
+    """Return the provider-wide part of an OpenRouter endpoint slug."""
+    return str(endpoint_slug or "").split("/", 1)[0]
+
+
 def _get(path: str, key: str | None) -> dict:
     req = urllib.request.Request(f"{API}{path}")
     if key:
@@ -74,7 +79,8 @@ def show_endpoints(model: str, key: str | None) -> None:
                 f"${float(completion) * 1e6:.4g}/M output"
             )
     print(
-        f"  {'provider slug':<18} {'provider':<20} {'quant':<9} {'context':>10} {'max_out':>10}  "
+        f"  {'provider slug':<16} {'exact endpoint':<22} {'provider':<20} "
+        f"{'quant':<9} {'context':>10} {'max_out':>10}  "
         f"{'$/M in':>8} {'$/M out':>9} {'cache':>8}  tools  schema"
     )
     for e in sorted(eps, key=lambda x: str(x.get("provider_name"))):
@@ -86,7 +92,8 @@ def show_endpoints(model: str, key: str | None) -> None:
             return f"{float(value) * 1e6:.4g}" if value not in (None, "") else "?"
 
         print(
-            f"  {str(e.get('tag')):<18} {str(e.get('provider_name')):<20} "
+            f"  {_base_provider_slug(e.get('tag')):<16} {str(e.get('tag')):<22} "
+            f"{str(e.get('provider_name')):<20} "
             f"{str(e.get('quantization')):<9} "
             f"{str(e.get('context_length')):>10} {str(e.get('max_completion_tokens')):>10}  "
             f"{per_million('prompt'):>8} {per_million('completion'):>9} "

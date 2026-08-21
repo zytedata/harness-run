@@ -95,14 +95,14 @@ SCHEMA = {
 }
 
 
-async def _probe(model: str, key: str, harness: str = "codex", attempts: int = 2) -> dict:
+async def _check_model(model: str, key: str, harness: str = "codex", attempts: int = 2) -> dict:
     """Run one turn on ``model`` under ``harness``; return a verdict row.
 
     Retries once on a soft miss. DeepSeek v4 Flash sometimes returns no final message under
     Claude Code. A retry is always reported in the verdict.
     """
     for attempt in range(1, attempts + 1):
-        row = await _probe_once(model, key, harness)
+        row = await _check_model_once(model, key, harness)
         if row["ok"]:
             if attempt > 1:
                 row["note"] = f"passed on attempt {attempt} (first attempt: soft miss)"
@@ -113,7 +113,7 @@ async def _probe(model: str, key: str, harness: str = "codex", attempts: int = 2
     return row
 
 
-async def _probe_once(model: str, key: str, harness: str = "codex") -> dict:
+async def _check_model_once(model: str, key: str, harness: str = "codex") -> dict:
     """One turn; the verdict row for it."""
     label = f"{model.removeprefix('openrouter/')} [{harness}]"
     # Tight caps: the point is the round-trip, not the model's work.
@@ -154,7 +154,9 @@ async def _probe_once(model: str, key: str, harness: str = "codex") -> dict:
         provider_matches = [req.get("provider_matches_request") for req in succeeded]
         requested_models = [req.get("requested_model") for req in succeeded]
         exact_costs = [
-            float(req["cost_usd"]) for req in succeeded if isinstance(req.get("cost_usd"), (int, float))
+            float(req["cost_usd"])
+            for req in succeeded
+            if isinstance(req.get("cost_usd"), (int, float))
         ]
         bare_model = model.removeprefix("openrouter/")
         row.update(cost=r.cost_usd, turns=r.num_turns or 0)
@@ -195,10 +197,10 @@ async def _probe_once(model: str, key: str, harness: str = "codex") -> dict:
     return row
 
 
-async def _probe_resume(model: str, key: str, harness: str = "codex", attempts: int = 2) -> dict:
+async def _check_resume(model: str, key: str, harness: str = "codex", attempts: int = 2) -> dict:
     """Two turns on one session: the routing must survive a resume (retries once)."""
     for attempt in range(1, attempts + 1):
-        row = await _probe_resume_once(model, key, harness)
+        row = await _check_resume_once(model, key, harness)
         if row["ok"]:
             if attempt > 1:
                 row["note"] = f"passed on attempt {attempt} (first attempt: soft miss)"
@@ -209,7 +211,7 @@ async def _probe_resume(model: str, key: str, harness: str = "codex", attempts: 
     return row
 
 
-async def _probe_resume_once(model: str, key: str, harness: str = "codex") -> dict:
+async def _check_resume_once(model: str, key: str, harness: str = "codex") -> dict:
     """One resume pair; the verdict row for it."""
     label = f"{model.removeprefix('openrouter/')} (resume) [{harness}]"
     spec = AgentSpec(
@@ -246,15 +248,17 @@ async def _probe_resume_once(model: str, key: str, harness: str = "codex") -> di
     return row
 
 
-async def _probe_schema(model: str, key: str, harness: str = "codex", attempts: int = 2) -> dict:
-    """Structured output on ``model`` under ``harness``; retries once, like ``_probe``.
+async def _check_structured_output(
+    model: str, key: str, harness: str = "codex", attempts: int = 2
+) -> dict:
+    """Structured output on ``model`` under ``harness``; retries once, like ``_check_model``.
 
     The task asks the model to run a command and report what it printed. A model that
     answers from its head instead gets the arithmetic wrong. Measured on DeepSeek v4 Pro
     under codex: one run answered 6 for ``print(6 * 7)``, two immediate re-runs answered 42.
     """
     for attempt in range(1, attempts + 1):
-        row = await _probe_schema_once(model, key, harness)
+        row = await _check_structured_output_once(model, key, harness)
         if row["ok"]:
             if attempt > 1:
                 row["note"] = f"passed on attempt {attempt} (first attempt: soft miss)"
@@ -265,7 +269,7 @@ async def _probe_schema(model: str, key: str, harness: str = "codex", attempts: 
     return row
 
 
-async def _probe_schema_once(model: str, key: str, harness: str = "codex") -> dict:
+async def _check_structured_output_once(model: str, key: str, harness: str = "codex") -> dict:
     """``output_schema`` must yield a parsed object."""
     label = f"{model.removeprefix('openrouter/')} (schema) [{harness}]"
     spec = AgentSpec(
@@ -301,7 +305,7 @@ async def _probe_schema_once(model: str, key: str, harness: str = "codex") -> di
     return row
 
 
-async def _probe_unpinned(model: str, key: str, harness: str) -> dict:
+async def _check_unpinned(model: str, key: str, harness: str) -> dict:
     """No provider pin: the turn still goes through the proxy, which is where cost is."""
     label = f"{model.removeprefix('openrouter/')} unpinned [{harness}]"
     spec = AgentSpec(
@@ -327,7 +331,9 @@ async def _probe_unpinned(model: str, key: str, harness: str) -> dict:
         row.update(cost=result.cost_usd, turns=result.num_turns or 0)
         succeeded = [req for req in requests if req.get("http_status") == 200]
         costs = [
-            float(req["cost_usd"]) for req in succeeded if isinstance(req.get("cost_usd"), (int, float))
+            float(req["cost_usd"])
+            for req in succeeded
+            if isinstance(req.get("cost_usd"), (int, float))
         ]
         row["ok"] = bool(
             not result.is_error
@@ -352,7 +358,7 @@ async def _probe_unpinned(model: str, key: str, harness: str) -> dict:
     return row
 
 
-async def _probe_budget(harness: str, key: str) -> dict:
+async def _check_budget(harness: str, key: str) -> dict:
     """The exact OpenRouter charge trips the cap."""
     label = f"exact-cost budget [{harness}]"
     spec = AgentSpec(
@@ -413,21 +419,21 @@ async def main() -> int:
     # (every check returns a row). SERIAL=1 restores ordered output
     # for debugging a single model.
     if os.environ.get("SERIAL") == "1":
-        rows = [await _probe(m, key, h) for m in MODELS for h in HARNESSES]
+        rows = [await _check_model(m, key, h) for m in MODELS for h in HARNESSES]
         for h in HARNESSES:
-            rows.append(await _probe_resume(RESUME_MODEL, key, h))
+            rows.append(await _check_resume(RESUME_MODEL, key, h))
             for model in MODELS:
-                rows.append(await _probe_schema(model, key, h))
-            rows.append(await _probe_unpinned(RESUME_MODEL, key, h))
-            rows.append(await _probe_budget(h, key))
+                rows.append(await _check_structured_output(model, key, h))
+            rows.append(await _check_unpinned(RESUME_MODEL, key, h))
+            rows.append(await _check_budget(h, key))
     else:
         rows = list(
             await asyncio.gather(
-                *(_probe(m, key, h) for m in MODELS for h in HARNESSES),
-                *(_probe_resume(RESUME_MODEL, key, h) for h in HARNESSES),
-                *(_probe_schema(m, key, h) for m in MODELS for h in HARNESSES),
-                *(_probe_unpinned(RESUME_MODEL, key, h) for h in HARNESSES),
-                *(_probe_budget(h, key) for h in HARNESSES),
+                *(_check_model(m, key, h) for m in MODELS for h in HARNESSES),
+                *(_check_resume(RESUME_MODEL, key, h) for h in HARNESSES),
+                *(_check_structured_output(m, key, h) for m in MODELS for h in HARNESSES),
+                *(_check_unpinned(RESUME_MODEL, key, h) for h in HARNESSES),
+                *(_check_budget(h, key) for h in HARNESSES),
             )
         )
 

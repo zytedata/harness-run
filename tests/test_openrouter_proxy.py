@@ -368,3 +368,24 @@ def test_error_status_response_is_recorded(monkeypatch):
     # The status says a request failed; only the message says what was wrong with it.
     assert event.raw["summary"] == "rate limited"
     assert proxy.exact_cost_usd is None
+
+
+def test_error_message_wins_over_routing_metadata(monkeypatch):
+    """A rejected request can still carry routing metadata; the message is what matters."""
+    body = json.dumps(
+        {
+            "error": {"message": "provider does not support this request"},
+            "openrouter_metadata": {"requested": "deepseek/deepseek-v4-flash", "summary": "av=1"},
+        }
+    ).encode()
+    _fake_upstream(monkeypatch, response=_FakeResponse(status=400, body=body))
+
+    with OpenRouterProxy(
+        "real-key", expected_model="deepseek/deepseek-v4-flash", provider="novita"
+    ) as proxy:
+        _proxy_post(proxy, body=json.dumps({"model": "deepseek/deepseek-v4-flash"}))
+        assert proxy.wait_until_idle()
+
+    event = proxy.drain_events()[0]
+    assert event.raw["http_status"] == 400
+    assert event.raw["summary"] == "provider does not support this request"

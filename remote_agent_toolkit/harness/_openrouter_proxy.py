@@ -26,7 +26,7 @@ import json
 import secrets
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
@@ -432,22 +432,28 @@ class OpenRouterProxy:
                         owner._provider,
                         response.status,
                     )
-                    if found is None and response.status >= 400:
-                        # An error response has no metadata and no cost, so nothing above
-                        # recorded it. It is also the case nothing else in the toolkit can
-                        # see: a retried 429, a provider refusing a request feature. Keep
-                        # OpenRouter's message; the status alone does not say what failed.
-                        found = OpenRouterRequest(
-                            requested_model=requested_model,
-                            requested_provider=owner._provider,
-                            provider=None,
-                            provider_model=None,
-                            region=None,
-                            attempt=None,
-                            summary=_error_message(bytes(captured), content_type),
-                            cost_usd=None,
-                            status=response.status,
-                        )
+                    if response.status >= 400:
+                        # A failed request is the case nothing else in the toolkit can see:
+                        # a retried 429, a provider refusing a request feature. Record it
+                        # with whatever OpenRouter said about it. The message beats the
+                        # routing summary here, because the status alone does not say what
+                        # failed. Some errors carry routing metadata and some carry none,
+                        # so this has to cover both.
+                        message = _error_message(bytes(captured), content_type)
+                        if found is None:
+                            found = OpenRouterRequest(
+                                requested_model=requested_model,
+                                requested_provider=owner._provider,
+                                provider=None,
+                                provider_model=None,
+                                region=None,
+                                attempt=None,
+                                summary=message,
+                                cost_usd=None,
+                                status=response.status,
+                            )
+                        elif message:
+                            found = replace(found, summary=message)
                     if found is not None:
                         owner._record(found)
                 finally:

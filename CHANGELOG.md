@@ -25,9 +25,12 @@ tag `vX.Y.Z`, push the commit and the tag.
 
 - Both harnesses can run `openrouter/*` models with an `OPENROUTER_API_KEY`
   per-invocation secret. Kimi K3, GLM-5.3, and DeepSeek v4 Flash/Pro have known
-  context sizes and fallback prices. Each OpenRouter response reports its selected
-  upstream and exact charge as an `openrouter_request` event. Results and budget
-  checks use the exact charge when available. `openrouter_provider` selects one
+  context sizes. Each OpenRouter response reports its selected upstream and exact
+  charge as an `openrouter_request` event. Results and budget checks use that charge,
+  and an OpenRouter model is never priced from the toolkit's own table: a turn
+  OpenRouter reported no charge for gets `cost_usd=None` and a `cost_unknown` event.
+  An estimate cannot match the charge, because OpenRouter routes one model id to
+  providers whose prices differ by up to 2.5x. `openrouter_provider` selects one
   OpenRouter provider per agent, session, or turn and disables fallbacks. Paid local
   and Gemini Agent Runtime checks cover both harnesses. ([#34])
 - Codex emits a `model_routing` status event from the app-server's thread record. ([#34])

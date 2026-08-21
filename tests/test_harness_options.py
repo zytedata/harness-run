@@ -279,16 +279,13 @@ def test_claude_model_is_untouched_by_any_of_this():
     assert "ANTHROPIC_CUSTOM_MODEL_OPTION" not in env
 
 
-def test_openrouter_cost_is_recomputed_from_usage():
-    """The CLI prices these models from its own catalogue and gets it badly wrong.
+def test_openrouter_cost_is_never_estimated():
+    """No charge from OpenRouter means no cost, never a price-table estimate.
 
-    Measured live: for deepseek-v4-flash the CLI reported $0.271 on a turn that really
-    cost $0.0045 — 60x over. Left alone, `max_budget_usd` would fire almost immediately.
+    The CLI's own figure is wrong here — measured live, it reported $0.271 for a
+    deepseek-v4-flash turn that really cost $0.0045 — and an estimate would be wrong in a
+    way nobody could see, because the charge depends on which provider served the call.
     """
-    from remote_agent_toolkit.harness import pricing
-
-    price = pricing.model_price("openrouter/deepseek/deepseek-v4-flash")
-    assert price is not None
     event = AgentEvent(
         kind="result",
         summary="done",
@@ -301,13 +298,11 @@ def test_openrouter_cost_is_recomputed_from_usage():
         },
         raw={"subtype": "success"},
     )
-    out = ClaudeCodeHarness()._final_result(event, turns_total=2, price=price)
+    out = ClaudeCodeHarness()._final_result(event, turns_total=2, openrouter=True)
 
-    # 20000 fresh + 500 cached input, 100 output, at flash rates.
-    expected = (20_000 * 0.084 + 500 * 0.0168 + 100 * 0.168) / 1e6
-    assert out.cost_usd == pytest.approx(expected)
+    assert out.cost_usd is None
     assert out.raw["cli_reported_cost_usd"] == 0.271  # kept for comparison
-    assert out.raw["price_source"] == "builtin"
+    assert "price_source" not in out.raw
 
 
 def test_openrouter_exact_cost_wins_and_enforces_budget():
@@ -351,9 +346,9 @@ def test_openrouter_no_final_text_is_an_error():
 
 
 def test_claude_models_keep_the_cli_cost():
-    """Only the OpenRouter path is repriced; Claude's own number is authoritative."""
+    """Only the OpenRouter path is touched; Claude's own number is authoritative."""
     event = AgentEvent(kind="result", summary="done", cost_usd=0.42, usage={}, raw={})
-    out = ClaudeCodeHarness()._final_result(event, turns_total=1, price=None)
+    out = ClaudeCodeHarness()._final_result(event, turns_total=1, openrouter=False)
     assert out.cost_usd == 0.42
     assert "cli_reported_cost_usd" not in out.raw
 
@@ -392,10 +387,8 @@ def test_proxy_402_is_reported_as_a_budget_failure():
 
 
 def test_unpriced_openrouter_model_reports_no_cost():
-    """An unknown id has no fallback price, so the CLI's invented figure is dropped."""
+    """Any id the proxy recorded no charge for drops the CLI's invented figure."""
     event = AgentEvent(kind="result", summary="done", cost_usd=0.271, usage={}, raw={})
-    out = ClaudeCodeHarness()._final_result(
-        event, turns_total=1, price=None, unpriced_openrouter=True
-    )
+    out = ClaudeCodeHarness()._final_result(event, turns_total=1, openrouter=True)
     assert out.cost_usd is None
     assert out.raw["cli_reported_cost_usd"] == 0.271

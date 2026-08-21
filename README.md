@@ -172,13 +172,13 @@ separately on both harnesses:
 
 | Model | Harness | Completes a turn | Structured output | Shell tools | Exact cost | Provider selection | Notes |
 | --- | --- | :---: | :---: | :---: | :---: | :---: | --- |
-| **Kimi K3**<br>`openrouter/moonshotai/kimi-k3` | Codex | ✅ | ✅ | ✅ | ✅ | ✅ | ~1M context; $3/$15 fallback price |
+| **Kimi K3**<br>`openrouter/moonshotai/kimi-k3` | Codex | ✅ | ✅ | ✅ | ✅ | ✅ | ~1M context |
 |  | Claude Code | ✅ | ✅ | ✅ | ✅ | ✅ | Runs through Claude Code |
-| **GLM-5.3**<br>`openrouter/z-ai/glm-5.3` | Codex | ✅ | ✅ | ✅ | ✅ | ✅ | ~1M context; $1.40/$4.40 fallback price |
+| **GLM-5.3**<br>`openrouter/z-ai/glm-5.3` | Codex | ✅ | ✅ | ✅ | ✅ | ✅ | ~1M context |
 |  | Claude Code | ✅ | ✅ | ✅ | ✅ | ✅ | Runs through Claude Code |
-| **DeepSeek v4 Flash**<br>`openrouter/deepseek/deepseek-v4-flash` | Codex | ✅ | ✅ | ✅ | ✅ | ✅ | Recommended harness; ~1M context; $0.084/$0.168 fallback price |
+| **DeepSeek v4 Flash**<br>`openrouter/deepseek/deepseek-v4-flash` | Codex | ✅ | ✅ | ✅ | ✅ | ✅ | Recommended harness; ~1M context |
 |  | Claude Code | ⚠️ | ✅ | ✅ | ✅ | ✅ | It sometimes finishes without a final answer; use Codex for reliable completion |
-| **DeepSeek v4 Pro**<br>`openrouter/deepseek/deepseek-v4-pro` | Codex | ✅ | ✅ | ✅ | ✅ | ✅ | Recommended harness; ~1M context; $1.60/$3.20 fallback price |
+| **DeepSeek v4 Pro**<br>`openrouter/deepseek/deepseek-v4-pro` | Codex | ✅ | ✅ | ✅ | ✅ | ✅ | Recommended harness; ~1M context |
 |  | Claude Code | ⚠️ | ✅ | ✅ | ✅ | ✅ | It has also finished without a final answer; use Codex for reliable completion |
 
 **Shell tools** means the agent can run commands in its workspace, such as Python, `git`, or a
@@ -188,8 +188,11 @@ absent from the command's environment.
 **Provider selection** uses `openrouter_provider` in the toolkit configuration. It is supported by
 both harnesses and does not require anything saved in the OpenRouter account.
 
-Fallback prices are USD per 1M input/output tokens. They are used only when OpenRouter does not
-return the exact charge. OpenRouter may charge a different rate for the selected provider.
+**Exact cost** is the charge OpenRouter reports for each response. There is no estimated
+price: OpenRouter routes one model id to providers whose prices differ by up to 2.5x, so a
+per-model estimate would only match whoever served the call. A turn OpenRouter reports no
+charge for gets `cost_usd=None` and a `cost_unknown` status event, and its `max_budget_usd`
+cannot be enforced.
 
 Both harnesses can run all four models. Use Codex for DeepSeek v4 Flash and Pro when reliable
 completion matters. DeepSeek Flash returned no final answer after two attempts in the latest local
@@ -197,8 +200,8 @@ and remote Claude Code tests. DeepSeek Pro passed the latest tests but failed bo
 earlier remote test. The controlled Codex runs completed normally. Claude Code turns with this
 problem return `error_no_final_text`, which allows the caller to retry or switch harness.
 
-Other `openrouter/*` model ids also work. Codex uses generic context metadata for an unknown
-model. Exact cost reporting still works when OpenRouter supplies it.
+Other `openrouter/*` model ids also work, with the same exact cost reporting. Codex uses
+generic context metadata for an unknown model.
 
 Every model call goes through a local proxy the toolkit runs for the turn, on either harness.
 The provider choice reaches OpenRouter through it, and the exact charge comes back through it.
@@ -309,7 +312,8 @@ Important details:
   the tool environment, and Codex disables its automatic login shell because it could reload
   keys from `~/.bashrc`.
 - Claude Code's own dollar estimate is wrong for these custom models. The result uses OpenRouter's
-  exact reported charge and keeps the CLI value as `cli_reported_cost_usd` for comparison.
+  exact reported charge and keeps the CLI value as `cli_reported_cost_usd` for comparison. The
+  price table in `harness/pricing.py` is not consulted for these models.
 - The four known models use a 1,048,576-token context window on both harnesses.
 - Codex disables its built-in web-search tool for OpenRouter turns because OpenRouter rejects the
   tool format Codex sends. Shell, file, MCP, and skill tools remain available.

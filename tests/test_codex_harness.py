@@ -722,7 +722,7 @@ async def test_openrouter_budget_is_enforceable(tmp_path, monkeypatch):
     script = [
         turn_started(),
         agent_message("partial"),
-        token_usage(in_tok=10_000, out_tok=10_000),  # kimi-k3: well past $0.01
+        token_usage(in_tok=10_000, out_tok=10_000),
         turn_completed("completed"),
     ]
     events, client = await _events_of(
@@ -766,23 +766,23 @@ async def test_openrouter_exact_cost_and_provider_come_from_proxy(tmp_path, monk
     assert result.raw["subtype"] == "error_budget_exceeded"
 
 
-def test_openrouter_builtin_prices():
-    for model, per_mtok in (
-        ("openrouter/moonshotai/kimi-k3", (3.00, 0.30, 15.00)),
-        ("openrouter/z-ai/glm-5.3", (1.40, 0.26, 4.40)),
-        ("openrouter/deepseek/deepseek-v4-flash", (0.084, 0.0168, 0.168)),
-        ("openrouter/deepseek/deepseek-v4-pro", (1.60, 0.135, 3.20)),
-    ):
-        price = pricing.model_price(model)
-        assert price is not None and price.source == "builtin", model
-        assert price.cost_usd(1_000_000, 0, 1_000_000) == pytest.approx(
-            per_mtok[0] + per_mtok[2]
-        ), model
-    assert pricing.model_price("openrouter/nobody/nothing") is None
+def test_openrouter_models_are_not_priced_by_the_table():
+    """The price table has no OpenRouter entries: those turns report OpenRouter's charge.
+
+    An estimate cannot match it — OpenRouter routes one id to providers whose prices
+    differ by up to 2.5x, so a per-model number only fits whoever served the call.
+    """
+    assert not [key for key in pricing._BUILTIN_PER_MTOK if key.startswith("openrouter/")]
 
 
-def test_openrouter_litellm_dataset_wins(monkeypatch):
-    """LiteLLM keys OpenRouter models the same way, so a dataset entry overrides ours."""
+async def test_openrouter_turn_reports_no_cost_when_openrouter_reports_none(
+    tmp_path, monkeypatch
+):
+    """Even with a LiteLLM entry for the id, an unreported charge means no cost.
+
+    LiteLLM does carry some ``openrouter/`` keys, so this asserts the binding never
+    reaches for one, and says so in an event instead of inventing a number.
+    """
     monkeypatch.setattr(
         pricing,
         "_litellm_prices",
@@ -794,9 +794,23 @@ def test_openrouter_litellm_dataset_wins(monkeypatch):
             }
         },
     )
-    price = pricing.model_price("openrouter/moonshotai/kimi-k3")
-    assert price is not None and price.source == "litellm"
-    assert price.input_per_token == 9e-6
+    spec = _or_spec()
+    ctx = _ctx(tmp_path, spec, secrets={"OPENROUTER_API_KEY": "k"})
+    script = [
+        turn_started(),
+        agent_message("done"),
+        token_usage(in_tok=10_000, out_tok=10_000),
+        turn_completed(),
+    ]
+    events, _ = await _events_of(
+        script, tmp_path, monkeypatch, spec=spec, ctx=ctx, proxy_cost=None
+    )
+    result = next(e for e in events if e.kind == "result")
+
+    assert result.cost_usd is None
+    assert result.raw["price_source"] is None
+    unknown = next(e for e in events if (e.raw or {}).get("event") == "cost_unknown")
+    assert "did not report a charge" in unknown.summary
 
 
 def test_openrouter_key_is_harness_consumed(tmp_path):
@@ -847,7 +861,6 @@ def test_openrouter_provider_keeps_known_context_and_price(tmp_path):
 
     assert opts.thread_args["model"] == "moonshotai/kimi-k3"
     assert "model_context_window=1048576" in overrides
-    assert pricing.model_price(spec.model) is not None
     assert not opts.warnings
 
 

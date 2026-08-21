@@ -151,7 +151,7 @@ _OPENROUTER_SCHEMA_INSTRUCTION = (
 
 # Context window for the OpenRouter models this binding vouches for, passed as
 # `model_context_window` because Codex's catalog has no entry for them (it would fall back
-# to generic metadata and warn). Keep in sync with the prices in `pricing`.
+# to generic metadata and warn). An id that is missing from the table still runs.
 _OPENROUTER_CONTEXT_WINDOW = pricing.OPENROUTER_CONTEXT_WINDOWS
 
 # Tool-result content kept in events is truncated: command output can be megabytes, and
@@ -799,8 +799,14 @@ class CodexHarness:
         )
         translator = CodexEventTranslator()
         # Price via the LiteLLM live dataset (baked fallback) — one fetch per process,
-        # off the loop; needed up front because budget enforcement runs mid-stream.
-        price = await asyncio.to_thread(pricing.model_price, spec.model)
+        # off the loop; needed up front because budget enforcement runs mid-stream. An
+        # OpenRouter turn is not priced here: it reports what OpenRouter charged, or
+        # nothing at all (see :mod:`pricing`).
+        price = (
+            None
+            if options.openrouter
+            else await asyncio.to_thread(pricing.model_price, spec.model)
+        )
         acct = _RunAccounting(spec.model, price)
         limit: str | None = None  # which cap tripped, if any
         thread_id = ""
@@ -933,8 +939,14 @@ class CodexHarness:
                         yield AgentEvent(
                             kind="status",
                             summary=(
-                                f"no price data for model {spec.model!r}: cost_usd is "
-                                "unknown and max_budget_usd could not be enforced"
+                                (
+                                    f"OpenRouter did not report a charge for model "
+                                    f"{spec.model!r}; "
+                                    if proxy is not None
+                                    else f"no price data for model {spec.model!r}: "
+                                )
+                                + "cost_usd is unknown and max_budget_usd could not be "
+                                "enforced"
                             ),
                             raw={"event": "cost_unknown", "model": spec.model},
                         )

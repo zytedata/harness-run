@@ -537,7 +537,8 @@ Each is a `typing.Protocol`; concrete adapters ship for prod (GCP) and dev (loca
   token counts but no USD and enforces no caps — the harness prices tokens via LiteLLM's live
   pricing dataset (`harness/pricing.py`; the same upstream `ccusage` uses, fetched once per process,
   baked 5.6-family fallback for offline; models unknown to both: cost `None` + a `cost_unknown`
-  status, budget unenforceable; the result raw carries `price_source`), counts
+  status, budget unenforceable; the result raw carries `price_source`). An `openrouter/` model is
+  never priced this way — it reports the charge OpenRouter itself returned, or nothing. It also counts
   `thread/tokenUsage/updated` notifications as model calls (= `num_turns`; verified live: one per
   call), and interrupts the turn at `max_turns` / `max_budget_usd` (`error_max_turns` /
   `error_budget_exceeded` result subtypes, accounting kept). **Checkpoint/resume**: the workspace
@@ -649,7 +650,7 @@ remote-agent-toolkit/
 │   │   ├── codex.py               # CodexHarness (drives an openai-codex AsyncCodex app-server)
 │   │   ├── _shared.py             # policy shared by the bindings (secret routing, env, checkpoint)
 │   │   ├── _openrouter_proxy.py   # per-run localhost proxy for openrouter/ models (both bindings)
-│   │   ├── pricing.py             # LiteLLM price lookup + baked fallbacks and context windows
+│   │   ├── pricing.py             # LiteLLM price lookup + baked OpenAI fallbacks, context windows
 │   │   └── translate.py           # Claude SDK message → AgentEvent (codex's lives in codex.py)
 │   ├── runtime/
 │   │   ├── base.py                # Engine + Session protocol + state machine + Run handle

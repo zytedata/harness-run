@@ -448,18 +448,18 @@ class ClaudeCodeHarness:
         event: AgentEvent,
         turns_total: int,
         segment_summaries: Sequence[str] = (),
-        price: Any | None = None,
-        unpriced_openrouter: bool = False,
+        openrouter: bool = False,
         exact_openrouter_cost: float | None = None,
         max_budget_usd: float | None = None,
         budget_blocked: bool = False,
     ) -> AgentEvent:
         """Stamp the cumulative turn count onto the turn's final result event.
 
-        ``price`` is set only for OpenRouter models, where the CLI's own ``total_cost_usd``
-        cannot be trusted: it prices from its catalogue, which has no entry for these
-        models, so it bills them at a default rate (measured 1.67x over Kimi K3's real
-        rate). The token counts it reports are fine, so the cost is recomputed from those.
+        On an ``openrouter`` turn the cost is the charge OpenRouter reported, or nothing.
+        The CLI's own ``total_cost_usd`` cannot be trusted here — it prices from its
+        catalogue, which has no entry for these ids, so it bills them at a default rate
+        (measured 1.67x over Kimi K3's real rate) — and there is no estimate to fall back
+        on (see :mod:`pricing`). It is kept as ``cli_reported_cost_usd`` either way.
         """
         if event.raw is not None:
             event.raw["num_turns"] = turns_total
@@ -470,27 +470,12 @@ class ClaudeCodeHarness:
                 event.raw["cli_reported_cost_usd"] = event.cost_usd
                 event.raw["price_source"] = "openrouter"
             event.cost_usd = exact_openrouter_cost
-        elif price is None and unpriced_openrouter:
-            # No price for a model neither the toolkit nor LiteLLM knows.
-            # The CLI's own number is not the OpenRouter cost, so report nothing rather
-            # than something wrong — same contract as the codex binding.
+        elif openrouter:
+            # OpenRouter reported no charge for this turn. Report nothing rather than
+            # something wrong — same contract as the codex binding.
             if event.raw is not None:
                 event.raw["cli_reported_cost_usd"] = event.cost_usd
             event.cost_usd = None
-        elif price is not None:
-            usage = event.usage or {}
-            cached = int(usage.get("cache_read_input_tokens") or 0)
-            # Anthropic reports fresh input, cache writes and cache reads separately; cache
-            # writes bill as input here (the small write premium is not distinguishable).
-            fresh = int(usage.get("input_tokens") or 0) + int(
-                usage.get("cache_creation_input_tokens") or 0
-            )
-            output = int(usage.get("output_tokens") or 0)
-            recomputed = price.cost_usd(fresh + cached, cached, output)
-            if event.raw is not None:
-                event.raw["cli_reported_cost_usd"] = event.cost_usd
-                event.raw["price_source"] = price.source
-            event.cost_usd = recomputed
         if (
             max_budget_usd is not None
             and event.summary == "(no final text)"
@@ -616,11 +601,9 @@ class ClaudeCodeHarness:
                     break
             return out
 
-        # OpenRouter models are priced by us, not by the CLI (see `_final_result`). One
-        # fetch per process, off the event loop.
+        # An OpenRouter turn's cost is the proxy's record of what OpenRouter charged, and
+        # nothing else (see `_final_result`).
         is_openrouter = (spec.model or "").startswith(_OPENROUTER_PREFIX)
-        price = await asyncio.to_thread(pricing.model_price, spec.model) if is_openrouter else None
-        unpriced_openrouter = is_openrouter and price is None
 
         def proxy_cost_usd() -> float | None:
             return proxy.exact_cost_usd if proxy is not None else None
@@ -703,14 +686,13 @@ class ClaudeCodeHarness:
                         finalized = True
                         async for proxy_event in drain_proxy():
                             yield proxy_event
-                        if unpriced_openrouter and proxy_cost_usd() is None:
+                        if is_openrouter and proxy_cost_usd() is None:
                             yield _openrouter_cost_unknown(spec.model)
                         yield self._final_result(
                             event,
                             turns_total,
                             segment_summaries(event),
-                            price,
-                            unpriced_openrouter,
+                            is_openrouter,
                             proxy_cost_usd(),
                             spec.max_budget_usd if is_openrouter else None,
                             proxy.budget_blocked if proxy is not None else False,
@@ -784,14 +766,13 @@ class ClaudeCodeHarness:
                 last = demoted[-1]
                 async for proxy_event in drain_proxy():
                     yield proxy_event
-                if unpriced_openrouter and proxy_cost_usd() is None:
+                if is_openrouter and proxy_cost_usd() is None:
                     yield _openrouter_cost_unknown(spec.model)
                 yield self._final_result(
                     last,
                     turns_total,
                     segment_summaries(last),
-                    price,
-                    unpriced_openrouter,
+                    is_openrouter,
                     proxy_cost_usd(),
                     spec.max_budget_usd if is_openrouter else None,
                     proxy.budget_blocked if proxy is not None else False,
@@ -818,14 +799,13 @@ class ClaudeCodeHarness:
             last = demoted[-1]
             async for proxy_event in drain_proxy():
                 yield proxy_event
-            if unpriced_openrouter and proxy_cost_usd() is None:
+            if is_openrouter and proxy_cost_usd() is None:
                 yield _openrouter_cost_unknown(spec.model)
             yield self._final_result(
                 last,
                 turns_total,
                 segment_summaries(last),
-                price,
-                unpriced_openrouter,
+                is_openrouter,
                 proxy_cost_usd(),
                 spec.max_budget_usd if is_openrouter else None,
                 proxy.budget_blocked if proxy is not None else False,

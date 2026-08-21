@@ -90,6 +90,15 @@ async def check_claude_openrouter(model: str, key: str) -> None:
         if isinstance(request.get("cost_usd"), (int, float))
     ]
     check(
+        f"claude-code+{bare}: every model call went through the relay",
+        # This spec pins no provider, so the relay is carrying the turn for its own sake:
+        # the exact charge below is only available because it did.
+        bool(requests)
+        and all("http_status" in request for request in requests)
+        and all(request.get("requested_provider") is None for request in requests),
+        f"statuses={[request.get('http_status') for request in requests]}",
+    )
+    check(
         f"claude-code+{bare}: OpenRouter reported the upstream for each request",
         bool(requests) and all(providers),
         f"providers={providers}",

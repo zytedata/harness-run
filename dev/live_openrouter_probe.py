@@ -127,11 +127,7 @@ async def _probe_once(model: str, key: str, harness: str = "codex") -> dict:
         openrouter_provider=_provider_for(model),
     )
     row = {"model": label, "ok": False, "tools": False, "cost": None, "turns": 0, "note": ""}
-    providers: list[str | None] = []
-    requested_models: list[str | None] = []
-    request_costs: list[float | None] = []
-    requested_providers: list[str | None] = []
-    provider_matches: list[bool | None] = []
+    requests: list[dict] = []
     price_source = None
     t0 = time.time()
     try:
@@ -141,18 +137,25 @@ async def _probe_once(model: str, key: str, harness: str = "codex") -> dict:
             if ev.kind == "tool_use":
                 row["tools"] = True
             if (ev.raw or {}).get("event") == "openrouter_request":
-                providers.append(ev.raw.get("provider"))
-                requested_models.append(ev.raw.get("requested_model"))
-                request_costs.append(ev.raw.get("cost_usd"))
-                requested_providers.append(ev.raw.get("requested_provider"))
-                provider_matches.append(ev.raw.get("provider_matches_request"))
+                requests.append(dict(ev.raw))
             if ev.kind == "result":
                 price_source = (ev.raw or {}).get("price_source")
             summary = " ".join((ev.summary or "").split())[:90]
             print(f"[{label}] {time.strftime('%H:%M:%S')} {ev.kind:11} {summary}", flush=True)
         r = run.result
         text = " ".join((r.text or "").split())
-        exact_costs = [float(cost) for cost in request_costs if isinstance(cost, (int, float))]
+        # Only the relay reports an HTTP status, so its presence proves the call went
+        # through it. Error responses are recorded too; they carry no provider or cost,
+        # so the routing and accounting checks look at successful ones.
+        relayed = all("http_status" in req for req in requests)
+        served = [req for req in requests if req.get("http_status") == 200]
+        providers = [req.get("provider") for req in served]
+        requested_providers = [req.get("requested_provider") for req in served]
+        provider_matches = [req.get("provider_matches_request") for req in served]
+        requested_models = [req.get("requested_model") for req in served]
+        exact_costs = [
+            float(req["cost_usd"]) for req in served if isinstance(req.get("cost_usd"), (int, float))
+        ]
         bare_model = model.removeprefix("openrouter/")
         row.update(cost=r.cost_usd, turns=r.num_turns or 0)
         row["ok"] = bool(
@@ -161,23 +164,23 @@ async def _probe_once(model: str, key: str, harness: str = "codex") -> dict:
             and EXPECTED in text
             and row["tools"]
             and isinstance(r.cost_usd, float)
-            and bool(providers)
+            and relayed
+            and bool(served)
             and all(providers)
-            and bool(requested_providers)
             and all(provider == _provider_for(model) for provider in requested_providers)
             and all(match is True for match in provider_matches)
-            and bool(requested_models)
             and all(requested == bare_model for requested in requested_models)
             and bool(exact_costs)
             and math.isclose(r.cost_usd, sum(exact_costs), rel_tol=1e-9, abs_tol=1e-12)
             and price_source == "openrouter"
         )
         if not row["ok"]:
+            statuses = [req.get("http_status") for req in requests]
             row["note"] = (
                 f"error={r.is_error} turns={row['turns']} tools={row['tools']} "
                 f"cost={r.cost_usd!r} request_costs={exact_costs} providers={providers} "
                 f"requested_providers={requested_providers} matches={provider_matches} "
-                f"requested={requested_models} source={price_source} "
+                f"requested={requested_models} statuses={statuses} source={price_source} "
                 f"text={text[:60]!r}"
             )
         print(
@@ -279,6 +282,57 @@ async def _probe_schema(model: str, key: str, harness: str = "codex") -> dict:
     return row
 
 
+async def _probe_unpinned(model: str, key: str, harness: str) -> dict:
+    """No provider pin: the turn still goes through the relay, which is where cost is."""
+    label = f"{model.removeprefix('openrouter/')} unpinned [{harness}]"
+    spec = AgentSpec(
+        name="ratk-openrouter-unpinned",
+        model=model,
+        harness=harness,
+        system_prompt="Reply briefly.",
+        max_turns=2,
+        max_budget_usd=0.30,
+    )
+    row = {"model": label, "ok": False, "tools": True, "cost": None, "turns": 0, "note": ""}
+    requests: list[dict] = []
+    price_source = None
+    try:
+        session = local.deploy(spec).start_session()
+        run = session.run("Reply with only: ok", secrets={"OPENROUTER_API_KEY": key})
+        async for event in run:
+            if (event.raw or {}).get("event") == "openrouter_request":
+                requests.append(dict(event.raw))
+            if event.kind == "result":
+                price_source = (event.raw or {}).get("price_source")
+        result = run.result
+        row.update(cost=result.cost_usd, turns=result.num_turns or 0)
+        served = [req for req in requests if req.get("http_status") == 200]
+        costs = [
+            float(req["cost_usd"]) for req in served if isinstance(req.get("cost_usd"), (int, float))
+        ]
+        row["ok"] = bool(
+            not result.is_error
+            and all("http_status" in req for req in requests)
+            and bool(served)
+            and all(req.get("provider") for req in served)
+            # Nothing was asked for, so nothing is claimed about what was selected.
+            and all(req.get("requested_provider") is None for req in served)
+            and all(req.get("provider_matches_request") is None for req in served)
+            and isinstance(result.cost_usd, float)
+            and bool(costs)
+            and math.isclose(result.cost_usd, sum(costs), rel_tol=1e-9, abs_tol=1e-12)
+            and price_source == "openrouter"
+        )
+        row["note"] = (
+            f"providers={[req.get('provider') for req in served]} "
+            f"statuses={[req.get('http_status') for req in requests]} source={price_source}"
+        )
+    except Exception as exc:  # noqa: BLE001 — report, don't hide
+        row["note"] = f"{type(exc).__name__}: {exc}"
+        traceback.print_exc()
+    return row
+
+
 async def _probe_budget(harness: str, key: str) -> dict:
     """The exact OpenRouter charge trips the cap."""
     label = f"exact-cost budget [{harness}]"
@@ -296,20 +350,31 @@ async def _probe_budget(harness: str, key: str) -> dict:
         session = local.deploy(spec).start_session()
         run = session.run("Reply with only: ok", secrets={"OPENROUTER_API_KEY": key})
         final = None
+        relayed = []
         async for event in run:
+            if (event.raw or {}).get("event") == "openrouter_request":
+                relayed.append("http_status" in event.raw)
             if event.kind == "result":
                 final = event
         result = run.result
         row.update(cost=result.cost_usd, turns=result.num_turns or 0)
-        source = (final.raw or {}).get("price_source") if final else None
+        raw = final.raw or {} if final else {}
+        source = raw.get("price_source")
+        subtype = raw.get("subtype")
         row["ok"] = bool(
             result.is_error
             and session.stop_reason is StopReason.BUDGET_EXCEEDED
+            and subtype == "error_budget_exceeded"
             and isinstance(result.cost_usd, float)
             and result.cost_usd > spec.max_budget_usd
             and source == "openrouter"
+            and bool(relayed)
+            and all(relayed)
         )
-        row["note"] = f"stop={session.stop_reason} cost={result.cost_usd:.6f} source={source}"
+        row["note"] = (
+            f"stop={session.stop_reason} cost={result.cost_usd:.6f} source={source} "
+            f"subtype={subtype} enforcement={raw.get('budget_enforcement')}"
+        )
     except Exception as exc:  # noqa: BLE001 — report, don't hide
         row["note"] = f"{type(exc).__name__}: {exc}"
         traceback.print_exc()
@@ -334,6 +399,7 @@ async def main() -> int:
             rows.append(await _probe_resume(RESUME_MODEL, key, h))
             for model in MODELS:
                 rows.append(await _probe_schema(model, key, h))
+            rows.append(await _probe_unpinned(RESUME_MODEL, key, h))
             rows.append(await _probe_budget(h, key))
     else:
         rows = list(
@@ -341,6 +407,7 @@ async def main() -> int:
                 *(_probe(m, key, h) for m in MODELS for h in HARNESSES),
                 *(_probe_resume(RESUME_MODEL, key, h) for h in HARNESSES),
                 *(_probe_schema(m, key, h) for m in MODELS for h in HARNESSES),
+                *(_probe_unpinned(RESUME_MODEL, key, h) for h in HARNESSES),
                 *(_probe_budget(h, key) for h in HARNESSES),
             )
         )

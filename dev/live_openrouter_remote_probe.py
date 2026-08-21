@@ -194,7 +194,10 @@ async def _check_model(engine, model: str, key: str, harness: str = "codex") -> 
     check(f"{label}: auth key absent from the tool", EXPECTED in text)
     check(f"{label}: called a tool", "tool_use" in kinds)
     check(f"{label}: cost priced", isinstance(r.cost_usd, float), f"${r.cost_usd or 0:.4f}")
-    requests = observations["openrouter_requests"]
+    all_requests = observations["openrouter_requests"]
+    # Only the relay stamps an HTTP status, so its presence proves the call went through
+    # it. Error responses carry no provider or cost, so the checks below use served ones.
+    requests = [request for request in all_requests if request.get("http_status") == 200]
     providers = [request.get("provider") for request in requests]
     requested_models = [request.get("requested_model") for request in requests]
     request_costs = [
@@ -205,6 +208,11 @@ async def _check_model(engine, model: str, key: str, harness: str = "codex") -> 
     requested_providers = [request.get("requested_provider") for request in requests]
     provider_matches = [request.get("provider_matches_request") for request in requests]
     bare_model = model.removeprefix("openrouter/")
+    check(
+        f"{label}: every model call went through the relay",
+        bool(all_requests) and all("http_status" in request for request in all_requests),
+        f"statuses={[request.get('http_status') for request in all_requests]}",
+    )
     check(
         f"{label}: upstream provider reported",
         bool(requests) and all(providers),

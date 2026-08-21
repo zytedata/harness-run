@@ -44,6 +44,7 @@ async def _events_of(
     ctx=None,
     proxy_cost=None,
     proxy_provider=None,
+    proxy_init=None,
     resolved=_UNSET,
 ):
     import openai_codex
@@ -60,7 +61,9 @@ async def _events_of(
     if (spec.model or "").startswith("openrouter/"):
 
         class FakeProxy:
-            def __init__(self, *_args, **_kwargs):
+            def __init__(self, *args, **kwargs):
+                if proxy_init is not None:
+                    proxy_init.append((args, kwargs))
                 self.base_url = "http://127.0.0.1:1"
                 self.client_token = "local-test-token"
                 self.exact_cost_usd = proxy_cost
@@ -685,6 +688,24 @@ async def test_openrouter_run_skips_login(tmp_path, monkeypatch):
     assert events[-1].raw["model"] == _OR_MODEL  # the result reports the caller's id
 
 
+async def test_openrouter_run_passes_provider_to_relay(tmp_path, monkeypatch):
+    seen = []
+    spec = _or_spec(openrouter_provider="moonshotai")
+    ctx = _ctx(tmp_path, spec, secrets={"OPENROUTER_API_KEY": "sk-or-1"})
+    script = [turn_started(), agent_message("done"), token_usage(), turn_completed()]
+
+    await _events_of(
+        script,
+        tmp_path,
+        monkeypatch,
+        spec=spec,
+        ctx=ctx,
+        proxy_init=seen,
+    )
+
+    assert seen and seen[0][1]["provider"] == "moonshotai"
+
+
 async def test_openrouter_run_without_key_raises(tmp_path, monkeypatch):
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     spec = _or_spec()
@@ -811,31 +832,21 @@ def test_unused_model_auth_key_never_reaches_the_agent(tmp_path):
     assert "OPENAI_API_KEY" not in env
 
 
-def test_openrouter_preset_id_passes_through_and_warns(tmp_path):
-    """`openrouter/@preset/<slug>` is how a caller pins routing we cannot express."""
-    spec = AgentSpec(name="a", model="openrouter/@preset/kimi-firstparty", harness="codex")
-    opts = CodexHarness().build_options(
-        spec, _ctx(tmp_path, spec, secrets={"OPENROUTER_API_KEY": "k"})
+def test_openrouter_provider_keeps_known_context_and_price(tmp_path):
+    spec = AgentSpec(
+        name="a",
+        model=_OR_MODEL,
+        harness="codex",
+        openrouter_provider="moonshotai",
     )
-    ovr = "\n".join(opts.codex_config.config_overrides)
-
-    assert opts.thread_args["model"] == "@preset/kimi-firstparty"  # prefix ours, not theirs
-    assert 'model_provider="openrouter"' in ovr
-    assert any("generic model metadata" in w for w in opts.warnings)
-    assert "model_context_window" not in ovr
-
-
-def test_openrouter_model_plus_preset_keeps_price_and_context(tmp_path):
-    model = "openrouter/moonshotai/kimi-k3@preset/kimi-firstparty"
-    spec = AgentSpec(name="a", model=model, harness="codex")
     opts = CodexHarness().build_options(
         spec, _ctx(tmp_path, spec, secrets={"OPENROUTER_API_KEY": "k"})
     )
     overrides = "\n".join(opts.codex_config.config_overrides)
 
-    assert opts.thread_args["model"] == "moonshotai/kimi-k3@preset/kimi-firstparty"
+    assert opts.thread_args["model"] == "moonshotai/kimi-k3"
     assert "model_context_window=1048576" in overrides
-    assert pricing.model_price(model) is not None
+    assert pricing.model_price(spec.model) is not None
     assert not opts.warnings
 
 

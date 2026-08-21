@@ -27,13 +27,13 @@ tag `vX.Y.Z`, push the commit and the tag.
   per-invocation secret. Kimi K3, GLM-5.3, and DeepSeek v4 Flash/Pro have known
   context sizes and fallback prices. Each OpenRouter response reports its selected
   upstream and exact charge as an `openrouter_request` event. Results and budget
-  checks use the exact charge when available. OpenRouter presets work with direct
-  `@preset/<slug>` ids and combined `<model>@preset/<slug>` ids. Paid local and
-  Gemini Agent Runtime probes cover both harnesses. ([#34])
+  checks use the exact charge when available. `openrouter_provider` selects one
+  OpenRouter provider per agent, session, or turn and disables fallbacks. Paid local
+  and Gemini Agent Runtime checks cover both harnesses. ([#34])
 - Codex emits a `model_routing` status event from the app-server's thread record.
   Codex model calls pass through a per-run localhost relay because the app-server
   omits OpenRouter response metadata. The relay records routing and cost fields,
-  keeps the provider key in the parent process, enforces the selected model and
+  keeps the provider key in the parent process, enforces the selected model and provider,
   budget, and forwards the response stream unchanged. ([#34])
 
 - Configuration now has three scopes, one type each: the `AgentSpec` baked at

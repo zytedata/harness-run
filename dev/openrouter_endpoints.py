@@ -2,7 +2,7 @@
 
 OpenRouter can serve one model id through providers with different quantization, context
 limits, prices, and tool support. Use this command to inspect the current choices before
-creating a routing preset.
+setting ``openrouter_provider``.
 
 This reads the public catalogue plus, with a key, what your account can reach. It makes no
 model calls and costs nothing.
@@ -74,8 +74,8 @@ def show_endpoints(model: str, key: str | None) -> None:
                 f"${float(completion) * 1e6:.4g}/M output"
             )
     print(
-        f"  {'provider':<20} {'quant':<9} {'context':>10} {'max_out':>10}  "
-        f"{'$/M in':>8} {'$/M out':>9} {'cache':>8}  tools"
+        f"  {'provider id':<18} {'provider':<20} {'quant':<9} {'context':>10} {'max_out':>10}  "
+        f"{'$/M in':>8} {'$/M out':>9} {'cache':>8}  tools  schema"
     )
     for e in sorted(eps, key=lambda x: str(x.get("provider_name"))):
         params = e.get("supported_parameters") or []
@@ -86,11 +86,13 @@ def show_endpoints(model: str, key: str | None) -> None:
             return f"{float(value) * 1e6:.4g}" if value not in (None, "") else "?"
 
         print(
-            f"  {str(e.get('provider_name')):<20} {str(e.get('quantization')):<9} "
+            f"  {str(e.get('tag')):<18} {str(e.get('provider_name')):<20} "
+            f"{str(e.get('quantization')):<9} "
             f"{str(e.get('context_length')):>10} {str(e.get('max_completion_tokens')):>10}  "
             f"{per_million('prompt'):>8} {per_million('completion'):>9} "
             f"{per_million('input_cache_read'):>8}  "
-            f"{'yes' if 'tools' in params else 'NO'}"
+            f"{'yes' if 'tools' in params else 'NO':<5}  "
+            f"{'yes' if 'response_format' in params else 'NO'}"
         )
     quants = {str(e.get("quantization")) for e in eps}
     if len(quants) > 1:
@@ -117,7 +119,7 @@ def probe(model: str, n: int, key: str) -> None:
         print(f"  {i + 1:>3}. {who}")
     print(f"  distinct providers: {len(seen)} — {dict(seen)}")
     if len(seen) > 1:
-        print("  ! providers varied; use a preset when runs must use the same provider")
+        print("  ! providers varied; set openrouter_provider when runs must use one provider")
 
 
 def main() -> int:

@@ -179,26 +179,30 @@ The model can change on each turn:
 await session.send(task, config=TurnConfig(model="openrouter/z-ai/glm-5.3"))
 ```
 
-The table summarizes the paid local and Gemini Agent Runtime tests:
+The table summarizes the paid local and Gemini Agent Runtime tests. Each model was tested
+separately on both harnesses:
 
 - ✅ passed locally and remotely
-- ⚠️ supported with the caveat described below
+- ⚠️ works, with the reliability note in the last column
 - ❌ unavailable
 
-| Model | Codex | Claude Code | Structured output | Shell tools | Exact cost | Choose provider | Notes |
-| --- | :---: | :---: | :---: | :---: | :---: | :---: | --- |
-| **Kimi K3**<br>`openrouter/moonshotai/kimi-k3` | ✅ | ✅ | ✅ | ✅ | ✅ | ⚠️ | ~1M context; $3/$15 fallback price |
-| **GLM-5.3**<br>`openrouter/z-ai/glm-5.3` | ✅ | ✅ | ✅ | ✅ | ✅ | ⚠️ | ~1M context; $1.40/$4.40 fallback price |
-| **DeepSeek v4 Flash**<br>`openrouter/deepseek/deepseek-v4-flash` | ✅ | ⚠️ | ✅ | ✅ | ✅ | ⚠️ | Use Codex; ~1M context; $0.084/$0.168 fallback price |
-| **DeepSeek v4 Pro**<br>`openrouter/deepseek/deepseek-v4-pro` | ✅ | ⚠️ | ✅ | ✅ | ✅ | ⚠️ | Use Codex; ~1M context; $1.60/$3.20 fallback price |
+| Model | Harness | Completes a turn | Structured output | Shell tools | Exact cost | Provider selection | Notes |
+| --- | --- | :---: | :---: | :---: | :---: | :---: | --- |
+| **Kimi K3**<br>`openrouter/moonshotai/kimi-k3` | Codex | ✅ | ✅ | ✅ | ✅ | ✅ | ~1M context; $3/$15 fallback price |
+|  | Claude Code | ✅ | ✅ | ✅ | ✅ | ✅ | Runs through Claude Code |
+| **GLM-5.3**<br>`openrouter/z-ai/glm-5.3` | Codex | ✅ | ✅ | ✅ | ✅ | ✅ | ~1M context; $1.40/$4.40 fallback price |
+|  | Claude Code | ✅ | ✅ | ✅ | ✅ | ✅ | Runs through Claude Code |
+| **DeepSeek v4 Flash**<br>`openrouter/deepseek/deepseek-v4-flash` | Codex | ✅ | ✅ | ✅ | ✅ | ✅ | Recommended harness; ~1M context; $0.084/$0.168 fallback price |
+|  | Claude Code | ⚠️ | ✅ | ✅ | ✅ | ✅ | It sometimes finishes without a final answer; use Codex for reliable completion |
+| **DeepSeek v4 Pro**<br>`openrouter/deepseek/deepseek-v4-pro` | Codex | ✅ | ✅ | ✅ | ✅ | ✅ | Recommended harness; ~1M context; $1.60/$3.20 fallback price |
+|  | Claude Code | ⚠️ | ✅ | ✅ | ✅ | ✅ | It has also finished without a final answer; use Codex for reliable completion |
 
 **Shell tools** means the agent can run commands in its workspace, such as Python, `git`, or a
 test command, and read the output. The tests also confirm that model-provider credentials are
 absent from the command's environment.
 
-**Choose provider** uses an OpenRouter preset. Preset handling is tested on both harnesses. A real
-provider pin still needs a preset in the shared OpenRouter account, and that account currently has
-none. The paid test can verify the chosen provider after a preset is created.
+**Provider selection** uses `openrouter_provider` in the toolkit configuration. It is supported by
+both harnesses and does not require anything saved in the OpenRouter account.
 
 Fallback prices are USD per 1M input/output tokens. They are used only when OpenRouter does not
 return the exact charge. OpenRouter may charge a different rate for the selected provider.
@@ -218,11 +222,20 @@ upstream provider, the provider's model name, region when available, and exact r
 The terminal result uses the sum of those exact costs. `max_budget_usd` is checked between model
 responses, so one response may take the total above the cap.
 
+```python
+run = session.run(task, secrets={"OPENROUTER_API_KEY": key})
+async for event in run:
+    data = event.raw or {}
+    if data.get("event") == "openrouter_request":
+        print(data["provider"], data["provider_model"], data["region"], data["cost_usd"])
+```
+
 #### Providers and repeatable experiments
 
-OpenRouter may offer the same model through several providers. By default, it chooses among
-available providers and may use another one when the first choice is unavailable. Providers can
-differ in quantization, price, context and output limits, tool support, latency, and throughput.
+OpenRouter may offer the same model through several providers. Its
+[provider routing](https://openrouter.ai/docs/guides/routing/provider-selection) normally chooses
+among available providers and may use another one when the first choice is unavailable. Providers
+can differ in quantization, price, context and output limits, tool support, latency, and throughput.
 List the current options without paying for a model call:
 
 ```bash
@@ -233,44 +246,64 @@ Provider choice matters when comparing models, harnesses, prompts, or settings. 
 provider, two runs may use different model hosting and produce different costs, speeds, or results.
 That variation can make an experiment misleading.
 
+Choose one provider directly in the agent definition:
+
+```python
+spec = AgentSpec(
+    name="kimi-first-party",
+    model="openrouter/moonshotai/kimi-k3",
+    harness="codex",  # or "claude-code"
+    openrouter_provider="moonshotai",
+)
+```
+
+The toolkit sends this rule with every model request:
+
+```json
+{"provider": {"only": ["moonshotai"], "allow_fallbacks": false}}
+```
+
+OpenRouter must use that provider. The request fails when the provider is unavailable. It cannot
+switch to another provider.
+
+The selected provider must support every feature used by the request. For example, a provider may
+support tools but reject Codex's `json_schema` structured-output format. With strict selection,
+OpenRouter returns that error to the agent. Check the exact model, harness, provider, and feature
+combination before a larger experiment. `dev/openrouter_endpoints.py` shows whether each endpoint
+advertises tools and `response_format`, although providers can support different response formats.
+
+Provider selection can also change for one turn:
+
+```python
+await session.send(
+    task,
+    config=TurnConfig(openrouter_provider="moonshotai"),
+)
+```
+
+Use `openrouter_provider=None` in a turn config to return to OpenRouter's normal routing. The
+provider setting requires an `openrouter/` model.
+
 For a repeatable comparison:
 
-- Create an [OpenRouter preset](https://openrouter.ai/docs/guides/features/presets) that allows one
-  provider and disables provider fallbacks.
-- Keep the preset unchanged for the whole experiment. Also keep the model, harness, prompt,
-  reasoning effort, and other generation settings unchanged unless one of them is the subject of
-  the comparison.
+- Set `openrouter_provider` and keep it unchanged for the whole experiment. Also keep the model,
+  harness, prompt, reasoning effort, and other generation settings unchanged unless one of them is
+  the subject of the comparison.
 - Save each `openrouter_request` event with the results. It records the provider, provider model,
   region, and exact charge for that response.
 - Run the provider check below before a larger experiment. It fails if OpenRouter reports a
   different provider.
 
-Put the explicit model before the preset so the toolkit keeps its known context and fallback price:
-
-```python
-AgentSpec(
-    name="pinned",
-    model="openrouter/moonshotai/kimi-k3@preset/kimi-firstparty",
-    harness="codex",  # or "claude-code"
-)
-```
-
-Create the preset in OpenRouter and set its provider rules there. A direct
-`openrouter/@preset/<slug>` id also works, although the toolkit cannot know its model or context
-before the first response.
-
-The paid tests can verify a real preset on both harnesses. They fail if any request reports a
-different provider:
+The provider-list command prints both the display name and provider ID. The paid check selects one
+known provider for every included model and fails if OpenRouter reports a different provider:
 
 ```bash
-OPENROUTER_PRESET_MODEL="openrouter/moonshotai/kimi-k3@preset/kimi-firstparty" \
-OPENROUTER_EXPECTED_PROVIDER="Moonshot AI" \
 make live-openrouter
 ```
 
-Pinning removes one important source of variation. Model output can still vary between requests,
-and a provider may update its serving software or model version. Record the date and the reported
-provider details with experimental results.
+Choosing a fixed provider removes one important source of variation. Model output can still vary
+between requests, and a provider may update its serving software or model version. Record the date
+and the reported provider details with experimental results.
 
 Important details:
 
@@ -293,8 +326,8 @@ Important details:
   use when the task does not need the preset's tool guidance.
 
 The paid local and remote tests run a basic turn and a structured-output turn with all four models
-on both harnesses. They also check tool use, credential removal, exact cost, budgets, preset
-handling, provider reporting, and resume. The remote test checks the Gemini runtime's history,
+on both harnesses. They also check tool use, credential removal, exact cost, budgets, provider
+selection, provider reporting, and resume. The remote test checks the Gemini runtime's history,
 resource, and trace data. See
 `make live-openrouter` and `make live-openrouter-remote`.
 
@@ -721,7 +754,7 @@ configures:
 |---|---|---|---|
 | deploy | `AgentSpec` | `gemini.deploy(spec)` | identity (`name`), image contents (`packages`, engine `env`, the harness CLIs — `harnesses=(...)` bakes several), and the *defaults* for everything below |
 | session | `SessionConfig` | `engine.start_session(config=...)` | the conversation's world: `repos`, `skills`, `mcp_servers`, `system_prompt`, `harness` (selects among the baked CLIs), `checkpoint`/`interactive`, `extra_env` — plus session-wide defaults for the turn knobs |
-| turn | `TurnConfig` | `session.run(config=...)` / `send(config=...)` | the knobs the harness re-reads every invocation: `model`, `reasoning_effort`, `max_turns`, `max_budget_usd`, `max_buffer_size`, `background_task_timeout`, `permission_mode`, tool lists, `output_schema` |
+| turn | `TurnConfig` | `session.run(config=...)` / `send(config=...)` | the knobs the harness re-reads every invocation: `model`, `openrouter_provider`, `reasoning_effort`, `max_turns`, `max_budget_usd`, `max_buffer_size`, `background_task_timeout`, `permission_mode`, tool lists, `output_schema` |
 
 Both config types are **sparse overlays**: a field left at `INHERIT` (the default) keeps
 the value from the layer below; a set field replaces it wholesale (`extra_env` is the one

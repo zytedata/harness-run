@@ -2,12 +2,12 @@
 
 Each model must call a shell tool, return its output, produce schema-valid structured output,
 hide provider credentials, report the selected upstream, and use OpenRouter's exact cost.
-Resume, preset errors, and budget caps are checked on both harnesses. Checks run concurrently
+Provider selection, resume, and budget caps are checked on both harnesses. Checks run concurrently
 unless ``SERIAL=1``.
 
 Run by hand with ``OPENROUTER_API_KEY=... make live-openrouter``. Never run this in CI.
-Use ``MODELS=...`` to limit the model list. To verify a real preset, also set
-``OPENROUTER_PRESET_MODEL`` and ``OPENROUTER_EXPECTED_PROVIDER``.
+Use ``MODELS=...`` to limit the model list. ``OPENROUTER_PROVIDER`` overrides the provider
+used by the checks; this is mainly useful with a single model.
 """
 
 from __future__ import annotations
@@ -52,10 +52,40 @@ RESUME_MODEL = "openrouter/z-ai/glm-5.3"
 BUDGET_MODEL = "openrouter/deepseek/deepseek-v4-flash"
 # Both harnesses can reach OpenRouter: codex through a provider config, claude-code through
 # the Anthropic-compatible endpoint. Every model is checked on both.
-HARNESSES = ["codex", "claude-code"]
-PINNED_MODEL = os.environ.get("OPENROUTER_PRESET_MODEL")
-EXPECTED_PROVIDER = os.environ.get("OPENROUTER_EXPECTED_PROVIDER")
+HARNESSES = [
+    value.strip()
+    for value in os.environ.get("HARNESSES", "codex,claude-code").split(",")
+    if value.strip()
+]
 PROBE_REASONING_EFFORT = os.environ.get("PROBE_REASONING_EFFORT")
+DEFAULT_PROVIDERS = {
+    "openrouter/moonshotai/kimi-k3": "moonshotai",
+    "openrouter/z-ai/glm-5.3": "z-ai",
+    # The shared account's ZDR policy excludes DeepSeek's own endpoint. Novita serves
+    # both models, supports tools, and is allowed by the account. It rejects Codex's
+    # json_schema format, so those two schema checks use normal routing below.
+    "openrouter/deepseek/deepseek-v4-flash": "novita",
+    "openrouter/deepseek/deepseek-v4-pro": "novita",
+}
+
+
+def _provider_for(model: str) -> str:
+    """Use a provider known to serve the model unless the operator overrides it."""
+    return (
+        os.environ.get("OPENROUTER_PROVIDER")
+        or DEFAULT_PROVIDERS.get(model)
+        or model.removeprefix("openrouter/").split("/", 1)[0]
+    )
+
+
+def _schema_provider(model: str, harness: str) -> str | None:
+    """Use normal routing where the selected provider lacks Codex JSON Schema support."""
+    if os.environ.get("OPENROUTER_PROVIDER"):
+        return _provider_for(model)
+    if harness == "codex" and model.startswith("openrouter/deepseek/"):
+        return None
+    return _provider_for(model)
+
 
 SCHEMA = {
     "type": "object",
@@ -94,11 +124,14 @@ async def _probe_once(model: str, key: str, harness: str = "codex") -> dict:
         max_turns=8,
         max_budget_usd=0.50,
         reasoning_effort=PROBE_REASONING_EFFORT,
+        openrouter_provider=_provider_for(model),
     )
     row = {"model": label, "ok": False, "tools": False, "cost": None, "turns": 0, "note": ""}
     providers: list[str | None] = []
     requested_models: list[str | None] = []
     request_costs: list[float | None] = []
+    requested_providers: list[str | None] = []
+    provider_matches: list[bool | None] = []
     price_source = None
     t0 = time.time()
     try:
@@ -111,6 +144,8 @@ async def _probe_once(model: str, key: str, harness: str = "codex") -> dict:
                 providers.append(ev.raw.get("provider"))
                 requested_models.append(ev.raw.get("requested_model"))
                 request_costs.append(ev.raw.get("cost_usd"))
+                requested_providers.append(ev.raw.get("requested_provider"))
+                provider_matches.append(ev.raw.get("provider_matches_request"))
             if ev.kind == "result":
                 price_source = (ev.raw or {}).get("price_source")
             summary = " ".join((ev.summary or "").split())[:90]
@@ -128,6 +163,9 @@ async def _probe_once(model: str, key: str, harness: str = "codex") -> dict:
             and isinstance(r.cost_usd, float)
             and bool(providers)
             and all(providers)
+            and bool(requested_providers)
+            and all(provider == _provider_for(model) for provider in requested_providers)
+            and all(match is True for match in provider_matches)
             and bool(requested_models)
             and all(requested == bare_model for requested in requested_models)
             and bool(exact_costs)
@@ -138,6 +176,7 @@ async def _probe_once(model: str, key: str, harness: str = "codex") -> dict:
             row["note"] = (
                 f"error={r.is_error} turns={row['turns']} tools={row['tools']} "
                 f"cost={r.cost_usd!r} request_costs={exact_costs} providers={providers} "
+                f"requested_providers={requested_providers} matches={provider_matches} "
                 f"requested={requested_models} source={price_source} "
                 f"text={text[:60]!r}"
             )
@@ -177,6 +216,7 @@ async def _probe_resume_once(model: str, key: str, harness: str = "codex") -> di
         checkpoint=True,  # conversation continuity is what `send` resumes
         max_turns=6,
         max_budget_usd=0.30,
+        openrouter_provider=_provider_for(model),
     )
     row = {"model": label, "ok": False, "tools": True, "cost": None, "turns": 0, "note": ""}
     try:
@@ -213,6 +253,7 @@ async def _probe_schema(model: str, key: str, harness: str = "codex") -> dict:
         max_turns=6,
         max_budget_usd=0.40,
         output_schema=SCHEMA,
+        openrouter_provider=_schema_provider(model, harness),
     )
     row = {"model": label, "ok": False, "tools": True, "cost": None, "turns": 0, "note": ""}
     try:
@@ -221,60 +262,17 @@ async def _probe_schema(model: str, key: str, harness: str = "codex") -> dict:
             'Run `python3 -c "print(6 * 7)"`. Return the number as `answer` and a one-word `note`.',
             secrets={"OPENROUTER_API_KEY": key},
         )
-        async for _ in run:
-            pass
+        events = []
+        async for event in run:
+            events.append(event)
         r = run.result
         row.update(cost=r.cost_usd, turns=r.num_turns or 0)
         out = r.structured_output
         row["ok"] = bool(not r.is_error and isinstance(out, dict) and out.get("answer") == 42)
         if not row["ok"]:
-            row["note"] = f"structured_output={out!r} text={(r.text or '')[:60]!r}"
+            summaries = [event.summary for event in events if event.summary]
+            row["note"] = f"structured_output={out!r} summaries={summaries!r}"
         print(f"[{label}] structured_output={out!r}", flush=True)
-    except Exception as exc:  # noqa: BLE001 — report, don't hide
-        row["note"] = f"{type(exc).__name__}: {exc}"
-        traceback.print_exc()
-    return row
-
-
-async def _probe_preset(harness: str, key: str) -> dict:
-    """Pinning plumbing: an `@preset/<slug>` id must reach OpenRouter as a preset.
-
-    Uses a slug that does not exist, so OpenRouter answers `preset_not_found`. This confirms
-    the id reached OpenRouter as a preset.
-    The turn is expected to fail; what is checked is HOW. Free: no tokens are billed.
-    Also asserts the failed request reports no cost.
-    """
-    label = f"@preset plumbing [{harness}]"
-    spec = AgentSpec(
-        name="ratk-openrouter-preset",
-        model="openrouter/@preset/ratk-does-not-exist",
-        harness=harness,
-        max_turns=4,
-        max_budget_usd=0.20,
-    )
-    row = {"model": label, "ok": False, "tools": True, "cost": None, "turns": 0, "note": ""}
-    try:
-        run = local.deploy(spec).start_session().run("say ok", secrets={"OPENROUTER_API_KEY": key})
-        saw_cost_unknown = False
-        blob = []
-        final = None
-        async for ev in run:
-            blob.append(f"{ev.kind}:{ev.summary}")
-            if (ev.raw or {}).get("event") == "cost_unknown":
-                saw_cost_unknown = True
-            if ev.kind == "result":
-                final = ev
-        text = " ".join(blob).lower()
-        reached = "preset" in text  # OpenRouter's own preset_not_found wording
-        # The terminal EVENT carries cost_usd=None for an unpriced model. Note RunResult
-        # flattens that to 0.0 (`cost_usd: float = 0.0`), so the event is what to read.
-        event_cost = final.cost_usd if final is not None else "no result event"
-        row["ok"] = bool(reached and saw_cost_unknown and event_cost is None)
-        row["note"] = (
-            f"preset error surfaced={reached} cost_unknown={saw_cost_unknown} "
-            f"event cost={event_cost!r}"
-        )
-        print(f"[{label}] {row['note']}", flush=True)
     except Exception as exc:  # noqa: BLE001 — report, don't hide
         row["note"] = f"{type(exc).__name__}: {exc}"
         traceback.print_exc()
@@ -291,6 +289,7 @@ async def _probe_budget(harness: str, key: str) -> dict:
         system_prompt="Reply briefly.",
         max_turns=2,
         max_budget_usd=0.000001,
+        openrouter_provider=_provider_for(BUDGET_MODEL),
     )
     row = {"model": label, "ok": False, "tools": True, "cost": None, "turns": 0, "note": ""}
     try:
@@ -317,51 +316,10 @@ async def _probe_budget(harness: str, key: str) -> dict:
     return row
 
 
-async def _probe_pin(harness: str, key: str, model: str, expected_provider: str) -> dict:
-    """Run a caller-owned preset and verify every reported upstream matches it."""
-    label = f"preset provider [{harness}]"
-    spec = AgentSpec(
-        name="ratk-openrouter-pinned",
-        model=model,
-        harness=harness,
-        max_turns=4,
-        max_budget_usd=0.30,
-    )
-    row = {"model": label, "ok": False, "tools": False, "cost": None, "turns": 0, "note": ""}
-    try:
-        run = local.deploy(spec).start_session().run(TASK, secrets={"OPENROUTER_API_KEY": key})
-        providers = []
-        async for event in run:
-            if event.kind == "tool_use":
-                row["tools"] = True
-            if (event.raw or {}).get("event") == "openrouter_request":
-                providers.append(event.raw.get("provider"))
-        result = run.result
-        row.update(cost=result.cost_usd, turns=result.num_turns or 0)
-        wanted = expected_provider.casefold()
-        row["ok"] = bool(
-            not result.is_error
-            and row["tools"]
-            and providers
-            and all((provider or "").casefold() == wanted for provider in providers)
-        )
-        row["note"] = f"expected={expected_provider!r} providers={providers!r} tools={row['tools']}"
-    except Exception as exc:  # noqa: BLE001 — report every harness in one run
-        row["note"] = f"{type(exc).__name__}: {exc}"
-        traceback.print_exc()
-    return row
-
-
 async def main() -> int:
     key = os.environ.get("OPENROUTER_API_KEY")
     if not key:
         print("OPENROUTER_API_KEY is not set — nothing to probe.", file=sys.stderr)
-        return 2
-    if bool(PINNED_MODEL) != bool(EXPECTED_PROVIDER):
-        print(
-            "Set OPENROUTER_PRESET_MODEL and OPENROUTER_EXPECTED_PROVIDER together.",
-            file=sys.stderr,
-        )
         return 2
     print(f"probing {len(MODELS)} model(s) — this spends real money", flush=True)
 
@@ -376,23 +334,14 @@ async def main() -> int:
             rows.append(await _probe_resume(RESUME_MODEL, key, h))
             for model in MODELS:
                 rows.append(await _probe_schema(model, key, h))
-            rows.append(await _probe_preset(h, key))
             rows.append(await _probe_budget(h, key))
-            if PINNED_MODEL and EXPECTED_PROVIDER:
-                rows.append(await _probe_pin(h, key, PINNED_MODEL, EXPECTED_PROVIDER))
     else:
         rows = list(
             await asyncio.gather(
                 *(_probe(m, key, h) for m in MODELS for h in HARNESSES),
                 *(_probe_resume(RESUME_MODEL, key, h) for h in HARNESSES),
                 *(_probe_schema(m, key, h) for m in MODELS for h in HARNESSES),
-                *(_probe_preset(h, key) for h in HARNESSES),
                 *(_probe_budget(h, key) for h in HARNESSES),
-                *(
-                    _probe_pin(h, key, PINNED_MODEL, EXPECTED_PROVIDER)
-                    for h in HARNESSES
-                    if PINNED_MODEL and EXPECTED_PROVIDER
-                ),
             )
         )
 

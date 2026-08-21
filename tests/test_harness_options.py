@@ -355,28 +355,22 @@ def test_claude_models_keep_the_cli_cost():
     assert "cli_reported_cost_usd" not in out.raw
 
 
-def test_openrouter_preset_is_passed_through_on_claude_too():
-    """`openrouter/@preset/<slug>` is how a caller pins routing; the CLI takes the id."""
-    spec = AgentSpec(name="a", model="openrouter/@preset/kimi-firstparty")
-    opts = ClaudeCodeHarness().build_options(spec, _ctx(spec, secrets={"OPENROUTER_API_KEY": "k"}))
-    assert opts.model == "@preset/kimi-firstparty"
-    assert opts.env["ANTHROPIC_CUSTOM_MODEL_OPTION"] == "@preset/kimi-firstparty"
+def test_openrouter_provider_uses_the_local_relay_on_claude():
+    spec = AgentSpec(name="a", model=_OR, openrouter_provider="moonshotai")
+    opts = ClaudeCodeHarness().build_options(
+        spec,
+        _ctx(spec, secrets={"OPENROUTER_API_KEY": "real-key"}),
+        openrouter_base_url="http://127.0.0.1:1234/api",
+        openrouter_client_token="local-token",
+    )
 
-
-def test_openrouter_model_plus_preset_keeps_context_and_price_on_claude():
-    from remote_agent_toolkit.harness import pricing
-
-    model = "openrouter/moonshotai/kimi-k3@preset/kimi-firstparty"
-    spec = AgentSpec(name="a", model=model)
-    opts = ClaudeCodeHarness().build_options(spec, _ctx(spec, secrets={"OPENROUTER_API_KEY": "k"}))
-
-    assert opts.model == "moonshotai/kimi-k3@preset/kimi-firstparty"
-    assert opts.env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] == "1048576"
-    assert pricing.model_price(model) is not None
+    assert opts.env["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:1234/api"
+    assert opts.env["ANTHROPIC_AUTH_TOKEN"] == "local-token"
+    assert "real-key" not in opts.env.values()
 
 
 def test_unpriced_openrouter_model_reports_no_cost():
-    """A preset (or an unknown id) has no price, so the CLI's invented figure is dropped."""
+    """An unknown id has no fallback price, so the CLI's invented figure is dropped."""
     event = AgentEvent(kind="result", summary="done", cost_usd=0.271, usage={}, raw={})
     out = ClaudeCodeHarness()._final_result(
         event, turns_total=1, price=None, unpriced_openrouter=True

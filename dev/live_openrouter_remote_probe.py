@@ -1,7 +1,7 @@
 """Paid Gemini Agent Runtime check for OpenRouter on both harnesses.
 
 One throwaway engine contains both CLIs. It checks every model's basic and structured-output
-turns on both harnesses. It also checks resume, presets, budgets, provider and cost reporting,
+turns on both harnesses. It also checks resume, budgets, provider selection and cost reporting,
 tools, credentials, effective specs, resource samples, memory peak, history, and Cloud Trace.
 
 Run by hand with ``OPENROUTER_API_KEY=... make live-openrouter-remote``. Never run this in
@@ -9,8 +9,8 @@ CI. A run usually takes 8-15 minutes and spends real money. The engine is delete
 checks and on SIGTERM/SIGINT. ``KEEP=1`` leaves it running for debugging.
 
 Set ``PROJECT``, ``LOCATION``, ``SUFFIX``, ``IMPERSONATE_SA``, ``MAX_INSTANCES``, or
-``SERIAL=1`` as needed. To verify a real preset, also set ``OPENROUTER_PRESET_MODEL`` and
-``OPENROUTER_EXPECTED_PROVIDER``.
+``SERIAL=1`` as needed. ``OPENROUTER_PROVIDER`` overrides the provider used by the checks;
+this is mainly useful when ``MODELS`` contains one model.
 """
 
 from __future__ import annotations
@@ -54,8 +54,34 @@ MAX_INSTANCES = int(os.environ.get("MAX_INSTANCES", "8"))
 # bakes CLAUDE_CODE_USE_VERTEX, which outranks the OpenRouter token, so this is where the
 # harness blanking that switch is proven on real infrastructure.
 HARNESSES = ["codex", "claude-code"]
-PINNED_MODEL = os.environ.get("OPENROUTER_PRESET_MODEL")
-EXPECTED_PROVIDER = os.environ.get("OPENROUTER_EXPECTED_PROVIDER")
+DEFAULT_PROVIDERS = {
+    "openrouter/moonshotai/kimi-k3": "moonshotai",
+    "openrouter/z-ai/glm-5.3": "z-ai",
+    # The shared account's ZDR policy excludes DeepSeek's own endpoint. Novita serves
+    # both models, supports tools, and is allowed by the account. It rejects Codex's
+    # json_schema format, so those two schema checks use normal routing below.
+    "openrouter/deepseek/deepseek-v4-flash": "novita",
+    "openrouter/deepseek/deepseek-v4-pro": "novita",
+}
+
+
+def _provider_for(model: str) -> str:
+    """Use a provider known to serve the model unless the operator overrides it."""
+    return (
+        os.environ.get("OPENROUTER_PROVIDER")
+        or DEFAULT_PROVIDERS.get(model)
+        or model.removeprefix("openrouter/").split("/", 1)[0]
+    )
+
+
+def _schema_provider(model: str, harness: str) -> str | None:
+    """Use normal routing where the selected provider lacks Codex JSON Schema support."""
+    if os.environ.get("OPENROUTER_PROVIDER"):
+        return _provider_for(model)
+    if harness == "codex" and model.startswith("openrouter/deepseek/"):
+        return None
+    return _provider_for(model)
+
 
 _TOOL_INPUT = b"ratk-openrouter-tool-check-2026-08-21"
 EXPECTED_DIGEST = hashlib.sha256(_TOOL_INPUT).hexdigest()[:16]
@@ -148,7 +174,10 @@ async def _check_model(engine, model: str, key: str, harness: str = "codex") -> 
             session.run(
                 TASK,
                 secrets={"OPENROUTER_API_KEY": key},
-                config=TurnConfig(model=model),
+                config=TurnConfig(
+                    model=model,
+                    openrouter_provider=_provider_for(model),
+                ),
             ),
         )
         if final_raw.get("subtype") != "error_no_final_text" or attempt == 2:
@@ -173,11 +202,20 @@ async def _check_model(engine, model: str, key: str, harness: str = "codex") -> 
         for request in requests
         if isinstance(request.get("cost_usd"), (int, float))
     ]
+    requested_providers = [request.get("requested_provider") for request in requests]
+    provider_matches = [request.get("provider_matches_request") for request in requests]
     bare_model = model.removeprefix("openrouter/")
     check(
         f"{label}: upstream provider reported",
         bool(requests) and all(providers),
         f"providers={providers}",
+    )
+    check(
+        f"{label}: requested provider honored",
+        bool(requested_providers)
+        and all(provider == _provider_for(model) for provider in requested_providers)
+        and all(match is True for match in provider_matches),
+        f"requested={requested_providers} providers={providers} matches={provider_matches}",
     )
     check(
         f"{label}: OpenRouter reports the requested model",
@@ -219,7 +257,11 @@ async def _check_structured_output(engine, model: str, key: str, harness: str) -
         session.run(
             'Run `python3 -c "print(6 * 7)"`. Return the number as `answer` and a one-word `note`.',
             secrets={"OPENROUTER_API_KEY": key},
-            config=TurnConfig(model=model, output_schema=SCHEMA),
+            config=TurnConfig(
+                model=model,
+                output_schema=SCHEMA,
+                openrouter_provider=_schema_provider(model, harness),
+            ),
         ),
     )
     out = r.structured_output
@@ -231,7 +273,13 @@ async def _check_structured_output(engine, model: str, key: str, harness: str) -
 
 
 async def _check_resume(engine, key: str, harness: str):
-    session = engine.start_session(config=SessionConfig(harness=harness, model=RESUME_MODEL))
+    session = engine.start_session(
+        config=SessionConfig(
+            harness=harness,
+            model=RESUME_MODEL,
+            openrouter_provider=_provider_for(RESUME_MODEL),
+        )
+    )
     secrets = {"OPENROUTER_API_KEY": key}
     await _drive(
         f"resume-1 [{harness}]",
@@ -252,22 +300,6 @@ async def _check_resume(engine, key: str, harness: str):
     return session, final_raw
 
 
-async def _check_preset(engine, key: str, harness: str) -> None:
-    """A missing preset must reach OpenRouter and return its preset error."""
-    label = f"@preset plumbing [{harness}]"
-    session = engine.start_session(config=SessionConfig(harness=harness))
-    run = session.run(
-        "Reply with only: ok",
-        secrets={"OPENROUTER_API_KEY": key},
-        config=TurnConfig(model="openrouter/@preset/ratk-does-not-exist"),
-    )
-    _, _, _, _, observations = await _drive(label, run)
-    text = " ".join(observations["summaries"]).lower()
-    check(f"{label}: error came from OpenRouter", "preset" in text, text[:100])
-    check(f"{label}: unknown cost reported", bool(observations["cost_unknown"]))
-    check(f"{label}: no invented event cost", observations["final_cost"] is None)
-
-
 async def _check_budget(engine, key: str, harness: str) -> None:
     """A tiny cap must use OpenRouter's charge and stop with the budget reason."""
     label = f"exact-cost budget [{harness}]"
@@ -276,6 +308,7 @@ async def _check_budget(engine, key: str, harness: str) -> None:
         model=BAKED_MODEL,
         max_turns=2,
         max_budget_usd=0.000001,
+        openrouter_provider=_provider_for(BAKED_MODEL),
     )
     run = session.run(
         "Reply with only: ok",
@@ -297,35 +330,6 @@ async def _check_budget(engine, key: str, harness: str) -> None:
         f"{label}: OpenRouter is the price source",
         final_raw.get("price_source") == "openrouter" and bool(observations["openrouter_requests"]),
         f"source={final_raw.get('price_source')}",
-    )
-
-
-async def _check_pin(
-    engine,
-    key: str,
-    harness: str,
-    model: str,
-    expected_provider: str,
-) -> None:
-    """Run a caller-owned preset and verify the provider reported remotely."""
-    label = f"preset provider [{harness}]"
-    session = engine.start_session(config=SessionConfig(harness=harness))
-    result, _, _, _, observations = await _drive(
-        label,
-        session.run(
-            TASK,
-            secrets={"OPENROUTER_API_KEY": key},
-            config=TurnConfig(model=model),
-        ),
-    )
-    providers = [request.get("provider") for request in observations["openrouter_requests"]]
-    wanted = expected_provider.casefold()
-    check(
-        f"{label}: selected provider honored",
-        not result.is_error
-        and bool(providers)
-        and all((provider or "").casefold() == wanted for provider in providers),
-        f"expected={expected_provider!r} providers={providers!r}",
     )
 
 
@@ -441,13 +445,6 @@ async def main() -> int:
     if not key:
         print("OPENROUTER_API_KEY is not set — nothing to probe.", file=sys.stderr)
         return 2
-    if bool(PINNED_MODEL) != bool(EXPECTED_PROVIDER):
-        print(
-            "Set OPENROUTER_PRESET_MODEL and OPENROUTER_EXPECTED_PROVIDER together.",
-            file=sys.stderr,
-        )
-        return 2
-
     credentials = None
     if sa := os.environ.get("IMPERSONATE_SA"):
         from google.auth import impersonated_credentials, default as adc
@@ -496,10 +493,7 @@ async def main() -> int:
                 for model in MODELS:
                     await _check_structured_output(engine, model, key, h)
                 resumes[h] = await _check_resume(engine, key, h)
-                await _check_preset(engine, key, h)
                 await _check_budget(engine, key, h)
-                if PINNED_MODEL and EXPECTED_PROVIDER:
-                    await _check_pin(engine, key, h, PINNED_MODEL, EXPECTED_PROVIDER)
             visibility_targets = [(*resumes[h], h) for h in HARNESSES]
         else:
             model_checks = [
@@ -513,20 +507,12 @@ async def main() -> int:
                 for harness in HARNESSES
             ]
             resume_checks = [_check_resume(engine, key, harness) for harness in HARNESSES]
-            preset_checks = [_check_preset(engine, key, harness) for harness in HARNESSES]
             budget_checks = [_check_budget(engine, key, harness) for harness in HARNESSES]
-            pin_checks = [
-                _check_pin(engine, key, harness, PINNED_MODEL, EXPECTED_PROVIDER)
-                for harness in HARNESSES
-                if PINNED_MODEL and EXPECTED_PROVIDER
-            ]
             results = await asyncio.gather(
                 *model_checks,
                 *schema_checks,
                 *resume_checks,
-                *preset_checks,
                 *budget_checks,
-                *pin_checks,
                 return_exceptions=True,
             )
             for r in results:

@@ -27,8 +27,8 @@ without re-learning the platform's sharp edges.
   the **Claude Code (Agent SDK)** binding (default) and the **Codex (openai-codex SDK)** binding
   (`spec.harness="codex"`). Both can run `openrouter/` model ids: Claude Code uses OpenRouter's
   Anthropic-compatible endpoint, and Codex uses `model_providers.*` config overrides. Providers beyond
-  OpenRouter are a later step. The prefix keeps model selection per turn and preserves compatibility
-  with existing engine configs.
+  OpenRouter are a later step. `openrouter_provider` can select one OpenRouter provider per turn.
+  The prefix keeps model selection per turn and preserves compatibility with existing engine configs.
 - Non-GCP backends. We design the **ports** (storage, events, dispatch, secrets) as protocols, but ship
   GCP adapters (GCS, Cloud Logging, Pub/Sub, Secret Manager) plus local/in-memory adapters for dev.
 - Replacing Scrapy-Cloud / monitoring logic — that stays in `gemini-agent-runtime` behind the seam.

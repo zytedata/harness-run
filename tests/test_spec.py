@@ -113,3 +113,18 @@ def test_agentspec_interactive_round_trip() -> None:
     explicit = AgentSpec(name="a", model="m", checkpoint=True, interactive=False)
     restored = AgentSpec.from_dict(explicit.to_dict())
     assert restored.interactive is False and restored.checkpoint is True
+
+
+def test_openrouter_provider_round_trip_and_validation() -> None:
+    spec = AgentSpec(
+        name="a",
+        model="openrouter/moonshotai/kimi-k3",
+        openrouter_provider="moonshotai",
+    )
+    assert AgentSpec.from_dict(spec.to_dict()) == spec
+    assert spec.to_dict()["openrouter_provider"] == "moonshotai"
+
+    with pytest.raises(ValueError, match="requires an openrouter/ model"):
+        AgentSpec(name="a", model="claude-sonnet-4-6", openrouter_provider="moonshotai")
+    with pytest.raises(ValueError, match="non-empty"):
+        AgentSpec(name="a", model="openrouter/moonshotai/kimi-k3", openrouter_provider="")

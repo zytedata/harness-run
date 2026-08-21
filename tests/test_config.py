@@ -97,6 +97,31 @@ def test_max_buffer_size_is_tunable_per_session_and_per_turn():
         apply_turn_config(spec, TurnConfig(max_buffer_size=0))
 
 
+def test_openrouter_provider_can_be_set_and_cleared_per_turn():
+    spec = _spec(model="openrouter/moonshotai/kimi-k3")
+    session_eff = apply_session_config(
+        spec, SessionConfig(openrouter_provider="moonshotai")
+    )
+    assert session_eff.openrouter_provider == "moonshotai"
+
+    turn_eff = apply_turn_config(session_eff, TurnConfig(openrouter_provider="fireworks"))
+    assert turn_eff.openrouter_provider == "fireworks"
+    assert TurnConfig.from_dict(TurnConfig(openrouter_provider="fireworks").to_dict()) == (
+        TurnConfig(openrouter_provider="fireworks")
+    )
+
+    unpinned = apply_turn_config(session_eff, TurnConfig(openrouter_provider=None))
+    assert unpinned.openrouter_provider is None
+    openai = apply_turn_config(
+        session_eff,
+        TurnConfig(model="gpt-5.6-luna", openrouter_provider=None),
+    )
+    assert openai.model == "gpt-5.6-luna"
+
+    with pytest.raises(ValueError, match="requires an openrouter/ model"):
+        apply_turn_config(session_eff, TurnConfig(model="gpt-5.6-luna"))
+
+
 # ---------------------------------------------------------------- serialization
 
 

@@ -476,20 +476,10 @@ class CodexHarness:
             # outright (400 before the first token), so it is off for these turns.
             'web_search="disabled"',
         ]
-        window = _OPENROUTER_CONTEXT_WINDOW.get(pricing.model_without_preset(model))
+        window = _OPENROUTER_CONTEXT_WINDOW.get(model)
         if window is not None:
             overrides.append(f"model_context_window={window}")
         return overrides
-
-    @staticmethod
-    def _is_preset(model: str) -> bool:
-        """An ``openrouter/@preset/<slug>`` id: routing/params defined in the account.
-
-        The Codex CLI does not expose OpenRouter's provider request field. A preset carries
-        those rules through the model id. A direct preset can also choose the model, so its
-        context size is unknown before the first response.
-        """
-        return model.removeprefix(_OPENROUTER_PREFIX).startswith("@preset/")
 
     async def _resolved_routing(self, thread: Any) -> dict[str, Any]:
         """Report the provider that the Codex app-server bound to this thread.
@@ -565,12 +555,6 @@ class CodexHarness:
         mcp_overrides, mcp_env = self._mcp_overrides(spec, ctx)
         model = spec.model or ""
         openrouter = model.startswith(_OPENROUTER_PREFIX)
-        if openrouter and self._is_preset(model):
-            warnings.append(
-                "OpenRouter preset selected: a direct @preset id can choose the model, so "
-                "Codex uses generic model metadata. OpenRouter still reports the selected "
-                "model, provider, and exact cost for each request."
-            )
         # The agent's shell env: Codex filters *KEY*/*SECRET*/*TOKEN*-named vars from the
         # shell by default — the opposite of the toolkit's contract (the caller's own
         # secrets ARE for the agent). Lift the default excludes, but keep the ones the
@@ -783,7 +767,12 @@ class CodexHarness:
             api_key = ctx.secrets.get(_OPENROUTER_KEY_ENV) or os.environ.get(_OPENROUTER_KEY_ENV)
             if api_key:
                 model = (spec.model or "").removeprefix(_OPENROUTER_PREFIX)
-                proxy = OpenRouterProxy(api_key, spec.max_budget_usd, model).start()
+                proxy = OpenRouterProxy(
+                    api_key,
+                    spec.max_budget_usd,
+                    model,
+                    provider=spec.openrouter_provider,
+                ).start()
         try:
             async for event in self._run(spec, ctx, proxy):
                 yield event

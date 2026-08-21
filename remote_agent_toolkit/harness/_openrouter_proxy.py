@@ -40,6 +40,7 @@ class OpenRouterRequest:
     """Metadata retained for one OpenRouter HTTP response."""
 
     requested_model: str | None
+    requested_provider: str | None
     provider: str | None
     provider_model: str | None
     region: str | None
@@ -59,7 +60,11 @@ class OpenRouterRequest:
             raw={
                 "event": "openrouter_request",
                 "requested_model": self.requested_model,
+                "requested_provider": self.requested_provider,
                 "provider": self.provider,
+                "provider_matches_request": _provider_matches_request(
+                    self.requested_provider, self.provider
+                ),
                 "provider_model": self.provider_model,
                 "region": self.region,
                 "attempt": self.attempt,
@@ -99,6 +104,7 @@ def _capture_request(
     body: bytes,
     content_type: str,
     requested_model: str | None,
+    requested_provider: str | None,
     status: int,
 ) -> OpenRouterRequest | None:
     """Extract cost and selected endpoint from one buffered response."""
@@ -140,6 +146,7 @@ def _capture_request(
         return None
     return OpenRouterRequest(
         requested_model=requested_model,
+        requested_provider=requested_provider,
         provider=str(provider) if provider is not None else None,
         provider_model=str(provider_model) if provider_model is not None else None,
         region=metadata.get("region"),
@@ -163,6 +170,31 @@ def _model_matches(expected: str | None, requested: Any) -> bool:
     return expected is None or (isinstance(requested, str) and requested == expected)
 
 
+def _provider_matches_request(requested: str | None, selected: str | None) -> bool | None:
+    """Compare an OpenRouter provider id with the display name in response metadata."""
+    if requested is None or selected is None:
+        return None
+
+    def normalize(value: str) -> str:
+        return "".join(char for char in value.casefold() if char.isalnum())
+
+    return normalize(requested) == normalize(selected)
+
+
+def _request_with_provider(body: bytes | None, provider: str | None) -> bytes | None:
+    """Add a strict provider choice to an OpenRouter JSON request body."""
+    if body is None or provider is None:
+        return body
+    try:
+        value = json.loads(body)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("OpenRouter provider selection requires a JSON request body") from exc
+    if not isinstance(value, dict):
+        raise ValueError("OpenRouter provider selection requires a JSON object request body")
+    value["provider"] = {"only": [provider], "allow_fallbacks": False}
+    return json.dumps(value, separators=(",", ":")).encode()
+
+
 class OpenRouterProxy:
     """Threaded localhost relay with a random child-facing token."""
 
@@ -171,10 +203,12 @@ class OpenRouterProxy:
         api_key: str,
         max_budget_usd: float | None = None,
         expected_model: str | None = None,
+        provider: str | None = None,
     ) -> None:
         self._api_key = api_key
         self._max_budget_usd = max_budget_usd
         self._expected_model = expected_model
+        self._provider = provider
         self.client_token = secrets.token_urlsafe(32)
         self._requests: list[OpenRouterRequest] = []
         self._drained = 0
@@ -290,6 +324,11 @@ class OpenRouterProxy:
                         {"error": {"message": "model does not match this relay run"}},
                     )
                     return
+                try:
+                    request_body = _request_with_provider(request_body, owner._provider)
+                except ValueError as exc:
+                    self._send_json(400, {"error": {"message": str(exc)}})
+                    return
                 headers = {
                     key: value
                     for key, value in self.headers.items()
@@ -320,7 +359,11 @@ class OpenRouterProxy:
                         self.wfile.write(chunk)
                         self.wfile.flush()
                     found = _capture_request(
-                        bytes(captured), content_type, requested_model, response.status
+                        bytes(captured),
+                        content_type,
+                        requested_model,
+                        owner._provider,
+                        response.status,
                     )
                     if found is not None:
                         owner._record(found)

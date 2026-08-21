@@ -105,20 +105,6 @@ def clear_cache() -> None:
         _litellm_attempted = False
 
 
-def model_without_preset(model: str) -> str:
-    """Return the explicit model part of ``model@preset/slug``.
-
-    A direct ``@preset/slug`` has no explicit model and stays unchanged.
-    """
-    prefix = "openrouter/"
-    if not model.startswith(prefix):
-        return model
-    bare = model[len(prefix) :]
-    if bare.startswith("@preset/") or "@preset/" not in bare:
-        return model
-    return prefix + bare.split("@preset/", 1)[0].rstrip("@")
-
-
 def model_price(model: str) -> ModelPrice | None:
     """Resolve ``model`` to per-token USD prices, or ``None`` if unknown everywhere.
 
@@ -127,7 +113,6 @@ def model_price(model: str) -> ModelPrice | None:
     that is also LiteLLM's key. The first call may block for the fetch timeout; callers
     on an event loop should run it in a worker thread.
     """
-    model = model_without_preset(model)
     data = _litellm_prices()
     if data:
         for key in (model, f"openai/{model}"):

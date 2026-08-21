@@ -411,17 +411,49 @@ def test_openrouter_exact_budget_interrupts_before_another_request(tmp_path, mon
     assert events[-1].cost_usd == 0.0123
 
 
-def test_direct_openrouter_preset_warns_about_unknown_context(tmp_path, monkeypatch):
-    spec = AgentSpec(name="a", model="openrouter/@preset/example")
-    events, _ = _events_of(
-        [result_msg(result="done")],
+def test_openrouter_run_passes_provider_to_relay(tmp_path, monkeypatch):
+    from remote_agent_toolkit.harness import _openrouter_proxy
+
+    seen = []
+
+    class FakeProxy:
+        def __init__(self, *args, **kwargs):
+            seen.append((args, kwargs))
+            self.base_url = "http://127.0.0.1:1"
+            self.client_token = "local-token"
+            self.exact_cost_usd = 0.001
+            self.budget_blocked = False
+
+        def start(self):
+            return self
+
+        def close(self):
+            return None
+
+        def wait_until_idle(self, _timeout=5.0):
+            return True
+
+        def drain_events(self):
+            return []
+
+    monkeypatch.setattr(_openrouter_proxy, "OpenRouterProxy", FakeProxy)
+    spec = AgentSpec(
+        name="a",
+        model="openrouter/moonshotai/kimi-k3",
+        openrouter_provider="moonshotai",
+    )
+
+    events, client_cls = _events_of(
+        [init_msg(), result_msg(result="done")],
         tmp_path,
         monkeypatch,
         spec=spec,
-        secrets={"OPENROUTER_API_KEY": "k"},
+        secrets={"OPENROUTER_API_KEY": "real-key"},
     )
-    warning = next(event for event in events if (event.raw or {}).get("event") == "spec_warning")
-    assert "generic context metadata" in warning.summary
+
+    assert seen and seen[0][1]["provider"] == "moonshotai"
+    assert client_cls.instances[0].options.env["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:1/api"
+    assert events[-1].kind == "result"
 
 
 def _result_event(summary, segment_summaries=None):

@@ -110,13 +110,18 @@ MODELS=openrouter/z-ai/glm-5.3 make live-openrouter  # one model, both harnesses
 This paid local test runs every model on both harnesses. Each model must call a shell tool,
 return its output, produce schema-valid structured output, hide provider credentials from the
 tool, report its selected upstream, and use OpenRouter's exact cost. It also checks resume, a
-missing preset error, and a tiny budget cap on both harnesses.
+strict provider choice, and a tiny budget cap on both harnesses.
 
-To verify a real provider pin, supply a preset model and its expected provider:
+Every model request selects one known provider and disables fallbacks. Kimi uses Moonshot AI,
+GLM uses Z.AI, and both DeepSeek models use Novita because the shared account's ZDR policy
+excludes DeepSeek's own endpoint. The test fails if OpenRouter reports a different provider.
+Novita serves the DeepSeek models but does not accept Codex's `json_schema` format. The two
+DeepSeek structured-output checks on Codex therefore use OpenRouter's normal routing. All other
+checks keep the selected provider. Set `OPENROUTER_PROVIDER` to test every feature against one
+specific provider. To test one model with another provider:
 
 ```bash
-OPENROUTER_PRESET_MODEL="openrouter/moonshotai/kimi-k3@preset/kimi-firstparty" \
-OPENROUTER_EXPECTED_PROVIDER="Moonshot AI" \
+MODELS=openrouter/moonshotai/kimi-k3 OPENROUTER_PROVIDER=fireworks \
 make live-openrouter
 ```
 
@@ -136,7 +141,7 @@ OPENROUTER_API_KEY=... make live-openrouter-remote
 
 This paid remote test repeats the local checks on Gemini Agent Runtime. One engine contains both
 CLIs and serves every model through per-turn overrides. Every model runs a structured-output turn
-on both harnesses. Resume, preset errors, and budget caps also run on both harnesses.
+on both harnesses. Resume, direct provider selection, and budget caps also run on both harnesses.
 
 It also checks the remote-only surface: the worker's `effective_spec` echo names the model,
 `session.resource_samples()` returns worker CPU/RAM, `memory_peak_bytes` is stamped on the

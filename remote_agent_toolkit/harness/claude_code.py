@@ -80,7 +80,12 @@ def _openrouter_cost_unknown(model: str | None) -> AgentEvent:
     )
 
 
-def _openrouter_env(model: str, api_key: str, shell_wrapper: Path) -> dict[str, str]:
+def _openrouter_env(
+    model: str,
+    api_key: str,
+    shell_wrapper: Path,
+    base_url: str = _OPENROUTER_ANTHROPIC_BASE,
+) -> dict[str, str]:
     """Env that points the Claude CLI at OpenRouter for ``model``.
 
     ``ANTHROPIC_CUSTOM_MODEL_OPTION`` is what lets the real id through: without it the CLI
@@ -90,7 +95,7 @@ def _openrouter_env(model: str, api_key: str, shell_wrapper: Path) -> dict[str, 
     """
     bare = model[len(_OPENROUTER_PREFIX) :]
     env = {
-        "ANTHROPIC_BASE_URL": _OPENROUTER_ANTHROPIC_BASE,
+        "ANTHROPIC_BASE_URL": base_url,
         "ANTHROPIC_AUTH_TOKEN": api_key,
         "ANTHROPIC_CUSTOM_MODEL_OPTION": bare,
         "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME": bare,
@@ -104,7 +109,7 @@ def _openrouter_env(model: str, api_key: str, shell_wrapper: Path) -> dict[str, 
         "CLAUDE_CODE_USE_BEDROCK": "",
         "CLAUDE_CODE_USE_FOUNDRY": "",
     }
-    window = pricing.OPENROUTER_CONTEXT_WINDOWS.get(pricing.model_without_preset(model))
+    window = pricing.OPENROUTER_CONTEXT_WINDOWS.get(model)
     if window is not None:
         # Claude Code otherwise assumes 200k for an unknown model and compacts early.
         env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] = str(window)
@@ -308,7 +313,14 @@ class ClaudeCodeHarness:
                 servers[srv.name or "stdio"] = cfg
         return servers
 
-    def build_options(self, spec: AgentSpec, ctx: RunContext) -> Any:
+    def build_options(
+        self,
+        spec: AgentSpec,
+        ctx: RunContext,
+        *,
+        openrouter_base_url: str | None = None,
+        openrouter_client_token: str | None = None,
+    ) -> Any:
         """Build ``ClaudeAgentOptions`` from ``spec`` + runtime ``ctx``."""
         from claude_agent_sdk import ClaudeAgentOptions
 
@@ -354,7 +366,14 @@ class ClaudeCodeHarness:
             shell_wrapper = ctx.job_dir / "openrouter-shell"
             shell_wrapper.write_text(_OPENROUTER_SHELL_WRAPPER, encoding="utf-8")
             shell_wrapper.chmod(0o700)
-            env.update(_openrouter_env(model, api_key, shell_wrapper))
+            env.update(
+                _openrouter_env(
+                    model,
+                    openrouter_client_token or api_key,
+                    shell_wrapper,
+                    openrouter_base_url or _OPENROUTER_ANTHROPIC_BASE,
+                )
+            )
             # The CLI wants the provider-relative id; the prefix is the toolkit's own.
             model = model[len(_OPENROUTER_PREFIX) :]
 
@@ -425,7 +444,7 @@ class ClaudeCodeHarness:
                 event.raw["price_source"] = "openrouter"
             event.cost_usd = exact_openrouter_cost
         elif price is None and unpriced_openrouter:
-            # No price for this id (an @preset, or a model neither we nor LiteLLM know).
+            # No price for a model neither the toolkit nor LiteLLM knows.
             # The CLI's own number is not the OpenRouter cost, so report nothing rather
             # than something wrong — same contract as the codex binding.
             if event.raw is not None:
@@ -472,6 +491,30 @@ class ClaudeCodeHarness:
         return event
 
     async def run(self, spec: AgentSpec, ctx: RunContext) -> AsyncIterator[AgentEvent]:
+        """Run one Claude Code turn, adding strict OpenRouter provider selection when set."""
+        from ._openrouter_proxy import OpenRouterProxy
+
+        proxy = None
+        if (spec.model or "").startswith(_OPENROUTER_PREFIX) and spec.openrouter_provider:
+            api_key = ctx.secrets.get(_OPENROUTER_KEY_ENV) or os.environ.get(_OPENROUTER_KEY_ENV)
+            if api_key:
+                model = (spec.model or "").removeprefix(_OPENROUTER_PREFIX)
+                proxy = OpenRouterProxy(
+                    api_key,
+                    spec.max_budget_usd,
+                    model,
+                    provider=spec.openrouter_provider,
+                ).start()
+        try:
+            async for event in self._run(spec, ctx, proxy):
+                yield event
+        finally:
+            if proxy is not None:
+                proxy.close()
+
+    async def _run(
+        self, spec: AgentSpec, ctx: RunContext, proxy: Any | None
+    ) -> AsyncIterator[AgentEvent]:
         """Drive one turn over a ``ClaudeSDKClient`` stream, yielding ``AgentEvent``s.
 
         Background-task semantics are HONORED (DESIGN.md §7): when the model ends its
@@ -495,13 +538,18 @@ class ClaudeCodeHarness:
 
         from .translate import EventTranslator
 
-        options = self.build_options(spec, ctx)
+        options = self.build_options(
+            spec,
+            ctx,
+            openrouter_base_url=(f"{proxy.base_url}/api" if proxy is not None else None),
+            openrouter_client_token=(proxy.client_token if proxy is not None else None),
+        )
         # Capture the CLI's stderr to <job_dir>/stderr.log + an in-memory tail; without a
         # registered callback the SDK doesn't pipe it at all and CLI-exit failures are
         # undiagnosable by construction (the ProcessError text promises stderr details).
         stderr_log = _StderrCapture(ctx.job_dir / "stderr.log")
         options.stderr = stderr_log
-        translator = EventTranslator()
+        translator = EventTranslator(openrouter_provider=spec.openrouter_provider)
         tracker = _TaskTracker()
         finalized = False
         # Every demoted (segment-boundary) result, oldest first; the newest is also the
@@ -539,19 +587,6 @@ class ClaudeCodeHarness:
         is_openrouter = (spec.model or "").startswith(_OPENROUTER_PREFIX)
         price = await asyncio.to_thread(pricing.model_price, spec.model) if is_openrouter else None
         unpriced_openrouter = is_openrouter and price is None
-        if is_openrouter and (spec.model or "").removeprefix(_OPENROUTER_PREFIX).startswith(
-            "@preset/"
-        ):
-            yield AgentEvent(
-                kind="status",
-                summary=(
-                    "OpenRouter preset selected: a direct @preset id can choose the model, "
-                    "so Claude Code uses generic context metadata. OpenRouter still reports "
-                    "the selected model, provider, and exact cost for each request."
-                ),
-                raw={"event": "spec_warning"},
-            )
-
         client = ClaudeSDKClient(options=options)
         try:
             await client.connect()

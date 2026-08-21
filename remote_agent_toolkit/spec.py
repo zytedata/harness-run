@@ -297,6 +297,10 @@ class AgentSpec:
             nearest own: Codex maps ``max → xhigh`` (with a ``spec_warning`` status);
             Claude Code maps ``minimal``/``none`` ``→ low``. Unknown strings pass
             through to the SDK untouched.
+        openrouter_provider: OpenRouter provider id to use for every model response, such
+            as ``"moonshotai"``. The toolkit sends it in OpenRouter's request body and
+            disables provider fallbacks. Leave it as ``None`` to use OpenRouter's normal
+            routing. This setting requires an ``openrouter/`` model.
         background_task_timeout: Seconds to keep a turn open waiting for the agent's
             still-running background tasks after the model ends its turn (event-driven
             waiting: the harness holds the stream open and the CLI re-invokes the model
@@ -349,6 +353,7 @@ class AgentSpec:
     env: Mapping[str, str] | None = field(default=None)
     packages: tuple[str, ...] = ()
     harnesses: tuple[str, ...] = ()
+    openrouter_provider: str | None = None
 
     def __post_init__(self) -> None:
         # Coerce list args to frozen-hashable tuples without breaking frozen-ness.
@@ -373,6 +378,11 @@ class AgentSpec:
             object.__setattr__(self, "allowed_tools", tuple(self.allowed_tools))
         if self.disallowed_tools is not None:
             object.__setattr__(self, "disallowed_tools", tuple(self.disallowed_tools))
+        if self.openrouter_provider is not None:
+            if not self.openrouter_provider.strip():
+                raise ValueError("openrouter_provider must be a non-empty provider id")
+            if not self.model.startswith("openrouter/"):
+                raise ValueError("openrouter_provider requires an openrouter/ model")
 
     @property
     def baked_harnesses(self) -> tuple[str, ...]:
@@ -417,6 +427,8 @@ class AgentSpec:
             d["output_schema"] = _output_schema_to_dict(self.output_schema)
         if self.harnesses:
             d["harnesses"] = list(self.harnesses)
+        if self.openrouter_provider is not None:
+            d["openrouter_provider"] = self.openrouter_provider
         return d
 
     @classmethod
@@ -457,6 +469,7 @@ class AgentSpec:
             env=dict(d["env"]) if d.get("env") is not None else None,
             packages=tuple(d.get("packages", ())),
             harnesses=tuple(d.get("harnesses", ())),
+            openrouter_provider=d.get("openrouter_provider"),
         )
 
     def to_yaml(self) -> str:

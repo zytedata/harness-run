@@ -110,7 +110,7 @@ def test_system_init_becomes_status_and_other_subtypes_drop():
 
 
 def test_openrouter_stream_reports_exact_cost_and_selected_provider():
-    tr = EventTranslator()
+    tr = EventTranslator(openrouter_provider="moonshotai")
     assert (
         list(
             tr.translate(
@@ -152,5 +152,7 @@ def test_openrouter_stream_reports_exact_cost_and_selected_provider():
     assert len(events) == 1
     assert events[0].raw["event"] == "openrouter_request"
     assert events[0].raw["provider"] == "Moonshot AI"
+    assert events[0].raw["requested_provider"] == "moonshotai"
+    assert events[0].raw["provider_matches_request"] is True
     assert events[0].raw["provider_model"] == "kimi-k3"
     assert events[0].raw["cost_usd"] == 0.0123

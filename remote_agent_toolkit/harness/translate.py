@@ -68,11 +68,12 @@ class EventTranslator:
     ``tool_use``, so the id → name mapping must persist across ``translate`` calls).
     """
 
-    def __init__(self) -> None:
+    def __init__(self, openrouter_provider: str | None = None) -> None:
         self._tool_names: dict[str, str] = {}
         self._openrouter_cost_total = 0.0
         self._openrouter_request_cost: float | None = None
         self._saw_openrouter_cost = False
+        self._openrouter_provider = openrouter_provider
 
     @property
     def openrouter_cost_usd(self) -> float | None:
@@ -121,17 +122,24 @@ class EventTranslator:
                         ),
                         {},
                     )
+                    from ._openrouter_proxy import _provider_matches_request
+
+                    provider = selected.get("provider")
                     yield AgentEvent(
                         kind="status",
                         summary=(
                             "OpenRouter request: "
-                            f"provider={selected.get('provider') or 'unreported'} "
+                            f"provider={provider or 'unreported'} "
                             f"model={selected.get('model') or metadata.get('requested')}"
                         ),
                         raw={
                             "event": "openrouter_request",
                             "requested_model": metadata.get("requested"),
-                            "provider": selected.get("provider"),
+                            "requested_provider": self._openrouter_provider,
+                            "provider": provider,
+                            "provider_matches_request": _provider_matches_request(
+                                self._openrouter_provider, provider
+                            ),
                             "provider_model": selected.get("model"),
                             "region": metadata.get("region"),
                             "attempt": metadata.get("attempt"),

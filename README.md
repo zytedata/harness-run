@@ -148,7 +148,8 @@ What to know when running Codex:
 
 ### OpenRouter models (either harness)
 
-Prefix an OpenRouter model id with `openrouter/`. Both harnesses support it:
+Prefix an OpenRouter model id with `openrouter/`. Set `harness` to `"codex"` or
+`"claude-code"`. The same configuration works locally and on Gemini Agent Runtime:
 
 ```python
 spec = AgentSpec(
@@ -162,6 +163,16 @@ result = await engine.start_session().run(
 )
 ```
 
+To run the same model with Claude Code, change only the harness:
+
+```python
+claude_spec = AgentSpec(
+    name="kimi-agent",
+    model="openrouter/moonshotai/kimi-k3",
+    harness="claude-code",
+)
+```
+
 The model can change on each turn:
 
 ```python
@@ -170,14 +181,19 @@ await session.send(task, config=TurnConfig(model="openrouter/z-ai/glm-5.3"))
 
 These four models have a known context size and a fallback price. The fallback is used only
 when OpenRouter does not return the exact charge. OpenRouter may charge a different rate for
-the selected upstream provider.
+the selected provider.
 
-| Model id | Fallback USD / 1M input → output | Context | Harness note |
-| --- | --- | --- | --- |
-| `openrouter/moonshotai/kimi-k3` | 3.00 → 15.00 | ~1M | Both validated |
-| `openrouter/z-ai/glm-5.3` | 1.40 → 4.40 | ~1M | Both validated |
-| `openrouter/deepseek/deepseek-v4-flash` | 0.084 → 0.168 | ~1M | Prefer Codex; see reliability note below |
-| `openrouter/deepseek/deepseek-v4-pro` | 1.60 → 3.20 | ~1M | Prefer Codex; see reliability note below |
+| Model id | Fallback USD / 1M input → output | Context | Recommended harness | Claude Code test result |
+| --- | --- | --- | --- | --- |
+| `openrouter/moonshotai/kimi-k3` | 3.00 → 15.00 | ~1M | Either | Local and remote tests passed |
+| `openrouter/z-ai/glm-5.3` | 1.40 → 4.40 | ~1M | Either | Local and remote tests passed |
+| `openrouter/deepseek/deepseek-v4-flash` | 0.084 → 0.168 | ~1M | Codex | Some turns ended without a final answer |
+| `openrouter/deepseek/deepseek-v4-pro` | 1.60 → 3.20 | ~1M | Codex | Final remote test ended without an answer in 2/2 attempts |
+
+Both harnesses can run all four models. Use Codex for DeepSeek v4 Flash and Pro when reliable
+completion matters. During testing, both DeepSeek models sometimes finished a Claude Code turn
+without returning a final answer. The controlled Codex runs completed normally. Claude Code turns
+with this problem return `error_no_final_text`, which allows the caller to retry or switch harness.
 
 Other `openrouter/*` model ids also work. Codex uses generic context metadata for an unknown
 model. Exact cost reporting still works when OpenRouter supplies it.
@@ -255,18 +271,17 @@ Important details:
 - Codex uses `low` reasoning when the spec leaves it unset because OpenRouter's Responses endpoint
   requires reasoning.
 - `output_schema` is also written into the prompt. OpenRouter accepts the JSON schema but may leave
-  enforcement to the model.
-- DeepSeek v4 can occasionally end a Claude Code turn without a final message. Flash showed this
-  most often (about one quarter of the earlier measured turns); Pro did it on both attempts in the
-  final remote validation. Such a turn ends with `error_no_final_text`, so callers can retry or
-  select another pairing. The controlled Codex runs completed normally. The paid tests retry once
-  and report it, while keeping the check failed if the retry also has no answer.
+  enforcement to the model. The separate live structured-output test used GLM-5.3 on both
+  harnesses; the other three models did not receive their own structured-output test.
+- Reasoning events vary by model. Kimi K3 and both DeepSeek models emitted them during testing;
+  GLM-5.3 did not.
 - A plain string in `spec.system_prompt` replaces Claude Code's larger preset. This can reduce token
   use when the task does not need the preset's tool guidance.
 
-The paid local and remote tests cover all four models on both harnesses. They check tool use,
-credential removal, exact cost, budgets, structured output, resume, preset handling, provider
-reporting, and the Gemini runtime's history, resource, and trace data. See
+The paid local and remote tests run a basic turn with all four models on both harnesses. They check
+tool use, credential removal, exact cost, budgets, preset handling, and provider reporting. Separate
+GLM-5.3 checks cover structured output and resume on both harnesses. The remote test also checks the
+Gemini runtime's history, resource, and trace data. See
 `make live-openrouter` and `make live-openrouter-remote`.
 
 ## Dev: run locally, in-process

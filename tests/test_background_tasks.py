@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import asyncio
 
-from claude_agent_sdk import AssistantMessage, TextBlock
+from claude_agent_sdk import AssistantMessage, StreamEvent, TextBlock
 
 from fakes import (
     init_msg,
@@ -29,13 +29,19 @@ from remote_agent_toolkit.harness.context import RunContext
 from remote_agent_toolkit.harness.translate import EventTranslator
 
 
-def _events_of(script, tmp_path, monkeypatch, spec=None):
+def _events_of(script, tmp_path, monkeypatch, spec=None, secrets=None):
     import claude_agent_sdk
 
     client_cls = make_sdk_client(script)
     monkeypatch.setattr(claude_agent_sdk, "ClaudeSDKClient", client_cls)
     spec = spec or AgentSpec(name="a", model="m")
-    ctx = RunContext(spec=spec, prompt="go", job_dir=tmp_path / "job", session_id="sid")
+    ctx = RunContext(
+        spec=spec,
+        prompt="go",
+        job_dir=tmp_path / "job",
+        session_id="sid",
+        secrets=secrets or {},
+    )
 
     async def drive():
         return [ev async for ev in ClaudeCodeHarness().run(spec, ctx)]
@@ -352,9 +358,7 @@ def test_segment_summaries_newest_first_schema_valid_only_capped(tmp_path, monke
 def test_promoted_stash_excludes_its_own_text_from_summaries(tmp_path, monkeypatch):
     # Timeout path: the newest demoted result IS the final result; only the earlier
     # segment's text rides along as a fallback candidate.
-    spec = AgentSpec(
-        name="a", model="m", output_schema=_SCHEMA, background_task_timeout=0.01
-    )
+    spec = AgentSpec(name="a", model="m", output_schema=_SCHEMA, background_task_timeout=0.01)
     first = '{"url": "https://example.com/first"}'
     second = '{"url": "https://example.com/second"}'
     script = [
@@ -372,6 +376,52 @@ def test_promoted_stash_excludes_its_own_text_from_summaries(tmp_path, monkeypat
     final = events[-1]
     assert final.kind == "result" and final.summary == second
     assert final.raw["segment_summaries"] == [first]
+
+
+def test_openrouter_exact_budget_interrupts_before_another_request(tmp_path, monkeypatch):
+    spec = AgentSpec(
+        name="a",
+        model="openrouter/deepseek/deepseek-v4-flash",
+        max_budget_usd=0.01,
+    )
+    script = [
+        StreamEvent(
+            uuid="1",
+            session_id="s",
+            event={"type": "message_delta", "usage": {"cost": 0.0123}},
+        ),
+        StreamEvent(
+            uuid="2",
+            session_id="s",
+            event={"type": "message_stop", "openrouter_metadata": {}},
+        ),
+        result_msg(result="done"),
+    ]
+    events, client_cls = _events_of(
+        script,
+        tmp_path,
+        monkeypatch,
+        spec=spec,
+        secrets={"OPENROUTER_API_KEY": "k"},
+    )
+
+    assert client_cls.instances[0].interrupted is True
+    assert any((e.raw or {}).get("event") == "limit_interrupt" for e in events)
+    assert events[-1].raw["subtype"] == "error_budget_exceeded"
+    assert events[-1].cost_usd == 0.0123
+
+
+def test_direct_openrouter_preset_warns_about_unknown_context(tmp_path, monkeypatch):
+    spec = AgentSpec(name="a", model="openrouter/@preset/example")
+    events, _ = _events_of(
+        [result_msg(result="done")],
+        tmp_path,
+        monkeypatch,
+        spec=spec,
+        secrets={"OPENROUTER_API_KEY": "k"},
+    )
+    warning = next(event for event in events if (event.raw or {}).get("event") == "spec_warning")
+    assert "generic context metadata" in warning.summary
 
 
 def _result_event(summary, segment_summaries=None):

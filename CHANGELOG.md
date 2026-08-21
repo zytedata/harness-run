@@ -23,35 +23,18 @@ tag `vX.Y.Z`, push the commit and the tag.
 
 ### Added
 
-- **Both harnesses** can run models through **OpenRouter**: a model id prefixed
-  `openrouter/` (e.g. `openrouter/moonshotai/kimi-k3`) is routed to OpenRouter
-  instead of the OpenAI API, with auth from an `OPENROUTER_API_KEY`
-  per-invocation secret. Kimi K3, GLM-5.3 and DeepSeek v4 Flash/Pro ship with
-  baked prices, so `cost_usd` and `max_budget_usd` work for them offline; any
-  other `openrouter/*` id runs as well. The provider rides the model id rather
-  than a new spec/config field, so it stays a per-turn knob (`TurnConfig`) and
-  needs no engine redeploy beyond the usual toolkit bump. Validated live on all
-  four models on both harnesses and both runtimes. Claude Code reaches OpenRouter
-  through its Anthropic-compatible endpoint (`ANTHROPIC_BASE_URL` plus a custom
-  model-catalogue entry, without which the CLI refuses the id), and the harness
-  recomputes the run's cost, because the CLI prices these models from its own
-  catalogue and gets it badly wrong — 60x over for `deepseek-v4-flash`, which
-  would make `max_budget_usd` fire almost immediately. On a deployed engine it
-  also blanks `CLAUDE_CODE_USE_VERTEX`, which would otherwise outrank the
-  OpenRouter token. Validated live on
-  `dev/live_openrouter_probe.py` (local) and
-  `dev/live_openrouter_remote_probe.py` (Gemini Agent Runtime, which also checks
-  that the remote visibility surface — `effective_spec` echo, resource samples,
-  `memory_peak_bytes`, history, and the session's Cloud Trace root span with its
-  model and cost — carries an OpenRouter model exactly as it carries a GPT or
-  Claude one). ([#34])
-- Every Codex turn now emits a `model_routing` status event carrying the provider
-  the app-server actually bound the thread to (`resolved_model_provider`) and
-  whether it matches the request (`matches_request`) — the only real answer to
-  "did the override take effect", since everything else in the result event just
-  repeats the caller's own request. OpenRouter routing can also be pinned
-  per turn with an `openrouter/@preset/<slug>` model id (the preset owns routing;
-  the run is then unpriced, and says so). ([#34])
+- Both harnesses can run `openrouter/*` models with an `OPENROUTER_API_KEY`
+  per-invocation secret. Kimi K3, GLM-5.3, and DeepSeek v4 Flash/Pro have known
+  context sizes and fallback prices. Each OpenRouter response reports its selected
+  upstream and exact charge as an `openrouter_request` event. Results and budget
+  checks use the exact charge when available. OpenRouter presets work with direct
+  `@preset/<slug>` ids and combined `<model>@preset/<slug>` ids. Paid local and
+  Gemini Agent Runtime probes cover both harnesses. ([#34])
+- Codex emits a `model_routing` status event from the app-server's thread record.
+  Codex model calls pass through a per-run localhost relay because the app-server
+  omits OpenRouter response metadata. The relay records routing and cost fields,
+  keeps the provider key in the parent process, enforces the selected model and
+  budget, and forwards the response stream unchanged. ([#34])
 
 - Configuration now has three scopes, one type each: the `AgentSpec` baked at
   deploy, a `SessionConfig` bound once at `engine.start_session(config=…)`
@@ -153,6 +136,15 @@ tag `vX.Y.Z`, push the commit and the tag.
   `AgentSpec.max_buffer_size`, default 32 MiB, and settable per session or per turn
   like the other invocation knobs. `claude-code` only: the Codex app-server SDK
   frames its own stream and has no equivalent.
+- Claude Code turns that finish without a final assistant message now return
+  `error_no_final_text` for OpenRouter models. This has occurred intermittently with
+  DeepSeek v4 and previously looked like a successful run with placeholder text. ([#34])
+- Claude Code now passes `output_schema` to the Agent SDK as its native JSON-schema
+  output format and preserves `ResultMessage.structured_output` in the terminal event.
+  Earlier versions only parsed the final text on the client, so the model received no
+  schema constraint and SDK-provided structured data was discarded. OpenRouter turns
+   also receive the schema in their prompt because its selected model may be responsible
+   for following it. ([#34])
 - Structured output is no longer lost when a background-task notification arrives
   after the agent has already delivered its answer: the model's reply to the stale
   notification became the turn's final message, and structured parsing — which reads

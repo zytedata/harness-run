@@ -1,50 +1,16 @@
-"""Live probe — did the turn actually run the model we asked for? Both harnesses.
+"""Paid local attribution check for both harnesses.
 
-COSTS REAL MONEY (a few cents) and needs keys. Run it by hand, locally, sparingly — never
-in CI. All checks run concurrently, so a pass is a few tens of seconds.
-
-Why this exists: `result.raw["model"]` is what the caller *asked* for, so asserting on it
-proves nothing. This probe only accepts evidence that comes back from the harness or the
-provider:
-
-  * **claude-code** — the CLI's `system/init` message carries the model it resolved
-    (`raw["data"]["model"]`). Independent of our request, and checked for a Claude model
-    and for every OpenRouter model, where the same check also confirms the harness
-    replaced the CLI's own (wrong) cost figure with one computed from the real prices.
-  * **codex** — the app-server's `thread.read()` reports the thread's bound
-    `model_provider`, surfaced by the harness as a `model_routing` event. This is what
-    proves an OpenRouter override actually took effect. It reports the *provider* only:
-    the SDK's `Thread` has no settings block, so the model id is not independently
-    confirmable on this path — hence the canary below.
-  * **OpenRouter, checked separately** — the chat wire returns both `model` and `provider`
-    in the body, so one cheap request confirms the account really serves the id we name,
-    and which upstream served it. The Responses wire the codex harness uses returns
-    neither, which is why this extra request exists.
-
-One limit worth stating plainly: on the codex/OpenRouter path there is **no way to see the
-upstream provider for the agent's own turn**. The two checks get close — the thread is bound
-to the openrouter provider, and the account does serve that model id — but neither names the
-upstream that answered a given turn. Pin the routing if you need that — see the README.
-
-Configure via env:
-  OPENROUTER_API_KEY   required for the OpenRouter checks
-  OPENAI_API_KEY       optional — enables the codex+OpenAI check
-  ANTHROPIC_API_KEY    optional — enables the claude-code check (or a logged-in claude CLI)
-  CLAUDE_MODEL         default claude-haiku-4-5
-  SERIAL=1             run checks one at a time
-
-Run:
-  make live-attribution
+Claude Code must report its resolved model. Codex must report its bound provider. Every
+OpenRouter response must report the selected upstream and exact cost. Checks run concurrently
+unless ``SERIAL=1``. Run by hand with ``make live-attribution``; never run this in CI.
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
+import math
 import os
 import sys
-import urllib.error
-import urllib.request
 
 from remote_agent_toolkit import AgentSpec, local
 
@@ -82,6 +48,10 @@ def _init_model(events) -> str | None:
     return ((init or {}).get("data") or {}).get("model")
 
 
+def _openrouter_requests(events) -> list[dict]:
+    return [e.raw for e in events if (e.raw or {}).get("event") == "openrouter_request"]
+
+
 async def check_claude(key: str | None) -> None:
     """The claude CLI reports the model it resolved in its init message."""
     spec = AgentSpec(name="attr-claude", model=CLAUDE_MODEL, max_turns=4, max_budget_usd=0.20)
@@ -97,10 +67,8 @@ async def check_claude(key: str | None) -> None:
 async def check_claude_openrouter(model: str, key: str) -> None:
     """claude-code reaching OpenRouter: the CLI must name the model we asked for.
 
-    Also checks the cost the toolkit reports. The CLI prices these models from its own
-    catalogue and gets it wrong (60x over for deepseek-v4-flash), so the harness recomputes
-    from the reported tokens. A `cli_reported_cost_usd` in the result raw is that original
-    figure, kept for comparison.
+    Also checks that OpenRouter's exact cost replaces the CLI estimate. The original value
+    remains available as ``cli_reported_cost_usd``.
     """
     bare = model.removeprefix("openrouter/")
     spec = AgentSpec(name="attr-cc-or", model=model, max_turns=4, max_budget_usd=0.50)
@@ -114,10 +82,27 @@ async def check_claude_openrouter(model: str, key: str) -> None:
     final = next((e for e in reversed(events) if e.kind == "result"), None)
     raw = (final.raw or {}) if final else {}
     cli = raw.get("cli_reported_cost_usd")
+    requests = _openrouter_requests(events)
+    providers = [request.get("provider") for request in requests]
+    request_costs = [
+        float(request["cost_usd"])
+        for request in requests
+        if isinstance(request.get("cost_usd"), (int, float))
+    ]
     check(
-        f"claude-code+{bare}: cost recomputed, not the CLI's figure",
-        isinstance(result.cost_usd, float) and cli is not None and result.cost_usd != cli,
-        f"ours=${result.cost_usd or 0:.6f} cli=${cli or 0:.6f} source={raw.get('price_source')}",
+        f"claude-code+{bare}: OpenRouter reported the upstream for each request",
+        bool(requests) and all(providers),
+        f"providers={providers}",
+    )
+    check(
+        f"claude-code+{bare}: result equals OpenRouter's exact charges",
+        isinstance(result.cost_usd, float)
+        and cli is not None
+        and bool(request_costs)
+        and math.isclose(result.cost_usd, sum(request_costs), rel_tol=1e-9, abs_tol=1e-12)
+        and raw.get("price_source") == "openrouter",
+        f"result=${result.cost_usd or 0:.6f} requests={request_costs} "
+        f"cli=${cli or 0:.6f} source={raw.get('price_source')}",
     )
 
 
@@ -127,9 +112,7 @@ async def check_codex_openai(key: str) -> None:
         name="attr-codex", model=OPENAI_MODEL, harness="codex", max_turns=4, max_budget_usd=0.20
     )
     events, result = await _events(spec, {"OPENAI_API_KEY": key})
-    routing = next(
-        (e.raw for e in events if (e.raw or {}).get("event") == "model_routing"), None
-    )
+    routing = next((e.raw for e in events if (e.raw or {}).get("event") == "model_routing"), None)
     if routing is None:
         skip("codex+OpenAI: thread routing reported", "no model_routing event (read() unsupported)")
         return
@@ -144,13 +127,9 @@ async def check_codex_openai(key: str) -> None:
 async def check_codex_openrouter(model: str, key: str) -> None:
     """The override must actually bind the thread to the openrouter provider."""
     label = model.removeprefix("openrouter/")
-    spec = AgentSpec(
-        name="attr-or", model=model, harness="codex", max_turns=4, max_budget_usd=0.30
-    )
+    spec = AgentSpec(name="attr-or", model=model, harness="codex", max_turns=4, max_budget_usd=0.30)
     events, result = await _events(spec, {"OPENROUTER_API_KEY": key})
-    routing = next(
-        (e.raw for e in events if (e.raw or {}).get("event") == "model_routing"), None
-    )
+    routing = next((e.raw for e in events if (e.raw or {}).get("event") == "model_routing"), None)
     if routing is None:
         skip(f"codex+{label}: thread routing reported", "no model_routing event")
     else:
@@ -160,42 +139,28 @@ async def check_codex_openrouter(model: str, key: str) -> None:
             f"provider={routing.get('resolved_model_provider')!r} "
             f"model={routing.get('resolved_model')!r}",
         )
-    # The model the harness handed Codex must be the provider-relative id, prefix stripped.
+    requests = _openrouter_requests(events)
+    providers = [request.get("provider") for request in requests]
+    request_costs = [
+        float(request["cost_usd"])
+        for request in requests
+        if isinstance(request.get("cost_usd"), (int, float))
+    ]
     check(
-        f"codex+{label}: turn completed and priced",
-        not result.is_error and isinstance(result.cost_usd, float),
-        f"cost={result.cost_usd!r}",
+        f"codex+{label}: OpenRouter reported the upstream for each request",
+        bool(requests) and all(providers),
+        f"providers={providers}",
     )
-
-
-def _canary(model_id: str, key: str) -> tuple[str | None, str | None, str | None]:
-    """Chat-wire canary: returns (served_model, provider, error). Costs a fraction of a cent."""
-    body = {
-        "model": model_id,
-        "max_tokens": 8,
-        "messages": [{"role": "user", "content": "ok"}],
-    }
-    req = urllib.request.Request(
-        "https://openrouter.ai/api/v1/chat/completions", data=json.dumps(body).encode()
-    )
-    req.add_header("Authorization", f"Bearer {key}")
-    req.add_header("Content-Type", "application/json")
-    try:
-        with urllib.request.urlopen(req, timeout=120) as r:  # noqa: S310 — fixed host
-            d = json.loads(r.read())
-        return d.get("model"), d.get("provider"), None
-    except urllib.error.HTTPError as e:
-        return None, None, e.read().decode()[:160]
-
-
-async def check_openrouter_canary(model: str, key: str) -> None:
-    """A separate request on the chat wire, which does name the model and the upstream."""
-    bare = model.removeprefix("openrouter/")
-    served, provider, err = await asyncio.to_thread(_canary, bare, key)
+    final = next((e for e in reversed(events) if e.kind == "result"), None)
     check(
-        f"openrouter canary: {bare} is served as itself",
-        served == bare,
-        f"served model={served!r} by provider={provider!r}" + (f" err={err}" if err else ""),
+        f"codex+{label}: turn completed with exact OpenRouter cost",
+        not result.is_error
+        and isinstance(result.cost_usd, float)
+        and bool(request_costs)
+        and math.isclose(result.cost_usd, sum(request_costs), rel_tol=1e-9, abs_tol=1e-12)
+        and (final.raw or {}).get("price_source") == "openrouter",
+        f"cost={result.cost_usd!r} requests={request_costs} "
+        f"source={(final.raw or {}).get('price_source') if final else None}",
     )
 
 
@@ -217,7 +182,6 @@ async def main() -> int:
         for m in OR_MODELS:
             tasks.append((f"codex+{m}", check_codex_openrouter(m, ork)))
             tasks.append((f"claude-code+{m}", check_claude_openrouter(m, ork)))
-            tasks.append((f"canary {m}", check_openrouter_canary(m, ork)))
     else:
         skip("openrouter checks", "OPENROUTER_API_KEY unset")
 

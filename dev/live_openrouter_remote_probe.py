@@ -1,64 +1,24 @@
-"""Live probe — the OpenRouter models on the **Gemini Agent Runtime**, with the remote-only
-visibility surface checked alongside them.
+"""Paid Gemini Agent Runtime check for OpenRouter on both harnesses.
 
-COSTS REAL MONEY (~$0.30: one engine build plus ~$0.08 of turns). The checks run
-**concurrently** (the engine is deployed with room for them), so the run is dominated by the
-build, not the turns: measured **26 checks in ~113 s** against a build that took 300 s, 300 s
-and 601 s across three runs. Budget **~8-15 min** end to end and give it a generous timeout;
-the serial version of the same checks took ~35-40 min. `SERIAL=1` restores lockstep for
-debugging one check. Give it a generous timeout
-either way; see the teardown note below for what happens if you don't. Run it by hand,
-locally, sparingly — never in CI. The companion
-`dev/live_openrouter_probe.py` covers the same models on the local runtime and is the
-cheaper first check; this one exists for what only the remote path has.
+One throwaway engine contains both CLIs. It repeats the local model, resume, schema, preset,
+budget, provider, cost, tool, and credential checks. It also checks effective specs, resource
+samples, memory peak, history, and Cloud Trace.
 
-Why a separate remote probe: on the local runtime the harness runs in-process, so a turn
-proves the provider wiring and nothing else. Remotely the same turn also has to survive
-being packaged into an engine, unpickled by a worker, handed its key through the GCS
-secrets handoff, and streamed back over GCS — and the platform's own visibility
-(`effective_spec`, resource samples, traces) has to carry the OpenRouter model the same
-way it carries a GPT or Claude one. None of that is exercised locally.
+Run by hand with ``OPENROUTER_API_KEY=... make live-openrouter-remote``. Never run this in
+CI. A run usually takes 8-15 minutes and spends real money. The engine is deleted after the
+checks and on SIGTERM/SIGINT. ``KEEP=1`` leaves it running for debugging.
 
-**One engine, four models.** `model` is a per-turn knob, so a single deployment runs all
-four via `TurnConfig(model=...)` — one build instead of four, and it demonstrates the claim
-that a session can move between models without a redeploy.
-
-What it checks, per model (a turn each on one engine):
-  * terminal result with `is_error=False`, the right answer, a `tool_use` event
-  * `cost_usd` is a real number (so `max_budget_usd` is enforceable remotely too)
-  * the worker's `effective_spec` echo names the model we asked for — the ground-truth
-    record that the per-turn override reached the worker, not just the client
-
-Then, once per run:
-  * **structured output** on GLM-5.3, the model that ignores OpenRouter's unenforced
-    json_schema format (see `harness/codex.py`)
-  * **resume**: `run()` then `send()` on one session must remember a token — the workspace
-    snapshot and the Codex rollout both round-trip through the blob store
-  * **remote-only visibility**, compared against what a GPT/Claude turn gives:
-      - `session.resource_samples()` returns worker CPU/RAM rows
-      - `memory_peak_bytes` is stamped into the terminal result
-      - `session.history()` replays the turn's events after the fact
-      - Cloud Trace's root span for THAT session names the OpenRouter model and
-        carries its cost (the same span contract a GPT/Claude turn gets)
-
-Pass criteria: every check passes. The engine is deleted in `finally`; a failed teardown
-prints loudly, because an engine bills while it exists.
-
-Configure via env:
-  OPENROUTER_API_KEY   required
-  PROJECT, LOCATION    default my-project / us-central1
-  SUFFIX               engine-name suffix (defaults to your username)
-  IMPERSONATE_SA       optional service account to impersonate
-  KEEP=1               skip teardown (debugging — you then own the cleanup)
-
-Run:
-  OPENROUTER_API_KEY=... make live-openrouter-remote
+Set ``PROJECT``, ``LOCATION``, ``SUFFIX``, ``IMPERSONATE_SA``, ``MAX_INSTANCES``, or
+``SERIAL=1`` as needed. To verify a real preset, also set ``OPENROUTER_PRESET_MODEL`` and
+``OPENROUTER_EXPECTED_PROVIDER``.
 """
 
 from __future__ import annotations
 
 import asyncio
 import getpass
+import hashlib
+import math
 import os
 import re
 import signal
@@ -66,7 +26,7 @@ import sys
 import time
 import traceback
 
-from remote_agent_toolkit import AgentSpec, SessionConfig, TurnConfig, gemini
+from remote_agent_toolkit import AgentSpec, SessionConfig, StopReason, TurnConfig, gemini
 
 PROJECT = os.environ.get("PROJECT", "my-project")
 LOCATION = os.environ.get("LOCATION", "us-central1")
@@ -87,6 +47,7 @@ MODELS = [
 # The engine is baked with the cheapest of them; every turn overrides the model anyway.
 BAKED_MODEL = "openrouter/deepseek/deepseek-v4-flash"
 SCHEMA_MODEL = "openrouter/z-ai/glm-5.3"  # ignores the unenforced json_schema format
+RESUME_MODEL = "openrouter/z-ai/glm-5.3"
 TOKEN = "BANANA-77"
 # Room for the concurrent checks; the default of 1 would serialize them.
 MAX_INSTANCES = int(os.environ.get("MAX_INSTANCES", "8"))
@@ -94,8 +55,21 @@ MAX_INSTANCES = int(os.environ.get("MAX_INSTANCES", "8"))
 # bakes CLAUDE_CODE_USE_VERTEX, which outranks the OpenRouter token, so this is where the
 # harness blanking that switch is proven on real infrastructure.
 HARNESSES = ["codex", "claude-code"]
+PINNED_MODEL = os.environ.get("OPENROUTER_PRESET_MODEL")
+EXPECTED_PROVIDER = os.environ.get("OPENROUTER_EXPECTED_PROVIDER")
 
-TASK = 'Run `python3 -c "print(6 * 7)"` in the shell and reply with just the number it prints.'
+_TOOL_INPUT = b"ratk-openrouter-tool-check-2026-08-21"
+EXPECTED_DIGEST = hashlib.sha256(_TOOL_INPUT).hexdigest()[:16]
+EXPECTED = EXPECTED_DIGEST + ":or0:rt0:aa0:ak0"
+TASK = (
+    "Run this exact command in the shell and reply with only what it prints: "
+    '`python3 -c "import hashlib, os; '
+    "h=hashlib.sha256(b'ratk-openrouter-tool-check-2026-08-21').hexdigest()[:16]; "
+    "s=':or%d:rt%d:aa%d:ak%d' % tuple(int(bool(os.environ.get(k))) for k in "
+    "('OPENROUTER_API_KEY','RATK_OPENROUTER_PROXY_TOKEN',"
+    "'ANTHROPIC_AUTH_TOKEN','ANTHROPIC_API_KEY')); "
+    'print(h+s)"`'
+)
 SCHEMA = {
     "type": "object",
     "properties": {"answer": {"type": "integer"}, "note": {"type": "string"}},
@@ -121,21 +95,39 @@ def skip(label: str, note: str) -> None:
 
 
 async def _drive(label: str, run):
-    """Stream one turn; return (result, kinds, effective_spec echoes, terminal event raw).
+    """Stream one turn and retain the reporting fields checked by this probe.
 
     The terminal event's ``raw`` is returned because the resource enrichment
     (``memory_peak_bytes`` and friends) is stamped there, not onto ``RunResult``.
     """
     kinds, echoes, final_raw = [], [], {}
+    observations = {
+        "openrouter_requests": [],
+        "cost_unknown": False,
+        "final_cost": None,
+        "model_routing": [],
+        "init_models": [],
+        "summaries": [],
+    }
     t0 = time.time()
     async for ev in run:
         kinds.append(ev.kind)
         raw = ev.raw or {}
         if raw.get("event") == "effective_spec":
             echoes.append(raw)
+        if raw.get("event") == "openrouter_request":
+            observations["openrouter_requests"].append(raw)
+        if raw.get("event") == "model_routing":
+            observations["model_routing"].append(raw)
+        if raw.get("subtype") == "init":
+            observations["init_models"].append((raw.get("data") or {}).get("model"))
+        if raw.get("event") == "cost_unknown":
+            observations["cost_unknown"] = True
         if ev.kind == "result":
             final_raw = raw
+            observations["final_cost"] = ev.cost_usd
         summary = " ".join((ev.summary or "").split())[:80]
+        observations["summaries"].append(ev.summary or "")
         print(f"[{label}] {time.strftime('%H:%M:%S')} {ev.kind:11} {summary}", flush=True)
     r = run.result
     print(
@@ -143,32 +135,87 @@ async def _drive(label: str, run):
         f"cost=${r.cost_usd or 0:.4f} error={r.is_error}",
         flush=True,
     )
-    return r, kinds, echoes, final_raw
+    return r, kinds, echoes, final_raw, observations
 
 
 async def _check_model(engine, model: str, key: str, harness: str = "codex") -> None:
     """One turn on `model` under `harness`, via a per-turn model override."""
     label = f"{model.removeprefix('openrouter/')} [{harness}]"
-    session = engine.start_session(config=SessionConfig(harness=harness))
-    r, kinds, echoes, _ = await _drive(
-        label,
-        session.run(TASK, secrets={"OPENROUTER_API_KEY": key}, config=TurnConfig(model=model)),
-    )
+    retry_note = ""
+    for attempt in (1, 2):
+        session = engine.start_session(config=SessionConfig(harness=harness))
+        r, kinds, echoes, final_raw, observations = await _drive(
+            label,
+            session.run(
+                TASK,
+                secrets={"OPENROUTER_API_KEY": key},
+                config=TurnConfig(model=model),
+            ),
+        )
+        if final_raw.get("subtype") != "error_no_final_text" or attempt == 2:
+            break
+        retry_note = "first attempt returned no final text; retried once"
+        print(f"[{label}] {retry_note}", flush=True)
     text = " ".join((r.text or "").split())
-    check(f"{label}: turn completed", not r.is_error and bool(r.num_turns), f"text={text[:40]!r}")
-    check(f"{label}: answered 42", "42" in text)
-    # Reported, not required: a model may answer from memory instead of running the command.
-    check(f"{label}: turn produced events", bool(kinds), f"tool_use={'tool_use' in kinds}")
+    check(
+        f"{label}: turn completed",
+        not r.is_error and bool(r.num_turns),
+        f"text={text[:40]!r}" + (f"; {retry_note}" if retry_note else ""),
+    )
+    check(f"{label}: returned the command output", EXPECTED_DIGEST in text)
+    check(f"{label}: auth key absent from the tool", EXPECTED in text)
+    check(f"{label}: called a tool", "tool_use" in kinds)
     check(f"{label}: cost priced", isinstance(r.cost_usd, float), f"${r.cost_usd or 0:.4f}")
+    requests = observations["openrouter_requests"]
+    providers = [request.get("provider") for request in requests]
+    requested_models = [request.get("requested_model") for request in requests]
+    request_costs = [
+        float(request["cost_usd"])
+        for request in requests
+        if isinstance(request.get("cost_usd"), (int, float))
+    ]
+    bare_model = model.removeprefix("openrouter/")
+    check(
+        f"{label}: upstream provider reported",
+        bool(requests) and all(providers),
+        f"providers={providers}",
+    )
+    check(
+        f"{label}: OpenRouter reports the requested model",
+        bool(requested_models) and all(requested == bare_model for requested in requested_models),
+        f"requested={requested_models}",
+    )
+    check(
+        f"{label}: result equals OpenRouter's exact charges",
+        final_raw.get("price_source") == "openrouter"
+        and isinstance(r.cost_usd, float)
+        and bool(request_costs)
+        and math.isclose(r.cost_usd, sum(request_costs), rel_tol=1e-9, abs_tol=1e-12),
+        f"source={final_raw.get('price_source')} result={r.cost_usd} request_costs={request_costs}",
+    )
     # The echo is the worker's own record of the merged spec it executed.
     echoed = [e.get("spec", {}).get("model") for e in echoes]
     check(f"{label}: effective_spec echoes the model", model in echoed, f"echoed={echoed}")
+    if harness == "codex":
+        routing = observations["model_routing"]
+        check(
+            f"{label}: Codex thread bound to OpenRouter",
+            bool(routing) and routing[-1].get("matches_request") is True,
+            f"routing={routing}",
+        )
+    else:
+        init_models = observations["init_models"]
+        check(
+            f"{label}: Claude Code names the model",
+            bool(init_models) and any(bare_model in str(value) for value in init_models),
+            f"init_models={init_models}",
+        )
 
 
-async def _check_structured_output(engine, key: str) -> None:
-    label = f"{SCHEMA_MODEL.removeprefix('openrouter/')} schema"
-    session = engine.start_session()
-    r, _, _, _ = await _drive(
+async def _check_structured_output(engine, key: str, harness: str) -> None:
+    label = f"{SCHEMA_MODEL.removeprefix('openrouter/')} schema [{harness}]"
+    session = engine.start_session(config=SessionConfig(harness=harness))
+    r, _, _, _, _ = await _drive(
         label,
         session.run(
             'Run `python3 -c "print(6 * 7)"`. Return the number as `answer` and a one-word `note`.',
@@ -178,56 +225,142 @@ async def _check_structured_output(engine, key: str) -> None:
     )
     out = r.structured_output
     check(
-        "structured output parses remotely",
+        f"structured output parses remotely [{harness}]",
         isinstance(out, dict) and out.get("answer") == 42,
         f"structured_output={out!r}",
     )
 
 
-async def _check_resume(engine, key: str) -> None:
-    session = engine.start_session()
+async def _check_resume(engine, key: str, harness: str):
+    session = engine.start_session(config=SessionConfig(harness=harness, model=RESUME_MODEL))
     secrets = {"OPENROUTER_API_KEY": key}
-    await _drive("resume-1", session.run(f"Remember the word {TOKEN}. Reply with just: stored",
-                                        secrets=secrets))
-    r2, _, _, final_raw = await _drive(
-        "resume-2",
-        session.send("What word did I ask you to remember? Reply with just the word.",
-                     secrets=secrets),
+    await _drive(
+        f"resume-1 [{harness}]",
+        session.run(f"Remember the word {TOKEN}. Reply with just: stored", secrets=secrets),
+    )
+    r2, _, _, final_raw, _ = await _drive(
+        f"resume-2 [{harness}]",
+        session.send(
+            "What word did I ask you to remember? Reply with just the word.", secrets=secrets
+        ),
     )
     text = " ".join((r2.text or "").split())
-    check("resume remembers across turns", TOKEN in text.upper(), f"turn2={text[:40]!r}")
+    check(
+        f"resume remembers across turns [{harness}]",
+        TOKEN in text.upper(),
+        f"turn2={text[:40]!r}",
+    )
     return session, final_raw
 
 
-async def _check_visibility(session, final_raw: dict, expect_model: str) -> None:
+async def _check_preset(engine, key: str, harness: str) -> None:
+    """A missing preset must reach OpenRouter and return its preset error."""
+    label = f"@preset plumbing [{harness}]"
+    session = engine.start_session(config=SessionConfig(harness=harness))
+    run = session.run(
+        "Reply with only: ok",
+        secrets={"OPENROUTER_API_KEY": key},
+        config=TurnConfig(model="openrouter/@preset/ratk-does-not-exist"),
+    )
+    _, _, _, _, observations = await _drive(label, run)
+    text = " ".join(observations["summaries"]).lower()
+    check(f"{label}: error came from OpenRouter", "preset" in text, text[:100])
+    check(f"{label}: unknown cost reported", bool(observations["cost_unknown"]))
+    check(f"{label}: no invented event cost", observations["final_cost"] is None)
+
+
+async def _check_budget(engine, key: str, harness: str) -> None:
+    """A tiny cap must use OpenRouter's charge and stop with the budget reason."""
+    label = f"exact-cost budget [{harness}]"
+    session = engine.start_session(config=SessionConfig(harness=harness))
+    config = TurnConfig(
+        model=BAKED_MODEL,
+        max_turns=2,
+        max_budget_usd=0.000001,
+    )
+    run = session.run(
+        "Reply with only: ok",
+        secrets={"OPENROUTER_API_KEY": key},
+        config=config,
+    )
+    result, _, _, final_raw, observations = await _drive(label, run)
+    check(
+        f"{label}: budget stop reason",
+        result.is_error and session.stop_reason is StopReason.BUDGET_EXCEEDED,
+        f"stop={session.stop_reason}",
+    )
+    check(
+        f"{label}: exact charge exceeds tiny cap",
+        isinstance(result.cost_usd, float) and result.cost_usd > config.max_budget_usd,
+        f"cost={result.cost_usd}",
+    )
+    check(
+        f"{label}: OpenRouter is the price source",
+        final_raw.get("price_source") == "openrouter" and bool(observations["openrouter_requests"]),
+        f"source={final_raw.get('price_source')}",
+    )
+
+
+async def _check_pin(
+    engine,
+    key: str,
+    harness: str,
+    model: str,
+    expected_provider: str,
+) -> None:
+    """Run a caller-owned preset and verify the provider reported remotely."""
+    label = f"preset provider [{harness}]"
+    session = engine.start_session(config=SessionConfig(harness=harness))
+    result, _, _, _, observations = await _drive(
+        label,
+        session.run(
+            TASK,
+            secrets={"OPENROUTER_API_KEY": key},
+            config=TurnConfig(model=model),
+        ),
+    )
+    providers = [request.get("provider") for request in observations["openrouter_requests"]]
+    wanted = expected_provider.casefold()
+    check(
+        f"{label}: selected provider honored",
+        not result.is_error
+        and bool(providers)
+        and all((provider or "").casefold() == wanted for provider in providers),
+        f"expected={expected_provider!r} providers={providers!r}",
+    )
+
+
+async def _check_visibility(session, final_raw: dict, expect_model: str, harness: str) -> None:
     """The remote-only surface: resource samples, memory peak, history, traces."""
     samples = await asyncio.to_thread(session.resource_samples)
     check(
-        "resource_samples returns worker CPU/RAM",
+        f"resource_samples returns worker CPU/RAM [{harness}]",
         bool(samples),
         f"{len(samples)} sample(s)" + (f", keys={sorted(samples[-1])[:4]}" if samples else ""),
     )
     # Stamped onto the terminal event's raw by the worker's cgroup sampler.
     peak = final_raw.get("memory_peak_bytes")
-    check("memory_peak_bytes stamped on the result", peak is not None, f"peak={peak}")
+    check(f"memory_peak_bytes stamped on the result [{harness}]", peak is not None, f"peak={peak}")
 
     history = await asyncio.to_thread(session.history)
-    check("history replays the turn's events", bool(history), f"{len(history)} event(s)")
+    check(
+        f"history replays the turn's events [{harness}]",
+        bool(history),
+        f"{len(history)} event(s)",
+    )
 
     ok, note = await asyncio.to_thread(_trace_check, session.session_id, expect_model)
     if ok is None:
-        skip("Cloud Trace root span carries the model and cost", note)
+        skip(f"Cloud Trace root span carries the model and cost [{harness}]", note)
     else:
-        check("Cloud Trace root span carries the model and cost", ok, note)
+        check(f"Cloud Trace root span carries the model and cost [{harness}]", ok, note)
 
 
 def _trace_check(session_id: str, expect_model: str) -> tuple[bool | None, str]:
     """Find THIS session's root span and confirm what it reports.
 
-    Scoped to the session on purpose: "some invoke_agent traces exist" proves nothing —
-    the project is shared and other engines emit them too. The root span must name the
-    OpenRouter model we ran and carry a cost, which is the same contract a GPT or Claude
-    turn gets (``runtime/gemini/tracing.py``).
+    The project is shared, so the lookup uses this session id. The root span must name the
+    OpenRouter model and carry a cost (``runtime/gemini/tracing.py``).
 
     Returns ``(None, reason)`` when the optional reader library isn't installed — a
     missing dev-only dependency is not a parity failure. Install it with
@@ -241,12 +374,14 @@ def _trace_check(session_id: str, expect_model: str) -> tuple[bool | None, str]:
         client = trace_v1.TraceServiceClient()
         deadline = time.time() + 120  # spans land a little after the turn
         while True:
-            for tr in client.list_traces(request={
-                "project_id": PROJECT,
-                "filter": "span:invoke_agent",
-                "view": trace_v1.ListTracesRequest.ViewType.COMPLETE,
-                "page_size": 50,
-            }):
+            for tr in client.list_traces(
+                request={
+                    "project_id": PROJECT,
+                    "filter": "span:invoke_agent",
+                    "view": trace_v1.ListTracesRequest.ViewType.COMPLETE,
+                    "page_size": 50,
+                }
+            ):
                 for span in tr.spans:
                     labels = dict(span.labels)
                     if labels.get("gen_ai.conversation.id") != str(session_id):
@@ -268,11 +403,8 @@ _TORN_DOWN = False
 def _teardown(engine) -> None:
     """Delete the engine, once, from either the normal path or a signal.
 
-    `finally` alone is not enough: this probe runs for ~35 min, so it is routinely wrapped
-    in a `timeout` or interrupted — and SIGTERM/SIGINT kill the process without running
-    `finally`, leaving an engine billing. (Observed: a 2400 s `timeout` fired mid-run and
-    leaked `ratk-openrouter-<user>`.) So teardown is idempotent and also reachable from a
-    signal handler.
+    SIGTERM and SIGINT can end the process before ``finally`` runs. The signal handler and
+    this idempotent function ensure the engine is deleted once.
     """
     global _TORN_DOWN
     if _TORN_DOWN or engine is None:
@@ -310,6 +442,12 @@ async def main() -> int:
     if not key:
         print("OPENROUTER_API_KEY is not set — nothing to probe.", file=sys.stderr)
         return 2
+    if bool(PINNED_MODEL) != bool(EXPECTED_PROVIDER):
+        print(
+            "Set OPENROUTER_PRESET_MODEL and OPENROUTER_EXPECTED_PROVIDER together.",
+            file=sys.stderr,
+        )
+        return 2
 
     credentials = None
     if sa := os.environ.get("IMPERSONATE_SA"):
@@ -332,10 +470,14 @@ async def main() -> int:
         max_turns=8,
         max_budget_usd=0.50,
     )
-    print(f"{time.strftime('%H:%M:%S')} deploying {NAME} (~5 min build) ...", flush=True)
+    print(f"{time.strftime('%H:%M:%S')} deploying {NAME} ...", flush=True)
     t0 = time.time()
     engine = await asyncio.to_thread(
-        gemini.deploy, spec, PROJECT, LOCATION, credentials=credentials,
+        gemini.deploy,
+        spec,
+        PROJECT,
+        LOCATION,
+        credentials=credentials,
         # The checks run concurrently, so the engine needs room to serve them in parallel;
         # with the default max_instances=1 they queue and the probe is back to ~40 min.
         max_instances=MAX_INSTANCES,
@@ -344,32 +486,66 @@ async def main() -> int:
     _install_signal_teardown(engine)
 
     try:
-        # Concurrent: every check is an independent session, and serially each one pays a
-        # cold start (100-420 s measured), which is what made this a ~40 min probe. The
-        # resume check is internally sequential (run, then send) but runs alongside the
-        # rest. SERIAL=1 restores lockstep for debugging.
+        # Every check uses an independent session. Resume remains sequential inside its
+        # session. SERIAL=1 gives ordered output for debugging.
         if os.environ.get("SERIAL") == "1":
             for model in MODELS:
                 for h in HARNESSES:
                     await _check_model(engine, model, key, h)
-            await _check_structured_output(engine, key)
-            last_session, final_raw = await _check_resume(engine, key)
+            resumes = {}
+            for h in HARNESSES:
+                await _check_structured_output(engine, key, h)
+                resumes[h] = await _check_resume(engine, key, h)
+                await _check_preset(engine, key, h)
+                await _check_budget(engine, key, h)
+                if PINNED_MODEL and EXPECTED_PROVIDER:
+                    await _check_pin(engine, key, h, PINNED_MODEL, EXPECTED_PROVIDER)
+            visibility_targets = [(*resumes[h], h) for h in HARNESSES]
         else:
+            model_checks = [
+                _check_model(engine, model, key, harness)
+                for model in MODELS
+                for harness in HARNESSES
+            ]
+            schema_checks = [
+                _check_structured_output(engine, key, harness) for harness in HARNESSES
+            ]
+            resume_checks = [_check_resume(engine, key, harness) for harness in HARNESSES]
+            preset_checks = [_check_preset(engine, key, harness) for harness in HARNESSES]
+            budget_checks = [_check_budget(engine, key, harness) for harness in HARNESSES]
+            pin_checks = [
+                _check_pin(engine, key, harness, PINNED_MODEL, EXPECTED_PROVIDER)
+                for harness in HARNESSES
+                if PINNED_MODEL and EXPECTED_PROVIDER
+            ]
             results = await asyncio.gather(
-                *(_check_model(engine, m, key, h) for m in MODELS for h in HARNESSES),
-                _check_structured_output(engine, key),
-                _check_resume(engine, key),
+                *model_checks,
+                *schema_checks,
+                *resume_checks,
+                *preset_checks,
+                *budget_checks,
+                *pin_checks,
                 return_exceptions=True,
             )
             for r in results:
                 if isinstance(r, BaseException):
                     traceback.print_exception(type(r), r, r.__traceback__)
                     check("all concurrent checks completed", False, f"{type(r).__name__}: {r}")
-            resume = results[-1]
-            if isinstance(resume, BaseException):
-                raise RuntimeError("resume check failed; skipping visibility") from resume
-            last_session, final_raw = resume
-        await _check_visibility(last_session, final_raw, BAKED_MODEL)
+            resume_start = len(model_checks) + len(schema_checks)
+            visibility_targets = []
+            for harness in HARNESSES:
+                resume = results[resume_start + HARNESSES.index(harness)]
+                if isinstance(resume, BaseException):
+                    raise RuntimeError(
+                        f"resume check failed for {harness}; skipping its visibility checks"
+                    ) from resume
+                visibility_targets.append((*resume, harness))
+        await asyncio.gather(
+            *(
+                _check_visibility(session, final_raw, RESUME_MODEL, harness)
+                for session, final_raw, harness in visibility_targets
+            )
+        )
     except Exception:  # noqa: BLE001 — always reach teardown
         traceback.print_exc()
         check("probe ran without exceptions", False, "see traceback above")

@@ -17,8 +17,8 @@ can only break in ways the earlier rungs can't see.
 `make test` runs with `-n auto` (pytest-xdist). Each worker is its own process, so the
 autouse fixtures, the pricing cache and the signal-handler test stay isolated; `make
 test-serial` gives readable output when debugging. The wall clock is bounded by a few
-deliberate poll-cadence tests (the slowest is ~15 s), so expect ~40 s rather than a linear
-speedup.
+deliberate poll-cadence tests; the slowest takes about 15 seconds. Expect about 40 seconds
+overall.
 
 The pytest suite makes **no network calls**: no GCP, no model, no subprocesses talking to
 real services. Backends are exercised against the fakes in [`tests/fakes.py`](tests/fakes.py) /
@@ -103,19 +103,25 @@ test), so it costs about the same wall-clock as the smoke test's parallel pair.
 ### The OpenRouter model check
 
 ```bash
-OPENROUTER_API_KEY=... make live-openrouter           # all four models + a resume check
-MODELS=openrouter/z-ai/glm-5.3 make live-openrouter   # just one
+OPENROUTER_API_KEY=... make live-openrouter
+MODELS=openrouter/z-ai/glm-5.3 make live-openrouter  # one model, both harnesses
 ```
 
-`dev/live_openrouter_probe.py` runs every OpenRouter model through a real turn on the
-**local** runtime (no GCP, no engine build), **on both harnesses** — codex reaches OpenRouter
-through a provider config, claude-code through its Anthropic-compatible endpoint. It also
-checks resume, structured output, and that an `@preset/<slug>` id arrives at OpenRouter as a
-preset (the pinning mechanism), each on both harnesses. It exists because every
-setting the harness sends to OpenRouter — the Responses wire, mandatory reasoning, Codex's
-web-search tool disabled — was chosen because the provider rejected the alternative, and a
-provider can change that server-side with no diff on our end. Run it when you touch the
-harness's provider wiring or the model list.
+This paid local probe runs every model on both harnesses. Each model must call a shell tool,
+return its output, hide provider credentials from the tool, report its selected upstream, and
+use OpenRouter's exact cost. It also checks resume, structured output, a missing preset error,
+and a tiny budget cap on both harnesses.
+
+To verify a real provider pin, supply a preset model and its expected provider:
+
+```bash
+OPENROUTER_PRESET_MODEL="openrouter/moonshotai/kimi-k3@preset/kimi-firstparty" \
+OPENROUTER_EXPECTED_PROVIDER="Moonshot AI" \
+make live-openrouter
+```
+
+The probe reads every `openrouter_request` event and fails if the provider differs. Set
+`SERIAL=1` for ordered output while debugging.
 
 **It costs real money** (a few cents a pass) and needs a key, so run it **by hand,
 sparingly, locally**. It must never run in CI: `pytest -q` stays free and credential-less
@@ -128,40 +134,29 @@ emits, and that is what CI checks.
 OPENROUTER_API_KEY=... make live-openrouter-remote
 ```
 
-`dev/live_openrouter_remote_probe.py` is the remote half. The local probe proves the
-provider wiring; this one proves the same turn survives being packaged into an engine,
-unpickled by a worker, handed its key through the GCS secrets handoff and streamed back —
-and that the platform's visibility carries an OpenRouter model the same way it carries a
-GPT or Claude one.
+This probe repeats the local checks on Gemini Agent Runtime. One engine contains both CLIs
+and serves every model through per-turn overrides. Structured output, resume, preset errors,
+and budget caps run on both harnesses.
 
-**One engine serves all four models.** `model` is a per-turn knob, so the probe deploys
-once and overrides per turn with `TurnConfig(model=...)` — one ~4 min build instead of
-four, and it demonstrates that a session can change provider with no redeploy.
-
-Beyond the per-model turn (answer, tool call, priced cost) it checks the remote-only
-surface: the worker's `effective_spec` echo names the model actually executed,
+It also checks the remote-only surface: the worker's `effective_spec` echo names the model,
 `session.resource_samples()` returns worker CPU/RAM, `memory_peak_bytes` is stamped on the
 terminal result, `session.history()` replays the events, and **that session's** Cloud Trace
-root span carries the model and its cost. The trace lookup is scoped to the session on
-purpose: "some `invoke_agent` traces exist" proves nothing in a shared project. It needs
-`uv pip install google-cloud-trace` (dev-only, not a toolkit dependency); without it that
-one check reports SKIP rather than failing.
+root span carries the model and its cost. It needs
+`uv pip install google-cloud-trace` (dev-only, not a toolkit dependency). The trace check
+reports SKIP when the package is missing.
 
 The engine is deleted in `finally`; a failed teardown prints loudly, because an engine
 bills while it exists. `KEEP=1` leaves it up for debugging and hands you the cleanup.
 
-**Costs real money** (~$0.30, mostly the build) and takes **~8-15 min**. The 26 checks run
-concurrently and land in ~2 min; the rest is the engine build, which measured 300 s, 300 s and
-601 s across three runs — platform variance is wide, so give it a generous timeout. Teardown
+**Costs real money** (mostly the build) and usually takes **~8-15 min**. Checks run
+concurrently; build time varies widely. Give it a generous timeout. Teardown
 also runs on SIGTERM/SIGINT, because a `timeout` that fires mid-run would otherwise leave an
-engine billing — that happened while writing this probe, which is why the handler exists.
+engine billing.
 
-One thing to expect: `deepseek-v4-flash` under Claude Code returns no final message in
-roughly one turn in four (24 of 33 across batches). The other three models measured 6/6 on
-both harnesses, and flash is 6/6 under Codex, so this is one model on one harness rather than
-a general problem. Prompt size and concurrency were both measured and ruled out as the cause.
-The probe retries a soft miss once and says so in the verdict, so its signal stays about the
-wiring rather than the model's mood.
+DeepSeek v4 sometimes returns no final message under Claude Code. Flash produced this most
+often in the earlier measurements; Pro produced it on both attempts in the final remote
+validation. The probe retries one soft failure and reports when the retry was used. It stays
+failed when the retry also has no answer.
 
 ### Model attribution: did we run what we asked for?
 
@@ -169,25 +164,17 @@ wiring rather than the model's mood.
 OPENROUTER_API_KEY=... OPENAI_API_KEY=... make live-attribution
 ```
 
-`dev/live_model_attribution.py` answers a question the result event cannot.
-`result.raw["model"]` is just what the caller asked for, so asserting on it tells you
-nothing. This probe only accepts evidence that comes back from the CLI, the app-server or
-the provider. It covers **both harnesses**:
+`dev/live_model_attribution.py` checks evidence returned by the CLI, app-server, and
+OpenRouter:
 
 - **claude-code** — the CLI's `system/init` message names the model it resolved.
 - **codex** — the app-server's `thread.read()` names the thread's bound `model_provider`,
   surfaced as a `model_routing` event. This is what proves an OpenRouter override took
   effect; a mismatch is reported as `matches_request: false`.
-- **OpenRouter, checked separately** — one cheap request on the chat wire, which returns both
-  `model` and `provider`. The Responses wire the codex harness uses returns neither.
+- **OpenRouter on both harnesses** — `openrouter_request` names the selected upstream and
+  reports exact cost for each model response.
 
-**One limit worth knowing.** On the codex/OpenRouter path you cannot see which upstream
-provider served the agent's own turn. The two checks above get close: the thread is bound to
-the openrouter provider, and the account does serve that model id. Neither names the upstream
-for a given turn. Pin the routing if you need that — see the README.
-
-All checks run concurrently (~10 s for 14 of them). Costs a few cents. `SERIAL=1` for
-lockstep output.
+Checks run concurrently and cost a few cents. `SERIAL=1` gives ordered output.
 
 ### Writing a bespoke live probe
 

@@ -75,10 +75,8 @@ both run on both backends (`local` and `gemini`) through the same Engine/Session
 | `codex` | OpenAI Codex, via the `openai-codex` SDK | OpenAI models (`gpt-5.6-sol` / `-terra` / `-luna`, `gpt-5.3-codex`) | `OPENAI_API_KEY` |
 | **either one** | the same loop, pointed at OpenRouter | `openrouter/<vendor>/<model>` — Kimi, GLM, DeepSeek (see [below](#openrouter-models-either-harness)) | `OPENROUTER_API_KEY` |
 
-The harness is a **session**-scoped choice and its CLI must be baked at deploy
-(`AgentSpec(harnesses=("claude-code", "codex"))` bakes both, then each session picks). The **model**
-is a **turn**-scoped knob, so one deployed engine can serve several models — including across
-providers — with no redeploy:
+The harness is selected for a session, and its CLI must be included at deploy time.
+The model can change on each turn. One deployed engine can therefore serve several models:
 
 ```python
 # One engine, several models — no redeploy:
@@ -150,162 +148,105 @@ What to know when running Codex:
 
 ### OpenRouter models (either harness)
 
-Prefix a model id with `openrouter/` and the turn runs on [OpenRouter](https://openrouter.ai), so
-non-OpenAI models reach the same Engine/Session/Run surface. **Both harnesses can do this**, by
-different routes: Codex through a provider config, and Claude Code through OpenRouter's
-Anthropic-compatible endpoint. Pick whichever agent loop you want:
+Prefix an OpenRouter model id with `openrouter/`. Both harnesses support it:
 
 ```python
 spec = AgentSpec(
     name="kimi-agent",
-    model="openrouter/moonshotai/kimi-k3",   # openrouter/<vendor>/<model>
-    harness="codex",                         # or "claude-code" — both work
+    model="openrouter/moonshotai/kimi-k3",
+    harness="codex",  # "claude-code" also works
 )
 result = await engine.start_session().run(
-    "scrape https://books.toscrape.com for title, price",
+    "Fix the failing tests",
     secrets={"OPENROUTER_API_KEY": os.environ["OPENROUTER_API_KEY"]},
 )
 ```
 
-The prefix is the whole API — there is no new spec field, so the model stays a per-turn knob and one
-session can move between providers: `session.send(task, config=TurnConfig(model="openrouter/z-ai/glm-5.3"))`.
-
-**The models we support here** — validated live on both runtimes, and priced offline so `cost_usd`
-is real and `max_budget_usd` is enforceable:
-
-| Model id | USD / 1M in → out | Context |
-| --- | --- | --- |
-| `openrouter/moonshotai/kimi-k3` | 3.00 → 15.00 | ~1M |
-| `openrouter/z-ai/glm-5.3` | 1.40 → 4.40 | ~1M |
-| `openrouter/deepseek/deepseek-v4-flash` | 0.084 → 0.168 | ~1M |
-| `openrouter/deepseek/deepseek-v4-pro` | 1.60 → 3.20 | ~1M |
-
-Any other `openrouter/*` id runs too. It only gets a price if LiteLLM's dataset knows it. Otherwise
-you get a `cost_unknown` event and no budget enforcement, as with any unpriced model. One note on
-price: DeepSeek v4 Pro through OpenRouter costs several times its first-party price. The
-zero-retention routing restriction is what you are paying for.
-
-**Which upstream serves your request is not fixed.** OpenRouter offers one model id from many
-upstream providers. They differ in price, in quantization (fp4, fp8, bf16, mxfp4, or undisclosed),
-in context and output caps, and in whether they support tool calling at all. How much that matters
-depends on the model. `dev/openrouter_endpoints.py` prints the endpoints for any id — free, and
-without calling the model:
-
-| Model | Endpoints | Quantizations offered |
-| --- | --- | --- |
-| `openrouter/moonshotai/kimi-k3` | 14 | bf16, fp4, fp8, mxfp4, undisclosed. Some support no tools |
-| `openrouter/z-ai/glm-5.3` | **1** (Z.AI, fp8) | only one, so it never varies |
-| `openrouter/deepseek/deepseek-v4-flash` | 18 | fp4, fp8, undisclosed |
-| `openrouter/deepseek/deepseek-v4-pro` | 18 | fp4, fp8, undisclosed |
-
-When a model has several endpoints, the one you get changes between runs. Twelve identical
-requests for `moonshotai/kimi-k3` were served by **three different providers** (Chutes ×5,
-Fireworks ×4, Phala ×3). The first-party Moonshot endpoint served none of the twelve. Two
-consequences: `cost_usd` is an estimate, and published scores for these models may not match what
-you get, because they are usually measured against the vendor's own API.
-
-The toolkit cannot choose the provider for you. That choice is a field in the request body, and the
-request body is built by the harness's CLI. Putting a provider name in the model id does not work
-either: the suffix is accepted and ignored, with no error (`…/kimi-k3:moonshotai` was served by
-Fireworks).
-
-Two things do work, both set up outside the toolkit. **Account-level provider preferences** apply to
-every request. An **[OpenRouter preset](https://openrouter.ai/docs)** can be named from the model id,
-which makes routing a per-turn choice:
+The model can change on each turn:
 
 ```python
-AgentSpec(name="pinned", model="openrouter/@preset/kimi-firstparty", harness="codex")
+await session.send(task, config=TurnConfig(model="openrouter/z-ai/glm-5.3"))
 ```
 
-A preset costs you cost tracking. It can pin the model as well as the provider, so the toolkit cannot
-tell which model will answer, and cannot price the run. You get a `cost_unknown` status event and no
-`max_budget_usd` enforcement. So: use a plain `openrouter/<vendor>/<model>` id when you want a budget
-cap, and account preferences when you want both. Several of these models — Kimi K3 among them — list
-their own vendor as an OpenRouter provider, at about the same price.
+These four models have a known context size and a fallback price. The fallback is used only
+when OpenRouter does not return the exact charge. OpenRouter may charge a different rate for
+the selected upstream provider.
 
-**What the toolkit reports.** Every codex turn emits a `model_routing` status event. It carries the
-provider the app-server actually bound the thread to (`resolved_model_provider`) and whether that
-matches the request (`matches_request`). Everything else in the result event just repeats what you
-asked for, so this event is the only real check. `make live-attribution` asserts it for both
-harnesses.
+| Model id | Fallback USD / 1M input → output | Context | Harness note |
+| --- | --- | --- | --- |
+| `openrouter/moonshotai/kimi-k3` | 3.00 → 15.00 | ~1M | Both validated |
+| `openrouter/z-ai/glm-5.3` | 1.40 → 4.40 | ~1M | Both validated |
+| `openrouter/deepseek/deepseek-v4-flash` | 0.084 → 0.168 | ~1M | Prefer Codex; see reliability note below |
+| `openrouter/deepseek/deepseek-v4-pro` | 1.60 → 3.20 | ~1M | Prefer Codex; see reliability note below |
 
-**Checking that a pin is working.** The provider that served a turn is invisible on the Responses
-wire the Codex harness uses. Check with a separate request on the chat wire, which does return it.
-Account preferences apply to the whole account, so one cheap request tells you what the account is
-doing:
+Other `openrouter/*` model ids also work. Codex uses generic context metadata for an unknown
+model. Exact cost reporting still works when OpenRouter supplies it.
+
+Each OpenRouter response uses [router metadata](https://openrouter.ai/docs/guides/features/router-metadata)
+and emits an `openrouter_request` status event. It includes the selected
+upstream provider, the provider's model name, region when available, and exact request cost.
+The terminal result uses the sum of those exact costs. `max_budget_usd` is checked between model
+responses, so one response may take the total above the cap.
+
+OpenRouter may offer a model through several upstream providers. They can differ in price,
+quantization, context limits, and tool support. List the current endpoints without paying for a
+model call:
 
 ```bash
-# what served it (chat wire returns a top-level `provider`):
-curl -s https://openrouter.ai/api/v1/chat/completions \
-  -H "Authorization: Bearer $OPENROUTER_API_KEY" -H "Content-Type: application/json" \
-  -d '{"model":"moonshotai/kimi-k3","max_tokens":8,"messages":[{"role":"user","content":"ok"}]}' \
-  | python3 -c 'import json,sys; print(json.load(sys.stdin)["provider"])'
-
-# demand a provider the pin should forbid; a working pin makes this fail:
-curl -s https://openrouter.ai/api/v1/chat/completions \
-  -H "Authorization: Bearer $OPENROUTER_API_KEY" -H "Content-Type: application/json" \
-  -d '{"model":"moonshotai/kimi-k3","max_tokens":8,"provider":{"only":["chutes"],
-       "allow_fallbacks":false},"messages":[{"role":"user","content":"ok"}]}'
+.venv/bin/python dev/openrouter_endpoints.py moonshotai/kimi-k3
 ```
 
-Run the first request several times. Without a pin the provider varies, so one attempt can land on
-the provider you wanted by luck. The second request tells you more: with no pin in place it succeeds
-and reports Chutes.
+Use an [OpenRouter preset](https://openrouter.ai/docs/guides/features/presets) when you need a fixed
+route. Put the explicit model before the preset so
+the toolkit keeps its context and fallback price:
 
-Other notes:
+```python
+AgentSpec(
+    name="pinned",
+    model="openrouter/moonshotai/kimi-k3@preset/kimi-firstparty",
+    harness="codex",  # or "claude-code"
+)
+```
 
-- **Auth** is the per-invocation `OPENROUTER_API_KEY` secret on both harnesses (local runs fall back
-  to the ambient env var). Codex takes it through its `env_key` indirection, so it never reaches the
-  command line; Claude Code takes it as `ANTHROPIC_AUTH_TOKEN`. Either way the harness consumes it,
-  so it stays out of the agent's own shell.
-- **Cost on the Claude Code route is recomputed by the toolkit.** The CLI prices these models from
-  its own catalogue, which has no entry for them, and the figure is badly wrong — measured 60x over
-  for `deepseek-v4-flash`, so `max_budget_usd` would fire almost immediately. The harness replaces it
-  with a figure computed from the reported tokens, and keeps the CLI's number in the result event as
-  `cli_reported_cost_usd` if you want to compare.
-- **On a deployed engine, Claude Code needs its Vertex switch off for these turns.** `gemini.deploy`
-  bakes `CLAUDE_CODE_USE_VERTEX=1`, and that outranks the OpenRouter token, so the harness blanks it
-  (along with the Bedrock and Foundry switches) for the turn. No action needed; this is why an
-  OpenRouter turn works on an engine that also serves Claude models.
-- **One model is flaky on one harness**: `deepseek-v4-flash` under Claude Code returned no final
-  message in roughly one turn in four (24 of 33 turns succeeded across several batches; 4/6 in a
-  controlled run). The other three models were 6/6 on both harnesses, and flash itself is 6/6 under
-  Codex. Retry, or use Codex for that model; the live probe retries a soft miss once.
+Create the preset in OpenRouter and set its provider rules there. A direct
+`openrouter/@preset/<slug>` id also works, although the toolkit cannot know its model or context
+before the first response.
 
-  Two plausible explanations, both measured and **rejected**: it is not prompt size (replacing Claude
-  Code's preset with a short prompt cut the input from ~43k tokens to ~11k and reliability stayed at
-  7/10 versus 6/10), and it is not concurrency (7/10 sequential versus 8/10 in parallel). The model
-  simply ends some turns without a final assistant message.
-- **You can replace the system prompt, and on this path it halves the bill.** A plain string in
-  `spec.system_prompt` replaces Claude Code's preset instead of appending to it, which took a
-  `deepseek-v4-flash` turn from ~43k input tokens to ~11k and from $0.0040 to $0.0019. Worth it when
-  you do not need Claude Code's own tool guidance:
+The paid probes can verify a real preset on both harnesses. They fail if any request reports a
+different provider:
 
-  ```python
-  AgentSpec(
-      name="lean",
-      model="openrouter/moonshotai/kimi-k3",
-      system_prompt="You are a coding agent working in a shell. Be terse.",  # replaces the preset
-  )
-  ```
+```bash
+OPENROUTER_PRESET_MODEL="openrouter/moonshotai/kimi-k3@preset/kimi-firstparty" \
+OPENROUTER_EXPECTED_PROVIDER="Moonshot AI" \
+make live-openrouter
+```
 
-  `SystemPrompt.inherit(append=...)` keeps the preset and adds to it, which is the default shape.
-- **On Codex only, web search is off** for these turns: Codex sends its server-side web-search tool
-  in a shape OpenRouter rejects outright. Shell and file tools are unaffected.
-- **On Codex only, reasoning is always on**: OpenRouter's Responses endpoint requires it, so an unset
-  `reasoning_effort` becomes `low` instead of Codex's `none`. Claude Code uses a different endpoint
-  and has no such requirement.
-- Only the OpenRouter *account* decides which upstream providers may serve a request (ours is
-  restricted to zero-retention, no-training routes); the toolkit does not pick routes.
-- **Structured output needs the schema in the prompt**, and both harnesses now put it there for these
-  models. OpenRouter accepts Codex's json_schema format but does not enforce it, and nothing steered
-  the model on the Claude Code path at all. GLM-5.3 replied in prose in both cases, which parses to
-  `structured_output=None`. With the schema stated in the prompt it returns a bare JSON object.
-  `output_schema` therefore works here, but it rests on the model following the instruction.
-- **Everything else matches the OpenAI path**, on both runtimes: cost, budgets, resume, MCP and
-  skills. On Agent Runtime that also covers the `effective_spec` echo, resource samples, history,
-  and the Cloud Trace span — the span carries the OpenRouter model id and its cost. The checks are
-  `make live-openrouter` and `make live-openrouter-remote`.
+Important details:
+
+- The `OPENROUTER_API_KEY` is passed per invocation. Both harnesses remove provider credentials
+  from the tool environment. Codex also disables its automatic login shell because it could reload
+  keys from `~/.bashrc`.
+- Claude Code's own dollar estimate is wrong for these custom models. The result uses OpenRouter's
+  exact reported charge and keeps the CLI value as `cli_reported_cost_usd` for comparison.
+- The four known models use a 1,048,576-token context window on both harnesses.
+- Codex disables its built-in web-search tool for OpenRouter turns because OpenRouter rejects the
+  tool format Codex sends. Shell, file, MCP, and skill tools remain available.
+- Codex uses `low` reasoning when the spec leaves it unset because OpenRouter's Responses endpoint
+  requires reasoning.
+- `output_schema` is also written into the prompt. OpenRouter accepts the JSON schema but may leave
+  enforcement to the model.
+- DeepSeek v4 can occasionally end a Claude Code turn without a final message. Flash showed this
+  most often (about one quarter of the earlier measured turns); Pro did it on both attempts in the
+  final remote validation. Such a turn ends with `error_no_final_text`, so callers can retry or
+  select another pairing. The controlled Codex runs completed normally. The paid probes retry once
+  and report it, while keeping the check failed if the retry also has no answer.
+- A plain string in `spec.system_prompt` replaces Claude Code's larger preset. This can reduce token
+  use when the task does not need the preset's tool guidance.
+
+The paid local and remote probes cover all four models on both harnesses. They check tool use,
+credential removal, exact cost, budgets, structured output, resume, preset handling, provider
+reporting, and the Gemini runtime's history, resource, and trace data. See
+`make live-openrouter` and `make live-openrouter-remote`.
 
 ## Dev: run locally, in-process
 
@@ -485,10 +426,11 @@ a per-turn job handle, so they get the bounded polls only.
 ## Structured output
 
 Set `output_schema` to a **pydantic model** (or a JSON-schema `dict`) and `result.structured_output` holds
-the parsed, validated object. The schema only describes the *shape* — you must **also tell the agent, in the
-prompt, what to emit**. Don't restate the fields by hand; serialize the schema into the prompt so the two
-never drift. The toolkit parses JSON out of the agent's final text (a ```` ```json ```` block, a bare object,
-or the whole message); it does not constrain decoding.
+the parsed, validated object. The harness sends the schema through the CLI's native structured-output
+option. Tell the agent what content to emit in the prompt; the schema describes its shape. OpenRouter may
+leave schema enforcement to the selected model, so those turns also receive the schema in their prompt.
+The toolkit validates the SDK's structured value when available and can parse JSON from the final text (a
+```` ```json ```` block, a bare object, or the whole message) as a fallback.
 
 ```python
 import json

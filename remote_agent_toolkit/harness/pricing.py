@@ -1,10 +1,11 @@
-"""Model pricing for harnesses that report tokens but no USD (Codex).
+"""Fallback model pricing for harnesses that do not report an exact USD charge.
 
-Codex surfaces token counts only, so ``cost_usd`` and budget enforcement need a price
-source. Primary: **LiteLLM's community-maintained pricing dataset** (the same upstream
+Codex with OpenAI models surfaces token counts only. OpenRouter normally supplies the exact
+charge, while this module covers responses where that metadata is missing. Primary:
+**LiteLLM's community-maintained pricing dataset** (the same upstream
 ``ccusage`` prices Codex sessions with), fetched once per process — new models are priced
 the day the dataset knows them, no toolkit release needed. Fallback: a small baked table
-of the current OpenAI flagships plus the OpenRouter models the Codex binding routes, so
+of the current OpenAI flagships plus the OpenRouter models both bindings route, so
 offline / air-gapped runs still price them. The fetch
 is best-effort with a short timeout and never raises; a total miss yields ``None`` (the
 harness then reports unknown cost and cannot enforce ``max_budget_usd``).
@@ -19,10 +20,16 @@ import threading
 from dataclasses import dataclass
 
 _LITELLM_PRICES_URL = (
-    "https://raw.githubusercontent.com/BerriAI/litellm/main/"
-    "model_prices_and_context_window.json"
+    "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"
 )
 _FETCH_TIMEOUT_S = 8.0
+
+OPENROUTER_CONTEXT_WINDOWS: dict[str, int] = {
+    "openrouter/moonshotai/kimi-k3": 1_048_576,
+    "openrouter/z-ai/glm-5.3": 1_048_576,
+    "openrouter/deepseek/deepseek-v4-flash": 1_048_576,
+    "openrouter/deepseek/deepseek-v4-pro": 1_048_576,
+}
 
 # USD per 1M tokens: (input, cached input, output) — fallback only; LiteLLM wins when
 # reachable. Cache *writes* (billed at 1.25x input since 5.6) are not distinguishable in
@@ -98,14 +105,29 @@ def clear_cache() -> None:
         _litellm_attempted = False
 
 
+def model_without_preset(model: str) -> str:
+    """Return the explicit model part of ``model@preset/slug``.
+
+    A direct ``@preset/slug`` has no explicit model and stays unchanged.
+    """
+    prefix = "openrouter/"
+    if not model.startswith(prefix):
+        return model
+    bare = model[len(prefix) :]
+    if bare.startswith("@preset/") or "@preset/" not in bare:
+        return model
+    return prefix + bare.split("@preset/", 1)[0].rstrip("@")
+
+
 def model_price(model: str) -> ModelPrice | None:
     """Resolve ``model`` to per-token USD prices, or ``None`` if unknown everywhere.
 
     LiteLLM keys are tried as the bare id then ``openai/<id>`` (Codex calls OpenAI
-    directly). An ``openrouter/<vendor>/<model>`` id needs no special case: that IS
-    LiteLLM's key for an OpenRouter model, so the bare-id probe covers it. May block up to the fetch timeout on first call — call it off the event
-    loop (``asyncio.to_thread``).
+    directly). An ``openrouter/<vendor>/<model>`` id needs no special case because
+    that is also LiteLLM's key. The first call may block for the fetch timeout; callers
+    on an event loop should run it in a worker thread.
     """
+    model = model_without_preset(model)
     data = _litellm_prices()
     if data:
         for key in (model, f"openai/{model}"):

@@ -13,6 +13,7 @@ third-party deps.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 from collections import deque
 from enum import Enum
@@ -50,13 +51,17 @@ _OPENROUTER_PREFIX = "openrouter/"
 _OPENROUTER_KEY_ENV = "OPENROUTER_API_KEY"
 # The Anthropic-compatible base: the CLI appends /v1/messages itself.
 _OPENROUTER_ANTHROPIC_BASE = "https://openrouter.ai/api"
+_OPENROUTER_METADATA_HEADER = "X-OpenRouter-Metadata: enabled"
+_OPENROUTER_SHELL_WRAPPER = """#!/bin/sh
+unset ANTHROPIC_AUTH_TOKEN ANTHROPIC_CUSTOM_HEADERS OPENROUTER_API_KEY
+exec /bin/bash -c "$1"
+"""
 
 
-# OpenRouter models are not steered toward JSON by anything else on this path: the Claude
-# binding only PARSES the final text (see `structured.py`), and unlike the Anthropic models
-# these do not reliably volunteer a bare JSON object. Measured: GLM-5.3 answered
-# "`answer`: 42" prose with `output_schema` set, which parses to None. So the schema is
-# stated in the prompt for these models, matching what the codex binding does.
+# OpenRouter receives the SDK's native output format, but its selected model may still be
+# responsible for following it. Measured: GLM-5.3 answered "`answer`: 42" prose with
+# `output_schema` set. Stating the schema in the prompt produced a bare JSON object, so the
+# OpenRouter path uses both forms, matching the Codex binding.
 _OPENROUTER_SCHEMA_INSTRUCTION = (
     "\n\nFINAL MESSAGE FORMAT: your last message of the turn must be ONLY a single JSON "
     "object conforming to this schema — no prose before or after it, no code fence, no "
@@ -64,7 +69,18 @@ _OPENROUTER_SCHEMA_INSTRUCTION = (
 )
 
 
-def _openrouter_env(model: str, api_key: str) -> dict[str, str]:
+def _openrouter_cost_unknown(model: str | None) -> AgentEvent:
+    return AgentEvent(
+        kind="status",
+        summary=(
+            f"OpenRouter did not report a charge for model {model!r}; cost_usd is "
+            "unknown and max_budget_usd could not be enforced"
+        ),
+        raw={"event": "cost_unknown", "model": model},
+    )
+
+
+def _openrouter_env(model: str, api_key: str, shell_wrapper: Path) -> dict[str, str]:
     """Env that points the Claude CLI at OpenRouter for ``model``.
 
     ``ANTHROPIC_CUSTOM_MODEL_OPTION`` is what lets the real id through: without it the CLI
@@ -73,16 +89,26 @@ def _openrouter_env(model: str, api_key: str) -> dict[str, str]:
     CLI's auth order, and a deployed engine bakes the Vertex ones in.
     """
     bare = model[len(_OPENROUTER_PREFIX) :]
-    return {
+    env = {
         "ANTHROPIC_BASE_URL": _OPENROUTER_ANTHROPIC_BASE,
         "ANTHROPIC_AUTH_TOKEN": api_key,
         "ANTHROPIC_CUSTOM_MODEL_OPTION": bare,
         "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME": bare,
+        # OpenRouter adds the selected upstream and exact request cost to the SDK stream.
+        "ANTHROPIC_CUSTOM_HEADERS": _OPENROUTER_METADATA_HEADER,
+        # The CLI needs the token, while Bash tools do not. This executable receives the
+        # original shell command as its sole argument and removes auth before running it.
+        "CLAUDE_CODE_SHELL_PREFIX": str(shell_wrapper),
         "ANTHROPIC_API_KEY": "",
         "CLAUDE_CODE_USE_VERTEX": "",
         "CLAUDE_CODE_USE_BEDROCK": "",
         "CLAUDE_CODE_USE_FOUNDRY": "",
     }
+    window = pricing.OPENROUTER_CONTEXT_WINDOWS.get(pricing.model_without_preset(model))
+    if window is not None:
+        # Claude Code otherwise assumes 200k for an unknown model and compacts early.
+        env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] = str(window)
+    return env
 
 
 class _StderrCapture:
@@ -224,11 +250,19 @@ class ClaudeCodeHarness:
         schema = _output_schema_to_dict(spec.output_schema)
         if not isinstance(schema, dict):
             return ""
-        import json
-
         return _OPENROUTER_SCHEMA_INSTRUCTION.format(
             schema=json.dumps(schema, separators=(",", ":"))
         )
+
+    @staticmethod
+    def _output_format(spec: AgentSpec) -> dict[str, Any] | None:
+        """Map the public output schema to the Claude Agent SDK's native option."""
+        if spec.output_schema is None:
+            return None
+        from ..spec import _output_schema_to_dict
+
+        schema = _output_schema_to_dict(spec.output_schema)
+        return {"type": "json_schema", "schema": schema} if isinstance(schema, dict) else None
 
     def _system_prompt(self, spec: AgentSpec, interactive: bool) -> Any:
         """Resolve ``spec.system_prompt`` (+ interactive suffix) to an SDK value.
@@ -256,7 +290,9 @@ class ClaudeCodeHarness:
         servers: dict[str, Any] = {}
         for srv in spec.mcp_servers:
             if srv.kind == "github":
-                token = next((ctx.secrets[k] for k in _GITHUB_MCP_TOKEN_KEYS if ctx.secrets.get(k)), None)
+                token = next(
+                    (ctx.secrets[k] for k in _GITHUB_MCP_TOKEN_KEYS if ctx.secrets.get(k)), None
+                )
                 if token:
                     servers["github"] = github_mcp_config(token)
                 # else: no token resolved — skip silently (never log the token).
@@ -314,7 +350,11 @@ class ClaudeCodeHarness:
                     f"{_OPENROUTER_KEY_ENV} in the per-invocation secrets (or set it in the "
                     "environment)"
                 )
-            env.update(_openrouter_env(model, api_key))
+            ctx.job_dir.mkdir(parents=True, exist_ok=True)
+            shell_wrapper = ctx.job_dir / "openrouter-shell"
+            shell_wrapper.write_text(_OPENROUTER_SHELL_WRAPPER, encoding="utf-8")
+            shell_wrapper.chmod(0o700)
+            env.update(_openrouter_env(model, api_key, shell_wrapper))
             # The CLI wants the provider-relative id; the prefix is the toolkit's own.
             model = model[len(_OPENROUTER_PREFIX) :]
 
@@ -328,7 +368,10 @@ class ClaudeCodeHarness:
             skills="all",
             permission_mode=spec.permission_mode,
             max_turns=spec.max_turns,
-            max_budget_usd=spec.max_budget_usd,
+            # Claude Code prices unknown models with its own fallback rates. OpenRouter
+            # can differ by orders of magnitude, so its native cap would stop valid runs.
+            # `_final_result` checks OpenRouter's exact streamed charge instead.
+            max_budget_usd=None if openrouter else spec.max_budget_usd,
             # The SDK's own default is 1 MiB per stdout message, and it raises from inside
             # the read loop when a message exceeds it — the turn ends with no result and
             # the run's work is lost (an in-context image Read is enough to trip it). See
@@ -342,6 +385,10 @@ class ClaudeCodeHarness:
             strict_mcp_config=True,
             hooks=ctx.hooks,
             system_prompt=self._system_prompt(spec, ctx.interactive),
+            # OpenRouter's exact request cost and selected upstream arrive in raw stream
+            # events. The translator ignores all ordinary deltas and keeps those fields.
+            include_partial_messages=openrouter,
+            output_format=self._output_format(spec),
             **extra,
         )
 
@@ -358,6 +405,8 @@ class ClaudeCodeHarness:
         segment_summaries: Sequence[str] = (),
         price: Any | None = None,
         unpriced_openrouter: bool = False,
+        exact_openrouter_cost: float | None = None,
+        max_budget_usd: float | None = None,
     ) -> AgentEvent:
         """Stamp the cumulative turn count onto the turn's final result event.
 
@@ -370,14 +419,19 @@ class ClaudeCodeHarness:
             event.raw["num_turns"] = turns_total
             if segment_summaries:
                 event.raw["segment_summaries"] = list(segment_summaries)
-        if price is None and unpriced_openrouter:
+        if exact_openrouter_cost is not None:
+            if event.raw is not None:
+                event.raw["cli_reported_cost_usd"] = event.cost_usd
+                event.raw["price_source"] = "openrouter"
+            event.cost_usd = exact_openrouter_cost
+        elif price is None and unpriced_openrouter:
             # No price for this id (an @preset, or a model neither we nor LiteLLM know).
             # The CLI's own number is not the OpenRouter cost, so report nothing rather
             # than something wrong — same contract as the codex binding.
             if event.raw is not None:
                 event.raw["cli_reported_cost_usd"] = event.cost_usd
             event.cost_usd = None
-        if price is not None:
+        elif price is not None:
             usage = event.usage or {}
             cached = int(usage.get("cache_read_input_tokens") or 0)
             # Anthropic reports fresh input, cache writes and cache reads separately; cache
@@ -391,6 +445,30 @@ class ClaudeCodeHarness:
                 event.raw["cli_reported_cost_usd"] = event.cost_usd
                 event.raw["price_source"] = price.source
             event.cost_usd = recomputed
+        if (
+            max_budget_usd is not None
+            and event.summary == "(no final text)"
+            and event.raw is not None
+            and not event.raw.get("is_error")
+        ):
+            # Some OpenRouter model/harness pairs end successfully at the protocol
+            # level without returning the requested answer. Surface that as a failed
+            # run so callers can retry or select another pairing.
+            event.raw["cli_reported_subtype"] = event.raw.get("subtype")
+            event.raw["subtype"] = "error_no_final_text"
+            event.raw["is_error"] = True
+        if (
+            max_budget_usd is not None
+            and event.cost_usd is not None
+            and event.cost_usd >= max_budget_usd
+            and event.raw is not None
+        ):
+            # The exact cost is known after a model response. This can exceed the cap by
+            # one response, but it prevents a wrong CLI price from stopping much earlier.
+            event.raw["cli_reported_subtype"] = event.raw.get("subtype")
+            event.raw["subtype"] = "error_budget_exceeded"
+            event.raw["is_error"] = True
+            event.raw["budget_enforcement"] = "after_model_response"
         return event
 
     async def run(self, spec: AgentSpec, ctx: RunContext) -> AsyncIterator[AgentEvent]:
@@ -430,6 +508,7 @@ class ClaudeCodeHarness:
         # crash/timeout fallback result when the turn never reaches a clean final one.
         demoted: list[AgentEvent] = []
         turns_total = 0  # num_turns resets per re-invocation; RunResult reports the sum
+        budget_interrupted = False
         wait_deadline: float | None = None
         phase = _StreamPhase.ACTIVE  # the initial query has been submitted to the model
 
@@ -460,16 +539,17 @@ class ClaudeCodeHarness:
         is_openrouter = (spec.model or "").startswith(_OPENROUTER_PREFIX)
         price = await asyncio.to_thread(pricing.model_price, spec.model) if is_openrouter else None
         unpriced_openrouter = is_openrouter and price is None
-
-        if unpriced_openrouter:
+        if is_openrouter and (spec.model or "").removeprefix(_OPENROUTER_PREFIX).startswith(
+            "@preset/"
+        ):
             yield AgentEvent(
                 kind="status",
                 summary=(
-                    f"no price data for model {spec.model!r}: cost_usd will be unknown and "
-                    "max_budget_usd cannot be enforced (the CLI's own figure prices these "
-                    "models from its catalogue and is not the OpenRouter cost)"
+                    "OpenRouter preset selected: a direct @preset id can choose the model, "
+                    "so Claude Code uses generic context metadata. OpenRouter still reports "
+                    "the selected model, provider, and exact cost for each request."
                 ),
-                raw={"event": "cost_unknown", "model": spec.model},
+                raw={"event": "spec_warning"},
             )
 
         client = ClaudeSDKClient(options=options)
@@ -511,7 +591,8 @@ class ClaudeCodeHarness:
                         },
                     )
                     break
-                for event in translator.translate(message):
+                translated = list(translator.translate(message))
+                for event in translated:
                     tracker.observe(event)
                     if (event.raw or {}).get("subtype") == "init":
                         # The notification grace ends as soon as the CLI starts the next
@@ -527,9 +608,16 @@ class ClaudeCodeHarness:
                     if reason is None:
                         fin = self._finalize(spec, ctx)
                         finalized = True
+                        if unpriced_openrouter and translator.openrouter_cost_usd is None:
+                            yield _openrouter_cost_unknown(spec.model)
                         yield self._final_result(
-                            event, turns_total, segment_summaries(event), price,
+                            event,
+                            turns_total,
+                            segment_summaries(event),
+                            price,
                             unpriced_openrouter,
+                            translator.openrouter_cost_usd,
+                            spec.max_budget_usd if is_openrouter else None,
                         )
                         if fin is not None:
                             yield fin
@@ -557,6 +645,25 @@ class ClaudeCodeHarness:
                             "undelivered": sorted(tracker.undelivered),
                         },
                     )
+                if (
+                    is_openrouter
+                    and not budget_interrupted
+                    and translator.openrouter_cost_usd is not None
+                    and translator.openrouter_cost_usd >= spec.max_budget_usd
+                ):
+                    budget_interrupted = True
+                    yield AgentEvent(
+                        kind="status",
+                        summary=(
+                            "max_budget_usd reached after an OpenRouter response; "
+                            "interrupting before another model request"
+                        ),
+                        raw={"event": "limit_interrupt", "limit": "budget"},
+                    )
+                    try:
+                        await client.interrupt()
+                    except Exception:  # noqa: BLE001 — the final result still records the cap
+                        pass
         except Exception as exc:
             # Surface the captured stderr with the failure: as a status event (reaches the
             # stream / Cloud Logging on gemini) and embedded in the raised error, so a
@@ -579,7 +686,17 @@ class ClaudeCodeHarness:
                 fin = self._finalize(spec, ctx)
                 finalized = True
                 last = demoted[-1]
-                yield self._final_result(last, turns_total, segment_summaries(last))
+                if unpriced_openrouter and translator.openrouter_cost_usd is None:
+                    yield _openrouter_cost_unknown(spec.model)
+                yield self._final_result(
+                    last,
+                    turns_total,
+                    segment_summaries(last),
+                    price,
+                    unpriced_openrouter,
+                    translator.openrouter_cost_usd,
+                    spec.max_budget_usd if is_openrouter else None,
+                )
                 if fin is not None:
                     yield fin
                 return
@@ -600,7 +717,17 @@ class ClaudeCodeHarness:
             fin = self._finalize(spec, ctx)
             finalized = True
             last = demoted[-1]
-            yield self._final_result(last, turns_total, segment_summaries(last))
+            if unpriced_openrouter and translator.openrouter_cost_usd is None:
+                yield _openrouter_cost_unknown(spec.model)
+            yield self._final_result(
+                last,
+                turns_total,
+                segment_summaries(last),
+                price,
+                unpriced_openrouter,
+                translator.openrouter_cost_usd,
+                spec.max_budget_usd if is_openrouter else None,
+            )
             if fin is not None:
                 yield fin
         elif not finalized:

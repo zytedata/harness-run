@@ -1,10 +1,8 @@
 """List the upstream endpoints OpenRouter can route a model to — free, no model call.
 
-OpenRouter serves one model id from many providers, and they are not equivalent: they
-differ in quantization, context and output caps, price, and whether they support tool
-calling at all. The toolkit cannot pin the choice (provider selection is a request-body
-field the harness's CLI builds), so the first step in any routing question is seeing what
-the pool actually contains.
+OpenRouter can serve one model id through providers with different quantization, context
+limits, prices, and tool support. Use this command to inspect the current choices before
+creating a routing preset.
 
 This reads the public catalogue plus, with a key, what your account can reach. It makes no
 model calls and costs nothing.
@@ -14,9 +12,9 @@ Run:
   .venv/bin/python dev/openrouter_endpoints.py z-ai/glm-5.3          # a specific model
   .venv/bin/python dev/openrouter_endpoints.py --probe moonshotai/kimi-k3 -n 12
 
-``--probe`` sends N tiny identical completions and reports which provider served each —
-the only way to see routing from outside, since the provider is absent from the Responses
-wire the Codex harness uses. **That part costs money** (a fraction of a cent per call).
+``--probe`` sends N tiny identical completions and reports which provider served each.
+**That part costs money** (a fraction of a cent per call). Agent turns also report this
+information as `openrouter_request` events.
 """
 
 from __future__ import annotations
@@ -64,16 +62,35 @@ def show_endpoints(model: str, key: str | None) -> None:
         print(f"{model}: HTTP {e.code} {e.read().decode()[:120]}")
         return
     eps = data.get("endpoints", [])
+    model_price = data.get("pricing") or {}
     print(f"\n{model} — {len(eps)} endpoint(s)")
-    print(f"  {'provider':<20} {'quant':<9} {'context':>10} {'max_out':>10}  {'$/Mtok in':>10}  tools")
+    if model_price:
+        prompt = model_price.get("prompt")
+        completion = model_price.get("completion")
+        if prompt not in (None, "") and completion not in (None, ""):
+            print(
+                "  model-list price: "
+                f"${float(prompt) * 1e6:.4g}/M input, "
+                f"${float(completion) * 1e6:.4g}/M output"
+            )
+    print(
+        f"  {'provider':<20} {'quant':<9} {'context':>10} {'max_out':>10}  "
+        f"{'$/M in':>8} {'$/M out':>9} {'cache':>8}  tools"
+    )
     for e in sorted(eps, key=lambda x: str(x.get("provider_name"))):
         params = e.get("supported_parameters") or []
-        price = e.get("pricing", {}).get("prompt")
-        per_mtok = f"{float(price) * 1e6:.2f}" if price not in (None, "") else "?"
+        prices = e.get("pricing", {})
+
+        def per_million(name: str) -> str:
+            value = prices.get(name)
+            return f"{float(value) * 1e6:.4g}" if value not in (None, "") else "?"
+
         print(
             f"  {str(e.get('provider_name')):<20} {str(e.get('quantization')):<9} "
             f"{str(e.get('context_length')):>10} {str(e.get('max_completion_tokens')):>10}  "
-            f"{per_mtok:>10}  {'yes' if 'tools' in params else 'NO'}"
+            f"{per_million('prompt'):>8} {per_million('completion'):>9} "
+            f"{per_million('input_cache_read'):>8}  "
+            f"{'yes' if 'tools' in params else 'NO'}"
         )
     quants = {str(e.get("quantization")) for e in eps}
     if len(quants) > 1:
@@ -100,7 +117,7 @@ def probe(model: str, n: int, key: str) -> None:
         print(f"  {i + 1:>3}. {who}")
     print(f"  distinct providers: {len(seen)} — {dict(seen)}")
     if len(seen) > 1:
-        print("  ! routing is not deterministic; pin it if you need comparable runs")
+        print("  ! providers varied; use a preset when runs must use the same provider")
 
 
 def main() -> int:

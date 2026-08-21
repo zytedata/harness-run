@@ -23,7 +23,7 @@ def test_build_requirements_includes_base_and_spec_packages() -> None:
     reqs = deploy.build_requirements(_spec(packages=["pandas==2.2.*"]))
 
     # Base deps are present (a representative sampling).
-    assert any(r.startswith("claude-agent-sdk") for r in reqs)
+    assert "claude-agent-sdk==0.2.130" in reqs
     assert any(r.startswith("google-adk") for r in reqs)
     assert any(r.startswith("a2a-sdk") for r in reqs)
     assert "uv>=0.5" in reqs
@@ -249,7 +249,7 @@ def test_validate_resource_limits_rejects_malformed() -> None:
 
 def test_build_requirements_codex_bakes_sdk() -> None:
     reqs = deploy.build_requirements(_spec(model="gpt-5.6-luna", harness="codex"))
-    assert any(r.startswith("openai-codex") for r in reqs)
+    assert "openai-codex==0.147.0" in reqs
     # A claude-harness engine doesn't carry the codex CLI binary.
     assert not any(r.startswith("openai-codex") for r in deploy.build_requirements(_spec()))
 

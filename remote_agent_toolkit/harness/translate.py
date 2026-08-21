@@ -27,14 +27,22 @@ Mapping (SDK message type → ``AgentEvent.kind``):
 
 from __future__ import annotations
 
+import json
 from typing import Any, Iterator
 
 from ..events import AgentEvent
 
 # Tool-input keys worth surfacing in a one-line ``tool_use`` summary, in priority order.
 _SUMMARY_KEYS = (
-    "command", "file_path", "skill", "pattern", "url",
-    "description", "subagent_type", "prompt", "query",
+    "command",
+    "file_path",
+    "skill",
+    "pattern",
+    "url",
+    "description",
+    "subagent_type",
+    "prompt",
+    "query",
 )
 
 
@@ -62,12 +70,21 @@ class EventTranslator:
 
     def __init__(self) -> None:
         self._tool_names: dict[str, str] = {}
+        self._openrouter_cost_total = 0.0
+        self._openrouter_request_cost: float | None = None
+        self._saw_openrouter_cost = False
+
+    @property
+    def openrouter_cost_usd(self) -> float | None:
+        """Exact sum reported by OpenRouter, or ``None`` when no cost was seen."""
+        return self._openrouter_cost_total if self._saw_openrouter_cost else None
 
     def translate(self, message: Any) -> Iterator[AgentEvent]:
         """Yield zero or more :class:`AgentEvent`s for one Claude SDK message."""
         from claude_agent_sdk import (
             AssistantMessage,
             ResultMessage,
+            StreamEvent,
             SystemMessage,
             TaskNotificationMessage,
             TaskStartedMessage,
@@ -80,7 +97,50 @@ class EventTranslator:
         )
         from claude_agent_sdk.types import TERMINAL_TASK_STATUSES
 
-        if isinstance(message, AssistantMessage):
+        if isinstance(message, StreamEvent):
+            event = message.event or {}
+            if event.get("type") == "message_delta":
+                usage = event.get("usage") or {}
+                cost = usage.get("cost")
+                if cost is not None:
+                    self._openrouter_request_cost = float(cost)
+            elif event.get("type") == "message_stop":
+                # ``message_delta.usage.cost`` is the charge for this response. Keep the
+                # latest value and commit it once at the matching stop event; treating
+                # every delta as a separate charge could count a cumulative value twice.
+                if self._openrouter_request_cost is not None:
+                    self._openrouter_cost_total += self._openrouter_request_cost
+                    self._saw_openrouter_cost = True
+                metadata = event.get("openrouter_metadata") or {}
+                if metadata:
+                    selected = next(
+                        (
+                            endpoint
+                            for endpoint in (metadata.get("endpoints") or {}).get("available", [])
+                            if endpoint.get("selected")
+                        ),
+                        {},
+                    )
+                    yield AgentEvent(
+                        kind="status",
+                        summary=(
+                            "OpenRouter request: "
+                            f"provider={selected.get('provider') or 'unreported'} "
+                            f"model={selected.get('model') or metadata.get('requested')}"
+                        ),
+                        raw={
+                            "event": "openrouter_request",
+                            "requested_model": metadata.get("requested"),
+                            "provider": selected.get("provider"),
+                            "provider_model": selected.get("model"),
+                            "region": metadata.get("region"),
+                            "attempt": metadata.get("attempt"),
+                            "summary": metadata.get("summary"),
+                            "cost_usd": self._openrouter_request_cost,
+                        },
+                    )
+                self._openrouter_request_cost = None
+        elif isinstance(message, AssistantMessage):
             for block in message.content:
                 if isinstance(block, TextBlock):
                     if block.text.strip():
@@ -165,7 +225,12 @@ class EventTranslator:
                 )
         elif isinstance(message, ResultMessage):
             usage = message.usage or {}
-            if message.is_error:
+            if message.structured_output is not None:
+                try:
+                    text = json.dumps(message.structured_output, separators=(",", ":"))
+                except (TypeError, ValueError):
+                    text = str(message.structured_output)
+            elif message.is_error:
                 text = message.result or "(run errored)"
             else:
                 text = message.result or "(no final text)"
@@ -180,6 +245,12 @@ class EventTranslator:
                     "num_turns": message.num_turns,
                     "duration_ms": message.duration_ms,
                     "session_id": message.session_id,
+                    "model_usage": message.model_usage,
+                    **(
+                        {"structured_output": message.structured_output}
+                        if message.structured_output is not None
+                        else {}
+                    ),
                 },
             )
-        # Other SDK message types (StreamEvent, RateLimitEvent) are intentionally dropped.
+        # Other SDK message types, including RateLimitEvent, are intentionally dropped.

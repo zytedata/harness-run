@@ -252,8 +252,8 @@ class AgentSpec:
     Attributes:
         name: Stable agent name. Maps to a deployed engine's display name (§5).
         model: Model id the harness runs, e.g. ``"claude-sonnet-4-6"`` (Claude Code) or
-            a GPT model id (Codex). An ``openrouter/<vendor>/<model>`` id runs on
-            OpenRouter through the Codex harness (see ``harness.codex``).
+            a GPT model id (Codex). An ``openrouter/<vendor>/<model>`` id runs through
+            OpenRouter on either harness.
         harness: The coding-agent loop to run: ``"claude-code"`` (default) or ``"codex"``.
             The spec's harness-shaped fields (``permission_mode``, tool lists, skills)
             are translated by each binding; see the harness module docstrings for the

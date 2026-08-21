@@ -30,7 +30,7 @@ live-smoke:
 live-revisions:
 	$(VENV)/bin/python dev/live_revisions.py
 
-# Live check of the OpenRouter models on the codex harness (local runtime, no cloud).
+# Live check of the OpenRouter models on both harnesses (local runtime, no cloud).
 # COSTS REAL MONEY (a few cents) and needs OPENROUTER_API_KEY — run it by hand, sparingly,
 # never in CI. Run it when you touch the harness's provider wiring or the model list.
 live-openrouter:
@@ -39,8 +39,8 @@ live-openrouter:
 # Same models on Gemini Agent Runtime, plus the remote-only visibility surface
 # (effective_spec echo, resource samples, memory peak, history, traces). One throwaway
 # engine serves all four models (model is a per-turn knob), deleted in `finally`.
-# COSTS REAL MONEY (~$0.30) and takes ~8-15 min, nearly all of it the engine build (the 26
-# checks run concurrently in ~2 min). Give it a generous timeout — by hand, never in CI.
+# COSTS REAL MONEY and takes ~8-15 min, mostly for the engine build. Checks run
+# concurrently. Give it a generous timeout — by hand, never in CI.
 live-openrouter-remote:
 	$(VENV)/bin/python dev/live_openrouter_remote_probe.py
 

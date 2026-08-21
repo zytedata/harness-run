@@ -71,6 +71,7 @@ def make_sdk_client(script):
             self.options = options
             self.prompt = None
             self.disconnected = False
+            self.interrupted = False
             type(self).instances.append(self)
 
         async def connect(self):
@@ -92,5 +93,8 @@ def make_sdk_client(script):
 
         async def disconnect(self):
             self.disconnected = True
+
+        async def interrupt(self):
+            self.interrupted = True
 
     return FakeSDKClient

@@ -48,7 +48,7 @@ _BASE_REQUIREMENTS: tuple[str, ...] = (
     "google-cloud-aiplatform[adk,agent_engines]>=1.154",
     "cloudpickle",
     "pydantic",
-    "claude-agent-sdk>=0.2.119",  # keep in lockstep with pyproject (task messages + stderr cb)
+    "claude-agent-sdk==0.2.130",  # keep in lockstep with pyproject and constraints
     "google-adk>=1.5",  # floor of the agentplatform AdkApp template
     # uv as a PYTHON dependency, not via an install script: build-script filesystem changes
     # don't persist into the runtime container, but requirements always do. The uv console
@@ -131,7 +131,7 @@ def build_requirements(spec: AgentSpec) -> list[str]:
     # deployment offers the codex harness (spec.harness or spec.harnesses) — harness
     # AVAILABILITY is a deploy-time fact; sessions select among what is baked. Keep in
     # lockstep with pyproject.
-    extra = ("openai-codex>=0.144.4",) if "codex" in spec.baked_harnesses else ()
+    extra = ("openai-codex==0.147.0",) if "codex" in spec.baked_harnesses else ()
 
     entries: list = []  # str (opaque pass-through) or Requirement, in first-seen order
     by_name: dict = {}

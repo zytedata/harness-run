@@ -96,9 +96,9 @@ tag `vX.Y.Z`, push the commit and the tag.
   is a cloned repo, which could ship a `stdio` server (an arbitrary command)
   for the agent to run. A repo whose `.mcp.json` servers *are* wanted must
   mirror them into `mcp_servers` ([#21]).
-- The pinned engine `google-cloud-aiplatform` is now 1.164.0 (Google's release
-  made fresh venvs drift past the old `==1.163.0` pin, failing
-  `verify_deploy_env()` — and CI — by design). Deploy venvs must carry 1.164.0
+- The pinned engine `google-cloud-aiplatform` is now 1.165.1 (Google's release
+  made fresh venvs drift past the old `==1.164.0` pin, failing
+  `verify_deploy_env()` — and CI — by design). Deploy venvs must carry 1.165.1
   from now on (`uv sync` suffices); already-deployed engines are unaffected,
   the pin is baked into their image. Verified with a clean `make live-smoke`
   ([#24]).

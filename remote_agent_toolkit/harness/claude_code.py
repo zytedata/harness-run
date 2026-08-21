@@ -558,7 +558,7 @@ class ClaudeCodeHarness:
         # undiagnosable by construction (the ProcessError text promises stderr details).
         stderr_log = _StderrCapture(ctx.job_dir / "stderr.log")
         options.stderr = stderr_log
-        translator = EventTranslator(openrouter_provider=spec.openrouter_provider)
+        translator = EventTranslator()
         tracker = _TaskTracker()
         finalized = False
         # Every demoted (segment-boundary) result, oldest first; the newest is also the

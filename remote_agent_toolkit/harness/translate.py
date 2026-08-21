@@ -68,24 +68,14 @@ class EventTranslator:
     ``tool_use``, so the id → name mapping must persist across ``translate`` calls).
     """
 
-    def __init__(self, openrouter_provider: str | None = None) -> None:
+    def __init__(self) -> None:
         self._tool_names: dict[str, str] = {}
-        self._openrouter_cost_total = 0.0
-        self._openrouter_request_cost: float | None = None
-        self._saw_openrouter_cost = False
-        self._openrouter_provider = openrouter_provider
-
-    @property
-    def openrouter_cost_usd(self) -> float | None:
-        """Exact sum reported by OpenRouter, or ``None`` when no cost was seen."""
-        return self._openrouter_cost_total if self._saw_openrouter_cost else None
 
     def translate(self, message: Any) -> Iterator[AgentEvent]:
         """Yield zero or more :class:`AgentEvent`s for one Claude SDK message."""
         from claude_agent_sdk import (
             AssistantMessage,
             ResultMessage,
-            StreamEvent,
             SystemMessage,
             TaskNotificationMessage,
             TaskStartedMessage,
@@ -98,57 +88,7 @@ class EventTranslator:
         )
         from claude_agent_sdk.types import TERMINAL_TASK_STATUSES
 
-        if isinstance(message, StreamEvent):
-            event = message.event or {}
-            if event.get("type") == "message_delta":
-                usage = event.get("usage") or {}
-                cost = usage.get("cost")
-                if cost is not None:
-                    self._openrouter_request_cost = float(cost)
-            elif event.get("type") == "message_stop":
-                # ``message_delta.usage.cost`` is the charge for this response. Keep the
-                # latest value and commit it once at the matching stop event; treating
-                # every delta as a separate charge could count a cumulative value twice.
-                if self._openrouter_request_cost is not None:
-                    self._openrouter_cost_total += self._openrouter_request_cost
-                    self._saw_openrouter_cost = True
-                metadata = event.get("openrouter_metadata") or {}
-                if metadata:
-                    selected = next(
-                        (
-                            endpoint
-                            for endpoint in (metadata.get("endpoints") or {}).get("available", [])
-                            if endpoint.get("selected")
-                        ),
-                        {},
-                    )
-                    from ._openrouter_proxy import _provider_matches_request
-
-                    provider = selected.get("provider")
-                    yield AgentEvent(
-                        kind="status",
-                        summary=(
-                            "OpenRouter request: "
-                            f"provider={provider or 'unreported'} "
-                            f"model={selected.get('model') or metadata.get('requested')}"
-                        ),
-                        raw={
-                            "event": "openrouter_request",
-                            "requested_model": metadata.get("requested"),
-                            "requested_provider": self._openrouter_provider,
-                            "provider": provider,
-                            "provider_matches_request": _provider_matches_request(
-                                self._openrouter_provider, provider
-                            ),
-                            "provider_model": selected.get("model"),
-                            "region": metadata.get("region"),
-                            "attempt": metadata.get("attempt"),
-                            "summary": metadata.get("summary"),
-                            "cost_usd": self._openrouter_request_cost,
-                        },
-                    )
-                self._openrouter_request_cost = None
-        elif isinstance(message, AssistantMessage):
+        if isinstance(message, AssistantMessage):
             for block in message.content:
                 if isinstance(block, TextBlock):
                     if block.text.strip():

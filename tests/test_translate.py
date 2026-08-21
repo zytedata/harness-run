@@ -5,7 +5,6 @@ from __future__ import annotations
 from claude_agent_sdk import (
     AssistantMessage,
     ResultMessage,
-    StreamEvent,
     SystemMessage,
     TextBlock,
     ThinkingBlock,
@@ -107,52 +106,3 @@ def test_system_init_becomes_status_and_other_subtypes_drop():
         "status"
     ]
     assert list(tr.translate(SystemMessage(subtype="other", data={}))) == []
-
-
-def test_openrouter_stream_reports_exact_cost_and_selected_provider():
-    tr = EventTranslator(openrouter_provider="moonshotai")
-    assert (
-        list(
-            tr.translate(
-                StreamEvent(
-                    uuid="1",
-                    session_id="s",
-                    event={"type": "message_delta", "usage": {"cost": 0.0123}},
-                )
-            )
-        )
-        == []
-    )
-    assert tr.openrouter_cost_usd is None  # committed once when the response stops
-    events = list(
-        tr.translate(
-            StreamEvent(
-                uuid="2",
-                session_id="s",
-                event={
-                    "type": "message_stop",
-                    "openrouter_metadata": {
-                        "requested": "moonshotai/kimi-k3",
-                        "region": "MAD",
-                        "attempt": 2,
-                        "summary": "available=2, attempts=2, selected=Moonshot AI",
-                        "endpoints": {
-                            "available": [
-                                {"provider": "Other", "model": "m", "selected": False},
-                                {"provider": "Moonshot AI", "model": "kimi-k3", "selected": True},
-                            ]
-                        },
-                    },
-                },
-            )
-        )
-    )
-
-    assert tr.openrouter_cost_usd == 0.0123
-    assert len(events) == 1
-    assert events[0].raw["event"] == "openrouter_request"
-    assert events[0].raw["provider"] == "Moonshot AI"
-    assert events[0].raw["requested_provider"] == "moonshotai"
-    assert events[0].raw["provider_matches_request"] is True
-    assert events[0].raw["provider_model"] == "kimi-k3"
-    assert events[0].raw["cost_usd"] == 0.0123

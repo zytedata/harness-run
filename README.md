@@ -271,17 +271,17 @@ Important details:
 - Codex uses `low` reasoning when the spec leaves it unset because OpenRouter's Responses endpoint
   requires reasoning.
 - `output_schema` is also written into the prompt. OpenRouter accepts the JSON schema but may leave
-  enforcement to the model. The separate live structured-output test used GLM-5.3 on both
-  harnesses; the other three models did not receive their own structured-output test.
+  enforcement to the model. Structured output was tested separately for every model on both
+  harnesses, locally and on Gemini Agent Runtime. All 16 checks returned schema-valid output.
 - Reasoning events vary by model. Kimi K3 and both DeepSeek models emitted them during testing;
   GLM-5.3 did not.
 - A plain string in `spec.system_prompt` replaces Claude Code's larger preset. This can reduce token
   use when the task does not need the preset's tool guidance.
 
-The paid local and remote tests run a basic turn with all four models on both harnesses. They check
-tool use, credential removal, exact cost, budgets, preset handling, and provider reporting. Separate
-GLM-5.3 checks cover structured output and resume on both harnesses. The remote test also checks the
-Gemini runtime's history, resource, and trace data. See
+The paid local and remote tests run a basic turn and a structured-output turn with all four models
+on both harnesses. They also check tool use, credential removal, exact cost, budgets, preset
+handling, provider reporting, and resume. The remote test checks the Gemini runtime's history,
+resource, and trace data. See
 `make live-openrouter` and `make live-openrouter-remote`.
 
 ## Dev: run locally, in-process

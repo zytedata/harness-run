@@ -1,8 +1,8 @@
 """Paid Gemini Agent Runtime check for OpenRouter on both harnesses.
 
-One throwaway engine contains both CLIs. It repeats the local model, resume, schema, preset,
-budget, provider, cost, tool, and credential checks. It also checks effective specs, resource
-samples, memory peak, history, and Cloud Trace.
+One throwaway engine contains both CLIs. It checks every model's basic and structured-output
+turns on both harnesses. It also checks resume, presets, budgets, provider and cost reporting,
+tools, credentials, effective specs, resource samples, memory peak, history, and Cloud Trace.
 
 Run by hand with ``OPENROUTER_API_KEY=... make live-openrouter-remote``. Never run this in
 CI. A run usually takes 8-15 minutes and spends real money. The engine is deleted after the
@@ -46,7 +46,6 @@ MODELS = [
 ]
 # The engine is baked with the cheapest of them; every turn overrides the model anyway.
 BAKED_MODEL = "openrouter/deepseek/deepseek-v4-flash"
-SCHEMA_MODEL = "openrouter/z-ai/glm-5.3"  # ignores the unenforced json_schema format
 RESUME_MODEL = "openrouter/z-ai/glm-5.3"
 TOKEN = "BANANA-77"
 # Room for the concurrent checks; the default of 1 would serialize them.
@@ -212,20 +211,20 @@ async def _check_model(engine, model: str, key: str, harness: str = "codex") -> 
         )
 
 
-async def _check_structured_output(engine, key: str, harness: str) -> None:
-    label = f"{SCHEMA_MODEL.removeprefix('openrouter/')} schema [{harness}]"
+async def _check_structured_output(engine, model: str, key: str, harness: str) -> None:
+    label = f"{model.removeprefix('openrouter/')} schema [{harness}]"
     session = engine.start_session(config=SessionConfig(harness=harness))
     r, _, _, _, _ = await _drive(
         label,
         session.run(
             'Run `python3 -c "print(6 * 7)"`. Return the number as `answer` and a one-word `note`.',
             secrets={"OPENROUTER_API_KEY": key},
-            config=TurnConfig(model=SCHEMA_MODEL, output_schema=SCHEMA),
+            config=TurnConfig(model=model, output_schema=SCHEMA),
         ),
     )
     out = r.structured_output
     check(
-        f"structured output parses remotely [{harness}]",
+        f"{label}: structured output parses remotely",
         isinstance(out, dict) and out.get("answer") == 42,
         f"structured_output={out!r}",
     )
@@ -494,7 +493,8 @@ async def main() -> int:
                     await _check_model(engine, model, key, h)
             resumes = {}
             for h in HARNESSES:
-                await _check_structured_output(engine, key, h)
+                for model in MODELS:
+                    await _check_structured_output(engine, model, key, h)
                 resumes[h] = await _check_resume(engine, key, h)
                 await _check_preset(engine, key, h)
                 await _check_budget(engine, key, h)
@@ -508,7 +508,9 @@ async def main() -> int:
                 for harness in HARNESSES
             ]
             schema_checks = [
-                _check_structured_output(engine, key, harness) for harness in HARNESSES
+                _check_structured_output(engine, model, key, harness)
+                for model in MODELS
+                for harness in HARNESSES
             ]
             resume_checks = [_check_resume(engine, key, harness) for harness in HARNESSES]
             preset_checks = [_check_preset(engine, key, harness) for harness in HARNESSES]

@@ -107,10 +107,10 @@ OPENROUTER_API_KEY=... make live-openrouter
 MODELS=openrouter/z-ai/glm-5.3 make live-openrouter  # one model, both harnesses
 ```
 
-This paid local probe runs every model on both harnesses. Each model must call a shell tool,
-return its output, hide provider credentials from the tool, report its selected upstream, and
-use OpenRouter's exact cost. It also checks resume, structured output, a missing preset error,
-and a tiny budget cap on both harnesses.
+This paid local test runs every model on both harnesses. Each model must call a shell tool,
+return its output, produce schema-valid structured output, hide provider credentials from the
+tool, report its selected upstream, and use OpenRouter's exact cost. It also checks resume, a
+missing preset error, and a tiny budget cap on both harnesses.
 
 To verify a real provider pin, supply a preset model and its expected provider:
 
@@ -120,7 +120,7 @@ OPENROUTER_EXPECTED_PROVIDER="Moonshot AI" \
 make live-openrouter
 ```
 
-The probe reads every `openrouter_request` event and fails if the provider differs. Set
+The test reads every `openrouter_request` event and fails if the provider differs. Set
 `SERIAL=1` for ordered output while debugging.
 
 **It costs real money** (a few cents a pass) and needs a key, so run it **by hand,
@@ -134,9 +134,9 @@ emits, and that is what CI checks.
 OPENROUTER_API_KEY=... make live-openrouter-remote
 ```
 
-This probe repeats the local checks on Gemini Agent Runtime. One engine contains both CLIs
-and serves every model through per-turn overrides. Structured output, resume, preset errors,
-and budget caps run on both harnesses.
+This paid remote test repeats the local checks on Gemini Agent Runtime. One engine contains both
+CLIs and serves every model through per-turn overrides. Every model runs a structured-output turn
+on both harnesses. Resume, preset errors, and budget caps also run on both harnesses.
 
 It also checks the remote-only surface: the worker's `effective_spec` echo names the model,
 `session.resource_samples()` returns worker CPU/RAM, `memory_peak_bytes` is stamped on the
@@ -155,7 +155,7 @@ engine billing.
 
 DeepSeek v4 sometimes returns no final message under Claude Code. Flash produced this most
 often in the earlier measurements; Pro produced it on both attempts in the final remote
-validation. The probe retries one soft failure and reports when the retry was used. It stays
+validation. The test retries one soft failure and reports when the retry was used. It stays
 failed when the retry also has no answer.
 
 ### Model attribution: did we run what we asked for?

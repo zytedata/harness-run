@@ -1,8 +1,9 @@
 """Paid local check for the four OpenRouter models on both harnesses.
 
-Each model must call a shell tool, return its output, hide provider credentials, report the
-selected upstream, and use OpenRouter's exact cost. Resume, structured output, preset errors,
-and budget caps are checked on both harnesses. Checks run concurrently unless ``SERIAL=1``.
+Each model must call a shell tool, return its output, produce schema-valid structured output,
+hide provider credentials, report the selected upstream, and use OpenRouter's exact cost.
+Resume, preset errors, and budget caps are checked on both harnesses. Checks run concurrently
+unless ``SERIAL=1``.
 
 Run by hand with ``OPENROUTER_API_KEY=... make live-openrouter``. Never run this in CI.
 Use ``MODELS=...`` to limit the model list. To verify a real preset, also set
@@ -56,8 +57,6 @@ PINNED_MODEL = os.environ.get("OPENROUTER_PRESET_MODEL")
 EXPECTED_PROVIDER = os.environ.get("OPENROUTER_EXPECTED_PROVIDER")
 PROBE_REASONING_EFFORT = os.environ.get("PROBE_REASONING_EFFORT")
 
-# The strictest structured-output case we know: this model ignores the unenforced schema.
-SCHEMA_MODEL = "openrouter/z-ai/glm-5.3"
 SCHEMA = {
     "type": "object",
     "properties": {"answer": {"type": "integer"}, "note": {"type": "string"}},
@@ -375,7 +374,8 @@ async def main() -> int:
         rows = [await _probe(m, key, h) for m in MODELS for h in HARNESSES]
         for h in HARNESSES:
             rows.append(await _probe_resume(RESUME_MODEL, key, h))
-            rows.append(await _probe_schema(SCHEMA_MODEL, key, h))
+            for model in MODELS:
+                rows.append(await _probe_schema(model, key, h))
             rows.append(await _probe_preset(h, key))
             rows.append(await _probe_budget(h, key))
             if PINNED_MODEL and EXPECTED_PROVIDER:
@@ -385,7 +385,7 @@ async def main() -> int:
             await asyncio.gather(
                 *(_probe(m, key, h) for m in MODELS for h in HARNESSES),
                 *(_probe_resume(RESUME_MODEL, key, h) for h in HARNESSES),
-                *(_probe_schema(SCHEMA_MODEL, key, h) for h in HARNESSES),
+                *(_probe_schema(m, key, h) for m in MODELS for h in HARNESSES),
                 *(_probe_preset(h, key) for h in HARNESSES),
                 *(_probe_budget(h, key) for h in HARNESSES),
                 *(

@@ -74,7 +74,7 @@ def show_endpoints(model: str, key: str | None) -> None:
                 f"${float(completion) * 1e6:.4g}/M output"
             )
     print(
-        f"  {'provider id':<18} {'provider':<20} {'quant':<9} {'context':>10} {'max_out':>10}  "
+        f"  {'provider slug':<18} {'provider':<20} {'quant':<9} {'context':>10} {'max_out':>10}  "
         f"{'$/M in':>8} {'$/M out':>9} {'cache':>8}  tools  schema"
     )
     for e in sorted(eps, key=lambda x: str(x.get("provider_name"))):

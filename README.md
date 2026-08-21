@@ -294,8 +294,9 @@ For a repeatable comparison:
 - Run the provider check below before a larger experiment. It fails if OpenRouter reports a
   different provider.
 
-The provider-list command prints both the display name and provider ID. The paid check selects one
-known provider for every included model and fails if OpenRouter reports a different provider:
+The provider-list command prints both the display name and provider slug. Use the slug as the
+`openrouter_provider` value. The paid check selects one known provider for every included model
+and fails if OpenRouter reports a different provider:
 
 ```bash
 make live-openrouter
@@ -318,8 +319,10 @@ Important details:
 - Codex uses `low` reasoning when the spec leaves it unset because OpenRouter's Responses endpoint
   requires reasoning.
 - `output_schema` is also written into the prompt. OpenRouter accepts the JSON schema but may leave
-  enforcement to the model. Structured output was tested separately for every model on both
-  harnesses, locally and on Gemini Agent Runtime. All 16 checks returned schema-valid output.
+  enforcement to the model. The local paid test returned valid structured output for every model
+  on both harnesses. The remote test did the same except for two Kimi/Codex requests that OpenRouter
+  rejected after the shared account ran out of credit; those combinations passed in earlier remote
+  runs.
 - Reasoning events vary by model. Kimi K3 and both DeepSeek models emitted them during testing;
   GLM-5.3 did not.
 - A plain string in `spec.system_prompt` replaces Claude Code's larger preset. This can reduce token

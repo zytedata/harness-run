@@ -133,6 +133,7 @@ def test_provider_choice_requires_a_json_object():
 def test_provider_name_matching_accepts_openrouter_display_names():
     assert _provider_matches_request("moonshotai", "Moonshot AI") is True
     assert _provider_matches_request("z-ai", "Z.AI") is True
+    assert _provider_matches_request("google-vertex/us-east5", "Google Vertex") is True
     assert _provider_matches_request("novita", "Together") is False
     assert _provider_matches_request(None, "Together") is None
 

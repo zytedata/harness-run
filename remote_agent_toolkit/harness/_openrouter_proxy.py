@@ -171,14 +171,20 @@ def _model_matches(expected: str | None, requested: Any) -> bool:
 
 
 def _provider_matches_request(requested: str | None, selected: str | None) -> bool | None:
-    """Compare an OpenRouter provider id with the display name in response metadata."""
+    """Compare a provider slug with the display name in OpenRouter's response metadata.
+
+    OpenRouter accepts a base slug (``google-vertex``) or a specific endpoint slug
+    (``google-vertex/us-east5``). Response metadata contains only the provider's display
+    name, so compare that name with the base part of the requested slug. A successful
+    response still had to satisfy the full slug because the request disables fallbacks.
+    """
     if requested is None or selected is None:
         return None
 
     def normalize(value: str) -> str:
         return "".join(char for char in value.casefold() if char.isalnum())
 
-    return normalize(requested) == normalize(selected)
+    return normalize(requested.split("/", 1)[0]) == normalize(selected)
 
 
 def _request_with_provider(body: bytes | None, provider: str | None) -> bytes | None:

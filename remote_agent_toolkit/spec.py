@@ -297,7 +297,7 @@ class AgentSpec:
             nearest own: Codex maps ``max → xhigh`` (with a ``spec_warning`` status);
             Claude Code maps ``minimal``/``none`` ``→ low``. Unknown strings pass
             through to the SDK untouched.
-        openrouter_provider: OpenRouter provider id to use for every model response, such
+        openrouter_provider: OpenRouter provider slug to use for every model response, such
             as ``"moonshotai"``. The toolkit sends it in OpenRouter's request body and
             disables provider fallbacks. Leave it as ``None`` to use OpenRouter's normal
             routing. This setting requires an ``openrouter/`` model.
@@ -380,7 +380,7 @@ class AgentSpec:
             object.__setattr__(self, "disallowed_tools", tuple(self.disallowed_tools))
         if self.openrouter_provider is not None:
             if not self.openrouter_provider.strip():
-                raise ValueError("openrouter_provider must be a non-empty provider id")
+                raise ValueError("openrouter_provider must be a non-empty provider slug")
             if not self.model.startswith("openrouter/"):
                 raise ValueError("openrouter_provider requires an openrouter/ model")
 

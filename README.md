@@ -322,6 +322,11 @@ Beyond skills, several `AgentSpec` fields shape what the agent can do and the en
   automatically when skills are present.
 - **`max_turns` / `max_budget_usd`** — hard caps on loop length and spend (the run ends with the matching
   stop reason).
+- **`max_buffer_size`** — bytes allowed in a single message read from the Claude Code CLI's stdout
+  (default 32 MiB; `claude-code` only). One oversized message — a `Read` of a large image arrives
+  base64-encoded, and a big tool result is one line — kills the turn with no result at all, so raise this
+  for an agent whose tool outputs are legitimately enormous rather than discovering the ceiling in
+  production. (The SDK's own default is 1 MiB; the toolkit's is deliberately far above it.)
 - **`reasoning_effort`** — how much reasoning the model spends per response
   (`"none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"`; unset = harness default). The
   vocabulary is the union of both harnesses'; each maps levels only the other supports to its nearest
@@ -525,7 +530,7 @@ configures:
 |---|---|---|---|
 | deploy | `AgentSpec` | `gemini.deploy(spec)` | identity (`name`), image contents (`packages`, engine `env`, the harness CLIs — `harnesses=(...)` bakes several), and the *defaults* for everything below |
 | session | `SessionConfig` | `engine.start_session(config=...)` | the conversation's world: `repos`, `skills`, `mcp_servers`, `system_prompt`, `harness` (selects among the baked CLIs), `checkpoint`/`interactive`, `extra_env` — plus session-wide defaults for the turn knobs |
-| turn | `TurnConfig` | `session.run(config=...)` / `send(config=...)` | the knobs the harness re-reads every invocation: `model`, `reasoning_effort`, `max_turns`, `max_budget_usd`, `background_task_timeout`, `permission_mode`, tool lists, `output_schema` |
+| turn | `TurnConfig` | `session.run(config=...)` / `send(config=...)` | the knobs the harness re-reads every invocation: `model`, `reasoning_effort`, `max_turns`, `max_budget_usd`, `max_buffer_size`, `background_task_timeout`, `permission_mode`, tool lists, `output_schema` |
 
 Both config types are **sparse overlays**: a field left at `INHERIT` (the default) keeps
 the value from the layer below; a set field replaces it wholesale (`extra_env` is the one

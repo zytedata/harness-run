@@ -32,6 +32,9 @@ Spec translation (parity notes):
                          it is mapped to ``xhigh`` with a status warning.
 * ``allowed_tools`` / ``disallowed_tools`` → no Codex equivalent; ignored with a status
                          warning.
+* ``max_buffer_size``  → inert: it caps one NDJSON message on the Claude Agent SDK's own
+                         stdout transport, and the Codex app-server SDK frames its stream
+                         itself with no equivalent knob.
 * background tasks     → no Codex equivalent of Claude Code's task re-invocation
                          (``spec.background_task_timeout`` is inert here).
 * checkpoint/resume    → the workspace snapshot is shared machinery; the conversation

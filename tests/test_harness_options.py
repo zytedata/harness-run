@@ -4,7 +4,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from remote_agent_toolkit import AgentSpec, McpServer, RepoSource, SystemPrompt
+from remote_agent_toolkit import (
+    DEFAULT_MAX_BUFFER_SIZE,
+    AgentSpec,
+    McpServer,
+    RepoSource,
+    SystemPrompt,
+)
 from remote_agent_toolkit.harness.claude_code import ClaudeCodeHarness
 from remote_agent_toolkit.harness.context import RunContext
 
@@ -51,6 +57,18 @@ def test_reasoning_effort_passthrough_and_floor():
         assert ClaudeCodeHarness().build_options(low, _ctx(low)).effort == "low"
     unset = AgentSpec(name="a", model="m")
     assert ClaudeCodeHarness().build_options(unset, _ctx(unset)).effort is None
+
+
+def test_max_buffer_size_reaches_the_sdk_and_beats_its_1mib_default():
+    # The SDK caps ONE stdout message at 1 MiB and raises inside its read loop past that,
+    # killing the turn with no result; the spec's cap must actually reach the transport.
+    spec = AgentSpec(name="a", model="m")
+    assert ClaudeCodeHarness().build_options(spec, _ctx(spec)).max_buffer_size == (
+        DEFAULT_MAX_BUFFER_SIZE
+    )
+    raised = AgentSpec(name="a", model="m", max_buffer_size=64 * 1024 * 1024)
+    opts = ClaudeCodeHarness().build_options(raised, _ctx(raised))
+    assert opts.max_buffer_size == 64 * 1024 * 1024
 
 
 def test_github_mcp_built_from_resolved_secret_only():

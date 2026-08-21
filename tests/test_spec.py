@@ -4,7 +4,14 @@ from __future__ import annotations
 
 import pytest
 
-from remote_agent_toolkit import AgentSpec, McpServer, RepoSource, SkillSource, SystemPrompt
+from remote_agent_toolkit import (
+    DEFAULT_MAX_BUFFER_SIZE,
+    AgentSpec,
+    McpServer,
+    RepoSource,
+    SkillSource,
+    SystemPrompt,
+)
 
 
 def _example_spec() -> AgentSpec:
@@ -74,6 +81,26 @@ def test_agentspec_reasoning_effort_round_trip() -> None:
     assert AgentSpec.from_dict(spec.to_dict()).reasoning_effort is None
     explicit = AgentSpec(name="a", model="m", reasoning_effort="xhigh")
     assert AgentSpec.from_dict(explicit.to_dict()).reasoning_effort == "xhigh"
+
+
+def test_agentspec_max_buffer_size_round_trip_and_default() -> None:
+    # The default is the toolkit's own generous cap, NOT the SDK's 1 MiB (which a real
+    # message — a base64 image, a large tool result — exceeds and dies mid-turn on).
+    assert AgentSpec(name="a", model="m").max_buffer_size == DEFAULT_MAX_BUFFER_SIZE
+    assert DEFAULT_MAX_BUFFER_SIZE > 1024 * 1024
+    explicit = AgentSpec(name="a", model="m", max_buffer_size=4 * 1024 * 1024)
+    assert AgentSpec.from_dict(explicit.to_dict()).max_buffer_size == 4 * 1024 * 1024
+    # A spec serialized before the field existed takes the default, not the old 1 MiB.
+    older = {k: v for k, v in explicit.to_dict().items() if k != "max_buffer_size"}
+    assert AgentSpec.from_dict(older).max_buffer_size == DEFAULT_MAX_BUFFER_SIZE
+
+
+@pytest.mark.parametrize("bad", [0, -1])
+def test_agentspec_rejects_non_positive_max_buffer_size(bad: int) -> None:
+    # Would reject every message; caught at construction rather than as a turn failure
+    # that reads like the payload's fault.
+    with pytest.raises(ValueError, match="max_buffer_size must be > 0"):
+        AgentSpec(name="a", model="m", max_buffer_size=bad)
 
 
 def test_agentspec_interactive_round_trip() -> None:

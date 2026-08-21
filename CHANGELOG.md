@@ -112,6 +112,17 @@ tag `vX.Y.Z`, push the commit and the tag.
 
 ### Fixed
 
+- A single oversized message on the Claude Code CLI's stdout no longer destroys the
+  whole turn. The Agent SDK caps one NDJSON message at 1 MiB and raises from inside
+  its read loop when a message exceeds it, so the harness generator died mid-run and
+  the turn ended as `agent run failed: Failed to decode JSON: JSON message exceeded
+  maximum buffer size of 1048576 bytes` with no result — everything the agent had
+  done was discarded. Nothing plumbed the SDK's `max_buffer_size` option, so the
+  1 MiB default was in force; an agent that `Read`s a screenshot (base64-encoded into
+  one line) or gets a large tool result hit it routinely. The cap is now
+  `AgentSpec.max_buffer_size`, default 32 MiB, and settable per session or per turn
+  like the other invocation knobs. `claude-code` only: the Codex app-server SDK
+  frames its own stream and has no equivalent.
 - Structured output is no longer lost when a background-task notification arrives
   after the agent has already delivered its answer: the model's reply to the stale
   notification became the turn's final message, and structured parsing — which reads

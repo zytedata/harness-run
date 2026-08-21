@@ -99,6 +99,7 @@ _KNOB_FIELDS = (
     "reasoning_effort",
     "max_turns",
     "max_budget_usd",
+    "max_buffer_size",
     "background_task_timeout",
     "permission_mode",
     "allowed_tools",
@@ -210,8 +211,9 @@ class SessionConfig(_ConfigBase):
             engine deployed with an output bucket).
         extra_env: Extra non-secret env vars for the agent subprocess, ADDED on top of
             the deployed ``spec.env`` (deploy-only). Non-secret only, like ``spec.env``.
-        model / reasoning_effort / max_turns / max_budget_usd / background_task_timeout /
-            permission_mode / allowed_tools / disallowed_tools / output_schema:
+        model / reasoning_effort / max_turns / max_budget_usd / max_buffer_size /
+            background_task_timeout / permission_mode / allowed_tools / disallowed_tools /
+            output_schema:
             session-wide defaults for the per-turn knobs (see :class:`TurnConfig`).
             ``output_schema`` also drives client-side structured parsing.
     """
@@ -231,6 +233,7 @@ class SessionConfig(_ConfigBase):
     reasoning_effort: str | None | Any = INHERIT
     max_turns: int | Any = INHERIT
     max_budget_usd: float | Any = INHERIT
+    max_buffer_size: int | Any = INHERIT
     background_task_timeout: float | Any = INHERIT
     permission_mode: str | Any = INHERIT
     allowed_tools: Sequence[str] | None | Any = INHERIT
@@ -262,6 +265,7 @@ class TurnConfig(_ConfigBase):
     reasoning_effort: str | None | Any = INHERIT
     max_turns: int | Any = INHERIT
     max_budget_usd: float | Any = INHERIT
+    max_buffer_size: int | Any = INHERIT
     background_task_timeout: float | Any = INHERIT
     permission_mode: str | Any = INHERIT
     allowed_tools: Sequence[str] | None | Any = INHERIT

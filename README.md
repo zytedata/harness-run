@@ -188,17 +188,34 @@ upstream provider, the provider's model name, region when available, and exact r
 The terminal result uses the sum of those exact costs. `max_budget_usd` is checked between model
 responses, so one response may take the total above the cap.
 
-OpenRouter may offer a model through several upstream providers. They can differ in price,
-quantization, context limits, and tool support. List the current endpoints without paying for a
-model call:
+#### Providers and repeatable experiments
+
+OpenRouter may offer the same model through several providers. By default, it chooses among
+available providers and may use another one when the first choice is unavailable. Providers can
+differ in quantization, price, context and output limits, tool support, latency, and throughput.
+List the current options without paying for a model call:
 
 ```bash
 .venv/bin/python dev/openrouter_endpoints.py moonshotai/kimi-k3
 ```
 
-Use an [OpenRouter preset](https://openrouter.ai/docs/guides/features/presets) when you need a fixed
-route. Put the explicit model before the preset so
-the toolkit keeps its context and fallback price:
+Provider choice matters when comparing models, harnesses, prompts, or settings. Without a fixed
+provider, two runs may use different model hosting and produce different costs, speeds, or results.
+That variation can make an experiment misleading.
+
+For a repeatable comparison:
+
+- Create an [OpenRouter preset](https://openrouter.ai/docs/guides/features/presets) that allows one
+  provider and disables provider fallbacks.
+- Keep the preset unchanged for the whole experiment. Also keep the model, harness, prompt,
+  reasoning effort, and other generation settings unchanged unless one of them is the subject of
+  the comparison.
+- Save each `openrouter_request` event with the results. It records the provider, provider model,
+  region, and exact charge for that response.
+- Run the provider check below before a larger experiment. It fails if OpenRouter reports a
+  different provider.
+
+Put the explicit model before the preset so the toolkit keeps its known context and fallback price:
 
 ```python
 AgentSpec(
@@ -212,7 +229,7 @@ Create the preset in OpenRouter and set its provider rules there. A direct
 `openrouter/@preset/<slug>` id also works, although the toolkit cannot know its model or context
 before the first response.
 
-The paid probes can verify a real preset on both harnesses. They fail if any request reports a
+The paid tests can verify a real preset on both harnesses. They fail if any request reports a
 different provider:
 
 ```bash
@@ -220,6 +237,10 @@ OPENROUTER_PRESET_MODEL="openrouter/moonshotai/kimi-k3@preset/kimi-firstparty" \
 OPENROUTER_EXPECTED_PROVIDER="Moonshot AI" \
 make live-openrouter
 ```
+
+Pinning removes one important source of variation. Model output can still vary between requests,
+and a provider may update its serving software or model version. Record the date and the reported
+provider details with experimental results.
 
 Important details:
 
@@ -238,12 +259,12 @@ Important details:
 - DeepSeek v4 can occasionally end a Claude Code turn without a final message. Flash showed this
   most often (about one quarter of the earlier measured turns); Pro did it on both attempts in the
   final remote validation. Such a turn ends with `error_no_final_text`, so callers can retry or
-  select another pairing. The controlled Codex runs completed normally. The paid probes retry once
+  select another pairing. The controlled Codex runs completed normally. The paid tests retry once
   and report it, while keeping the check failed if the retry also has no answer.
 - A plain string in `spec.system_prompt` replaces Claude Code's larger preset. This can reduce token
   use when the task does not need the preset's tool guidance.
 
-The paid local and remote probes cover all four models on both harnesses. They check tool use,
+The paid local and remote tests cover all four models on both harnesses. They check tool use,
 credential removal, exact cost, budgets, structured output, resume, preset handling, provider
 reporting, and the Gemini runtime's history, resource, and trace data. See
 `make live-openrouter` and `make live-openrouter-remote`.

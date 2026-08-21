@@ -1,8 +1,19 @@
-"""Local OpenRouter relay used when a CLI drops response metadata.
+"""Local OpenRouter relay: the path every OpenRouter model call takes, on both harnesses.
 
-The relay binds to localhost, forwards the CLI's HTTP stream unchanged, and records only
-OpenRouter's routing metadata and billed cost. Response bytes are held in memory while the
-stream is parsed and are discarded after the request.
+Neither CLI exposes OpenRouter's ``provider`` request field, and neither reports what
+OpenRouter charged. The relay is where the toolkit gets both. It binds to localhost, hands
+the CLI a random per-run token instead of the account key, and for each call it:
+
+* adds the caller's provider choice to the request body (``_request_with_provider``);
+* forwards the response stream to the CLI unchanged, while keeping a rolling tail to read
+  OpenRouter's routing metadata and billed cost out of (``_capture_request``);
+* records one :class:`OpenRouterRequest` per response — including error responses, which
+  is the one place a retried 429 or a provider-rejected request is visible at all;
+* refuses the next call with 402 once ``max_budget_usd`` is spent.
+
+Response bytes are held in memory only while the stream is parsed. Only GET and POST are
+served: that is all either CLI sends, and ``BaseHTTPRequestHandler`` answers anything else
+with 501 rather than forwarding it blind.
 """
 
 from __future__ import annotations
@@ -313,6 +324,15 @@ class OpenRouterProxy:
                     )
                     return
 
+                if "chunked" in (self.headers.get("Transfer-Encoding") or "").lower():
+                    # The body is framed by the chunk protocol, not Content-Length, so the
+                    # read below would silently produce an empty body. Neither CLI sends
+                    # one (both use Content-Length for JSON); say so instead of guessing.
+                    self._send_json(
+                        411,
+                        {"error": {"message": "the relay does not accept chunked request bodies"}},
+                    )
+                    return
                 length = int(self.headers.get("Content-Length") or 0)
                 request_body = self.rfile.read(length) if length else None
                 requested_model = None
@@ -350,8 +370,25 @@ class OpenRouterProxy:
                 upstream = http.client.HTTPSConnection("openrouter.ai", timeout=600)
                 owner._begin_request()
                 try:
-                    upstream.request(self.command, self.path, body=request_body, headers=headers)
-                    response = upstream.getresponse()
+                    try:
+                        upstream.request(
+                            self.command, self.path, body=request_body, headers=headers
+                        )
+                        response = upstream.getresponse()
+                    except (OSError, http.client.HTTPException) as exc:
+                        # Nothing has been written to the CLI yet, so a readable error is
+                        # still possible. Without this the handler thread dies and the CLI
+                        # sees a closed connection with nothing to diagnose it by.
+                        self._send_json(
+                            502,
+                            {
+                                "error": {
+                                    "type": "relay_upstream_error",
+                                    "message": f"{type(exc).__name__}: {exc}",
+                                }
+                            },
+                        )
+                        return
                     content_type = response.getheader("Content-Type", "")
                     self.send_response(response.status, response.reason)
                     for key, value in response.getheaders():
@@ -360,10 +397,17 @@ class OpenRouterProxy:
                     self.send_header("Connection", "close")
                     self.end_headers()
                     captured = bytearray()
-                    while chunk := response.read(64 * 1024):
-                        _append_capture(captured, chunk)
-                        self.wfile.write(chunk)
-                        self.wfile.flush()
+                    try:
+                        while chunk := response.read(64 * 1024):
+                            _append_capture(captured, chunk)
+                            self.wfile.write(chunk)
+                            self.wfile.flush()
+                    except OSError:
+                        # The headers are already sent, so there is no way to report this
+                        # to the CLI — and the CLI hanging up mid-stream is one of the ways
+                        # it happens. Keep whatever was captured: a partial body records
+                        # nothing, a complete one still yields its cost.
+                        pass
                     found = _capture_request(
                         bytes(captured),
                         content_type,
@@ -371,6 +415,21 @@ class OpenRouterProxy:
                         owner._provider,
                         response.status,
                     )
+                    if found is None and response.status >= 400:
+                        # An error response carries no metadata and no cost, and is exactly
+                        # what the harness cannot see any other way (a retried 429, a
+                        # provider refusing a request feature).
+                        found = OpenRouterRequest(
+                            requested_model=requested_model,
+                            requested_provider=owner._provider,
+                            provider=None,
+                            provider_model=None,
+                            region=None,
+                            attempt=None,
+                            summary=None,
+                            cost_usd=None,
+                            status=response.status,
+                        )
                     if found is not None:
                         owner._record(found)
                 finally:

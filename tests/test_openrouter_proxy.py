@@ -1,4 +1,8 @@
-"""OpenRouter response metadata parsing. No server or external request is used."""
+"""OpenRouter relay: metadata parsing, and the localhost server with a faked upstream.
+
+The server tests bind a real socket on 127.0.0.1 and monkeypatch ``HTTPSConnection``, so
+nothing leaves the machine.
+"""
 
 from __future__ import annotations
 
@@ -72,6 +76,44 @@ def test_captures_anthropic_json_shape():
     assert found.provider == "Z.AI"
     assert found.cost_usd == 0.0042
     assert found.requested_model == "z-ai/glm-5.3"
+    assert found.event().raw["provider_matches_request"] is True
+
+
+def test_captures_anthropic_sse_shape():
+    """Claude Code's wire: usage arrives on ``message_delta``, metadata on ``message_stop``.
+
+    ``usage.cost`` is cumulative per response, so the last value is the charge — the same
+    reason the reading is committed once per response rather than summed per delta.
+    """
+    events = [
+        {"type": "message_start", "message": {"model": "moonshotai/kimi-k3", "usage": {}}},
+        {"type": "content_block_delta", "delta": {"text": "hi"}},
+        {"type": "message_delta", "usage": {"cost": 0.0009}},
+        {"type": "message_delta", "usage": {"cost": 0.0021}},
+        {
+            "type": "message_stop",
+            "openrouter_metadata": {
+                "requested": "moonshotai/kimi-k3",
+                "region": "MAD",
+                "attempt": 1,
+                "endpoints": {
+                    "available": [
+                        {"provider": "Baidu", "model": "kimi-k3", "selected": False},
+                        {"provider": "Moonshot AI", "model": "kimi-k3-0821", "selected": True},
+                    ]
+                },
+            },
+        },
+    ]
+    body = "".join(f"data: {json.dumps(event)}\n\n" for event in events).encode()
+
+    found = _capture_request(body, "text/event-stream", "moonshotai/kimi-k3", "moonshotai", 200)
+
+    assert found is not None
+    assert found.cost_usd == 0.0021
+    assert found.provider == "Moonshot AI"
+    assert found.provider_model == "kimi-k3-0821"
+    assert found.requested_model == "moonshotai/kimi-k3"
     assert found.event().raw["provider_matches_request"] is True
 
 
@@ -215,3 +257,112 @@ def test_relay_sends_provider_choice_to_openrouter(monkeypatch):
     assert event.raw["requested_provider"] == "moonshotai"
     assert event.raw["provider"] == "Moonshot AI"
     assert event.raw["provider_matches_request"] is True
+
+
+class _FakeResponse:
+    """One canned upstream response, read once."""
+
+    def __init__(self, status=200, body=b"{}", content_type="application/json"):
+        self.status = status
+        self.reason = "OK" if status == 200 else "ERR"
+        self._body = body
+        self._content_type = content_type
+
+    def getheader(self, name, default=None):
+        return self._content_type if name == "Content-Type" else default
+
+    def getheaders(self):
+        return [("Content-Type", self._content_type)]
+
+    def read(self, _size=-1):
+        body, self._body = self._body, b""
+        return body
+
+
+def _fake_upstream(monkeypatch, response=None, raises=None, calls=None):
+    """Point the relay's upstream at a canned response, or make connecting fail."""
+
+    class Upstream:
+        def __init__(self, host, timeout):
+            assert host == "openrouter.ai"
+
+        def request(self, method, path, body=None, headers=None):
+            if calls is not None:
+                calls.append((method, path, body, headers))
+            if raises is not None:
+                raise raises
+
+        def getresponse(self):
+            return response or _FakeResponse()
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(proxy_module.http.client, "HTTPSConnection", Upstream)
+
+
+def _relay_post(proxy, body=None, headers=None, path="/api/v1/responses"):
+    """POST to the running relay and return (status, body-bytes)."""
+    target = urlsplit(proxy.base_url)
+    conn = http.client.HTTPConnection(target.hostname, target.port, timeout=5)
+    sent = {"Authorization": f"Bearer {proxy.client_token}", "Content-Type": "application/json"}
+    sent.update(headers or {})
+    conn.request("POST", path, body=body, headers=sent)
+    response = conn.getresponse()
+    payload = response.read()
+    status = response.status
+    conn.close()
+    return status, payload
+
+
+def test_upstream_failure_returns_502_json(monkeypatch):
+    """A dead upstream must reach the CLI as a readable error, not a closed socket."""
+    _fake_upstream(monkeypatch, raises=ConnectionRefusedError("no route"))
+
+    with OpenRouterProxy("real-key", expected_model="moonshotai/kimi-k3") as proxy:
+        status, payload = _relay_post(
+            proxy, body=json.dumps({"model": "moonshotai/kimi-k3", "input": "hi"})
+        )
+        assert proxy.wait_until_idle()
+
+    assert status == 502
+    assert json.loads(payload)["error"]["type"] == "relay_upstream_error"
+    assert "ConnectionRefusedError" in json.loads(payload)["error"]["message"]
+    assert proxy.drain_events() == []
+
+
+def test_chunked_request_body_is_rejected_with_411(monkeypatch):
+    """Chunked framing would read as an empty body; say so instead of forwarding it."""
+    calls = []
+    _fake_upstream(monkeypatch, calls=calls)
+
+    with OpenRouterProxy("real-key", expected_model="moonshotai/kimi-k3") as proxy:
+        status, payload = _relay_post(proxy, headers={"Transfer-Encoding": "chunked"})
+
+    assert status == 411
+    assert "chunked" in json.loads(payload)["error"]["message"]
+    assert calls == []
+
+
+def test_error_status_response_is_recorded(monkeypatch):
+    """A 429 carries no metadata and no cost, and is only visible here."""
+    _fake_upstream(
+        monkeypatch,
+        response=_FakeResponse(status=429, body=b'{"error":{"message":"rate limited"}}'),
+    )
+
+    with OpenRouterProxy(
+        "real-key", expected_model="moonshotai/kimi-k3", provider="moonshotai"
+    ) as proxy:
+        status, _ = _relay_post(
+            proxy, body=json.dumps({"model": "moonshotai/kimi-k3", "input": "hi"})
+        )
+        assert proxy.wait_until_idle()
+
+    assert status == 429
+    event = proxy.drain_events()[0]
+    assert event.raw["http_status"] == 429
+    assert event.raw["provider"] is None
+    assert event.raw["cost_usd"] is None
+    assert event.raw["requested_provider"] == "moonshotai"
+    assert proxy.exact_cost_usd is None

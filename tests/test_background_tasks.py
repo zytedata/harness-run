@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import asyncio
 
-from claude_agent_sdk import AssistantMessage, StreamEvent, TextBlock
+from claude_agent_sdk import AssistantMessage, TextBlock
 
 from fakes import (
     init_msg,
@@ -29,12 +29,60 @@ from remote_agent_toolkit.harness.context import RunContext
 from remote_agent_toolkit.harness.translate import EventTranslator
 
 
+def _install_fake_proxy(monkeypatch, *, cost=None, events=(), idle=True, blocked=False):
+    """Replace the localhost relay with a scriptable stand-in; no socket is bound.
+
+    Returns the list of constructor arguments, one entry per relay created.
+    """
+    from remote_agent_toolkit.harness import _openrouter_proxy
+
+    created = []
+
+    class FakeProxy:
+        def __init__(self, api_key, max_budget_usd=None, expected_model=None, **kwargs):
+            created.append(
+                {
+                    "api_key": api_key,
+                    "max_budget_usd": max_budget_usd,
+                    "expected_model": expected_model,
+                    **kwargs,
+                }
+            )
+            self.base_url = "http://127.0.0.1:1"
+            self.client_token = "local-token"
+            self.exact_cost_usd = cost
+            self.budget_blocked = blocked
+            self._pending = list(events)
+
+        def start(self):
+            return self
+
+        def close(self):
+            return None
+
+        def wait_until_idle(self, _timeout=5.0):
+            return idle
+
+        def drain_events(self):
+            pending, self._pending = self._pending, []
+            return pending
+
+    monkeypatch.setattr(_openrouter_proxy, "OpenRouterProxy", FakeProxy)
+    return created
+
+
 def _events_of(script, tmp_path, monkeypatch, spec=None, secrets=None):
     import claude_agent_sdk
 
     client_cls = make_sdk_client(script)
     monkeypatch.setattr(claude_agent_sdk, "ClaudeSDKClient", client_cls)
     spec = spec or AgentSpec(name="a", model="m")
+    if (spec.model or "").startswith("openrouter/"):
+        from remote_agent_toolkit.harness import _openrouter_proxy
+
+        if _openrouter_proxy.OpenRouterProxy.__module__.startswith("remote_agent_toolkit"):
+            # Every OpenRouter turn starts a relay; keep the offline suite off sockets.
+            _install_fake_proxy(monkeypatch)
     ctx = RunContext(
         spec=spec,
         prompt="go",
@@ -379,26 +427,15 @@ def test_promoted_stash_excludes_its_own_text_from_summaries(tmp_path, monkeypat
 
 
 def test_openrouter_exact_budget_interrupts_before_another_request(tmp_path, monkeypatch):
+    """The relay's running total is what the cap is measured against."""
     spec = AgentSpec(
         name="a",
         model="openrouter/deepseek/deepseek-v4-flash",
         max_budget_usd=0.01,
     )
-    script = [
-        StreamEvent(
-            uuid="1",
-            session_id="s",
-            event={"type": "message_delta", "usage": {"cost": 0.0123}},
-        ),
-        StreamEvent(
-            uuid="2",
-            session_id="s",
-            event={"type": "message_stop", "openrouter_metadata": {}},
-        ),
-        result_msg(result="done"),
-    ]
+    _install_fake_proxy(monkeypatch, cost=0.0123)
     events, client_cls = _events_of(
-        script,
+        [init_msg(), result_msg(result="done")],
         tmp_path,
         monkeypatch,
         spec=spec,
@@ -412,31 +449,7 @@ def test_openrouter_exact_budget_interrupts_before_another_request(tmp_path, mon
 
 
 def test_openrouter_run_passes_provider_to_relay(tmp_path, monkeypatch):
-    from remote_agent_toolkit.harness import _openrouter_proxy
-
-    seen = []
-
-    class FakeProxy:
-        def __init__(self, *args, **kwargs):
-            seen.append((args, kwargs))
-            self.base_url = "http://127.0.0.1:1"
-            self.client_token = "local-token"
-            self.exact_cost_usd = 0.001
-            self.budget_blocked = False
-
-        def start(self):
-            return self
-
-        def close(self):
-            return None
-
-        def wait_until_idle(self, _timeout=5.0):
-            return True
-
-        def drain_events(self):
-            return []
-
-    monkeypatch.setattr(_openrouter_proxy, "OpenRouterProxy", FakeProxy)
+    created = _install_fake_proxy(monkeypatch, cost=0.001)
     spec = AgentSpec(
         name="a",
         model="openrouter/moonshotai/kimi-k3",
@@ -451,8 +464,75 @@ def test_openrouter_run_passes_provider_to_relay(tmp_path, monkeypatch):
         secrets={"OPENROUTER_API_KEY": "real-key"},
     )
 
-    assert seen and seen[0][1]["provider"] == "moonshotai"
+    assert created and created[0]["provider"] == "moonshotai"
     assert client_cls.instances[0].options.env["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:1/api"
+    assert events[-1].kind == "result"
+
+
+def test_openrouter_relays_without_a_provider(tmp_path, monkeypatch):
+    """An unpinned turn still goes through the relay: that is where cost comes from."""
+    from remote_agent_toolkit.events import AgentEvent
+
+    relay_event = AgentEvent(
+        kind="status",
+        summary="OpenRouter request: provider=Z.AI model=z-ai/glm-5.3",
+        raw={"event": "openrouter_request", "http_status": 200, "cost_usd": 0.004},
+    )
+    created = _install_fake_proxy(monkeypatch, cost=0.004, events=[relay_event])
+    spec = AgentSpec(name="a", model="openrouter/z-ai/glm-5.3")
+
+    events, client_cls = _events_of(
+        [init_msg(), result_msg(result="done")],
+        tmp_path,
+        monkeypatch,
+        spec=spec,
+        secrets={"OPENROUTER_API_KEY": "real-key"},
+    )
+
+    assert created and created[0]["provider"] is None
+    env = client_cls.instances[0].options.env
+    assert env["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:1/api"
+    assert env["ANTHROPIC_AUTH_TOKEN"] == "local-token"
+    assert env["OPENROUTER_API_KEY"] == ""
+    assert [e for e in events if (e.raw or {}).get("event") == "openrouter_request"] == [
+        relay_event
+    ]
+    assert events[-1].cost_usd == 0.004
+    assert events[-1].raw["price_source"] == "openrouter"
+
+
+def test_relay_402_maps_to_budget_exceeded(tmp_path, monkeypatch):
+    """The CLI reports its own failure; the relay knows the cap was the cause."""
+    _install_fake_proxy(monkeypatch, cost=0.02, blocked=True)
+    spec = AgentSpec(name="a", model="openrouter/z-ai/glm-5.3", max_budget_usd=10.0)
+
+    events, _ = _events_of(
+        [init_msg(), result_msg(subtype="error_during_execution", is_error=True)],
+        tmp_path,
+        monkeypatch,
+        spec=spec,
+        secrets={"OPENROUTER_API_KEY": "k"},
+    )
+
+    assert events[-1].raw["subtype"] == "error_budget_exceeded"
+    assert events[-1].raw["budget_enforcement"] == "relay_402"
+
+
+def test_metadata_timeout_is_reported_before_the_result(tmp_path, monkeypatch):
+    _install_fake_proxy(monkeypatch, cost=0.001, idle=False)
+    spec = AgentSpec(name="a", model="openrouter/z-ai/glm-5.3")
+
+    events, _ = _events_of(
+        [init_msg(), result_msg(result="done")],
+        tmp_path,
+        monkeypatch,
+        spec=spec,
+        secrets={"OPENROUTER_API_KEY": "k"},
+    )
+
+    kinds = [(e.raw or {}).get("event") for e in events]
+    assert "openrouter_metadata_timeout" in kinds
+    assert kinds.index("openrouter_metadata_timeout") < len(events) - 1
     assert events[-1].kind == "result"
 
 

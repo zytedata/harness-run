@@ -51,7 +51,6 @@ _OPENROUTER_PREFIX = "openrouter/"
 _OPENROUTER_KEY_ENV = "OPENROUTER_API_KEY"
 # The Anthropic-compatible base: the CLI appends /v1/messages itself.
 _OPENROUTER_ANTHROPIC_BASE = "https://openrouter.ai/api"
-_OPENROUTER_METADATA_HEADER = "X-OpenRouter-Metadata: enabled"
 _OPENROUTER_SHELL_WRAPPER = """#!/bin/sh
 unset ANTHROPIC_AUTH_TOKEN ANTHROPIC_CUSTOM_HEADERS OPENROUTER_API_KEY
 exec /bin/bash -c "$1"
@@ -92,6 +91,10 @@ def _openrouter_env(
     refuses the turn with ``unrecognized_model``. The Vertex/Bedrock/Foundry switches and
     ``ANTHROPIC_API_KEY`` are blanked because they outrank ``ANTHROPIC_AUTH_TOKEN`` in the
     CLI's auth order, and a deployed engine bakes the Vertex ones in.
+
+    ``api_key`` is the relay's per-run token, not the account key: ``run`` always starts a
+    relay when a key is available. The default ``base_url`` is only reachable by a caller
+    that builds options directly.
     """
     bare = model[len(_OPENROUTER_PREFIX) :]
     env = {
@@ -99,11 +102,12 @@ def _openrouter_env(
         "ANTHROPIC_AUTH_TOKEN": api_key,
         "ANTHROPIC_CUSTOM_MODEL_OPTION": bare,
         "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME": bare,
-        # OpenRouter adds the selected upstream and exact request cost to the SDK stream.
-        "ANTHROPIC_CUSTOM_HEADERS": _OPENROUTER_METADATA_HEADER,
         # The CLI needs the token, while Bash tools do not. This executable receives the
         # original shell command as its sole argument and removes auth before running it.
         "CLAUDE_CODE_SHELL_PREFIX": str(shell_wrapper),
+        # The SDK layers this env OVER the worker's own, so an ambient OpenRouter key
+        # would otherwise reach the CLI process even though the relay holds the real one.
+        _OPENROUTER_KEY_ENV: "",
         "ANTHROPIC_API_KEY": "",
         "CLAUDE_CODE_USE_VERTEX": "",
         "CLAUDE_CODE_USE_BEDROCK": "",
@@ -404,9 +408,6 @@ class ClaudeCodeHarness:
             strict_mcp_config=True,
             hooks=ctx.hooks,
             system_prompt=self._system_prompt(spec, ctx.interactive),
-            # OpenRouter's exact request cost and selected upstream arrive in raw stream
-            # events. The translator ignores all ordinary deltas and keeps those fields.
-            include_partial_messages=openrouter,
             output_format=self._output_format(spec),
             **extra,
         )
@@ -426,6 +427,7 @@ class ClaudeCodeHarness:
         unpriced_openrouter: bool = False,
         exact_openrouter_cost: float | None = None,
         max_budget_usd: float | None = None,
+        budget_blocked: bool = False,
     ) -> AgentEvent:
         """Stamp the cumulative turn count onto the turn's final result event.
 
@@ -488,14 +490,21 @@ class ClaudeCodeHarness:
             event.raw["subtype"] = "error_budget_exceeded"
             event.raw["is_error"] = True
             event.raw["budget_enforcement"] = "after_model_response"
+        elif budget_blocked and event.raw is not None:
+            # The relay refused a request with 402 after the cap was spent. Whatever the
+            # CLI made of that error, the run stopped because of the budget.
+            event.raw["cli_reported_subtype"] = event.raw.get("subtype")
+            event.raw["subtype"] = "error_budget_exceeded"
+            event.raw["is_error"] = True
+            event.raw["budget_enforcement"] = "relay_402"
         return event
 
     async def run(self, spec: AgentSpec, ctx: RunContext) -> AsyncIterator[AgentEvent]:
-        """Run one Claude Code turn, adding strict OpenRouter provider selection when set."""
+        """Run one Claude Code turn, with a local metadata relay for OpenRouter turns."""
         from ._openrouter_proxy import OpenRouterProxy
 
         proxy = None
-        if (spec.model or "").startswith(_OPENROUTER_PREFIX) and spec.openrouter_provider:
+        if (spec.model or "").startswith(_OPENROUTER_PREFIX):
             api_key = ctx.secrets.get(_OPENROUTER_KEY_ENV) or os.environ.get(_OPENROUTER_KEY_ENV)
             if api_key:
                 model = (spec.model or "").removeprefix(_OPENROUTER_PREFIX)
@@ -587,6 +596,27 @@ class ClaudeCodeHarness:
         is_openrouter = (spec.model or "").startswith(_OPENROUTER_PREFIX)
         price = await asyncio.to_thread(pricing.model_price, spec.model) if is_openrouter else None
         unpriced_openrouter = is_openrouter and price is None
+
+        def relay_cost() -> float | None:
+            return proxy.exact_cost_usd if proxy is not None else None
+
+        async def settle_relay() -> AsyncIterator[AgentEvent]:
+            """Let the relay finish recording before the result quotes its total.
+
+            The CLI sees the last response bytes before the relay's handler has parsed
+            them, so a result built immediately can miss the final request's charge.
+            """
+            if proxy is None:
+                return
+            if not await asyncio.to_thread(proxy.wait_until_idle, 5.0):
+                yield AgentEvent(
+                    kind="status",
+                    summary="timed out waiting for OpenRouter response metadata",
+                    raw={"event": "openrouter_metadata_timeout"},
+                )
+            for event in proxy.drain_events():
+                yield event
+
         client = ClaudeSDKClient(options=options)
         try:
             await client.connect()
@@ -626,6 +656,9 @@ class ClaudeCodeHarness:
                         },
                     )
                     break
+                if proxy is not None:
+                    for relay_event in proxy.drain_events():
+                        yield relay_event
                 translated = list(translator.translate(message))
                 for event in translated:
                     tracker.observe(event)
@@ -643,7 +676,9 @@ class ClaudeCodeHarness:
                     if reason is None:
                         fin = self._finalize(spec, ctx)
                         finalized = True
-                        if unpriced_openrouter and translator.openrouter_cost_usd is None:
+                        async for relay_event in settle_relay():
+                            yield relay_event
+                        if unpriced_openrouter and relay_cost() is None:
                             yield _openrouter_cost_unknown(spec.model)
                         yield self._final_result(
                             event,
@@ -651,8 +686,9 @@ class ClaudeCodeHarness:
                             segment_summaries(event),
                             price,
                             unpriced_openrouter,
-                            translator.openrouter_cost_usd,
+                            relay_cost(),
                             spec.max_budget_usd if is_openrouter else None,
+                            proxy.budget_blocked if proxy is not None else False,
                         )
                         if fin is not None:
                             yield fin
@@ -683,8 +719,8 @@ class ClaudeCodeHarness:
                 if (
                     is_openrouter
                     and not budget_interrupted
-                    and translator.openrouter_cost_usd is not None
-                    and translator.openrouter_cost_usd >= spec.max_budget_usd
+                    and relay_cost() is not None
+                    and relay_cost() >= spec.max_budget_usd
                 ):
                     budget_interrupted = True
                     yield AgentEvent(
@@ -721,7 +757,9 @@ class ClaudeCodeHarness:
                 fin = self._finalize(spec, ctx)
                 finalized = True
                 last = demoted[-1]
-                if unpriced_openrouter and translator.openrouter_cost_usd is None:
+                async for relay_event in settle_relay():
+                    yield relay_event
+                if unpriced_openrouter and relay_cost() is None:
                     yield _openrouter_cost_unknown(spec.model)
                 yield self._final_result(
                     last,
@@ -729,8 +767,9 @@ class ClaudeCodeHarness:
                     segment_summaries(last),
                     price,
                     unpriced_openrouter,
-                    translator.openrouter_cost_usd,
+                    relay_cost(),
                     spec.max_budget_usd if is_openrouter else None,
+                    proxy.budget_blocked if proxy is not None else False,
                 )
                 if fin is not None:
                     yield fin
@@ -752,7 +791,9 @@ class ClaudeCodeHarness:
             fin = self._finalize(spec, ctx)
             finalized = True
             last = demoted[-1]
-            if unpriced_openrouter and translator.openrouter_cost_usd is None:
+            async for relay_event in settle_relay():
+                yield relay_event
+            if unpriced_openrouter and relay_cost() is None:
                 yield _openrouter_cost_unknown(spec.model)
             yield self._final_result(
                 last,
@@ -760,8 +801,9 @@ class ClaudeCodeHarness:
                 segment_summaries(last),
                 price,
                 unpriced_openrouter,
-                translator.openrouter_cost_usd,
+                relay_cost(),
                 spec.max_budget_usd if is_openrouter else None,
+                proxy.budget_blocked if proxy is not None else False,
             )
             if fin is not None:
                 yield fin

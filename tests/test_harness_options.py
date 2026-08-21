@@ -195,13 +195,13 @@ def test_openrouter_points_the_cli_at_openrouter():
 
     assert opts.env["ANTHROPIC_BASE_URL"] == "https://openrouter.ai/api"
     assert opts.env["ANTHROPIC_AUTH_TOKEN"] == "sk-or-1"
-    assert opts.env["ANTHROPIC_CUSTOM_HEADERS"] == "X-OpenRouter-Metadata: enabled"
+    # Metadata is read by the relay, which sets the header on its own request.
+    assert "ANTHROPIC_CUSTOM_HEADERS" not in opts.env
     # Without this the CLI rejects the id outright.
     assert opts.env["ANTHROPIC_CUSTOM_MODEL_OPTION"] == "moonshotai/kimi-k3"
     assert opts.env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] == "1048576"
     # The prefix is the toolkit's; the CLI gets the provider-relative id.
     assert opts.model == "moonshotai/kimi-k3"
-    assert opts.include_partial_messages is True
     # The CLI's own fallback prices are wrong for these ids. The harness applies the
     # exact OpenRouter charge after each response.
     assert opts.max_budget_usd is None
@@ -246,6 +246,9 @@ def test_openrouter_blanks_the_auth_sources_that_outrank_the_token():
     assert env["CLAUDE_CODE_USE_BEDROCK"] == ""
     assert env["CLAUDE_CODE_USE_FOUNDRY"] == ""
     assert env["ANTHROPIC_API_KEY"] == ""
+    # The SDK layers this env over the worker's own, so an ambient key would otherwise
+    # reach the CLI process even when the relay holds the real one.
+    assert env["OPENROUTER_API_KEY"] == ""
 
 
 def test_openrouter_without_a_key_raises(monkeypatch):
@@ -355,8 +358,10 @@ def test_claude_models_keep_the_cli_cost():
     assert "cli_reported_cost_usd" not in out.raw
 
 
-def test_openrouter_provider_uses_the_local_relay_on_claude():
-    spec = AgentSpec(name="a", model=_OR, openrouter_provider="moonshotai")
+@pytest.mark.parametrize("provider", ["moonshotai", None])
+def test_openrouter_turns_use_the_local_relay_on_claude(provider):
+    """Pinned or not, the CLI talks to the relay and never holds the account key."""
+    spec = AgentSpec(name="a", model=_OR, openrouter_provider=provider)
     opts = ClaudeCodeHarness().build_options(
         spec,
         _ctx(spec, secrets={"OPENROUTER_API_KEY": "real-key"}),
@@ -367,6 +372,23 @@ def test_openrouter_provider_uses_the_local_relay_on_claude():
     assert opts.env["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:1234/api"
     assert opts.env["ANTHROPIC_AUTH_TOKEN"] == "local-token"
     assert "real-key" not in opts.env.values()
+
+
+def test_relay_402_is_reported_as_a_budget_failure():
+    """Whatever the CLI made of the 402, the run stopped because of the cap."""
+    event = AgentEvent(
+        kind="result",
+        summary="failed",
+        cost_usd=0.02,
+        usage={},
+        raw={"subtype": "error_during_execution", "is_error": True},
+    )
+    out = ClaudeCodeHarness()._final_result(
+        event, turns_total=1, exact_openrouter_cost=0.02, budget_blocked=True
+    )
+    assert out.raw["subtype"] == "error_budget_exceeded"
+    assert out.raw["budget_enforcement"] == "relay_402"
+    assert out.raw["cli_reported_subtype"] == "error_during_execution"
 
 
 def test_unpriced_openrouter_model_reports_no_cost():

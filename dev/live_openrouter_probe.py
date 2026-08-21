@@ -246,7 +246,26 @@ async def _probe_resume_once(model: str, key: str, harness: str = "codex") -> di
     return row
 
 
-async def _probe_schema(model: str, key: str, harness: str = "codex") -> dict:
+async def _probe_schema(model: str, key: str, harness: str = "codex", attempts: int = 2) -> dict:
+    """Structured output on ``model`` under ``harness``; retries once, like ``_probe``.
+
+    The task asks the model to run a command and report what it printed. A model that
+    answers from its head instead gets the arithmetic wrong. Measured on DeepSeek v4 Pro
+    under codex: one run answered 6 for ``print(6 * 7)``, two immediate re-runs answered 42.
+    """
+    for attempt in range(1, attempts + 1):
+        row = await _probe_schema_once(model, key, harness)
+        if row["ok"]:
+            if attempt > 1:
+                row["note"] = f"passed on attempt {attempt} (first attempt: soft miss)"
+            return row
+        if attempt < attempts:
+            print(f"[{row['model']}] soft miss, retrying once: {row['note'][:70]}", flush=True)
+    row["note"] = f"failed {attempts} attempts — {row['note']}"
+    return row
+
+
+async def _probe_schema_once(model: str, key: str, harness: str = "codex") -> dict:
     """``output_schema`` must yield a parsed object."""
     label = f"{model.removeprefix('openrouter/')} (schema) [{harness}]"
     spec = AgentSpec(

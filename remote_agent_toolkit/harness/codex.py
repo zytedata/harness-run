@@ -470,8 +470,6 @@ class CodexHarness:
             f"{json.dumps(base_url or _OPENROUTER_BASE_URL)}",
             f"model_providers.{_OPENROUTER_PROVIDER}.env_key={json.dumps(key_env)}",
             f"model_providers.{_OPENROUTER_PROVIDER}.wire_api={json.dumps(_OPENROUTER_WIRE_API)}",
-            f"model_providers.{_OPENROUTER_PROVIDER}.http_headers="
-            '{"X-OpenRouter-Metadata" = "enabled"}',
             # Codex's server-side web-search tool carries a field OpenRouter rejects
             # outright (400 before the first token), so it is off for these turns.
             'web_search="disabled"',

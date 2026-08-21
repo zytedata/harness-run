@@ -77,7 +77,7 @@ _OPENROUTER_KEY_ENV = "OPENROUTER_API_KEY"
 # The Anthropic-compatible base: the CLI appends /v1/messages itself.
 _OPENROUTER_ANTHROPIC_BASE = "https://openrouter.ai/api"
 _OPENROUTER_SHELL_WRAPPER = """#!/bin/sh
-unset ANTHROPIC_AUTH_TOKEN ANTHROPIC_CUSTOM_HEADERS OPENROUTER_API_KEY
+unset ANTHROPIC_AUTH_TOKEN OPENROUTER_API_KEY
 exec /bin/bash -c "$1"
 """
 

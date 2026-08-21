@@ -1,14 +1,14 @@
 """Fallback model pricing for harnesses that do not report an exact USD charge.
 
-Codex with OpenAI models surfaces token counts only. OpenRouter normally supplies the exact
-charge, while this module covers responses where that metadata is missing. Primary:
-**LiteLLM's community-maintained pricing dataset** (the same upstream
-``ccusage`` prices Codex sessions with), fetched once per process — new models are priced
-the day the dataset knows them, no toolkit release needed. Fallback: a small baked table
-of the current OpenAI flagships plus the OpenRouter models both bindings route, so
-offline / air-gapped runs still price them. The fetch
-is best-effort with a short timeout and never raises; a total miss yields ``None`` (the
-harness then reports unknown cost and cannot enforce ``max_budget_usd``).
+Codex with OpenAI models surfaces token counts only. OpenRouter normally supplies the
+exact charge, while this module covers responses where that metadata is missing. Primary:
+**LiteLLM's community-maintained pricing dataset** (the same upstream ``ccusage`` prices
+Codex sessions with), fetched once per process — new models are priced the day the dataset
+knows them, no toolkit release needed. Fallback: a small baked table of the current OpenAI
+flagships plus the OpenRouter models both bindings route, so offline / air-gapped runs
+still price them. The fetch is best-effort with a short timeout and never raises; a total
+miss yields ``None`` (the harness then reports unknown cost and cannot enforce
+``max_budget_usd``).
 
 Stdlib-only (urllib). All prices are USD per single token.
 """
@@ -40,11 +40,12 @@ _BUILTIN_PER_MTOK: dict[str, tuple[float, float, float]] = {
     "gpt-5.6-terra": (2.50, 0.25, 15.00),
     "gpt-5.6-luna": (1.00, 0.10, 6.00),
     "gpt-5.3-codex": (1.75, 0.175, 14.00),
-    # OpenRouter models the Codex binding routes (``openrouter/<vendor>/<model>``, see
-    # ``harness.codex``). LiteLLM keys OpenRouter the same way, so a dataset entry wins
-    # over these as soon as one exists — as of 2026-08-20 it has none for them. Listed
-    # OpenRouter prices: it routes a request to one of several upstream providers, whose
-    # prices differ slightly, so cost is an estimate even when the dataset is reachable.
+    # OpenRouter models both bindings route (``openrouter/<vendor>/<model>``, see
+    # ``harness.codex`` and ``harness.claude_code``). LiteLLM keys OpenRouter the same
+    # way, so a dataset entry wins over these as soon as one exists — as of 2026-08-20 it
+    # has none for them. These are OpenRouter's listed prices: it routes a request to one
+    # of several upstream providers, whose prices differ slightly, so cost is an estimate
+    # even when the dataset is reachable.
     "openrouter/moonshotai/kimi-k3": (3.00, 0.30, 15.00),
     "openrouter/z-ai/glm-5.3": (1.40, 0.26, 4.40),
     "openrouter/deepseek/deepseek-v4-flash": (0.084, 0.0168, 0.168),

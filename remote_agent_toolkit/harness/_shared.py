@@ -33,10 +33,12 @@ def harness_consumed_secret_names(spec: AgentSpec) -> set[str]:
     goes into the server's headers — neither needs to be a plain environment variable the agent
     (or a prompt-injection) can read. The Codex binding additionally consumes its model-auth
     keys: ``OPENAI_API_KEY`` (routed to ``codex login``) and ``OPENROUTER_API_KEY`` (routed to
-    the OpenRouter provider config). The Claude binding consumes ``OPENROUTER_API_KEY`` too
-    when the model is an ``openrouter/`` one (routed to ``ANTHROPIC_AUTH_TOKEN``). Both are listed whichever model the turn runs, so passing
-    one the turn doesn't use still doesn't leak it into the agent's shell. Everything else the
-    caller passes is the agent's own to use.
+    the OpenRouter provider config). Codex lists both whichever model the turn runs, so passing
+    one the turn doesn't use still doesn't leak it into the agent's shell. The Claude binding
+    consumes ``OPENROUTER_API_KEY`` only for an ``openrouter/`` model (routed to
+    ``ANTHROPIC_AUTH_TOKEN``); on a native Anthropic turn it has no model-auth key to route,
+    so one passed anyway stays the agent's own. Everything else the caller passes is the
+    agent's own to use.
     """
     names: set[str] = {r.auth for r in spec.repos if getattr(r, "auth", None)}
     if any(m.kind == "github" for m in spec.mcp_servers):
@@ -79,9 +81,8 @@ def runtime_env(spec: AgentSpec, ctx: RunContext) -> dict[str, str]:
     Layering (later wins): per-invocation secrets → ``spec.env`` (caller's static config)
     → ``ctx.env`` (runtime-resolved, e.g. the local deploy-time packages venv). Only the
     caller's own secrets land here — those consumed by the harness (repo push tokens,
-    GitHub MCP token, Codex's model-auth keys) are routed to git/MCP/the model provider
-    and excluded,
-    so they never appear as environment variables the agent can read.
+    GitHub MCP token, the model-auth keys) are routed to git/MCP/the model provider and
+    excluded, so they never appear as environment variables the agent can read.
 
     SECURITY: returns secret *values* — callers must never log this dict.
     """

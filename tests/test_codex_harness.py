@@ -521,7 +521,8 @@ def test_openrouter_build_options_emits_provider_config(tmp_path):
     assert 'model_providers.openrouter.env_key="OPENROUTER_API_KEY"' in ovr
     # Codex 0.147 dropped wire_api="chat"; responses is the only wire left.
     assert 'model_providers.openrouter.wire_api="responses"' in ovr
-    assert "X-OpenRouter-Metadata" in ovr
+    # Metadata is read by the proxy, which sets the header on its own request.
+    assert "X-OpenRouter-Metadata" not in ovr
     # Codex's web-search tool carries a field OpenRouter 400s on.
     assert 'web_search="disabled"' in ovr
     # The prefix is ours, not OpenRouter's: codex gets the provider-relative id.

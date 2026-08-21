@@ -269,7 +269,7 @@ def test_openrouter_key_is_removed_before_bash_tools():
     wrapper = Path(env["CLAUDE_CODE_SHELL_PREFIX"])
     assert wrapper.stat().st_mode & 0o777 == 0o700
     body = wrapper.read_text()
-    assert "unset ANTHROPIC_AUTH_TOKEN ANTHROPIC_CUSTOM_HEADERS OPENROUTER_API_KEY" in body
+    assert "unset ANTHROPIC_AUTH_TOKEN OPENROUTER_API_KEY" in body
 
 
 def test_claude_model_is_untouched_by_any_of_this():

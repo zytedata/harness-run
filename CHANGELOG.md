@@ -41,7 +41,6 @@ tag `vX.Y.Z`, push the commit and the tag.
   rejected. It enforces the selected model and the budget, and passes the response
   through unchanged. The CLI holds a random per-run token, so the provider key stays
   in the parent process. ([#34])
-
 - Configuration now has three scopes, one type each: the `AgentSpec` baked at
   deploy, a `SessionConfig` bound once at `engine.start_session(config=…)`
   (the conversation's world: `repos`, `skills`, `mcp_servers`,
@@ -128,6 +127,12 @@ tag `vX.Y.Z`, push the commit and the tag.
   any pool quiet for half an hour permanently cold. Note the cost implication
   on redeploy: idle workers now bill for up to a day; pass `pool_max_wait_s`
   to dial it back for pools with steady traffic ([#28]).
+- The harness SDKs are now pinned exactly: `claude-agent-sdk==0.2.130` and
+  `openai-codex==0.147.0`, matching what a deployed engine installs. Both were
+  validated together on the local and Agent Runtime paths, and `openai-codex`
+  ships the Codex CLI itself, whose behavior moves between versions (0.147
+  dropped the `chat` wire API the OpenRouter route used to have a choice
+  about). Installing this library therefore fixes those two versions ([#34]).
 
 ### Fixed
 

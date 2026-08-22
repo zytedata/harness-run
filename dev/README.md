@@ -35,9 +35,16 @@ image uses, so a clean `make parity-check` (and your agent running under `parity
 that the deploy's install step will succeed too. See `DESIGN.md` §12 (local parity) for the open design
 questions.
 
-## Live smoke test (`live_smoke.py`)
+## Live probes
 
-This directory also holds [`live_smoke.py`](live_smoke.py) — the standard **live validation** run
-(`make live-smoke`): throwaway engines deployed from your checkout, one turn through the cold and warm
-dispatch paths, teardown in `finally`. It's the opposite end of the ladder from the parity image — real
-platform, real money. See [`TESTING.md`](../TESTING.md) for when it's required.
+This directory also holds the paid probes. They deploy or run against the real thing and spend real
+money, so they run by hand, never in CI. See [`TESTING.md`](../TESTING.md) for when each is required.
+
+| Script | Make target | What it covers |
+|---|---|---|
+| [`live_smoke.py`](live_smoke.py) | `make live-smoke` | the standard live validation: throwaway engines from your checkout, one turn through the cold and warm dispatch paths, teardown in `finally` |
+| [`live_revisions.py`](live_revisions.py) | `make live-revisions` | the revision control plane: deploy-as-update, traffic rollback, pinning |
+| [`live_openrouter_probe.py`](live_openrouter_probe.py) | `make live-openrouter` | the OpenRouter models on both harnesses, locally |
+| [`live_openrouter_remote_probe.py`](live_openrouter_remote_probe.py) | `make live-openrouter-remote` | the same models on Agent Runtime, plus the remote-only visibility surface |
+| [`live_model_attribution.py`](live_model_attribution.py) | `make live-attribution` | did the turn run the model we asked for, from evidence the CLI and provider return |
+| [`openrouter_endpoints.py`](openrouter_endpoints.py) | — | lists a model's OpenRouter providers and their advertised features; free unless you pass `--probe` |

@@ -1,6 +1,6 @@
 # Testing — from unit tests to live validation
 
-Three rungs, cheapest first. Every change runs rung 1; run the later rungs when your change
+Cheapest first. Every change runs the offline suite; run the later rungs when your change
 can only break in ways the earlier rungs can't see.
 
 | Rung | Command | Catches | Cost |
@@ -9,13 +9,14 @@ can only break in ways the earlier rungs can't see.
 | Install parity | `make parity-build` / `-check` | dependency/install/glibc breakage | ~1 min, free |
 | **Live validation** | `make live-smoke` | **platform-contract breakage** | ~10 min, ~$0.10 + build |
 | Model-provider check | `make live-openrouter` | provider-contract breakage (OpenRouter) | ~4 min, ~$0.60 |
-| Model-provider check, remote | `make live-openrouter-remote` | the same models + remote visibility on Agent Runtime | ~8-15 min, ~$0.30 |
+| Model-provider check, remote | `make live-openrouter-remote` | the same models + remote visibility on Agent Runtime | ~8-15 min, ~$0.45 + build |
 | Model attribution | `make live-attribution` | did the turn run the model we asked for — both harnesses | ~10 s, ~$0.06 |
 
-The two OpenRouter figures are measured (2026-08-21, all four models on both harnesses).
-Most of `live-openrouter` is the big models: one Kimi K3 probe on claude-code cost $0.088
-and one DeepSeek v4 Pro probe $0.082, while DeepSeek v4 Flash on codex cost $0.0015. Set
-`MODELS=openrouter/deepseek/deepseek-v4-flash` to check the plumbing for well under a cent.
+The two OpenRouter figures are measured (2026-08-22, all four models on both harnesses:
+22/22 local checks for $0.60, 120/120 remote checks for $0.44 of model spend plus the engine
+build). Most of `live-openrouter` is the big models: one DeepSeek v4 Pro basic turn on
+claude-code cost $0.083 and one Kimi K3 $0.077, while DeepSeek v4 Flash on codex cost $0.002.
+Set `MODELS=openrouter/deepseek/deepseek-v4-flash` to check the plumbing for about a cent.
 
 ## 1. Offline tests (`make test`)
 
@@ -118,21 +119,24 @@ tool, report its selected upstream, and use OpenRouter's exact cost. It also che
 strict provider choice, and a tiny budget cap on both harnesses.
 
 Every model call goes through the local proxy (`harness/_openrouter_proxy.py`), so the test
-also requires an `http_status` on every `openrouter_request` event. Only the proxy reports
-one, which is what proves no call went straight to OpenRouter. One row per harness runs with
-no provider pinned, because that case used to skip the proxy entirely.
+also requires an `http_status` on every `openrouter_request` event, which only the proxy
+reports. That shows the proxy saw the calls the run made. What keeps a call from going
+straight to OpenRouter is the environment: the test also asserts that the account key is
+absent from the tool environment, and the CLI only ever gets the proxy's per-run token. One
+row per harness runs with no provider pinned, because that case used to skip the proxy
+entirely.
 
 Three checks retry once on a soft miss: the basic turn, resume, and structured output. Models
 occasionally answer without running the command they were asked to run. Measured on DeepSeek
 v4 Pro under codex: one run answered 6 for `print(6 * 7)`, two immediate re-runs answered 42.
 
-Every model request selects one known provider and disables fallbacks. Kimi uses Moonshot AI,
-GLM uses Z.AI, and both DeepSeek models use Novita because the shared account's ZDR policy
-excludes DeepSeek's own endpoint. The test fails if OpenRouter reports a different provider.
-Novita serves the DeepSeek models but does not accept Codex's `json_schema` format. The two
-DeepSeek structured-output checks on Codex therefore use OpenRouter's normal routing. All other
-checks keep the selected provider. Set `OPENROUTER_PROVIDER` to test every feature against one
-specific provider. To test one model with another provider:
+Almost every model request selects one known provider and disables fallbacks. Kimi uses
+Moonshot AI, GLM uses Z.AI, and both DeepSeek models use Novita because the shared account's
+ZDR policy excludes DeepSeek's own endpoint. The test fails if OpenRouter reports a different
+provider. Two kinds of row are deliberately unpinned: the two rows named "unpinned" above, and
+the two DeepSeek structured-output checks on Codex — Novita serves those models but does not
+accept Codex's `json_schema` format. Set `OPENROUTER_PROVIDER` to test every feature against
+one specific provider. To test one model with another provider:
 
 ```bash
 MODELS=openrouter/moonshotai/kimi-k3 OPENROUTER_PROVIDER=fireworks \
@@ -141,6 +145,9 @@ make live-openrouter
 
 The test reads every `openrouter_request` event and fails if the provider differs. Set
 `SERIAL=1` for ordered output while debugging.
+
+Other knobs: `HARNESSES=codex` (or `claude-code`) runs one harness instead of both, which
+roughly halves a pass, and `PROBE_REASONING_EFFORT` sets the effort every turn asks for.
 
 **It costs real money** (about $0.60 a pass) and needs a key, so run it **by hand,
 sparingly, locally**. It must never run in CI: `pytest -q` stays free and credential-less
@@ -167,15 +174,20 @@ reports SKIP when the package is missing.
 The engine is deleted in `finally`; a failed teardown prints loudly, because an engine
 bills while it exists. `KEEP=1` leaves it up for debugging and hands you the cleanup.
 
+`MODELS=` narrows the model list here too. The deployment knobs are `PROJECT`, `LOCATION`,
+`SUFFIX` (the engine name's suffix), `MAX_INSTANCES` and `IMPERSONATE_SA`; each falls back to
+the same default the other live probes use.
+
 **Costs real money** (mostly the build) and usually takes **~8-15 min**. Checks run
 concurrently; build time varies widely. Give it a generous timeout. Teardown
 also runs on SIGTERM/SIGINT, because a `timeout` that fires mid-run would otherwise leave an
 engine billing.
 
-DeepSeek v4 sometimes returns no final message under Claude Code. Flash produced this most
-often in the earlier measurements; Pro produced it on both attempts in the final remote
-validation. The test retries one soft failure and reports when the retry was used. It stays
-failed when the retry also has no answer.
+DeepSeek v4 sometimes returns no final message under Claude Code — both Flash and Pro have
+done it in earlier runs. It is intermittent: in the 2026-08-22 validation (120/120 remote,
+22/22 local) both models answered on the first attempt, with no retry used. The test retries
+one soft failure and reports when the retry was used. It stays failed when the retry also has
+no answer.
 
 ### Model attribution: did we run what we asked for?
 
@@ -193,7 +205,10 @@ OpenRouter:
 - **OpenRouter on both harnesses** — `openrouter_request` names the selected upstream and
   reports exact cost for each model response.
 
-Checks run concurrently and cost a few cents. `SERIAL=1` gives ordered output.
+Checks run concurrently and cost a few cents. `SERIAL=1` gives ordered output. The claude-code
+check always runs, so it needs whatever Claude auth your shell already uses — an
+`ANTHROPIC_API_KEY` or a logged-in `claude` CLI. `CLAUDE_MODEL` and `OPENAI_MODEL` change the
+native models it checks alongside the OpenRouter ones.
 
 ### Writing a bespoke live probe
 

@@ -89,8 +89,10 @@ engine.start_session(config=SessionConfig(harness="codex"))   # selects among wh
 ```
 
 Model ids are free-form strings passed to the harness — any id the underlying CLI accepts works, so a
-new model needs no toolkit release. The ids listed above are the ones we price offline (and therefore
-can enforce `max_budget_usd` against) and, for OpenRouter, have validated live.
+new model needs no toolkit release. For Claude and OpenAI ids, the ones listed above are the ones the
+toolkit prices offline, which is what `max_budget_usd` is enforced against. OpenRouter ids are
+budgeted from the charge OpenRouter reports instead, and the four listed above have been validated
+live on both harnesses.
 
 ### Claude Code (the default)
 
@@ -168,18 +170,24 @@ separately on both harnesses:
 
 - ✅ passed locally and remotely
 - ⚠️ works, with the reliability note in the last column
-- ❌ unavailable
+
+All four models have a ~1M-token context window, on both harnesses.
 
 | Model | Harness | Completes a turn | Structured output | Shell tools | Exact cost | Provider selection | Notes |
 | --- | --- | :---: | :---: | :---: | :---: | :---: | --- |
-| **Kimi K3**<br>`openrouter/moonshotai/kimi-k3` | Codex | ✅ | ✅ | ✅ | ✅ | ✅ | ~1M context |
-|  | Claude Code | ✅ | ✅ | ✅ | ✅ | ✅ | Runs through Claude Code |
-| **GLM-5.3**<br>`openrouter/z-ai/glm-5.3` | Codex | ✅ | ✅ | ✅ | ✅ | ✅ | ~1M context |
-|  | Claude Code | ✅ | ✅ | ✅ | ✅ | ✅ | Runs through Claude Code |
-| **DeepSeek v4 Flash**<br>`openrouter/deepseek/deepseek-v4-flash` | Codex | ✅ | ✅ | ✅ | ✅ | ✅ | Recommended harness; ~1M context |
+| **Kimi K3**<br>`openrouter/moonshotai/kimi-k3` | Codex | ✅ | ✅ | ✅ | ✅ | ✅ |  |
+|  | Claude Code | ✅ | ✅ | ✅ | ✅ | ✅ |  |
+| **GLM-5.3**<br>`openrouter/z-ai/glm-5.3` | Codex | ✅ | ✅ | ✅ | ✅ | ✅ |  |
+|  | Claude Code | ✅ | ✅ | ✅ | ✅ | ✅ |  |
+| **DeepSeek v4 Flash**<br>`openrouter/deepseek/deepseek-v4-flash` | Codex | ✅ | ✅\* | ✅ | ✅ | ✅ | Recommended harness |
 |  | Claude Code | ⚠️ | ✅ | ✅ | ✅ | ✅ | It sometimes finishes without a final answer; use Codex for reliable completion |
-| **DeepSeek v4 Pro**<br>`openrouter/deepseek/deepseek-v4-pro` | Codex | ✅ | ✅ | ✅ | ✅ | ✅ | Recommended harness; ~1M context |
+| **DeepSeek v4 Pro**<br>`openrouter/deepseek/deepseek-v4-pro` | Codex | ✅ | ✅\* | ✅ | ✅ | ✅ | Recommended harness |
 |  | Claude Code | ⚠️ | ✅ | ✅ | ✅ | ✅ | It has also finished without a final answer; use Codex for reliable completion |
+
+\* The DeepSeek structured-output checks on Codex run without a pinned provider, because Novita —
+the provider the other DeepSeek checks pin — rejects the `json_schema` format Codex sends. So those
+two boxes are the only ones where structured output and provider selection were not proven in the
+same request.
 
 **Shell tools** means the agent can run commands in its workspace, such as Python, `git`, or a
 test command, and read the output. The tests also confirm that model-provider credentials are
@@ -191,21 +199,37 @@ both harnesses and does not require anything saved in the OpenRouter account.
 **Exact cost** is the charge OpenRouter reports for each response. There is no estimated
 price: OpenRouter routes one model id to providers whose prices differ by up to 2.5x, so a
 per-model estimate would only match whoever served the call. A turn OpenRouter reports no
-charge for gets `cost_usd=None` and a `cost_unknown` status event, and its `max_budget_usd`
-cannot be enforced.
+charge for gets `cost_usd=None` on its result event, plus a `cost_unknown` status event, and its
+`max_budget_usd` cannot be enforced. Watch for that event if you need to tell an unreported charge
+from a free one: `RunResult.cost_usd` is a plain float, so both arrive there as `0.0`.
 
-Both harnesses can run all four models. Use Codex for DeepSeek v4 Flash and Pro when reliable
-completion matters. DeepSeek Flash returned no final answer after two attempts in the latest local
-and remote Claude Code tests. DeepSeek Pro passed the latest tests but failed both attempts in an
-earlier remote test. The controlled Codex runs completed normally. Claude Code turns with this
-problem return `error_no_final_text`, which allows the caller to retry or switch harness.
+Both harnesses can run all four models. The ⚠️ is about intermittency, not a permanent failure:
+under Claude Code, both DeepSeek models have finished a turn without returning a final answer in
+earlier runs, while the newest local and remote runs (2026-08-22) had both of them answer on the
+first attempt. The same models under Codex have not shown it. So prefer Codex for DeepSeek v4 Flash
+and Pro when a single run has to produce an answer. A Claude Code turn that hits this is reported as
+`error_no_final_text` rather than a success, so the caller can retry or switch harness. That
+reclassification currently needs `max_budget_usd` set on the spec; without it the turn is still
+reported as a success with no text.
 
-Other `openrouter/*` model ids also work, with the same exact cost reporting. Codex uses
-generic context metadata for an unknown model.
+Other `openrouter/*` model ids also work, with the same exact cost reporting and no code change.
+Only the context window is missing for a model the toolkit does not list: Codex falls back to
+generic model metadata and warns, and Claude Code assumes 200k tokens, so it compacts the
+conversation earlier than the model needs. Add the model to `OPENROUTER_CONTEXT_WINDOWS` in
+`harness/pricing.py` to fix that.
+
+What can stop a new model is the OpenRouter account, not the toolkit. An account restricted to
+zero-data-retention endpoints refuses a model that has none, with HTTP 404 and a data-policy
+message. The run fails honestly — the `openrouter_request` event records the 404 — but note that
+the Claude Code CLI rewrites the message into a vague "model may not exist or you may not have
+access", so read the recorded status rather than the result text.
 
 Every model call goes through a local proxy the toolkit runs for the turn, on either harness.
-The provider choice reaches OpenRouter through it, and the exact charge comes back through it.
-The CLI is given a random per-run token, so the OpenRouter key never enters it.
+The provider choice reaches OpenRouter through it, and the exact charge comes back through it. The
+`OPENROUTER_API_KEY` is passed per invocation and stays in the calling process: the CLI gets a
+random per-run token for the proxy instead. Both harnesses also remove provider credentials from the
+tool environment, and Codex has its automatic login shell disabled because it could reload keys from
+`~/.bashrc`.
 
 Each response uses [router metadata](https://openrouter.ai/docs/guides/features/router-metadata)
 and emits an `openrouter_request` status event. It reports the selected upstream provider,
@@ -221,6 +245,10 @@ async for event in run:
     if data.get("event") == "openrouter_request":
         print(data["provider"], data["provider_model"], data["region"], data["cost_usd"])
 ```
+
+A Codex turn also emits one `model_routing` status event, which reports what the Codex app-server
+itself recorded for the thread. That answers "did the model override take effect", where
+`openrouter_request` answers "who served each call".
 
 #### Providers and repeatable experiments
 
@@ -255,8 +283,10 @@ The toolkit sends this rule with every model request:
 {"provider": {"only": ["moonshotai"], "allow_fallbacks": false}}
 ```
 
-OpenRouter must use that provider. The request fails when the provider is unavailable. It cannot
-switch to another provider.
+OpenRouter must use that provider, and cannot switch to another one. A request that provider
+rejects or cannot serve therefore fails instead of moving elsewhere. You see it as an
+`openrouter_request` event carrying the HTTP status and OpenRouter's message, and the CLI retries.
+Observed with Novita on DeepSeek v4 Flash: one rejected request, then a normal completion.
 
 The selected provider must support every feature used by the request. For example, a provider may
 support tools but reject Codex's `json_schema` structured-output format. With strict selection,
@@ -264,17 +294,16 @@ OpenRouter returns that error to the agent. Check the exact model, harness, prov
 combination before a larger experiment. `dev/openrouter_endpoints.py` shows whether each endpoint
 advertises tools and `response_format`, although providers can support different response formats.
 
-Provider selection can also change for one turn:
+Provider selection can also be set for one session or one turn:
 
 ```python
-await session.send(
-    task,
-    config=TurnConfig(openrouter_provider="moonshotai"),
-)
+engine.start_session(config=SessionConfig(openrouter_provider="moonshotai"))
+await session.send(task, config=TurnConfig(openrouter_provider="moonshotai"))
 ```
 
 Use `openrouter_provider=None` in a turn config to return to OpenRouter's normal routing. The
-provider setting requires an `openrouter/` model.
+provider setting requires an `openrouter/` model, so clear it in the same config when a turn
+switches to a non-OpenRouter model.
 
 For a repeatable comparison:
 
@@ -300,17 +329,8 @@ Choosing a fixed provider removes one important source of variation. Model outpu
 between requests, and a provider may update its serving software or model version. Record the date
 and the reported provider details with experimental results.
 
-A pin also disables fallbacks. A request the chosen provider rejects therefore fails, rather than
-moving to another provider. You see it as an `openrouter_request` event carrying the HTTP status
-and OpenRouter's message, and the CLI retries. Observed with Novita on DeepSeek v4 Flash: one
-rejected request, then a normal completion.
-
 Important details:
 
-- The `OPENROUTER_API_KEY` is passed per invocation and stays in the calling process. The CLI
-  gets the proxy's per-run token instead. Both harnesses also remove provider credentials from
-  the tool environment, and Codex disables its automatic login shell because it could reload
-  keys from `~/.bashrc`.
 - Claude Code's own dollar estimate is wrong for these custom models. The result uses OpenRouter's
   exact reported charge and keeps the CLI value as `cli_reported_cost_usd` for comparison. The
   price table in `harness/pricing.py` is not consulted for these models.
@@ -320,14 +340,12 @@ Important details:
 - Codex uses `low` reasoning when the spec leaves it unset because OpenRouter's Responses endpoint
   requires reasoning.
 - `output_schema` is also written into the prompt. OpenRouter accepts the JSON schema but may leave
-  enforcement to the model. The local paid test returned valid structured output for every model
-  on both harnesses. The remote test did the same except for two Kimi/Codex requests that OpenRouter
-  rejected after the shared account ran out of credit; those combinations passed in earlier remote
-  runs.
+  enforcement to the model. Both the local and the remote paid tests returned valid structured output
+  for every model on both harnesses.
 - Reasoning events vary by model. Kimi K3 and both DeepSeek models emitted them during testing;
   GLM-5.3 did not.
-- A plain string in `spec.system_prompt` replaces Claude Code's larger preset. This can reduce token
-  use when the task does not need the preset's tool guidance.
+- A plain string in `spec.system_prompt` replaces Claude Code's larger built-in system prompt. This
+  can reduce token use when the task does not need that prompt's tool guidance.
 
 The paid local and remote tests run a basic turn and a structured-output turn with all four models
 on both harnesses. They also check tool use, credential removal, exact cost, budgets, provider
@@ -544,7 +562,12 @@ and you still have `result.text`. A runnable version is in [`examples/minimal`](
 
 Beyond skills, several `AgentSpec` fields shape what the agent can do and the environment its tools run in:
 
-- **`model`** — the Claude model id (e.g. `"claude-sonnet-4-6"`, `"claude-haiku-4-5"`).
+- **`model`** — the model id for the chosen harness: a Claude id (`"claude-sonnet-4-6"`), an OpenAI
+  id (`"gpt-5.6-luna"`), or an OpenRouter id (`"openrouter/z-ai/glm-5.3"`). See
+  [Harnesses and models](#harnesses-and-models).
+- **`openrouter_provider`** — pin one OpenRouter provider for an `openrouter/` model, so every
+  request goes to the same one (see [OpenRouter models](#openrouter-models-either-harness)). Also
+  settable per session and per turn.
 - **`allowed_tools` / `disallowed_tools`** — tool allow/deny lists. Unset `allowed_tools` defaults to a
   coding-agent set (`Read, Write, Edit, Bash, Glob, Grep, TodoWrite`); the `Skill` tool is enabled
   automatically when skills are present.
@@ -655,6 +678,7 @@ result = await session.run(
 | the agent's own keys (`SH_APIKEY`, …) | the agent's code/tools | **yes** — that's the point |
 | a repo's `auth=` token | embedded in `git` `origin` for clone/push | **no** |
 | a `McpServer.github()` token (`GH_TOKEN`/`GITHUB_TOKEN`/`GH_PAT`) | injected into MCP request headers | **no** |
+| `OPENROUTER_API_KEY` | the local proxy, which is what calls OpenRouter | **no** — the CLI gets a per-run proxy token |
 
 **The blast-radius model — the honest part.** A background agent can be steered by hostile input (a page it
 scrapes, a file in a repo) into revealing whatever it can reach: environment variables, `.git/config`, a
@@ -675,6 +699,9 @@ a per-invocation secret — but then the agent's process (hence the `Bash` tool)
 anything exposed to untrusted input. Locally the agent likewise inherits your shell's environment (including
 your own `ANTHROPIC_API_KEY`, or — with no key set — your `claude.ai` subscription login: see
 [which credential pays for a local run](#dev-run-locally-in-process)); local is a trusted-dev context.
+An [OpenRouter model](#openrouter-models-either-harness) is the one case where a model key is never
+in the agent's environment even in API-key mode: `OPENROUTER_API_KEY` stays in the calling process
+and the CLI is given a per-run token for the local proxy.
 
 **In transit & at rest.** Secret values never travel in the invocation payload itself — the platform
 *persists* a job's input verbatim (`jobs/<sid>_input.jsonl` in the output bucket), and a Pub/Sub message is
@@ -1144,8 +1171,9 @@ See [`DESIGN.md`](DESIGN.md) — the agreed architecture, the hard-won platform 
 adapters seam (§7), and the phased roadmap (§11). The README grows with the code, phase by phase.
 
 Contributing? [`TESTING.md`](TESTING.md) covers the testing ladder — the offline suite (`make test`), the
-install-parity image ([`dev/`](dev/)), and **live validation** on real Agent Runtime (`make live-smoke`):
-when each is required and how to debug a live run.
+install-parity image ([`dev/`](dev/)), and **live validation** on real Agent Runtime (`make live-smoke`,
+plus `make live-openrouter` and `make live-openrouter-remote` for the OpenRouter models): when each is
+required and how to debug a live run.
 
 Changes ship as tagged releases documented in [`CHANGELOG.md`](CHANGELOG.md) — its header spells out
 the versioning policy (0.x minor releases may break; every breaking change carries update notes) and

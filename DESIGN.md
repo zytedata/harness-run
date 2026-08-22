@@ -27,7 +27,8 @@ without re-learning the platform's sharp edges.
   the **Claude Code (Agent SDK)** binding (default) and the **Codex (openai-codex SDK)** binding
   (`spec.harness="codex"`). Both can run `openrouter/` model ids: Claude Code uses OpenRouter's
   Anthropic-compatible endpoint, and Codex uses `model_providers.*` config overrides. Providers beyond
-  OpenRouter are a later step. `openrouter_provider` can select one OpenRouter provider per turn.
+  OpenRouter are a later step. `openrouter_provider` selects one OpenRouter provider, on the spec, a
+  session or a single turn.
   The prefix keeps model selection per turn and preserves compatibility with existing engine configs.
 - Non-GCP backends. We design the **ports** (storage, events, dispatch, secrets) as protocols, but ship
   GCP adapters (GCS, Cloud Logging, Pub/Sub, Secret Manager) plus local/in-memory adapters for dev.
@@ -738,8 +739,10 @@ saving all onboarding docs for the end.
   the platform session machinery that broke under us on 2026-07-28 (and our events are deliberately
   `partial`, i.e. not appended). Worth raising in the existing Google query-job telemetry thread: a
   native progress-stream for `asyncQuery` would let us delete this channel entirely.
-- **Structured outputs** — prefer the SDK's constrained-decoding `structured_output`; keep "parse last
-  JSON block" only as a fallback for harnesses that lack it. Confirm Vertex model support per model.
+- **Structured outputs — BUILT (2026-08).** Both harnesses send the schema through the CLI's own
+  structured-output option and keep "parse the last JSON block" only as a fallback. OpenRouter turns
+  also get the schema in the prompt, because OpenRouter accepts the schema but leaves enforcement to
+  the model. Still open: confirming Vertex model support per model.
 - **Outcomes / rubrics** — CMA's iterate-until-graded "definition of done" is attractive for autonomous
   background work; candidate post-P4 capability (a `verify=Rubric(...)` on `AgentSpec`).
 - **Second harness** — codex (subprocess) or a custom LLMNL harness behind the `Harness` protocol; the

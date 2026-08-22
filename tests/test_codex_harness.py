@@ -847,7 +847,7 @@ def test_unused_model_auth_key_never_reaches_the_agent(tmp_path):
     assert "OPENAI_API_KEY" not in env
 
 
-def test_openrouter_provider_keeps_known_context_and_price(tmp_path):
+def test_openrouter_provider_keeps_the_known_context_window(tmp_path):
     spec = AgentSpec(
         name="a",
         model=_OR_MODEL,

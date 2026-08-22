@@ -19,8 +19,22 @@ from remote_agent_toolkit.harness.claude_code import ClaudeCodeHarness
 from remote_agent_toolkit.harness.context import RunContext
 
 
+_JOB_DIR: Path
+
+
+@pytest.fixture(autouse=True)
+def _job_dir(tmp_path):
+    """Give every ctx a writable job dir under tmp_path.
+
+    ``build_options`` writes the OpenRouter shell wrapper under the job dir, so a fixed
+    path would create files on the host (and fails outright where /tmp is read-only).
+    """
+    global _JOB_DIR
+    _JOB_DIR = tmp_path / "job"
+
+
 def _ctx(spec, **kw):
-    return RunContext(spec=spec, prompt="hi", job_dir=Path("/tmp/x"), session_id="sid", **kw)
+    return RunContext(spec=spec, prompt="hi", job_dir=_JOB_DIR, session_id="sid", **kw)
 
 
 def test_system_prompt_inherit_appends_to_preset():
@@ -30,7 +44,7 @@ def test_system_prompt_inherit_appends_to_preset():
     opts = ClaudeCodeHarness().build_options(spec, _ctx(spec))
     assert opts.system_prompt == {"type": "preset", "preset": "claude_code", "append": "Be terse."}
     # cwd is the "workspace" leaf under the job dir, not the anonymous job dir itself.
-    assert opts.cwd == "/tmp/x/workspace" and opts.model == "claude-sonnet-4-6"
+    assert opts.cwd == str(_JOB_DIR / "workspace") and opts.model == "claude-sonnet-4-6"
 
 
 def test_system_prompt_plain_string_replaces():

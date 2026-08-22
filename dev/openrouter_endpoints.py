@@ -131,7 +131,7 @@ def probe(model: str, n: int, key: str) -> None:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("models", nargs="*", default=DEFAULT_MODELS)
+    ap.add_argument("models", nargs="*")
     ap.add_argument("--probe", action="store_true", help="also send N identical calls (COSTS MONEY)")
     ap.add_argument("-n", type=int, default=12, help="probe count (default 12)")
     args = ap.parse_args()

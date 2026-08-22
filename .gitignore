@@ -7,3 +7,7 @@ build/
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
+
+# Local agent-tool settings, per developer.
+.claude/
+.mcp.json

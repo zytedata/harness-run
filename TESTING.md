@@ -130,12 +130,12 @@ Three checks retry once on a soft miss: the basic turn, resume, and structured o
 occasionally answer without running the command they were asked to run. Measured on DeepSeek
 v4 Pro under codex: one run answered 6 for `print(6 * 7)`, two immediate re-runs answered 42.
 
-Almost every model request selects one known provider and disables fallbacks. Kimi uses
-Moonshot AI, GLM uses Z.AI, and both DeepSeek models use Novita because the shared account's
-ZDR policy excludes DeepSeek's own endpoint. The test fails if OpenRouter reports a different
-provider. Two kinds of row are deliberately unpinned: the two rows named "unpinned" above, and
-the two DeepSeek structured-output checks on Codex — Novita serves those models but does not
-accept Codex's `json_schema` format. Set `OPENROUTER_PROVIDER` to test every feature against
+Most model requests select one known provider and disable fallbacks. Kimi uses Moonshot AI,
+GLM uses Z.AI, and both DeepSeek models use Novita because the shared account's ZDR policy
+excludes DeepSeek's own endpoint. Those rows fail if OpenRouter reports a different provider.
+Three kinds of row do something else on purpose: the two rows named "unpinned" above, the two
+DeepSeek structured-output checks on Codex — Novita serves those models but does not accept
+Codex's `json_schema` format — and the routing rows below, which send a whole provider object. Set `OPENROUTER_PROVIDER` to test every feature against
 one specific provider. To test one model with another provider:
 
 ```bash
@@ -143,30 +143,24 @@ MODELS=openrouter/moonshotai/kimi-k3 OPENROUTER_PROVIDER=fireworks \
 make live-openrouter
 ```
 
-The test reads every `openrouter_request` event and fails if the provider differs. Set
-`SERIAL=1` for ordered output while debugging.
+Set `SERIAL=1` for ordered output while debugging.
 
 Two rows per harness send a whole routing object instead of a single slug, both on Kimi K3
 because it has many providers (GLM-5.3 has one endpoint, which would prove nothing). The
 "closed" row sends `{"only": [moonshotai, fireworks]}` and requires that OpenRouter reports
-one of those two and that `provider_matches_request` is true. The "open" row sends
-`{"order": [fireworks, moonshotai], "allow_fallbacks": true}` and requires the opposite:
-the turn completes and `provider_matches_request` is null, because a request that permits
-any provider cannot prove which one was allowed. Both rows judge the reported provider name
-themselves rather than trusting the toolkit's own verdict. The second provider never has to
-be reachable — the primary is in both objects — so `OPENROUTER_ALTERNATE_PROVIDER` only
-needs changing to test a different pair.
-
-The closed row accepts either allowed provider on purpose, and it needs to: in the 2026-08-22
-remote run, one claude-code turn under `{"only": [...]}` was served by Fireworks for one request
-and Moonshot AI for the next. A closed set bounds who may serve a turn; it does not make a turn
-stay with one provider.
+one of those two — either counts, because a closed set bounds who may serve a turn without
+keeping the turn on one of them — and that `provider_matches_request` is true. The "open" row
+sends `{"order": [fireworks, moonshotai], "allow_fallbacks": true}` and requires the opposite:
+the turn completes and `provider_matches_request` is null. The README explains when that verdict
+can be claimed. Both rows judge the reported provider name themselves rather than trusting the
+toolkit's own verdict. The second provider never has to be reachable — the primary is in both
+objects — so `OPENROUTER_ALTERNATE_PROVIDER` only needs changing to test a different pair.
 
 Other knobs: `HARNESSES=codex` (or `claude-code`) runs one harness instead of both, which
 roughly halves a pass, and `PROBE_REASONING_EFFORT` sets the effort every turn asks for.
 
-**It costs real money** (about $0.60 a pass) and needs a key, so run it **by hand,
-sparingly, locally**. It must never run in CI: `pytest -q` stays free and credential-less
+**It costs real money** (the summary table above has the current figure) and needs a key, so
+run it **by hand, sparingly, locally**. It must never run in CI: `pytest -q` stays free and credential-less
 (see §1 and `.github/workflows/ci.yml`) — the offline tests pin the config the harness
 emits, and that is what CI checks.
 
@@ -202,8 +196,8 @@ also runs on SIGTERM/SIGINT, because a `timeout` that fires mid-run would otherw
 engine billing.
 
 DeepSeek v4 sometimes returns no final message under Claude Code — both Flash and Pro have
-done it in earlier runs. It is intermittent: in the 2026-08-22 validation (120/120 remote,
-22/22 local) both models answered on the first attempt, with no retry used. The test retries
+done it in earlier runs. It is intermittent: in the 2026-08-22 validation (128/128 remote,
+26/26 local) both models answered on the first attempt, with no retry used. The test retries
 one soft failure and reports when the retry was used. It stays failed when the retry also has
 no answer.
 

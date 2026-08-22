@@ -171,7 +171,7 @@ separately on both harnesses:
 - ✅ passed locally and remotely
 - ⚠️ works, with the reliability note in the last column
 
-All four models have a ~1M-token context window, on both harnesses.
+All four models have a 1,048,576-token context window, on both harnesses.
 
 | Model | Harness | Completes a turn | Structured output | Shell tools | Exact cost | Provider selection | Notes |
 | --- | --- | :---: | :---: | :---: | :---: | :---: | --- |
@@ -193,8 +193,9 @@ same request.
 test command, and read the output. The tests also confirm that model-provider credentials are
 absent from the command's environment.
 
-**Provider selection** uses `openrouter_provider` in the toolkit configuration. It is supported by
-both harnesses and does not require anything saved in the OpenRouter account.
+**Provider selection** uses `openrouter_provider` (one provider) or `openrouter_routing`
+(OpenRouter's whole `provider` object) in the toolkit configuration. Both are supported by both
+harnesses and neither requires anything saved in the OpenRouter account.
 
 **Exact cost** is the charge OpenRouter reports for each response. There is no estimated
 price: OpenRouter routes one model id to providers whose prices differ by up to 2.5x, so a
@@ -225,7 +226,8 @@ the Claude Code CLI rewrites the message into a vague "model may not exist or yo
 access", so read the recorded status rather than the result text.
 
 Every model call goes through a local proxy the toolkit runs for the turn, on either harness.
-The provider choice reaches OpenRouter through it, and the exact charge comes back through it. The
+The provider choice reaches OpenRouter through it, whichever of the two settings expressed it, and
+the exact charge comes back through it. The
 `OPENROUTER_API_KEY` is passed per invocation and stays in the calling process: the CLI gets a
 random per-run token for the proxy instead. Both harnesses also remove provider credentials from the
 tool environment, and Codex has its automatic login shell disabled because it could reload keys from
@@ -302,9 +304,9 @@ engine.start_session(config=SessionConfig(openrouter_provider="moonshotai"))
 await session.send(task, config=TurnConfig(openrouter_provider="moonshotai"))
 ```
 
-Use `openrouter_provider=None` in a turn config to return to OpenRouter's normal routing. The
-provider setting requires an `openrouter/` model, so clear it in the same config when a turn
-switches to a non-OpenRouter model.
+Use `openrouter_provider=None` in a turn config to return to OpenRouter's normal routing. Either
+provider setting requires an `openrouter/` model, so clear whichever one is set in the same config
+when a turn switches to a non-OpenRouter model.
 
 For a repeatable comparison:
 
@@ -335,7 +337,7 @@ and the reported provider details with experimental results.
 `openrouter_provider` is a shorthand for one provider with fallbacks off. `openrouter_routing`
 takes OpenRouter's whole
 [`provider` object](https://openrouter.ai/docs/guides/routing/provider-selection) and sends it
-verbatim, so anything that API accepts is available:
+verbatim, so nothing in that API is out of reach:
 
 ```python
 spec = AgentSpec(
@@ -354,59 +356,53 @@ OpenRouter accepts there:
 
 | Key | Type | What it does |
 | --- | --- | --- |
-| `order` | list of slugs | Try these first, in this order. With `allow_fallbacks: true` (the API default) OpenRouter may go on to any other provider; with `false` the request fails once the list is exhausted. |
-| `only` | list of slugs | Allow only these, in no particular order. Fallbacks stay inside the list, so `allow_fallbacks` changes nothing here. |
+| `order` | list of slugs | Try these first, in this order. |
+| `only` | list of slugs | Allow only these, in no particular order. |
 | `ignore` | list of slugs | Never use these. Everyone else stays eligible. |
+| `allow_fallbacks` | bool | Whether OpenRouter may go on to a provider outside an `order` list, rather than failing once the list is exhausted. Default true. An `only` list confines fallbacks to its own members, so this changes nothing there. |
 | `sort` | `"price"`, `"throughput"`, `"latency"` | Order every eligible provider by that measure instead of OpenRouter's default. |
-| `allow_fallbacks` | bool | Whether OpenRouter may leave an `order` list. Default true. |
 | `require_parameters` | bool | Skip providers that do not support every parameter the request sends. |
 | `data_collection` | `"allow"`, `"deny"` | Exclude providers that may store the request. |
 | `quantizations` | list | Only endpoints at these quantization levels. |
 | `max_price` | object | A ceiling on what a provider may charge, per price component. |
 | `zdr` | bool | Zero-data-retention endpoints only. |
 
-Watch the difference when a list holds one entry. `{"only": ["moonshotai"]}` has nothing to fall
-back to, so it behaves like the strict pin. `{"order": ["moonshotai"], "allow_fallbacks": True}`
-prefers Moonshot and accepts anyone else.
+A one-entry `only` is the strict pin again, since the list leaves nothing to fall back to.
 
-The order is honored, so it changes who serves the turn. In the 2026-08-22 paid checks on Kimi K3,
+The lists are honored, and they are used as lists. In the 2026-08-22 paid checks on Kimi K3,
 `{"order": ["fireworks", "moonshotai"], "allow_fallbacks": true}` went to Fireworks first every
-time, where the strict Moonshot pin never did. A list of several providers is also used as a list:
-one remote turn under `{"only": ["moonshotai", "fireworks"]}` was served by Fireworks for one
-request and Moonshot AI for the next. Both are inside the allowed set, so both count as a match —
-but a turn is not guaranteed to stay with one provider unless the set holds only one.
+time, and one remote turn under `{"only": ["moonshotai", "fireworks"]}` was served by Fireworks for
+one request and Moonshot AI for the next. So a set of several providers bounds who may serve a turn
+without keeping the turn on one of them.
 
 Whether the reported provider is checked depends on what the routing object allows. A closed
 set — `only`, or `order` with `allow_fallbacks: false` — is checked against the provider
 OpenRouter reports, and `provider_matches_request` is true or false. Anything that leaves the set
 open (an `order` list with fallbacks on, an `ignore` list, a `sort` preference) reports
 `provider_matches_request: null`, because the response could legitimately come from a provider the
-request never named. The routing object itself is echoed on every `openrouter_request` event as
-`requested_routing`.
+request never named.
 
 `openrouter_routing` and `openrouter_provider` cannot be combined: both write the same request
 field, so one would silently win. Set the routing object in a `SessionConfig` or `TurnConfig` the
 same way as the single slug; to swap one for the other in a turn, clear the one you are leaving in
 the same config.
 
-The slugs are the endpoint list's `tag` values (`moonshotai/mxfp4`, `fireworks`), and both slug
-forms above work in any of these lists. Two model-id suffixes do the same job as `sort` without a
-routing object at all: `openrouter/z-ai/glm-5.3:nitro` sorts by throughput and `:floor` sorts by
-price. They are part of the model id, so they need no other setting.
+Both slug forms above work in any of these lists. Two model-id suffixes do the same job as `sort`
+without a routing object at all: `openrouter/z-ai/glm-5.3:nitro` sorts by throughput and `:floor`
+sorts by price. They are part of the model id, so they need no other setting.
 
 Important details:
 
 - Claude Code's own dollar estimate is wrong for these custom models. The result uses OpenRouter's
   exact reported charge and keeps the CLI value as `cli_reported_cost_usd` for comparison. The
   price table in `harness/pricing.py` is not consulted for these models.
-- The four known models use a 1,048,576-token context window on both harnesses.
 - Codex disables its built-in web-search tool for OpenRouter turns because OpenRouter rejects the
   tool format Codex sends. Shell, file, MCP, and skill tools remain available.
 - Codex uses `low` reasoning when the spec leaves it unset because OpenRouter's Responses endpoint
   requires reasoning.
-- `output_schema` is also written into the prompt. OpenRouter accepts the JSON schema but may leave
-  enforcement to the model. Both the local and the remote paid tests returned valid structured output
-  for every model on both harnesses.
+- `output_schema` also rides in the prompt on these turns (see [Structured output](#structured-output)).
+  Both the local and the remote paid tests returned valid structured output for every model on both
+  harnesses.
 - Reasoning events vary by model. Kimi K3 and both DeepSeek models emitted them during testing;
   GLM-5.3 did not.
 - A plain string in `spec.system_prompt` replaces Claude Code's larger built-in system prompt. This

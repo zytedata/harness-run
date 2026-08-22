@@ -8,14 +8,15 @@ can only break in ways the earlier rungs can't see.
 | Offline tests | `make test` | logic, event plumbing, contracts we encode | ~40 s (parallel), free |
 | Install parity | `make parity-build` / `-check` | dependency/install/glibc breakage | ~1 min, free |
 | **Live validation** | `make live-smoke` | **platform-contract breakage** | ~10 min, ~$0.10 + build |
-| Model-provider check | `make live-openrouter` | provider-contract breakage (OpenRouter) | ~4 min, ~$0.60 |
+| Model-provider check | `make live-openrouter` | provider-contract breakage (OpenRouter) | ~4 min, ~$0.75 |
 | Model-provider check, remote | `make live-openrouter-remote` | the same models + remote visibility on Agent Runtime | ~8-15 min, ~$0.45 + build |
 | Model attribution | `make live-attribution` | did the turn run the model we asked for — both harnesses | ~10 s, ~$0.06 |
 
 The two OpenRouter figures are measured (2026-08-22, all four models on both harnesses:
-22/22 local checks for $0.60, 120/120 remote checks for $0.44 of model spend plus the engine
-build). Most of `live-openrouter` is the big models: one DeepSeek v4 Pro basic turn on
-claude-code cost $0.083 and one Kimi K3 $0.077, while DeepSeek v4 Flash on codex cost $0.002.
+26/26 local checks for $0.74, and the remote checks for well under a dollar of model spend
+plus the engine build). Most of `live-openrouter` is the big models: one DeepSeek v4 Pro basic
+turn on claude-code cost $0.083 and one Kimi K3 $0.069, while DeepSeek v4 Flash on codex cost
+$0.002.
 Set `MODELS=openrouter/deepseek/deepseek-v4-flash` to check the plumbing for about a cent.
 
 ## 1. Offline tests (`make test`)

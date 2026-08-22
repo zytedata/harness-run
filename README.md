@@ -369,6 +369,10 @@ Watch the difference when a list holds one entry. `{"only": ["moonshotai"]}` has
 back to, so it behaves like the strict pin. `{"order": ["moonshotai"], "allow_fallbacks": True}`
 prefers Moonshot and accepts anyone else.
 
+The order is honored, so it changes who serves the turn. In the 2026-08-22 paid check on Kimi K3,
+`{"only": ["moonshotai", "fireworks"]}` was served by Moonshot AI on both harnesses, and
+`{"order": ["fireworks", "moonshotai"], "allow_fallbacks": true}` was served by Fireworks.
+
 Whether the reported provider is checked depends on what the routing object allows. A closed
 set — `only`, or `order` with `allow_fallbacks: false` — is checked against the provider
 OpenRouter reports, and `provider_matches_request` is true or false. Anything that leaves the set

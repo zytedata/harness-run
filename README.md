@@ -233,7 +233,8 @@ tool environment, and Codex has its automatic login shell disabled because it co
 
 Each response uses [router metadata](https://openrouter.ai/docs/guides/features/router-metadata)
 and emits an `openrouter_request` status event. It reports the selected upstream provider,
-the provider's model name, region when available, the HTTP status, and the exact request cost.
+the provider's model name, region when available, the HTTP status, the exact request cost, and what
+the request asked for (`requested_provider` or `requested_routing`).
 Failed responses are reported too, so a retried request is visible. The result uses the sum of
 the exact costs. `max_budget_usd` is checked between model responses, so one response may take
 the total above the cap. The proxy then refuses the next request.
@@ -329,6 +330,63 @@ Choosing a fixed provider removes one important source of variation. Model outpu
 between requests, and a provider may update its serving software or model version. Record the date
 and the reported provider details with experimental results.
 
+#### Full provider routing control
+
+`openrouter_provider` is a shorthand for one provider with fallbacks off. `openrouter_routing`
+takes OpenRouter's whole
+[`provider` object](https://openrouter.ai/docs/guides/routing/provider-selection) and sends it
+verbatim, so anything that API accepts is available:
+
+```python
+spec = AgentSpec(
+    name="kimi-first-party",
+    model="openrouter/moonshotai/kimi-k3",
+    harness="codex",  # or "claude-code"
+    openrouter_routing={
+        "order": ["moonshotai", "fireworks"],
+        "allow_fallbacks": True,
+    },
+)
+```
+
+That asks for Moonshot first, then Fireworks, then anyone else who serves the model. The fields
+OpenRouter accepts there:
+
+| Key | Type | What it does |
+| --- | --- | --- |
+| `order` | list of slugs | Try these first, in this order. With `allow_fallbacks: true` (the API default) OpenRouter may go on to any other provider; with `false` the request fails once the list is exhausted. |
+| `only` | list of slugs | Allow only these, in no particular order. Fallbacks stay inside the list, so `allow_fallbacks` changes nothing here. |
+| `ignore` | list of slugs | Never use these. Everyone else stays eligible. |
+| `sort` | `"price"`, `"throughput"`, `"latency"` | Order every eligible provider by that measure instead of OpenRouter's default. |
+| `allow_fallbacks` | bool | Whether OpenRouter may leave an `order` list. Default true. |
+| `require_parameters` | bool | Skip providers that do not support every parameter the request sends. |
+| `data_collection` | `"allow"`, `"deny"` | Exclude providers that may store the request. |
+| `quantizations` | list | Only endpoints at these quantization levels. |
+| `max_price` | object | A ceiling on what a provider may charge, per price component. |
+| `zdr` | bool | Zero-data-retention endpoints only. |
+
+Watch the difference when a list holds one entry. `{"only": ["moonshotai"]}` has nothing to fall
+back to, so it behaves like the strict pin. `{"order": ["moonshotai"], "allow_fallbacks": True}`
+prefers Moonshot and accepts anyone else.
+
+Whether the reported provider is checked depends on what the routing object allows. A closed
+set — `only`, or `order` with `allow_fallbacks: false` — is checked against the provider
+OpenRouter reports, and `provider_matches_request` is true or false. Anything that leaves the set
+open (an `order` list with fallbacks on, an `ignore` list, a `sort` preference) reports
+`provider_matches_request: null`, because the response could legitimately come from a provider the
+request never named. The routing object itself is echoed on every `openrouter_request` event as
+`requested_routing`.
+
+`openrouter_routing` and `openrouter_provider` cannot be combined: both write the same request
+field, so one would silently win. Set the routing object in a `SessionConfig` or `TurnConfig` the
+same way as the single slug; to swap one for the other in a turn, clear the one you are leaving in
+the same config.
+
+The slugs are the endpoint list's `tag` values (`moonshotai/mxfp4`, `fireworks`), and both slug
+forms above work in any of these lists. Two model-id suffixes do the same job as `sort` without a
+routing object at all: `openrouter/z-ai/glm-5.3:nitro` sorts by throughput and `:floor` sorts by
+price. They are part of the model id, so they need no other setting.
+
 Important details:
 
 - Claude Code's own dollar estimate is wrong for these custom models. The result uses OpenRouter's
@@ -349,8 +407,8 @@ Important details:
 
 The paid local and remote tests run a basic turn and a structured-output turn with all four models
 on both harnesses. They also check tool use, credential removal, exact cost, budgets, provider
-selection, provider reporting, and resume. The remote test checks the Gemini runtime's history,
-resource, and trace data. See
+selection, routing objects with a closed and an open provider set, provider reporting, and resume.
+The remote test checks the Gemini runtime's history, resource, and trace data. See
 `make live-openrouter` and `make live-openrouter-remote`.
 
 ## Dev: run locally, in-process
@@ -568,6 +626,10 @@ Beyond skills, several `AgentSpec` fields shape what the agent can do and the en
 - **`openrouter_provider`** — pin one OpenRouter provider for an `openrouter/` model, so every
   request goes to the same one (see [OpenRouter models](#openrouter-models-either-harness)). Also
   settable per session and per turn.
+- **`openrouter_routing`** — OpenRouter's whole `provider` object instead of one pinned slug:
+  several providers, a deny list, fallbacks on, a price or throughput sort (see
+  [Full provider routing control](#full-provider-routing-control)). Also settable per session and
+  per turn.
 - **`allowed_tools` / `disallowed_tools`** — tool allow/deny lists. Unset `allowed_tools` defaults to a
   coding-agent set (`Read, Write, Edit, Bash, Glob, Grep, TodoWrite`); the `Skill` tool is enabled
   automatically when skills are present.
@@ -785,7 +847,7 @@ configures:
 |---|---|---|---|
 | deploy | `AgentSpec` | `gemini.deploy(spec)` | identity (`name`), image contents (`packages`, engine `env`, the harness CLIs — `harnesses=(...)` bakes several), and the *defaults* for everything below |
 | session | `SessionConfig` | `engine.start_session(config=...)` | the conversation's world: `repos`, `skills`, `mcp_servers`, `system_prompt`, `harness` (selects among the baked CLIs), `checkpoint`/`interactive`, `extra_env` — plus session-wide defaults for the turn knobs |
-| turn | `TurnConfig` | `session.run(config=...)` / `send(config=...)` | the knobs the harness re-reads every invocation: `model`, `openrouter_provider`, `reasoning_effort`, `max_turns`, `max_budget_usd`, `max_buffer_size`, `background_task_timeout`, `permission_mode`, tool lists, `output_schema` |
+| turn | `TurnConfig` | `session.run(config=...)` / `send(config=...)` | the knobs the harness re-reads every invocation: `model`, `openrouter_provider`, `openrouter_routing`, `reasoning_effort`, `max_turns`, `max_budget_usd`, `max_buffer_size`, `background_task_timeout`, `permission_mode`, tool lists, `output_schema` |
 
 Both config types are **sparse overlays**: a field left at `INHERIT` (the default) keeps
 the value from the layer below; a set field replaces it wholesale (`extra_env` is the one

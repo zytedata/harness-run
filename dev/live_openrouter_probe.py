@@ -2,12 +2,13 @@
 
 Each model must call a shell tool, return its output, produce schema-valid structured output,
 hide provider credentials, report the selected upstream, and use OpenRouter's exact cost.
-Provider selection, resume, and budget caps are checked on both harnesses. Checks run concurrently
-unless ``SERIAL=1``.
+Provider selection, whole routing objects, resume, and budget caps are checked on both
+harnesses. Checks run concurrently unless ``SERIAL=1``.
 
 Run by hand with ``OPENROUTER_API_KEY=... make live-openrouter``. Never run this in CI.
 Use ``MODELS=...`` to limit the model list. ``OPENROUTER_PROVIDER`` overrides the provider
 used by the checks; this is mainly useful with a single model.
+``OPENROUTER_ALTERNATE_PROVIDER`` overrides the second provider in the routing checks.
 """
 
 from __future__ import annotations
@@ -76,6 +77,37 @@ def _provider_for(model: str) -> str:
         or DEFAULT_PROVIDERS.get(model)
         or model.removeprefix("openrouter/").split("/", 1)[0]
     )
+
+
+# Routing objects are checked on Kimi K3: it is served by many providers, so a set of
+# two is a real choice. GLM 5.3 has a single endpoint, which would prove nothing.
+ROUTING_MODEL = "openrouter/moonshotai/kimi-k3"
+# Any second provider that serves ROUTING_MODEL. It never has to be reachable: the
+# primary is in both routing objects, so a provider the account cannot use is simply
+# not selected.
+ROUTING_ALTERNATE = os.environ.get("OPENROUTER_ALTERNATE_PROVIDER", "fireworks")
+
+
+def _routing_cases(model: str) -> list[tuple[str, dict, bool | None]]:
+    """The routing objects to check, with the verdict each one supports.
+
+    A closed set can be checked against the provider OpenRouter reports. An open one
+    cannot, and then the toolkit must claim nothing instead of guessing.
+    """
+    primary = _provider_for(model)
+    return [
+        ("closed", {"only": [primary, ROUTING_ALTERNATE]}, True),
+        ("open", {"order": [ROUTING_ALTERNATE, primary], "allow_fallbacks": True}, None),
+    ]
+
+
+def _looks_like(provider: str | None, slug: str) -> bool:
+    """Whether a reported display name is the provider that ``slug`` asked for."""
+
+    def norm(value: str) -> str:
+        return "".join(char for char in value.casefold() if char.isalnum())
+
+    return provider is not None and norm(provider) == norm(slug.split("/", 1)[0])
 
 
 def _schema_provider(model: str, harness: str) -> str | None:
@@ -358,6 +390,62 @@ async def _check_unpinned(model: str, key: str, harness: str) -> dict:
     return row
 
 
+async def _check_routing(
+    model: str,
+    key: str,
+    harness: str,
+    case: str,
+    routing: dict,
+    expect_match: bool | None,
+) -> dict:
+    """A whole routing object reaches OpenRouter, and is only judged when it can be."""
+    label = f"{model.removeprefix('openrouter/')} routing {case} [{harness}]"
+    spec = AgentSpec(
+        name="ratk-openrouter-routing",
+        model=model,
+        harness=harness,
+        system_prompt="Reply briefly.",
+        max_turns=2,
+        max_budget_usd=0.30,
+        reasoning_effort=PROBE_REASONING_EFFORT,
+        openrouter_routing=routing,
+    )
+    row = {"model": label, "ok": False, "tools": True, "cost": None, "turns": 0, "note": ""}
+    requests: list[dict] = []
+    try:
+        session = local.deploy(spec).start_session()
+        run = session.run("Reply with only: ok", secrets={"OPENROUTER_API_KEY": key})
+        async for event in run:
+            if (event.raw or {}).get("event") == "openrouter_request":
+                requests.append(dict(event.raw))
+        result = run.result
+        row.update(cost=result.cost_usd, turns=result.num_turns or 0)
+        succeeded = [req for req in requests if req.get("http_status") == 200]
+        # Judge the reported provider here rather than trusting the toolkit's own verdict.
+        allowed = routing.get("only") or []
+        served_by_allowed = all(
+            any(_looks_like(req.get("provider"), slug) for slug in allowed) for req in succeeded
+        )
+        row["ok"] = bool(
+            not result.is_error
+            and bool(succeeded)
+            and all(req.get("requested_routing") == routing for req in succeeded)
+            # The routing object replaces the single-slug pin; nothing sets both.
+            and all(req.get("requested_provider") is None for req in succeeded)
+            and all(req.get("provider") for req in succeeded)
+            and all(req.get("provider_matches_request") is expect_match for req in succeeded)
+            and (not allowed or served_by_allowed)
+        )
+        row["note"] = (
+            f"routing={routing} providers={[req.get('provider') for req in succeeded]} "
+            f"matches={[req.get('provider_matches_request') for req in succeeded]}"
+        )
+    except Exception as exc:  # noqa: BLE001 — report, don't hide
+        row["note"] = f"{type(exc).__name__}: {exc}"
+        traceback.print_exc()
+    return row
+
+
 async def _check_budget(harness: str, key: str) -> dict:
     """The exact OpenRouter charge trips the cap."""
     label = f"exact-cost budget [{harness}]"
@@ -425,6 +513,10 @@ async def main() -> int:
             for model in MODELS:
                 rows.append(await _check_structured_output(model, key, h))
             rows.append(await _check_unpinned(RESUME_MODEL, key, h))
+            for case, routing, expect in _routing_cases(ROUTING_MODEL):
+                rows.append(
+                    await _check_routing(ROUTING_MODEL, key, h, case, routing, expect)
+                )
             rows.append(await _check_budget(h, key))
     else:
         rows = list(
@@ -433,6 +525,11 @@ async def main() -> int:
                 *(_check_resume(RESUME_MODEL, key, h) for h in HARNESSES),
                 *(_check_structured_output(m, key, h) for m in MODELS for h in HARNESSES),
                 *(_check_unpinned(RESUME_MODEL, key, h) for h in HARNESSES),
+                *(
+                    _check_routing(ROUTING_MODEL, key, h, case, routing, expect)
+                    for h in HARNESSES
+                    for case, routing, expect in _routing_cases(ROUTING_MODEL)
+                ),
                 *(_check_budget(h, key) for h in HARNESSES),
             )
         )

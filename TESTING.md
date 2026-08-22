@@ -116,7 +116,7 @@ MODELS=openrouter/z-ai/glm-5.3 make live-openrouter  # one model, both harnesses
 This paid local test runs every model on both harnesses. Each model must call a shell tool,
 return its output, produce schema-valid structured output, hide provider credentials from the
 tool, report its selected upstream, and use OpenRouter's exact cost. It also checks resume, a
-strict provider choice, and a tiny budget cap on both harnesses.
+strict provider choice, whole routing objects, and a tiny budget cap on both harnesses.
 
 Every model call goes through the local proxy (`harness/_openrouter_proxy.py`), so the test
 also requires an `http_status` on every `openrouter_request` event, which only the proxy
@@ -146,6 +146,17 @@ make live-openrouter
 The test reads every `openrouter_request` event and fails if the provider differs. Set
 `SERIAL=1` for ordered output while debugging.
 
+Two rows per harness send a whole routing object instead of a single slug, both on Kimi K3
+because it has many providers (GLM-5.3 has one endpoint, which would prove nothing). The
+"closed" row sends `{"only": [moonshotai, fireworks]}` and requires that OpenRouter reports
+one of those two and that `provider_matches_request` is true. The "open" row sends
+`{"order": [fireworks, moonshotai], "allow_fallbacks": true}` and requires the opposite:
+the turn completes and `provider_matches_request` is null, because a request that permits
+any provider cannot prove which one was allowed. Both rows judge the reported provider name
+themselves rather than trusting the toolkit's own verdict. The second provider never has to
+be reachable — the primary is in both objects — so `OPENROUTER_ALTERNATE_PROVIDER` only
+needs changing to test a different pair.
+
 Other knobs: `HARNESSES=codex` (or `claude-code`) runs one harness instead of both, which
 roughly halves a pass, and `PROBE_REASONING_EFFORT` sets the effort every turn asks for.
 
@@ -162,7 +173,9 @@ OPENROUTER_API_KEY=... make live-openrouter-remote
 
 This paid remote test repeats the local checks on Gemini Agent Runtime. One engine contains both
 CLIs and serves every model through per-turn overrides. Every model runs a structured-output turn
-on both harnesses. Resume, direct provider selection, and budget caps also run on both harnesses.
+on both harnesses. Resume, direct provider selection, routing objects, and budget caps also run on
+both harnesses. The two routing rows are the same closed/open pair the local test runs, which is
+where a routing object is proven to survive the trip to a deployed worker.
 
 It also checks the remote-only surface: the worker's `effective_spec` echo names the model,
 `session.resource_samples()` returns worker CPU/RAM, `memory_peak_bytes` is stamped on the

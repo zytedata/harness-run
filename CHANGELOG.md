@@ -33,6 +33,15 @@ tag `vX.Y.Z`, push the commit and the tag.
   providers whose prices differ by up to 2.5x. `openrouter_provider` selects one
   OpenRouter provider per agent, session, or turn and disables fallbacks. Paid local
   and Gemini Agent Runtime checks cover both harnesses. ([#34])
+- `openrouter_routing` takes OpenRouter's whole `provider` object — several providers,
+  a deny list, fallbacks on, a price or throughput sort — and sends it verbatim, where
+  `openrouter_provider` only pins one provider with fallbacks off. Available on the spec
+  and per session and turn, and cannot be combined with `openrouter_provider`.
+  `provider_matches_request` is only reported when the routing object names a closed set
+  of providers (`only`, or `order` with `allow_fallbacks` false); an open set reports
+  `null` instead of a verdict the request cannot support. Every `openrouter_request` event
+  carries the object as `requested_routing`. Because a config field is new, a client
+  staging it against an older engine fails closed, as the same-revision rule requires. ([#34])
 - Codex emits a `model_routing` status event from the app-server's thread record. ([#34])
 - Every OpenRouter model call, on both harnesses, passes through a per-run localhost
   proxy. The CLIs cannot send OpenRouter's provider field and cannot report what

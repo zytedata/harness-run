@@ -1,8 +1,9 @@
 """Paid Gemini Agent Runtime check for OpenRouter on both harnesses.
 
 One throwaway engine contains both CLIs. It checks every model's basic and structured-output
-turns on both harnesses. It also checks resume, budgets, provider selection and cost reporting,
-tools, credentials, effective specs, resource samples, memory peak, history, and Cloud Trace.
+turns on both harnesses. It also checks resume, budgets, provider selection, whole routing
+objects, cost reporting, tools, credentials, effective specs, resource samples, memory peak,
+history, and Cloud Trace.
 
 Run by hand with ``OPENROUTER_API_KEY=... make live-openrouter-remote``. Never run this in
 CI. A run usually takes 8-15 minutes and spends real money. The engine is deleted after the
@@ -11,6 +12,7 @@ checks and on SIGTERM/SIGINT. ``KEEP=1`` leaves it running for debugging.
 Set ``PROJECT``, ``LOCATION``, ``SUFFIX``, ``IMPERSONATE_SA``, ``MAX_INSTANCES``, or
 ``SERIAL=1`` as needed. ``OPENROUTER_PROVIDER`` overrides the provider used by the checks;
 this is mainly useful when ``MODELS`` contains one model.
+``OPENROUTER_ALTERNATE_PROVIDER`` overrides the second provider in the routing checks.
 """
 
 from __future__ import annotations
@@ -81,6 +83,37 @@ def _schema_provider(model: str, harness: str) -> str | None:
     if harness == "codex" and model.startswith("openrouter/deepseek/"):
         return None
     return _provider_for(model)
+
+
+# Routing objects are checked on Kimi K3: it is served by many providers, so a set of
+# two is a real choice. GLM 5.3 has a single endpoint, which would prove nothing.
+ROUTING_MODEL = "openrouter/moonshotai/kimi-k3"
+# Any second provider that serves ROUTING_MODEL. It never has to be reachable: the
+# primary is in both routing objects, so a provider the account cannot use is simply
+# not selected.
+ROUTING_ALTERNATE = os.environ.get("OPENROUTER_ALTERNATE_PROVIDER", "fireworks")
+
+
+def _routing_cases(model: str) -> list[tuple[str, dict, bool | None]]:
+    """The routing objects to check, with the verdict each one supports.
+
+    A closed set can be checked against the provider OpenRouter reports. An open one
+    cannot, and then the toolkit must claim nothing instead of guessing.
+    """
+    primary = _provider_for(model)
+    return [
+        ("closed", {"only": [primary, ROUTING_ALTERNATE]}, True),
+        ("open", {"order": [ROUTING_ALTERNATE, primary], "allow_fallbacks": True}, None),
+    ]
+
+
+def _looks_like(provider: str | None, slug: str) -> bool:
+    """Whether a reported display name is the provider that ``slug`` asked for."""
+
+    def norm(value: str) -> str:
+        return "".join(char for char in value.casefold() if char.isalnum())
+
+    return provider is not None and norm(provider) == norm(slug.split("/", 1)[0])
 
 
 _TOOL_INPUT = b"ratk-openrouter-tool-check-2026-08-21"
@@ -309,6 +342,54 @@ async def _check_resume(engine, key: str, harness: str):
     return session, final_raw
 
 
+async def _check_routing(
+    engine,
+    key: str,
+    harness: str,
+    case: str,
+    routing: dict,
+    expect_match: bool | None,
+) -> None:
+    """A whole routing object survives the trip to a deployed worker, and is judged there."""
+    label = f"routing {case} [{harness}]"
+    session = engine.start_session(config=SessionConfig(harness=harness))
+    _, _, _, _, observations = await _drive(
+        label,
+        session.run(
+            "Reply with only: ok",
+            secrets={"OPENROUTER_API_KEY": key},
+            config=TurnConfig(model=ROUTING_MODEL, openrouter_routing=routing),
+        ),
+    )
+    requests = [
+        request
+        for request in observations["openrouter_requests"]
+        if request.get("http_status") == 200
+    ]
+    providers = [request.get("provider") for request in requests]
+    matches = [request.get("provider_matches_request") for request in requests]
+    check(
+        f"{label}: routing object reached OpenRouter",
+        bool(requests)
+        and all(request.get("requested_routing") == routing for request in requests)
+        and all(request.get("requested_provider") is None for request in requests),
+        f"routing={[request.get('requested_routing') for request in requests]}",
+    )
+    # Judge the reported provider here rather than trusting the toolkit's own verdict.
+    allowed = routing.get("only") or []
+    check(
+        f"{label}: provider verdict matches what the routing can prove",
+        bool(requests)
+        and all(providers)
+        and all(match is expect_match for match in matches)
+        and (
+            not allowed
+            or all(any(_looks_like(name, slug) for slug in allowed) for name in providers)
+        ),
+        f"providers={providers} matches={matches} expected={expect_match}",
+    )
+
+
 async def _check_budget(engine, key: str, harness: str) -> None:
     """A tiny cap must use OpenRouter's charge and stop with the budget reason."""
     label = f"exact-cost budget [{harness}]"
@@ -503,6 +584,8 @@ async def main() -> int:
                     await _check_structured_output(engine, model, key, h)
                 resumes[h] = await _check_resume(engine, key, h)
                 await _check_budget(engine, key, h)
+                for case, routing, expect in _routing_cases(ROUTING_MODEL):
+                    await _check_routing(engine, key, h, case, routing, expect)
             visibility_targets = [(*resumes[h], h) for h in HARNESSES]
         else:
             model_checks = [
@@ -517,11 +600,18 @@ async def main() -> int:
             ]
             resume_checks = [_check_resume(engine, key, harness) for harness in HARNESSES]
             budget_checks = [_check_budget(engine, key, harness) for harness in HARNESSES]
+            # After the resume checks: their results are read back by position below.
+            routing_checks = [
+                _check_routing(engine, key, harness, case, routing, expect)
+                for harness in HARNESSES
+                for case, routing, expect in _routing_cases(ROUTING_MODEL)
+            ]
             results = await asyncio.gather(
                 *model_checks,
                 *schema_checks,
                 *resume_checks,
                 *budget_checks,
+                *routing_checks,
                 return_exceptions=True,
             )
             for r in results:

@@ -27,7 +27,8 @@ without re-learning the platform's sharp edges.
   the **Claude Code (Agent SDK)** binding (default) and the **Codex (openai-codex SDK)** binding
   (`spec.harness="codex"`). Both can run `openrouter/` model ids: Claude Code uses OpenRouter's
   Anthropic-compatible endpoint, and Codex uses `model_providers.*` config overrides. Providers beyond
-  OpenRouter are a later step. `openrouter_provider` selects one OpenRouter provider, on the spec, a
+  OpenRouter are a later step. `openrouter_provider` selects one OpenRouter provider and
+  `openrouter_routing` carries OpenRouter's whole `provider` object, either one on the spec, a
   session or a single turn.
   The prefix keeps model selection per turn and preserves compatibility with existing engine configs.
 - Non-GCP backends. We design the **ports** (storage, events, dispatch, secrets) as protocols, but ship
@@ -551,8 +552,9 @@ Each is a `typing.Protocol`; concrete adapters ship for prod (GCP) and dev (loca
   have no mapping and are ignored with a status warning.
 - **`openrouter/` models go through a per-run localhost proxy** (`harness/_openrouter_proxy.py`), on
   **both** bindings. Two things force this. The CLIs cannot send OpenRouter's `provider` request
-  field, and they cannot report what OpenRouter charged. The proxy adds `spec.openrouter_provider`
-  to the request body (`only`, fallbacks off). It passes the response through unchanged and reads
+  field, and they cannot report what OpenRouter charged. The proxy puts the caller's choice in the
+  request body: `spec.openrouter_provider` as `only` with fallbacks off, or
+  `spec.openrouter_routing` verbatim. It passes the response through unchanged and reads
   the routing metadata and the charge out of it. Each response becomes one `openrouter_request`
   event, failed responses included — nothing else can see a retried 429. The CLI holds a random
   per-run token, never the account key. The summed charges become the result's `cost_usd`

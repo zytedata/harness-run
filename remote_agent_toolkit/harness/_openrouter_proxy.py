@@ -6,7 +6,8 @@ do not report what OpenRouter charged. The proxy supplies both.
 
 For each call it:
 
-* adds the caller's provider choice to the request body (``_request_with_provider``);
+* puts the caller's provider choice in the request body (``_request_with_provider``) —
+  either the single-slug strict pin or a whole routing object;
 * swaps the CLI's per-run token for the real account key;
 * passes the response through to the CLI as it arrives, keeping the last few MB to read
   the routing metadata and the charge out of (``_capture_request``);
@@ -28,7 +29,7 @@ import threading
 import time
 from dataclasses import dataclass, replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any
+from typing import Any, Mapping
 
 from ..events import AgentEvent
 
@@ -55,6 +56,7 @@ class OpenRouterRequest:
 
     requested_model: str | None
     requested_provider: str | None
+    requested_routing: Mapping[str, Any] | None
     provider: str | None
     provider_model: str | None
     region: str | None
@@ -75,9 +77,14 @@ class OpenRouterRequest:
                 "event": "openrouter_request",
                 "requested_model": self.requested_model,
                 "requested_provider": self.requested_provider,
+                "requested_routing": (
+                    dict(self.requested_routing) if self.requested_routing is not None else None
+                ),
                 "provider": self.provider,
-                "provider_matches_request": _provider_matches_request(
-                    self.requested_provider, self.provider
+                "provider_matches_request": (
+                    _provider_matches_routing(self.requested_routing, self.provider)
+                    if self.requested_routing is not None
+                    else _provider_matches_request(self.requested_provider, self.provider)
                 ),
                 "provider_model": self.provider_model,
                 "region": self.region,
@@ -119,6 +126,7 @@ def _capture_request(
     content_type: str,
     requested_model: str | None,
     requested_provider: str | None,
+    requested_routing: Mapping[str, Any] | None,
     status: int,
 ) -> OpenRouterRequest | None:
     """Extract cost and selected endpoint from one buffered response."""
@@ -161,6 +169,7 @@ def _capture_request(
     return OpenRouterRequest(
         requested_model=requested_model,
         requested_provider=requested_provider,
+        requested_routing=requested_routing,
         provider=str(provider) if provider is not None else None,
         provider_model=str(provider_model) if provider_model is not None else None,
         region=metadata.get("region"),
@@ -199,26 +208,72 @@ def _model_matches(expected: str | None, requested: Any) -> bool:
     return expected is None or (isinstance(requested, str) and requested == expected)
 
 
+def _normalized_provider(value: str) -> str:
+    return "".join(char for char in value.casefold() if char.isalnum())
+
+
 def _provider_matches_request(requested: str | None, selected: str | None) -> bool | None:
     """Compare a provider slug with the display name in OpenRouter's response metadata.
 
     OpenRouter accepts a base slug (``google-vertex``) or a specific endpoint slug
     (``google-vertex/us-east5``). Response metadata contains only the provider's display
-    name, so compare that name with the base part of the requested slug. A successful
-    response still had to satisfy the full slug because the request disables fallbacks.
+    name, so compare that name with the base part of the requested slug. A response that
+    came back under a single-slug pin still had to satisfy the full slug, because that pin
+    disables fallbacks.
     """
     if requested is None or selected is None:
         return None
-
-    def normalize(value: str) -> str:
-        return "".join(char for char in value.casefold() if char.isalnum())
-
-    return normalize(requested.split("/", 1)[0]) == normalize(selected)
+    return _normalized_provider(requested.split("/", 1)[0]) == _normalized_provider(selected)
 
 
-def _request_with_provider(body: bytes | None, provider: str | None) -> bytes | None:
-    """Add a strict provider choice to an OpenRouter JSON request body."""
-    if body is None or provider is None:
+def _routing_allowed_providers(routing: Mapping[str, Any] | None) -> list[str] | None:
+    """The closed set of providers a routing object allows, or ``None`` when it is open.
+
+    Only a closed set can be checked against the provider OpenRouter reports. ``only`` is
+    closed: fallbacks stay inside its list. ``order`` is closed only with
+    ``allow_fallbacks`` false, because otherwise OpenRouter may route past the list.
+    Anything else — a deny-list, a sort preference, an entry that is not a slug — leaves
+    the set open, and then nothing is claimed about who served the request.
+    """
+    if not routing:
+        return None
+    for key in ("only", "order"):
+        value = routing.get(key)
+        if value is None:
+            continue
+        if key == "order" and routing.get("allow_fallbacks") is not False:
+            continue
+        if not isinstance(value, (list, tuple)) or not value:
+            return None
+        if not all(isinstance(entry, str) and entry.strip() for entry in value):
+            return None
+        return list(value)
+    return None
+
+
+def _provider_matches_routing(
+    routing: Mapping[str, Any] | None, selected: str | None
+) -> bool | None:
+    """Whether the provider OpenRouter reported is one the routing object allowed."""
+    allowed = _routing_allowed_providers(routing)
+    if allowed is None or selected is None:
+        return None
+    return any(_provider_matches_request(entry, selected) is True for entry in allowed)
+
+
+def _request_with_provider(
+    body: bytes | None,
+    provider: str | None,
+    routing: Mapping[str, Any] | None = None,
+) -> bytes | None:
+    """Put the caller's provider choice in an OpenRouter JSON request body.
+
+    ``routing`` is OpenRouter's ``provider`` object and is sent verbatim. ``provider`` is
+    the single-slug shorthand for the strict pin. Either way the body's own ``provider``
+    key is replaced: neither CLI can send one, so anything already there is not the
+    caller's choice.
+    """
+    if body is None or (provider is None and routing is None):
         return body
     try:
         value = json.loads(body)
@@ -226,7 +281,10 @@ def _request_with_provider(body: bytes | None, provider: str | None) -> bytes | 
         raise ValueError("OpenRouter provider selection requires a JSON request body") from exc
     if not isinstance(value, dict):
         raise ValueError("OpenRouter provider selection requires a JSON object request body")
-    value["provider"] = {"only": [provider], "allow_fallbacks": False}
+    if routing is not None:
+        value["provider"] = dict(routing)
+    else:
+        value["provider"] = {"only": [provider], "allow_fallbacks": False}
     return json.dumps(value, separators=(",", ":")).encode()
 
 
@@ -239,11 +297,13 @@ class OpenRouterProxy:
         max_budget_usd: float | None = None,
         expected_model: str | None = None,
         provider: str | None = None,
+        routing: Mapping[str, Any] | None = None,
     ) -> None:
         self._api_key = api_key
         self._max_budget_usd = max_budget_usd
         self._expected_model = expected_model
         self._provider = provider
+        self._routing = routing
         self.client_token = secrets.token_urlsafe(32)
         self._requests: list[OpenRouterRequest] = []
         self._drained = 0
@@ -369,7 +429,9 @@ class OpenRouterProxy:
                     )
                     return
                 try:
-                    request_body = _request_with_provider(request_body, owner._provider)
+                    request_body = _request_with_provider(
+                        request_body, owner._provider, owner._routing
+                    )
                 except ValueError as exc:
                     self._send_json(400, {"error": {"message": str(exc)}})
                     return
@@ -430,6 +492,7 @@ class OpenRouterProxy:
                         content_type,
                         requested_model,
                         owner._provider,
+                        owner._routing,
                         response.status,
                     )
                     if response.status >= 400:
@@ -444,6 +507,7 @@ class OpenRouterProxy:
                             found = OpenRouterRequest(
                                 requested_model=requested_model,
                                 requested_provider=owner._provider,
+                                requested_routing=owner._routing,
                                 provider=None,
                                 provider_model=None,
                                 region=None,

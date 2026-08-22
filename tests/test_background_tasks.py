@@ -469,6 +469,28 @@ def test_openrouter_run_passes_provider_to_proxy(tmp_path, monkeypatch):
     assert events[-1].kind == "result"
 
 
+def test_openrouter_run_passes_routing_to_proxy(tmp_path, monkeypatch):
+    created = _install_fake_proxy(monkeypatch, cost=0.001)
+    routing = {"only": ["moonshotai", "fireworks"]}
+    spec = AgentSpec(
+        name="a",
+        model="openrouter/moonshotai/kimi-k3",
+        openrouter_routing=routing,
+    )
+
+    events, _ = _events_of(
+        [init_msg(), result_msg(result="done")],
+        tmp_path,
+        monkeypatch,
+        spec=spec,
+        secrets={"OPENROUTER_API_KEY": "real-key"},
+    )
+
+    assert created and created[0]["routing"] == routing
+    assert created[0]["provider"] is None
+    assert events[-1].kind == "result"
+
+
 def test_openrouter_proxies_without_a_provider(tmp_path, monkeypatch):
     """An unpinned turn still goes through the proxy: that is where cost comes from."""
     from remote_agent_toolkit.events import AgentEvent

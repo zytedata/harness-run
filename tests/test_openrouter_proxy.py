@@ -19,7 +19,9 @@ from remote_agent_toolkit.harness._openrouter_proxy import (
     _capture_request,
     _model_matches,
     _provider_matches_request,
+    _provider_matches_routing,
     _request_with_provider,
+    _routing_allowed_providers,
 )
 
 
@@ -45,7 +47,7 @@ def test_captures_responses_stream_cost_and_selected_endpoint():
     }
     body = f"event: response.completed\ndata: {json.dumps(response)}\n\n".encode()
 
-    found = _capture_request(body, "text/event-stream", None, "novita", 200)
+    found = _capture_request(body, "text/event-stream", None, "novita", None, 200)
 
     assert found is not None
     assert found.requested_model == "deepseek/deepseek-v4-flash"
@@ -70,7 +72,7 @@ def test_captures_anthropic_json_shape():
         }
     ).encode()
 
-    found = _capture_request(body, "application/json", "asked", "z-ai", 200)
+    found = _capture_request(body, "application/json", "asked", "z-ai", None, 200)
 
     assert found is not None
     assert found.provider == "Z.AI"
@@ -107,7 +109,9 @@ def test_captures_anthropic_sse_shape():
     ]
     body = "".join(f"data: {json.dumps(event)}\n\n" for event in events).encode()
 
-    found = _capture_request(body, "text/event-stream", "moonshotai/kimi-k3", "moonshotai", 200)
+    found = _capture_request(
+        body, "text/event-stream", "moonshotai/kimi-k3", "moonshotai", None, 200
+    )
 
     assert found is not None
     assert found.cost_usd == 0.0021
@@ -118,7 +122,7 @@ def test_captures_anthropic_sse_shape():
 
 
 def test_ignores_responses_without_openrouter_fields():
-    assert _capture_request(b'{"ok":true}', "application/json", "m", None, 200) is None
+    assert _capture_request(b'{"ok":true}', "application/json", "m", None, None, 200) is None
 
 
 def test_capture_buffer_keeps_final_stream_metadata():
@@ -170,6 +174,73 @@ def test_provider_choice_requires_a_json_object():
         _request_with_provider(b"not json", "moonshotai")
     with pytest.raises(ValueError, match="JSON object"):
         _request_with_provider(b"[]", "moonshotai")
+
+
+def test_sends_a_routing_object_verbatim():
+    body = json.dumps(
+        {
+            "model": "moonshotai/kimi-k3",
+            "messages": [{"role": "user", "content": "hello"}],
+            "provider": {"sort": "price"},
+        }
+    ).encode()
+    routing = {"order": ["moonshotai", "fireworks"], "allow_fallbacks": True}
+
+    changed = _request_with_provider(body, None, routing)
+
+    assert changed is not None
+    request = json.loads(changed)
+    assert request["model"] == "moonshotai/kimi-k3"
+    assert request["messages"] == [{"role": "user", "content": "hello"}]
+    assert request["provider"] == routing
+
+
+def test_routing_wins_over_the_single_slug_pin():
+    body = json.dumps({"model": "moonshotai/kimi-k3"}).encode()
+
+    changed = _request_with_provider(body, "novita", {"ignore": ["novita"]})
+
+    assert json.loads(changed)["provider"] == {"ignore": ["novita"]}
+
+
+def test_a_routing_object_leaves_the_body_alone_when_there_is_none():
+    assert _request_with_provider(b'{"model":"m"}', None, None) == b'{"model":"m"}'
+
+
+def test_routing_closes_the_provider_set_only_when_it_cannot_route_past_it():
+    # ``only`` is closed: OpenRouter may fall back, but only inside the list.
+    assert _routing_allowed_providers({"only": ["moonshotai", "fireworks"]}) == [
+        "moonshotai",
+        "fireworks",
+    ]
+    assert _routing_allowed_providers({"only": ["moonshotai"], "allow_fallbacks": True}) == [
+        "moonshotai"
+    ]
+    # ``order`` is closed only with fallbacks off.
+    assert _routing_allowed_providers({"order": ["moonshotai"], "allow_fallbacks": False}) == [
+        "moonshotai"
+    ]
+    assert _routing_allowed_providers({"order": ["moonshotai"], "allow_fallbacks": True}) is None
+    assert _routing_allowed_providers({"order": ["moonshotai"]}) is None
+    # Nothing that names an allowed set: the set stays open.
+    assert _routing_allowed_providers({"ignore": ["novita"]}) is None
+    assert _routing_allowed_providers({"sort": "price"}) is None
+    assert _routing_allowed_providers({}) is None
+    assert _routing_allowed_providers(None) is None
+    # A list that is not slugs proves nothing either.
+    assert _routing_allowed_providers({"only": []}) is None
+    assert _routing_allowed_providers({"only": "moonshotai"}) is None
+    assert _routing_allowed_providers({"only": [{"slug": "moonshotai"}]}) is None
+
+
+def test_routing_matching_accepts_any_allowed_provider():
+    routing = {"only": ["moonshotai", "z-ai"]}
+    assert _provider_matches_routing(routing, "Moonshot AI") is True
+    assert _provider_matches_routing(routing, "Z.AI") is True
+    assert _provider_matches_routing(routing, "Together") is False
+    # An open set claims nothing, even about a provider that is in the list.
+    assert _provider_matches_routing({"order": ["moonshotai"]}, "Moonshot AI") is None
+    assert _provider_matches_routing(routing, None) is None
 
 
 def test_provider_name_matching_accepts_openrouter_display_names():
@@ -313,6 +384,50 @@ def _proxy_post(proxy, body=None, headers=None, path="/api/v1/responses"):
     status = response.status
     conn.close()
     return status, payload
+
+
+@pytest.mark.parametrize(
+    ("routing", "matches"),
+    [
+        ({"only": ["moonshotai", "fireworks"]}, True),
+        ({"order": ["moonshotai", "fireworks"], "allow_fallbacks": True}, None),
+    ],
+    ids=["closed-set", "open-set"],
+)
+def test_proxy_sends_a_routing_object_and_judges_it(monkeypatch, routing, matches):
+    """The live proxy path sends the routing object, and only claims a closed set."""
+    calls = []
+    _fake_upstream(
+        monkeypatch,
+        response=_FakeResponse(
+            body=json.dumps(
+                {
+                    "model": "moonshotai/kimi-k3",
+                    "provider": "Moonshot AI",
+                    "usage": {"cost": 0.001},
+                }
+            ).encode()
+        ),
+        calls=calls,
+    )
+
+    with OpenRouterProxy(
+        "real-key",
+        expected_model="moonshotai/kimi-k3",
+        routing=routing,
+    ) as proxy:
+        status, _ = _proxy_post(
+            proxy, body=json.dumps({"model": "moonshotai/kimi-k3", "input": "hello"})
+        )
+        assert proxy.wait_until_idle()
+
+    assert status == 200
+    assert json.loads(calls[0][2])["provider"] == routing
+    event = proxy.drain_events()[0]
+    assert event.raw["requested_routing"] == routing
+    assert event.raw["requested_provider"] is None
+    assert event.raw["provider"] == "Moonshot AI"
+    assert event.raw["provider_matches_request"] is matches
 
 
 def test_upstream_failure_returns_502_json(monkeypatch):

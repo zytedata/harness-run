@@ -707,6 +707,26 @@ async def test_openrouter_run_passes_provider_to_proxy(tmp_path, monkeypatch):
     assert seen and seen[0][1]["provider"] == "moonshotai"
 
 
+async def test_openrouter_run_passes_routing_to_proxy(tmp_path, monkeypatch):
+    seen = []
+    routing = {"order": ["moonshotai", "fireworks"], "allow_fallbacks": True}
+    spec = _or_spec(openrouter_routing=routing)
+    ctx = _ctx(tmp_path, spec, secrets={"OPENROUTER_API_KEY": "sk-or-1"})
+    script = [turn_started(), agent_message("done"), token_usage(), turn_completed()]
+
+    await _events_of(
+        script,
+        tmp_path,
+        monkeypatch,
+        spec=spec,
+        ctx=ctx,
+        proxy_init=seen,
+    )
+
+    assert seen and seen[0][1]["routing"] == routing
+    assert seen[0][1]["provider"] is None
+
+
 async def test_openrouter_run_without_key_raises(tmp_path, monkeypatch):
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     spec = _or_spec()

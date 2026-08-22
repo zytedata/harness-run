@@ -122,6 +122,32 @@ def test_openrouter_provider_can_be_set_and_cleared_per_turn():
         apply_turn_config(session_eff, TurnConfig(model="gpt-5.6-luna"))
 
 
+def test_openrouter_routing_can_be_set_and_cleared_per_turn():
+    spec = _spec(model="openrouter/moonshotai/kimi-k3")
+    routing = {"order": ["moonshotai", "fireworks"], "allow_fallbacks": True}
+    session_eff = apply_session_config(spec, SessionConfig(openrouter_routing=routing))
+    assert session_eff.openrouter_routing == routing
+
+    turn = TurnConfig(openrouter_routing={"only": ["moonshotai"]})
+    turn_eff = apply_turn_config(session_eff, turn)
+    assert turn_eff.openrouter_routing == {"only": ["moonshotai"]}
+    assert TurnConfig.from_dict(turn.to_dict()) == turn
+
+    unpinned = apply_turn_config(session_eff, TurnConfig(openrouter_routing=None))
+    assert unpinned.openrouter_routing is None
+
+    # One turn can swap the whole routing object for the single-slug pin.
+    pinned = apply_turn_config(
+        session_eff, TurnConfig(openrouter_routing=None, openrouter_provider="moonshotai")
+    )
+    assert pinned.openrouter_provider == "moonshotai" and pinned.openrouter_routing is None
+
+    with pytest.raises(ValueError, match="cannot be combined"):
+        apply_turn_config(session_eff, TurnConfig(openrouter_provider="moonshotai"))
+    with pytest.raises(ValueError, match="requires an openrouter/ model"):
+        apply_turn_config(session_eff, TurnConfig(model="gpt-5.6-luna"))
+
+
 # ---------------------------------------------------------------- serialization
 
 

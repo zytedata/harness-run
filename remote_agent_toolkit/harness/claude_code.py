@@ -523,6 +523,7 @@ class ClaudeCodeHarness:
                     spec.max_budget_usd,
                     model,
                     provider=spec.openrouter_provider,
+                    routing=spec.openrouter_routing,
                 ).start()
         try:
             async for event in self._run(spec, ctx, proxy):

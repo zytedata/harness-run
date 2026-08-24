@@ -15,10 +15,11 @@ OpenRouter models
 An ``openrouter/<vendor>/<model>`` id runs on this harness too. OpenRouter serves an
 Anthropic-compatible endpoint, so the CLI can talk to it (see :func:`_openrouter_env`).
 
-Those turns go through the toolkit's own proxy (:mod:`._openrouter_proxy`).
-:meth:`ClaudeCodeHarness.run` starts one per turn and closes it at the end. The CLI is
-pointed at ``127.0.0.1`` and gets a random token, so the OpenRouter key never leaves this
-process. What the proxy sees is the only record of what OpenRouter did:
+Those turns go through the toolkit's own proxy (:mod:`._openrouter_proxy`), started per
+turn and closed at the end by :func:`_shared.run_with_openrouter_proxy`, which the Codex
+binding uses too. The CLI is pointed at ``127.0.0.1`` and gets a random token, so the
+OpenRouter key never leaves this process. What the proxy sees is the only record of what
+OpenRouter did:
 
 * The caller's provider routing reaches the request body through it. The CLI has no field
   for it. ``spec.openrouter_provider`` is resolved to a routing object before the proxy
@@ -39,8 +40,6 @@ model and harness pairings finish cleanly at the protocol level without answerin
 from __future__ import annotations
 
 import asyncio
-import json
-import os
 from collections import deque
 from enum import Enum
 from pathlib import Path
@@ -53,9 +52,16 @@ from . import pricing
 from ._shared import (
     GITHUB_MCP_TOKEN_KEYS as _GITHUB_MCP_TOKEN_KEYS,
     INTERACTIVE_SUFFIX as _INTERACTIVE_SUFFIX,
+    OPENROUTER_KEY_ENV,
+    OPENROUTER_PREFIX,
+    drain_proxy,
     finalize_checkpoint,
     harness_consumed_secret_names,
-    openrouter_provider_routing,
+    missing_openrouter_key_error,
+    openrouter_api_key,
+    openrouter_cost_unknown,
+    openrouter_schema_steer,
+    run_with_openrouter_proxy,
     runtime_env,
 )
 
@@ -73,37 +79,14 @@ DEFAULT_ALLOWED_TOOLS = ("Read", "Write", "Edit", "Bash", "Glob", "Grep", "TodoW
 # OpenRouter support (see "OpenRouter models" in the module docstring). OpenRouter serves an
 # Anthropic-compatible endpoint, so the Claude CLI can talk to it: point it at the base URL,
 # hand it the OpenRouter key as a bearer token, and register the model as a custom catalogue
-# entry so the CLI stops rejecting the id as unrecognized.
-_OPENROUTER_PREFIX = "openrouter/"
-_OPENROUTER_KEY_ENV = "OPENROUTER_API_KEY"
+# entry so the CLI stops rejecting the id as unrecognized. The prefix, the key name and the
+# proxy's own lifecycle are shared with the Codex binding (see :mod:`._shared`).
 # The Anthropic-compatible base: the CLI appends /v1/messages itself.
 _OPENROUTER_ANTHROPIC_BASE = "https://openrouter.ai/api"
 _OPENROUTER_SHELL_WRAPPER = """#!/bin/sh
 unset ANTHROPIC_AUTH_TOKEN OPENROUTER_API_KEY
 exec /bin/bash -c "$1"
 """
-
-
-# OpenRouter receives the SDK's native output format, but its selected model may still be
-# responsible for following it. Measured: GLM-5.3 answered "`answer`: 42" prose with
-# `output_schema` set. Stating the schema in the prompt produced a bare JSON object, so the
-# OpenRouter path uses both forms, matching the Codex binding.
-_OPENROUTER_SCHEMA_INSTRUCTION = (
-    "\n\nFINAL MESSAGE FORMAT: your last message of the turn must be ONLY a single JSON "
-    "object conforming to this schema — no prose before or after it, no code fence, no "
-    "explanation:\n{schema}"
-)
-
-
-def _openrouter_cost_unknown(model: str | None) -> AgentEvent:
-    return AgentEvent(
-        kind="status",
-        summary=(
-            f"OpenRouter did not report a charge for model {model!r}; cost_usd is "
-            "unknown and max_budget_usd could not be enforced"
-        ),
-        raw={"event": "cost_unknown", "model": model},
-    )
 
 
 def _openrouter_env(
@@ -123,7 +106,7 @@ def _openrouter_env(
     proxy when a key is available. The default ``base_url`` is only reachable by a caller
     that builds options directly.
     """
-    bare = model[len(_OPENROUTER_PREFIX) :]
+    bare = model[len(OPENROUTER_PREFIX) :]
     env = {
         "ANTHROPIC_BASE_URL": base_url,
         "ANTHROPIC_AUTH_TOKEN": api_key,
@@ -134,7 +117,7 @@ def _openrouter_env(
         "CLAUDE_CODE_SHELL_PREFIX": str(shell_wrapper),
         # The SDK layers this env OVER the worker's own, so an ambient OpenRouter key
         # would otherwise reach the CLI process even though the proxy holds the real one.
-        _OPENROUTER_KEY_ENV: "",
+        OPENROUTER_KEY_ENV: "",
         "ANTHROPIC_API_KEY": "",
         "CLAUDE_CODE_USE_VERTEX": "",
         "CLAUDE_CODE_USE_BEDROCK": "",
@@ -277,19 +260,6 @@ class ClaudeCodeHarness:
 
     # -- option building -------------------------------------------------------
 
-    def _schema_steer(self, spec: AgentSpec) -> str:
-        """Prompt text asking for a bare JSON object, for OpenRouter models only."""
-        if not (spec.model or "").startswith(_OPENROUTER_PREFIX) or spec.output_schema is None:
-            return ""
-        from ..spec import _output_schema_to_dict
-
-        schema = _output_schema_to_dict(spec.output_schema)
-        if not isinstance(schema, dict):
-            return ""
-        return _OPENROUTER_SCHEMA_INSTRUCTION.format(
-            schema=json.dumps(schema, separators=(",", ":"))
-        )
-
     @staticmethod
     def _output_format(spec: AgentSpec) -> dict[str, Any] | None:
         """Map the public output schema to the Claude Agent SDK's native option."""
@@ -309,7 +279,7 @@ class ClaudeCodeHarness:
           system prompt (``--system-prompt ""``): no preset, no ``CLAUDE.md``, no
           environment block, so the agent would not be Claude Code at all.
         """
-        suffix = (_INTERACTIVE_SUFFIX if interactive else "") + self._schema_steer(spec)
+        suffix = (_INTERACTIVE_SUFFIX if interactive else "") + openrouter_schema_steer(spec)
         sp = spec.system_prompt
         if isinstance(sp, str):
             return sp + suffix if suffix else sp
@@ -383,16 +353,12 @@ class ClaudeCodeHarness:
             )
 
         model = spec.model or ""
-        openrouter = model.startswith(_OPENROUTER_PREFIX)
+        openrouter = model.startswith(OPENROUTER_PREFIX)
         env = runtime_env(spec, ctx)
         if openrouter:
-            api_key = ctx.secrets.get(_OPENROUTER_KEY_ENV) or os.environ.get(_OPENROUTER_KEY_ENV)
+            api_key = openrouter_api_key(ctx)
             if not api_key:
-                raise RuntimeError(
-                    "claude-code harness has no OpenRouter credentials: pass "
-                    f"{_OPENROUTER_KEY_ENV} in the per-invocation secrets (or set it in the "
-                    "environment)"
-                )
+                raise missing_openrouter_key_error("claude-code")
             ctx.job_dir.mkdir(parents=True, exist_ok=True)
             shell_wrapper = ctx.job_dir / "openrouter-shell"
             shell_wrapper.write_text(_OPENROUTER_SHELL_WRAPPER, encoding="utf-8")
@@ -406,7 +372,7 @@ class ClaudeCodeHarness:
                 )
             )
             # The CLI wants the provider-relative id; the prefix is the toolkit's own.
-            model = model[len(_OPENROUTER_PREFIX) :]
+            model = model[len(OPENROUTER_PREFIX) :]
 
         return ClaudeAgentOptions(
             cwd=str(ctx.workspace),
@@ -513,25 +479,10 @@ class ClaudeCodeHarness:
 
     async def run(self, spec: AgentSpec, ctx: RunContext) -> AsyncIterator[AgentEvent]:
         """Run one Claude Code turn, with a local metadata proxy for OpenRouter turns."""
-        from ._openrouter_proxy import OpenRouterProxy
-
-        proxy = None
-        if (spec.model or "").startswith(_OPENROUTER_PREFIX):
-            api_key = ctx.secrets.get(_OPENROUTER_KEY_ENV) or os.environ.get(_OPENROUTER_KEY_ENV)
-            if api_key:
-                model = (spec.model or "").removeprefix(_OPENROUTER_PREFIX)
-                proxy = OpenRouterProxy(
-                    api_key,
-                    spec.max_budget_usd,
-                    model,
-                    routing=openrouter_provider_routing(spec),
-                ).start()
-        try:
-            async for event in self._run(spec, ctx, proxy):
-                yield event
-        finally:
-            if proxy is not None:
-                proxy.close()
+        async for event in run_with_openrouter_proxy(
+            spec, ctx, lambda proxy: self._run(spec, ctx, proxy)
+        ):
+            yield event
 
     async def _run(
         self, spec: AgentSpec, ctx: RunContext, proxy: Any | None
@@ -605,27 +556,40 @@ class ClaudeCodeHarness:
 
         # An OpenRouter turn's cost is the proxy's record of what OpenRouter charged, and
         # nothing else (see `_final_result`).
-        is_openrouter = (spec.model or "").startswith(_OPENROUTER_PREFIX)
+        is_openrouter = (spec.model or "").startswith(OPENROUTER_PREFIX)
 
         def proxy_cost_usd() -> float | None:
             return proxy.exact_cost_usd if proxy is not None else None
 
-        async def drain_proxy() -> AsyncIterator[AgentEvent]:
-            """Let the proxy finish recording before the result quotes its total.
+        async def finish(result_event: AgentEvent) -> AsyncIterator[AgentEvent]:
+            """End the turn: the proxy's last events, the terminal result, the checkpoint.
 
-            The CLI sees the last response bytes before the proxy's handler has parsed
-            them, so a result built immediately can miss the final request's charge.
+            Reached from three places — a clean result, a crash while waiting on background
+            tasks, and a stream that ended without either.
+
+            ``_finalize`` is CALLED first and YIELDED last. It has to run while the executor
+            is still pulling events, because in-cloud the executor stops pulling after the
+            terminal result (see ``_run``'s docstring). Its event still comes after the
+            result, so the result is the last thing a caller reads before the checkpoint.
             """
-            if proxy is None:
-                return
-            if not await asyncio.to_thread(proxy.wait_until_idle, 5.0):
-                yield AgentEvent(
-                    kind="status",
-                    summary="timed out waiting for OpenRouter response metadata",
-                    raw={"event": "openrouter_metadata_timeout"},
-                )
-            for event in proxy.drain_events():
+            nonlocal finalized
+            fin = self._finalize(spec, ctx)
+            finalized = True
+            async for event in drain_proxy(proxy):
                 yield event
+            if is_openrouter and proxy_cost_usd() is None:
+                yield openrouter_cost_unknown(spec.model)
+            yield self._final_result(
+                result_event,
+                turns_total,
+                segment_summaries(result_event),
+                is_openrouter,
+                proxy_cost_usd(),
+                spec.max_budget_usd if is_openrouter else None,
+                proxy.budget_blocked if proxy is not None else False,
+            )
+            if fin is not None:
+                yield fin
 
         client = ClaudeSDKClient(options=options)
         try:
@@ -683,23 +647,8 @@ class ClaudeCodeHarness:
                     turns_total += int((event.raw or {}).get("num_turns") or 0)
                     reason = None if (event.raw or {}).get("is_error") else tracker.waiting()
                     if reason is None:
-                        fin = self._finalize(spec, ctx)
-                        finalized = True
-                        async for proxy_event in drain_proxy():
-                            yield proxy_event
-                        if is_openrouter and proxy_cost_usd() is None:
-                            yield _openrouter_cost_unknown(spec.model)
-                        yield self._final_result(
-                            event,
-                            turns_total,
-                            segment_summaries(event),
-                            is_openrouter,
-                            proxy_cost_usd(),
-                            spec.max_budget_usd if is_openrouter else None,
-                            proxy.budget_blocked if proxy is not None else False,
-                        )
-                        if fin is not None:
-                            yield fin
+                        async for final_event in finish(event):
+                            yield final_event
                         return
                     # Segment boundary, not the end of the turn: hold the stream open
                     # for the CLI's task-completion re-invocation.
@@ -762,24 +711,8 @@ class ClaudeCodeHarness:
                     summary=f"harness failed while awaiting background tasks: {str(exc)[:200]}",
                     raw={"event": "late_harness_error"},
                 )
-                fin = self._finalize(spec, ctx)
-                finalized = True
-                last = demoted[-1]
-                async for proxy_event in drain_proxy():
-                    yield proxy_event
-                if is_openrouter and proxy_cost_usd() is None:
-                    yield _openrouter_cost_unknown(spec.model)
-                yield self._final_result(
-                    last,
-                    turns_total,
-                    segment_summaries(last),
-                    is_openrouter,
-                    proxy_cost_usd(),
-                    spec.max_budget_usd if is_openrouter else None,
-                    proxy.budget_blocked if proxy is not None else False,
-                )
-                if fin is not None:
-                    yield fin
+                async for final_event in finish(demoted[-1]):
+                    yield final_event
                 return
             if not tail:
                 raise
@@ -795,24 +728,8 @@ class ClaudeCodeHarness:
         # Stream ended / wait timed out without a clean final result: the last produced
         # result stands (then the defensive no-result fallback, as before).
         if demoted and not finalized:
-            fin = self._finalize(spec, ctx)
-            finalized = True
-            last = demoted[-1]
-            async for proxy_event in drain_proxy():
-                yield proxy_event
-            if is_openrouter and proxy_cost_usd() is None:
-                yield _openrouter_cost_unknown(spec.model)
-            yield self._final_result(
-                last,
-                turns_total,
-                segment_summaries(last),
-                is_openrouter,
-                proxy_cost_usd(),
-                spec.max_budget_usd if is_openrouter else None,
-                proxy.budget_blocked if proxy is not None else False,
-            )
-            if fin is not None:
-                yield fin
+            async for final_event in finish(demoted[-1]):
+                yield final_event
         elif not finalized:
             fin = self._finalize(spec, ctx)
             if fin is not None:

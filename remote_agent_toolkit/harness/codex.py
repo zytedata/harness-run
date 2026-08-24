@@ -75,7 +75,7 @@ is needed (all four settings were established live against OpenRouter, 2026-08-2
 
 ``output_schema`` needs the same treatment: OpenRouter accepts Codex's json_schema
 response format but does not enforce it, so the schema is ALSO stated in the developer
-instructions (see :data:`_OPENROUTER_SCHEMA_INSTRUCTION`). Without that, a model that
+instructions (:func:`_shared.openrouter_schema_steer`). Without that, a model that
 ignores the unenforced format returns prose and ``structured_output`` comes back ``None``.
 
 Codex ships no catalog entry for these models, so it falls back to generic metadata and
@@ -84,6 +84,11 @@ carries the context window for the models we vouch for, passed as ``model_contex
 so the agent is not compacted at a guessed limit. Any other ``openrouter/*`` id still
 runs with Codex's generic context metadata. OpenRouter's response metadata supplies its
 exact cost and budget accounting.
+
+Every OpenRouter turn goes through the toolkit's own proxy (:mod:`._openrouter_proxy`),
+started and closed by :func:`_shared.run_with_openrouter_proxy`, which the Claude binding
+uses too. Only how Codex is pointed at it — ``model_providers.*`` overrides rather than
+environment variables — is this binding's own.
 """
 
 from __future__ import annotations
@@ -101,8 +106,14 @@ from . import pricing
 from ._shared import (
     GITHUB_MCP_TOKEN_KEYS,
     INTERACTIVE_SUFFIX,
+    OPENROUTER_KEY_ENV,
+    OPENROUTER_PREFIX,
+    drain_proxy,
     finalize_checkpoint,
-    openrouter_provider_routing,
+    missing_openrouter_key_error,
+    openrouter_cost_unknown,
+    openrouter_schema_steer,
+    run_with_openrouter_proxy,
     runtime_env,
 )
 
@@ -127,28 +138,17 @@ _PERMISSION_MAP = {
 _GITHUB_MCP_TOKEN_ENV = "RATK_GITHUB_MCP_TOKEN"
 _GITHUB_MCP_URL = "https://api.githubcopilot.com/mcp/"
 
-# OpenRouter routing (see "OpenRouter models" in the module docstring). The prefix is
-# stripped before the id reaches Codex: OpenRouter's own ids are `<vendor>/<model>`.
-_OPENROUTER_PREFIX = "openrouter/"
+# OpenRouter routing (see "OpenRouter models" in the module docstring). The `openrouter/`
+# prefix is stripped before the id reaches Codex: OpenRouter's own ids are
+# `<vendor>/<model>`. The prefix, the key name and the proxy's own lifecycle are shared
+# with the Claude binding (see :mod:`._shared`).
 _OPENROUTER_PROVIDER = "openrouter"
 _OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
-_OPENROUTER_KEY_ENV = "OPENROUTER_API_KEY"
 _OPENROUTER_PROXY_KEY_ENV = "RATK_OPENROUTER_PROXY_TOKEN"
 _OPENROUTER_WIRE_API = "responses"
 # OpenRouter's Responses endpoint refuses a turn with reasoning disabled, and Codex sends
 # effort "none" for a model it has no metadata for.
 _OPENROUTER_MIN_EFFORT = "low"
-
-# OpenRouter accepts Codex's json_schema response format and echoes it back, but does NOT
-# enforce it — compliance is left to the model, and some ignore it (measured 2026-08-20:
-# DeepSeek v4 Flash/Pro and Kimi K3 returned clean JSON, GLM-5.3 returned prose 3/3 times,
-# which parses to structured_output=None). So the schema is also asked for in words. The
-# toolkit's own parse already tolerates a fenced block, but not prose.
-_OPENROUTER_SCHEMA_INSTRUCTION = (
-    "\n\nFINAL MESSAGE FORMAT: your last message of the turn must be ONLY a single JSON "
-    "object conforming to this schema — no prose before or after it, no code fence, no "
-    "explanation:\n{schema}"
-)
 
 # Tool-result content kept in events is truncated: command output can be megabytes, and
 # events ride Cloud Logging on gemini (per-entry size limits).
@@ -447,7 +447,7 @@ class CodexHarness:
         self,
         model: str,
         base_url: str | None = None,
-        key_env: str = _OPENROUTER_KEY_ENV,
+        key_env: str = OPENROUTER_KEY_ENV,
     ) -> list[str]:
         """``--config`` overrides that point Codex at OpenRouter for ``model``.
 
@@ -543,7 +543,7 @@ class CodexHarness:
 
         mcp_overrides, mcp_env = self._mcp_overrides(spec, ctx)
         model = spec.model or ""
-        openrouter = model.startswith(_OPENROUTER_PREFIX)
+        openrouter = model.startswith(OPENROUTER_PREFIX)
         # The agent's shell env: Codex filters *KEY*/*SECRET*/*TOKEN*-named vars from the
         # shell by default — the opposite of the toolkit's contract (the caller's own
         # secrets ARE for the agent). Lift the default excludes, but keep the ones the
@@ -554,13 +554,13 @@ class CodexHarness:
             "allow_login_shell=false",
             "shell_environment_policy.ignore_default_excludes=true",
             "shell_environment_policy.exclude=["
-            f'"OPENAI_API_KEY", "{_OPENROUTER_KEY_ENV}", '
+            f'"OPENAI_API_KEY", "{OPENROUTER_KEY_ENV}", '
             f'"{_OPENROUTER_PROXY_KEY_ENV}", "{_GITHUB_MCP_TOKEN_ENV}"]',
             *(
                 self._openrouter_overrides(
                     model,
                     openrouter_base_url,
-                    _OPENROUTER_PROXY_KEY_ENV if openrouter_client_token else _OPENROUTER_KEY_ENV,
+                    _OPENROUTER_PROXY_KEY_ENV if openrouter_client_token else OPENROUTER_KEY_ENV,
                 )
                 if openrouter
                 else []
@@ -577,7 +577,7 @@ class CodexHarness:
         env["CODEX_HOME"] = str(codex_home)
         env.update(mcp_env)
 
-        key_env = _OPENROUTER_KEY_ENV if openrouter else "OPENAI_API_KEY"
+        key_env = OPENROUTER_KEY_ENV if openrouter else "OPENAI_API_KEY"
         api_key = ctx.secrets.get(key_env) or os.environ.get(key_env)
         if openrouter and api_key:
             # The provider reads its key from the app-server's env (env_key), so unlike
@@ -585,13 +585,13 @@ class CodexHarness:
             if openrouter_client_token:
                 # Keep the real provider credential out of the CLI process. The random
                 # token only authenticates this run to its localhost proxy.
-                env[_OPENROUTER_KEY_ENV] = ""
+                env[OPENROUTER_KEY_ENV] = ""
                 env[_OPENROUTER_PROXY_KEY_ENV] = openrouter_client_token
             else:
-                env[_OPENROUTER_KEY_ENV] = api_key
+                env[OPENROUTER_KEY_ENV] = api_key
 
         thread_args: dict[str, Any] = {
-            "model": model[len(_OPENROUTER_PREFIX) :] if openrouter else (model or None),
+            "model": model[len(OPENROUTER_PREFIX) :] if openrouter else (model or None),
             "cwd": str(ctx.workspace),
             "sandbox": Sandbox[sandbox_name],
             "approval_mode": ApprovalMode[approval_name],
@@ -625,12 +625,10 @@ class CodexHarness:
             schema = _output_schema_to_dict(spec.output_schema)
             if isinstance(schema, dict):
                 run_args["output_schema"] = schema
-                if openrouter:
-                    # Sent as well as asked for: if OpenRouter starts enforcing the
-                    # format, the request already carries it.
-                    steer = _OPENROUTER_SCHEMA_INSTRUCTION.format(
-                        schema=json.dumps(schema, separators=(",", ":"))
-                    )
+                # Sent as well as asked for: if OpenRouter starts enforcing the format,
+                # the request already carries it.
+                steer = openrouter_schema_steer(spec)
+                if steer:
                     existing = thread_args.get("developer_instructions", "")
                     # The steer carries its own leading blank line for appending; with
                     # nothing to append to it would just indent the instructions.
@@ -749,25 +747,10 @@ class CodexHarness:
 
     async def run(self, spec: AgentSpec, ctx: RunContext) -> AsyncIterator[AgentEvent]:
         """Run Codex, with a local metadata proxy for OpenRouter turns."""
-        from ._openrouter_proxy import OpenRouterProxy
-
-        proxy = None
-        if (spec.model or "").startswith(_OPENROUTER_PREFIX):
-            api_key = ctx.secrets.get(_OPENROUTER_KEY_ENV) or os.environ.get(_OPENROUTER_KEY_ENV)
-            if api_key:
-                model = (spec.model or "").removeprefix(_OPENROUTER_PREFIX)
-                proxy = OpenRouterProxy(
-                    api_key,
-                    spec.max_budget_usd,
-                    model,
-                    routing=openrouter_provider_routing(spec),
-                ).start()
-        try:
-            async for event in self._run(spec, ctx, proxy):
-                yield event
-        finally:
-            if proxy is not None:
-                proxy.close()
+        async for event in run_with_openrouter_proxy(
+            spec, ctx, lambda proxy: self._run(spec, ctx, proxy)
+        ):
+            yield event
 
     async def _run(
         self, spec: AgentSpec, ctx: RunContext, proxy: Any | None
@@ -820,11 +803,7 @@ class CodexHarness:
                 # env), so there is nothing to log in with — `codex login` would store
                 # OpenAI credentials this path never reads.
                 if not options.api_key:
-                    raise RuntimeError(
-                        "codex harness has no OpenRouter credentials: pass "
-                        f"{_OPENROUTER_KEY_ENV} in the per-invocation secrets (or set it "
-                        "in the environment)"
-                    )
+                    raise missing_openrouter_key_error("codex")
             elif options.api_key and not (options.codex_home / "auth.json").exists():
                 await codex.login_api_key(options.api_key)
             elif not options.api_key and not (options.codex_home / "auth.json").exists():
@@ -905,19 +884,8 @@ class CodexHarness:
                                 pass
                     continue
                 if notification.method == "turn/completed":
-                    if proxy is not None:
-                        # The proxy forwards the final bytes before it records their
-                        # metadata. Give that handler a brief chance to finish so the
-                        # terminal result consistently carries the exact charge.
-                        metadata_complete = await asyncio.to_thread(proxy.wait_until_idle, 5.0)
-                        for event in proxy.drain_events():
-                            yield event
-                        if not metadata_complete:
-                            yield AgentEvent(
-                                kind="status",
-                                summary="timed out waiting for OpenRouter response metadata",
-                                raw={"event": "openrouter_metadata_timeout"},
-                            )
+                    async for event in drain_proxy(proxy):
+                        yield event
                     exact_cost = proxy.exact_cost_usd if proxy is not None else None
                     if (
                         limit is None
@@ -928,15 +896,7 @@ class CodexHarness:
                     if proxy is not None and price is None and exact_cost is None:
                         # A model with no price and no proxy already reported this before
                         # the turn started; only the OpenRouter case is news here.
-                        yield AgentEvent(
-                            kind="status",
-                            summary=(
-                                f"OpenRouter did not report a charge for model "
-                                f"{spec.model!r}; cost_usd is unknown and max_budget_usd "
-                                "could not be enforced"
-                            ),
-                            raw={"event": "cost_unknown", "model": spec.model},
-                        )
+                        yield openrouter_cost_unknown(spec.model)
                     if proxy is not None and proxy.budget_blocked:
                         limit = "budget"
                     fin = self._finalize(spec, ctx, options.codex_home, thread_id)

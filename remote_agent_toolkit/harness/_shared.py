@@ -2,15 +2,17 @@
 
 Everything here is harness-agnostic policy — how secrets are routed, how the agent
 subprocess env is layered, the interactive-mode prompt suffix, the inline workspace
-checkpoint — extracted from the Claude binding when the Codex binding arrived so the
-two stay behaviorally identical where the spec doesn't distinguish them. Stdlib-only
-at import time.
+checkpoint, the OpenRouter proxy's lifecycle and events — extracted from the Claude
+binding when the Codex binding arrived so the two stay behaviorally identical where the
+spec doesn't distinguish them. Stdlib-only at import time.
 """
 
 from __future__ import annotations
 
+import asyncio
+import json
 import os
-from typing import Any, TYPE_CHECKING
+from typing import Any, AsyncIterator, Callable, TYPE_CHECKING
 
 from ..events import AgentEvent
 
@@ -21,9 +23,14 @@ if TYPE_CHECKING:
 # Conventional GitHub token names a ``github`` MCP server pulls from the per-invocation secrets.
 GITHUB_MCP_TOKEN_KEYS = ("GH_TOKEN", "GITHUB_TOKEN", "GH_PAT")
 
+# The model-id prefix that routes a turn to OpenRouter, and the key that pays for it. The
+# rest of the OpenRouter helpers are grouped further down.
+OPENROUTER_PREFIX = "openrouter/"
+OPENROUTER_KEY_ENV = "OPENROUTER_API_KEY"
+
 # Model-auth secrets the Codex binding routes itself: OpenAI directly, or OpenRouter for an
 # ``openrouter/``-prefixed model (see ``harness.codex``).
-CODEX_MODEL_AUTH_KEYS = ("OPENAI_API_KEY", "OPENROUTER_API_KEY")
+CODEX_MODEL_AUTH_KEYS = ("OPENAI_API_KEY", OPENROUTER_KEY_ENV)
 
 
 def harness_consumed_secret_names(spec: AgentSpec) -> set[str]:
@@ -45,10 +52,10 @@ def harness_consumed_secret_names(spec: AgentSpec) -> set[str]:
         names.update(GITHUB_MCP_TOKEN_KEYS)
     if getattr(spec, "harness", "claude-code") == "codex":
         names.update(CODEX_MODEL_AUTH_KEYS)
-    elif (getattr(spec, "model", "") or "").startswith("openrouter/"):
+    elif (getattr(spec, "model", "") or "").startswith(OPENROUTER_PREFIX):
         # claude-code reaches OpenRouter through ANTHROPIC_AUTH_TOKEN, so the key is the
         # harness's to route here too.
-        names.add("OPENROUTER_API_KEY")
+        names.add(OPENROUTER_KEY_ENV)
     return names
 
 
@@ -111,6 +118,41 @@ def runtime_env(spec: AgentSpec, ctx: RunContext) -> dict[str, str]:
     return env
 
 
+# -- OpenRouter ---------------------------------------------------------------
+#
+# Both bindings run ``openrouter/`` models, and both do it through the same per-run proxy
+# (:mod:`._openrouter_proxy`). What differs is only how each CLI is configured to reach it
+# — Claude Code through environment variables, Codex through ``--config`` overrides — so
+# that part stays in the bindings. Everything below is the same on either one.
+
+# How long to wait for the proxy to record the last response's charge before a result
+# quotes its total.
+METADATA_DRAIN_TIMEOUT_S = 5.0
+
+# OpenRouter passes each CLI's native structured-output format on to the selected model,
+# but does NOT enforce it — compliance is the model's. Measured 2026-08-20: DeepSeek v4
+# Flash/Pro and Kimi K3 returned clean JSON; GLM-5.3 returned prose 3/3 times, which parses
+# to structured_output=None. So the schema is asked for in words as well. The toolkit's own
+# parse already tolerates a fenced block, but not prose.
+OPENROUTER_SCHEMA_INSTRUCTION = (
+    "\n\nFINAL MESSAGE FORMAT: your last message of the turn must be ONLY a single JSON "
+    "object conforming to this schema — no prose before or after it, no code fence, no "
+    "explanation:\n{schema}"
+)
+
+
+def openrouter_api_key(ctx: RunContext) -> str | None:
+    """The OpenRouter key for this turn: the caller's secret, else the ambient one."""
+    return ctx.secrets.get(OPENROUTER_KEY_ENV) or os.environ.get(OPENROUTER_KEY_ENV)
+
+
+def missing_openrouter_key_error(harness: str) -> RuntimeError:
+    return RuntimeError(
+        f"{harness} harness has no OpenRouter credentials: pass "
+        f"{OPENROUTER_KEY_ENV} in the per-invocation secrets (or set it in the environment)"
+    )
+
+
 def openrouter_provider_routing(spec: AgentSpec) -> dict[str, Any] | None:
     """The OpenRouter ``provider`` object this spec asks for, or ``None`` for no preference.
 
@@ -125,6 +167,81 @@ def openrouter_provider_routing(spec: AgentSpec) -> dict[str, Any] | None:
     if spec.openrouter_provider is not None:
         return {"only": [spec.openrouter_provider], "allow_fallbacks": False}
     return None
+
+
+def openrouter_schema_steer(spec: AgentSpec) -> str:
+    """Prompt text asking for a bare JSON object, for OpenRouter models only."""
+    if not (spec.model or "").startswith(OPENROUTER_PREFIX) or spec.output_schema is None:
+        return ""
+    from ..spec import _output_schema_to_dict
+
+    schema = _output_schema_to_dict(spec.output_schema)
+    if not isinstance(schema, dict):
+        return ""
+    return OPENROUTER_SCHEMA_INSTRUCTION.format(schema=json.dumps(schema, separators=(",", ":")))
+
+
+def openrouter_cost_unknown(model: str | None) -> AgentEvent:
+    return AgentEvent(
+        kind="status",
+        summary=(
+            f"OpenRouter did not report a charge for model {model!r}; cost_usd is "
+            "unknown and max_budget_usd could not be enforced"
+        ),
+        raw={"event": "cost_unknown", "model": model},
+    )
+
+
+async def drain_proxy(proxy: Any | None) -> AsyncIterator[AgentEvent]:
+    """Let the proxy finish recording before the result quotes its total.
+
+    The CLI sees the last response bytes before the proxy's handler has parsed them, so a
+    result built immediately can miss the final request's charge. The recorded requests are
+    yielded first, then the notice if the wait ran out — that notice qualifies the total the
+    result is about to report.
+    """
+    if proxy is None:
+        return
+    complete = await asyncio.to_thread(proxy.wait_until_idle, METADATA_DRAIN_TIMEOUT_S)
+    for event in proxy.drain_events():
+        yield event
+    if not complete:
+        yield AgentEvent(
+            kind="status",
+            summary="timed out waiting for OpenRouter response metadata",
+            raw={"event": "openrouter_metadata_timeout"},
+        )
+
+
+async def run_with_openrouter_proxy(
+    spec: AgentSpec,
+    ctx: RunContext,
+    run_inner: Callable[[Any | None], AsyncIterator[AgentEvent]],
+) -> AsyncIterator[AgentEvent]:
+    """Run a turn behind a per-run OpenRouter proxy, when the turn is an OpenRouter one.
+
+    ``run_inner`` receives the proxy, or ``None`` when there is nothing to proxy: a native
+    model, or an ``openrouter/`` model with no key (the binding raises for that itself, with
+    its own name in the message). The proxy is closed however the turn ends.
+    """
+    from ._openrouter_proxy import OpenRouterProxy
+
+    proxy = None
+    if (spec.model or "").startswith(OPENROUTER_PREFIX):
+        api_key = openrouter_api_key(ctx)
+        if api_key:
+            proxy = OpenRouterProxy(
+                api_key,
+                spec.max_budget_usd,
+                expected_model=(spec.model or "").removeprefix(OPENROUTER_PREFIX),
+                routing=openrouter_provider_routing(spec),
+            ).start()
+    try:
+        async for event in run_inner(proxy):
+            yield event
+    finally:
+        if proxy is not None:
+            proxy.close()
 
 
 def finalize_checkpoint(spec: AgentSpec, ctx: Any) -> AgentEvent | None:

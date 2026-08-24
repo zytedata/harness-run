@@ -16,7 +16,9 @@ import pytest
 from remote_agent_toolkit.events import AgentEvent
 from remote_agent_toolkit.harness._shared import (
     harness_consumed_secret_names,
+    openrouter_cost_unknown,
     openrouter_provider_routing,
+    openrouter_schema_steer,
 )
 from remote_agent_toolkit.harness.claude_code import ClaudeCodeHarness
 from remote_agent_toolkit.harness.context import RunContext
@@ -236,9 +238,7 @@ def test_unlisted_openrouter_model_gets_no_context_window():
 
 
 def test_openrouter_cost_unknown_event_names_the_model():
-    from remote_agent_toolkit.harness.claude_code import _openrouter_cost_unknown
-
-    event = _openrouter_cost_unknown(_OR)
+    event = openrouter_cost_unknown(_OR)
 
     assert event.raw == {"event": "cost_unknown", "model": _OR}
     assert "did not report a charge" in event.summary
@@ -477,3 +477,31 @@ def test_a_routing_object_is_passed_through_unchanged():
 
 def test_no_provider_preference_resolves_to_nothing():
     assert openrouter_provider_routing(AgentSpec(name="a", model=_OR)) is None
+
+
+# -- one schema steer ---------------------------------------------------------
+#
+# Both bindings ask an OpenRouter model for bare JSON in words, because OpenRouter passes
+# the native structured-output format on without enforcing it. Same text, same conditions.
+
+
+def test_the_schema_steer_states_the_schema_for_an_openrouter_turn():
+    spec = AgentSpec(name="a", model=_OR, output_schema={"type": "object"})
+    steer = openrouter_schema_steer(spec)
+
+    assert "FINAL MESSAGE FORMAT" in steer
+    assert '{"type":"object"}' in steer
+    # It is appended to a prompt, so it brings its own separation.
+    assert steer.startswith("\n\n")
+
+
+@pytest.mark.parametrize(
+    "spec",
+    [
+        AgentSpec(name="a", model="claude-sonnet-4-5", output_schema={"type": "object"}),
+        AgentSpec(name="a", model=_OR),
+    ],
+    ids=["native-model", "no-schema"],
+)
+def test_the_schema_steer_is_empty_when_it_does_not_apply(spec):
+    assert openrouter_schema_steer(spec) == ""

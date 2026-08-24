@@ -47,6 +47,10 @@ tag `vX.Y.Z`, push the commit and the tag.
   proxy, because the CLIs can neither send OpenRouter's provider field nor report what
   OpenRouter charged. It also enforces the selected model and the budget, and keeps the
   provider key in the parent process. See DESIGN.md. ([#34])
+  The proxy's lifecycle, the key lookup, the schema steer, the metadata drain and the
+  `cost_unknown` event live once in `harness/_shared.py`; each binding keeps only how its
+  own CLI is pointed at the proxy (environment variables for Claude Code, `--config`
+  overrides for Codex).
 
 ### Changed
 

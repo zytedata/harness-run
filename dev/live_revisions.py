@@ -123,8 +123,7 @@ async def main() -> int:
         print(f"{time.strftime('%H:%M:%S')} rolling traffic back to {previous} ...", flush=True)
         engine.set_traffic(previous)
         rolled = gemini.get_engine(
-            NAME, project=PROJECT, location=LOCATION, spec=_spec("two"),
-            version=previous, credentials=credentials,
+            NAME, project=PROJECT, location=LOCATION, version=previous, credentials=credentials
         )
         check("get_engine(version=previous) resolves", rolled.version == previous)
         try:

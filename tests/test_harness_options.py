@@ -221,6 +221,27 @@ def test_openrouter_points_the_cli_at_openrouter():
     assert opts.max_budget_usd is None
 
 
+def test_unlisted_openrouter_model_gets_no_context_window():
+    """An id the table does not carry still runs; the CLI then assumes its own 200k."""
+    spec = AgentSpec(name="a", model="openrouter/some-vendor/brand-new-model")
+    opts = ClaudeCodeHarness().build_options(
+        spec, _ctx(spec, secrets={"OPENROUTER_API_KEY": "sk-or-1"})
+    )
+
+    assert "CLAUDE_CODE_MAX_CONTEXT_TOKENS" not in opts.env
+    assert opts.model == "some-vendor/brand-new-model"
+
+
+def test_openrouter_cost_unknown_event_names_the_model():
+    from remote_agent_toolkit.harness.claude_code import _openrouter_cost_unknown
+
+    event = _openrouter_cost_unknown(_OR)
+
+    assert event.raw == {"event": "cost_unknown", "model": _OR}
+    assert "did not report a charge" in event.summary
+    assert "max_budget_usd could not be enforced" in event.summary
+
+
 def test_output_schema_uses_claude_sdk_format_and_steers_openrouter():
     schema = {
         "type": "object",
@@ -342,21 +363,40 @@ def test_openrouter_exact_cost_wins_and_enforces_budget():
     assert out.raw["budget_enforcement"] == "after_model_response"
 
 
-def test_openrouter_no_final_text_is_an_error():
-    event = AgentEvent(
+def _no_final_text_event():
+    return AgentEvent(
         kind="result",
         summary="(no final text)",
         cost_usd=0.01,
         raw={"subtype": "success", "is_error": False},
     )
+
+
+@pytest.mark.parametrize("max_budget_usd", [1.0, None])
+def test_openrouter_no_final_text_is_an_error(max_budget_usd):
+    """The reclassification follows the OpenRouter turn, not the budget cap."""
     out = ClaudeCodeHarness()._final_result(
-        event,
+        _no_final_text_event(),
         turns_total=1,
+        openrouter=True,
         exact_openrouter_cost=0.001,
-        max_budget_usd=1.0,
+        max_budget_usd=max_budget_usd,
     )
     assert out.raw["subtype"] == "error_no_final_text"
+    assert out.raw["cli_reported_subtype"] == "success"
     assert out.raw["is_error"] is True
+
+
+def test_claude_no_final_text_is_left_alone():
+    """A native Claude turn keeps whatever the CLI reported."""
+    out = ClaudeCodeHarness()._final_result(
+        _no_final_text_event(),
+        turns_total=1,
+        openrouter=False,
+        max_budget_usd=1.0,
+    )
+    assert out.raw["subtype"] == "success"
+    assert out.raw["is_error"] is False
 
 
 def test_claude_models_keep_the_cli_cost():

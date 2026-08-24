@@ -45,6 +45,8 @@ async def _events_of(
     proxy_cost=None,
     proxy_provider=None,
     proxy_init=None,
+    proxy_blocked=False,
+    proxy_idle=True,
     resolved=_UNSET,
 ):
     import openai_codex
@@ -61,13 +63,18 @@ async def _events_of(
     if (spec.model or "").startswith("openrouter/"):
 
         class FakeProxy:
-            def __init__(self, *args, **kwargs):
+            def __init__(self, api_key, max_budget_usd=None, expected_model=None, **kwargs):
                 if proxy_init is not None:
-                    proxy_init.append((args, kwargs))
+                    proxy_init.append(
+                        (
+                            (api_key, max_budget_usd, expected_model),
+                            kwargs,
+                        )
+                    )
                 self.base_url = "http://127.0.0.1:1"
                 self.client_token = "local-test-token"
                 self.exact_cost_usd = proxy_cost
-                self.budget_blocked = False
+                self.budget_blocked = proxy_blocked
                 self._drained = False
 
             def start(self):
@@ -77,7 +84,7 @@ async def _events_of(
                 return None
 
             def wait_until_idle(self, _timeout=5.0):
-                return True
+                return proxy_idle
 
             def drain_events(self):
                 if self._drained or proxy_provider is None:
@@ -421,7 +428,9 @@ async def test_run_unknown_model_warns_and_skips_budget(tmp_path, monkeypatch):
     spec = AgentSpec(name="a", model="gpt-9-hyperion", harness="codex", max_budget_usd=0.0001)
     script = [turn_started(), token_usage(in_tok=10_000_000), agent_message("ok"), turn_completed()]
     events, client = await _events_of(script, tmp_path, monkeypatch, spec=spec)
-    assert any((e.raw or {}).get("event") == "cost_unknown" for e in events)
+    unknown = [e for e in events if (e.raw or {}).get("event") == "cost_unknown"]
+    assert len(unknown) == 1  # reported once, before the turn — not again at the end
+    assert "no price data" in unknown[0].summary
     assert not client.interrupted  # budget can't be enforced without a price
     result = events[-1]
     assert result.raw["subtype"] == "success" and result.cost_usd is None
@@ -705,6 +714,9 @@ async def test_openrouter_run_passes_provider_to_proxy(tmp_path, monkeypatch):
     )
 
     assert seen and seen[0][1]["provider"] == "moonshotai"
+    # The proxy holds the account key, the spec's cap, and the id it will serve — the
+    # prefix already stripped, because that is what the CLI puts in the request body.
+    assert seen[0][0] == ("sk-or-1", spec.max_budget_usd, "moonshotai/kimi-k3")
 
 
 async def test_openrouter_run_passes_routing_to_proxy(tmp_path, monkeypatch):
@@ -786,6 +798,55 @@ async def test_openrouter_exact_cost_and_provider_come_from_proxy(tmp_path, monk
     assert result.raw["subtype"] == "error_budget_exceeded"
 
 
+async def test_proxy_402_is_reported_as_a_budget_failure(tmp_path, monkeypatch):
+    """The proxy refused a request after the cap was spent; the run stopped for budget.
+
+    Whatever the CLI made of that 402, the reason is the budget, so the result says so
+    even though the harness's own mid-turn check never tripped.
+    """
+    spec = _or_spec(max_budget_usd=0.01)
+    ctx = _ctx(tmp_path, spec, secrets={"OPENROUTER_API_KEY": "k"})
+    script = [turn_started(), agent_message("done"), token_usage(), turn_completed()]
+
+    events, _ = await _events_of(
+        script,
+        tmp_path,
+        monkeypatch,
+        spec=spec,
+        ctx=ctx,
+        proxy_cost=0.004,  # under the cap: only the 402 says the budget stopped this
+        proxy_blocked=True,
+    )
+
+    result = next(e for e in events if e.kind == "result")
+    assert result.raw["subtype"] == "error_budget_exceeded"
+    assert result.raw["is_error"] is True
+    assert result.cost_usd == 0.004  # the charges already recorded still count
+
+
+async def test_metadata_timeout_is_reported(tmp_path, monkeypatch):
+    """The charge may still be in flight when the turn ends; say so rather than guess."""
+    spec = _or_spec()
+    ctx = _ctx(tmp_path, spec, secrets={"OPENROUTER_API_KEY": "k"})
+    script = [turn_started(), agent_message("done"), token_usage(), turn_completed()]
+
+    events, _ = await _events_of(
+        script,
+        tmp_path,
+        monkeypatch,
+        spec=spec,
+        ctx=ctx,
+        proxy_cost=0.001,
+        proxy_idle=False,
+    )
+
+    timeout = next(
+        e for e in events if (e.raw or {}).get("event") == "openrouter_metadata_timeout"
+    )
+    assert "timed out" in timeout.summary
+    assert events[-1].kind == "result"  # the turn still finishes
+
+
 def test_openrouter_models_are_not_priced_by_the_table():
     """The price table has no OpenRouter entries: those turns report OpenRouter's charge.
 
@@ -829,8 +890,9 @@ async def test_openrouter_turn_reports_no_cost_when_openrouter_reports_none(
 
     assert result.cost_usd is None
     assert result.raw["price_source"] is None
-    unknown = next(e for e in events if (e.raw or {}).get("event") == "cost_unknown")
-    assert "did not report a charge" in unknown.summary
+    unknown = [e for e in events if (e.raw or {}).get("event") == "cost_unknown"]
+    assert len(unknown) == 1
+    assert "did not report a charge" in unknown[0].summary
 
 
 def test_openrouter_key_is_harness_consumed(tmp_path):

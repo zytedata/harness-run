@@ -79,8 +79,8 @@ instructions (see :data:`_OPENROUTER_SCHEMA_INSTRUCTION`). Without that, a model
 ignores the unenforced format returns prose and ``structured_output`` comes back ``None``.
 
 Codex ships no catalog entry for these models, so it falls back to generic metadata and
-warns that this "can degrade performance". :data:`_OPENROUTER_CONTEXT_WINDOW` carries the
-context window for the models we vouch for, which is passed as ``model_context_window``
+warns that this "can degrade performance". :data:`pricing.OPENROUTER_CONTEXT_WINDOWS`
+carries the context window for the models we vouch for, passed as ``model_context_window``
 so the agent is not compacted at a guessed limit. Any other ``openrouter/*`` id still
 runs with Codex's generic context metadata. OpenRouter's response metadata supplies its
 exact cost and budget accounting.
@@ -149,11 +149,6 @@ _OPENROUTER_SCHEMA_INSTRUCTION = (
     "explanation:\n{schema}"
 )
 
-# Context window for the OpenRouter models this binding vouches for, passed as
-# `model_context_window` because Codex's catalog has no entry for them (it would fall back
-# to generic metadata and warn). An id that is missing from the table still runs.
-_OPENROUTER_CONTEXT_WINDOW = pricing.OPENROUTER_CONTEXT_WINDOWS
-
 # Tool-result content kept in events is truncated: command output can be megabytes, and
 # events ride Cloud Logging on gemini (per-entry size limits).
 _CONTENT_CAP = 4000
@@ -175,11 +170,6 @@ class _CodexOptions:
     # True when the model routes through OpenRouter: auth is the provider's env_key, so
     # `run` must not call `codex login` (that path stores OpenAI credentials).
     openrouter: bool = False
-
-
-def thread_args_model(options: _CodexOptions) -> str | None:
-    """The model id handed to Codex (prefix already stripped for OpenRouter)."""
-    return options.thread_args.get("model")
 
 
 class _RunAccounting:
@@ -474,7 +464,7 @@ class CodexHarness:
             # outright (400 before the first token), so it is off for these turns.
             'web_search="disabled"',
         ]
-        window = _OPENROUTER_CONTEXT_WINDOW.get(model)
+        window = pricing.OPENROUTER_CONTEXT_WINDOWS.get(model)
         if window is not None:
             overrides.append(f"model_context_window={window}")
         return overrides
@@ -876,7 +866,7 @@ class CodexHarness:
                     kind="status",
                     summary=(
                         f"model routing: provider={got or 'unreported'} "
-                        f"model={routing.get('resolved_model') or thread_args_model(options)}"
+                        f"model={routing.get('resolved_model') or options.thread_args.get('model')}"
                     ),
                     raw={
                         "event": "model_routing",
@@ -915,7 +905,6 @@ class CodexHarness:
                                 pass
                     continue
                 if notification.method == "turn/completed":
-                    metadata_complete = True
                     if proxy is not None:
                         # The proxy forwards the final bytes before it records their
                         # metadata. Give that handler a brief chance to finish so the
@@ -936,18 +925,15 @@ class CodexHarness:
                         and exact_cost >= spec.max_budget_usd
                     ):
                         limit = "budget"
-                    if price is None and exact_cost is None:
+                    if proxy is not None and price is None and exact_cost is None:
+                        # A model with no price and no proxy already reported this before
+                        # the turn started; only the OpenRouter case is news here.
                         yield AgentEvent(
                             kind="status",
                             summary=(
-                                (
-                                    f"OpenRouter did not report a charge for model "
-                                    f"{spec.model!r}; "
-                                    if proxy is not None
-                                    else f"no price data for model {spec.model!r}: "
-                                )
-                                + "cost_usd is unknown and max_budget_usd could not be "
-                                "enforced"
+                                f"OpenRouter did not report a charge for model "
+                                f"{spec.model!r}; cost_usd is unknown and max_budget_usd "
+                                "could not be enforced"
                             ),
                             raw={"event": "cost_unknown", "model": spec.model},
                         )

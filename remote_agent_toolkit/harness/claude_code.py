@@ -477,7 +477,7 @@ class ClaudeCodeHarness:
                 event.raw["cli_reported_cost_usd"] = event.cost_usd
             event.cost_usd = None
         if (
-            max_budget_usd is not None
+            openrouter
             and event.summary == "(no final text)"
             and event.raw is not None
             and not event.raw.get("is_error")
@@ -668,8 +668,7 @@ class ClaudeCodeHarness:
                 if proxy is not None:
                     for proxy_event in proxy.drain_events():
                         yield proxy_event
-                translated = list(translator.translate(message))
-                for event in translated:
+                for event in translator.translate(message):
                     tracker.observe(event)
                     if (event.raw or {}).get("subtype") == "init":
                         # The notification grace ends as soon as the CLI starts the next

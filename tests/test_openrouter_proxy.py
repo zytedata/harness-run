@@ -504,3 +504,148 @@ def test_error_message_wins_over_routing_metadata(monkeypatch):
     event = proxy.drain_events()[0]
     assert event.raw["http_status"] == 400
     assert event.raw["summary"] == "provider does not support this request"
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [{"Authorization": "Bearer wrong-token"}, {"Authorization": ""}],
+    ids=["wrong-token", "no-token"],
+)
+def test_only_the_run_token_opens_the_proxy(monkeypatch, headers):
+    """The token is what keeps the account key out of the CLI, so it must be checked."""
+    calls = []
+    _fake_upstream(monkeypatch, calls=calls)
+
+    with OpenRouterProxy("real-key", expected_model="moonshotai/kimi-k3") as proxy:
+        status, payload = _proxy_post(
+            proxy,
+            body=json.dumps({"model": "moonshotai/kimi-k3", "input": "hi"}),
+            headers=headers,
+        )
+
+    assert status == 401
+    assert json.loads(payload)["error"]["message"] == "invalid local proxy token"
+    assert calls == []  # the real key never left the process
+    assert proxy.drain_events() == []
+
+
+def test_the_x_api_key_header_also_carries_the_run_token(monkeypatch):
+    """Claude Code authenticates with ``X-Api-Key`` rather than a bearer header."""
+    _fake_upstream(monkeypatch)
+
+    with OpenRouterProxy("real-key", expected_model="moonshotai/kimi-k3") as proxy:
+        status, _ = _proxy_post(
+            proxy,
+            body=json.dumps({"model": "moonshotai/kimi-k3", "input": "hi"}),
+            headers={"Authorization": "", "X-Api-Key": proxy.client_token},
+        )
+        assert proxy.wait_until_idle()
+
+    assert status == 200
+
+
+def test_a_request_for_another_model_is_refused(monkeypatch):
+    """The proxy serves one model for one run; a helper-model call must not slip through."""
+    calls = []
+    _fake_upstream(monkeypatch, calls=calls)
+
+    with OpenRouterProxy("real-key", expected_model="moonshotai/kimi-k3") as proxy:
+        status, payload = _proxy_post(
+            proxy, body=json.dumps({"model": "anthropic/claude-haiku-4-5", "input": "hi"})
+        )
+
+    assert status == 400
+    assert json.loads(payload)["error"]["message"] == "model does not match this proxy run"
+    assert calls == []
+
+
+def test_the_next_request_is_refused_once_the_budget_is_spent(monkeypatch):
+    """Two charges cross the cap, and the third request never reaches OpenRouter."""
+    charge = json.dumps(
+        {"model": "moonshotai/kimi-k3", "provider": "Moonshot AI", "usage": {"cost": 0.004}}
+    ).encode()
+    calls = []
+
+    class TwoCharges:
+        """A fresh body per call: ``_FakeResponse`` can only be read once."""
+
+        def __init__(self, host, timeout):
+            assert host == "openrouter.ai"
+
+        def request(self, method, path, body=None, headers=None):
+            calls.append((method, path, body, headers))
+
+        def getresponse(self):
+            return _FakeResponse(body=charge)
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(proxy_module.http.client, "HTTPSConnection", TwoCharges)
+    body = json.dumps({"model": "moonshotai/kimi-k3", "input": "hi"})
+
+    with OpenRouterProxy("real-key", 0.006, expected_model="moonshotai/kimi-k3") as proxy:
+        first, _ = _proxy_post(proxy, body=body)
+        assert proxy.wait_until_idle()
+        assert not proxy.budget_blocked  # $0.004 of $0.006 spent
+        second, _ = _proxy_post(proxy, body=body)
+        assert proxy.wait_until_idle()
+        third, payload = _proxy_post(proxy, body=body)
+
+    assert (first, second, third) == (200, 200, 402)
+    assert json.loads(payload)["error"]["type"] == "budget_exceeded"
+    assert proxy.budget_blocked is True
+    assert len(calls) == 2  # the refused request never went upstream
+    assert proxy.exact_cost_usd == pytest.approx(0.008)  # both charges, summed
+    assert len(proxy.drain_events()) == 2
+
+
+def test_the_response_reaches_the_client_unchanged(monkeypatch):
+    """The proxy reads the body for metadata; the CLI must still get every byte of it."""
+    chunks = [
+        b'data: {"type":"message_start","message":{"model":"moonshotai/kimi-k3"}}\n\n',
+        b'data: {"type":"content_block_delta","delta":{"text":"hello"}}\n\n',
+        b'data: {"type":"message_delta","usage":{"cost":0.0015}}\n\n',
+        b'data: {"type":"message_stop","openrouter_metadata":'
+        b'{"requested":"moonshotai/kimi-k3","endpoints":{"available":[]}}}\n\n',
+    ]
+
+    class Streamed:
+        """Hands the body over in pieces, the way a real SSE response arrives."""
+
+        def __init__(self, host, timeout):
+            self._remaining = list(chunks)
+
+        def request(self, method, path, body=None, headers=None):
+            pass
+
+        def getresponse(self):
+            return self
+
+        status = 200
+        reason = "OK"
+
+        def getheader(self, name, default=None):
+            return "text/event-stream" if name == "Content-Type" else default
+
+        def getheaders(self):
+            return [("Content-Type", "text/event-stream")]
+
+        def read(self, _size=-1):
+            return self._remaining.pop(0) if self._remaining else b""
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(proxy_module.http.client, "HTTPSConnection", Streamed)
+
+    with OpenRouterProxy("real-key", expected_model="moonshotai/kimi-k3") as proxy:
+        status, payload = _proxy_post(
+            proxy, body=json.dumps({"model": "moonshotai/kimi-k3", "input": "hi"})
+        )
+        assert proxy.wait_until_idle()
+
+    assert status == 200
+    assert payload == b"".join(chunks)
+    event = proxy.drain_events()[0]
+    assert event.raw["cost_usd"] == 0.0015

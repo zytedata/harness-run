@@ -465,7 +465,15 @@ def test_openrouter_run_passes_provider_to_proxy(tmp_path, monkeypatch):
     )
 
     assert created and created[0]["provider"] == "moonshotai"
-    assert client_cls.instances[0].options.env["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:1/api"
+    # The proxy holds the account key, the cap it enforces, and the only id it will serve.
+    assert created[0]["api_key"] == "real-key"
+    assert created[0]["max_budget_usd"] == spec.max_budget_usd
+    assert created[0]["expected_model"] == "moonshotai/kimi-k3"
+    # The CLI is pointed at the proxy and given its token instead of the key.
+    env = client_cls.instances[0].options.env
+    assert env["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:1/api"
+    assert env["ANTHROPIC_AUTH_TOKEN"] == "local-token"
+    assert "real-key" not in env.values()
     assert events[-1].kind == "result"
 
 

@@ -390,8 +390,9 @@ sorts by price. They are part of the model id, so they need no other setting.
 
 Important details:
 
-- The CLI's own dollar figure is kept as `cli_reported_cost_usd`, next to the exact charge, for
-  comparison.
+- On the Claude Code harness, the CLI's own dollar figure is kept as `cli_reported_cost_usd`, next
+  to the exact charge, for comparison. The Codex CLI reports no dollar figure at all, so there is
+  none to keep there.
 - Codex disables its built-in web-search tool for OpenRouter turns because OpenRouter rejects the
   tool format Codex sends. Shell, file, MCP, and skill tools remain available.
 - Codex uses `low` reasoning when the spec leaves it unset because OpenRouter's Responses endpoint

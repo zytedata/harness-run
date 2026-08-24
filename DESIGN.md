@@ -554,15 +554,16 @@ Each is a `typing.Protocol`; concrete adapters ship for prod (GCP) and dev (loca
   re-invocation exists (`spec.background_task_timeout` is inert); `allowed_tools`/`disallowed_tools`
   have no mapping and are ignored with a status warning.
 - **`openrouter/` models go through a per-run localhost proxy** (`harness/_openrouter_proxy.py`), on
-  **both** bindings. Two things force this. The CLIs cannot send OpenRouter's `provider` request
-  field, and they cannot report what OpenRouter charged. The proxy puts the caller's routing object
-  in the request body verbatim. `spec.openrouter_provider` is the shorthand for pinning one provider
-  and is resolved to `{"only": [slug], "allow_fallbacks": false}` before the proxy starts, so only
-  one form travels below the spec. It passes the response through unchanged and reads
-  the routing metadata and the charge out of it. Each response becomes one `openrouter_request`
-  event, failed responses included — nothing else can see a retried 429. The CLI holds a random
-  per-run token, never the account key. The summed charges become the result's `cost_usd`
-  (`price_source="openrouter"`; the CLI's own figure is kept as `cli_reported_cost_usd`) — these
+  **both** bindings, Claude Code and Codex. Two things force this. The CLIs cannot send OpenRouter's
+  `provider` request field, and they cannot report what OpenRouter charged. The proxy puts the
+  caller's routing object in the request body verbatim. `spec.openrouter_provider` is the shorthand
+  for pinning one provider and is resolved to `{"only": [slug], "allow_fallbacks": false}` before
+  the proxy starts, so only one form travels below the spec. It passes the response through
+  unchanged and reads the routing metadata and the charge out of it. Each response becomes one
+  `openrouter_request` event, failed responses included — nothing else can see a retried 429. The
+  CLI holds a random per-run token, never the account key. The summed charges become the result's
+  `cost_usd` (`price_source="openrouter"`). The Claude Code binding also keeps the CLI's own figure
+  as `cli_reported_cost_usd`; the Codex CLI reports no USD at all, so it has none to keep. These
   models are never priced from the table, and a turn OpenRouter reports no charge for reports none.
   The budget is measured against that total, and the proxy answers 402 once the cap is spent.
 - **Background-task semantics are honored** (eval feedback: a model armed the Monitor tool and ended its

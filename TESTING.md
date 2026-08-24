@@ -1,15 +1,30 @@
 # Testing — from unit tests to live validation
 
-Three rungs, cheapest first. Every change runs rung 1; run the later rungs when your change
+Cheapest first. Every change runs the offline suite; run the later rungs when your change
 can only break in ways the earlier rungs can't see.
 
 | Rung | Command | Catches | Cost |
 |---|---|---|---|
-| Offline tests | `make test` | logic, event plumbing, contracts we encode | seconds, free |
+| Offline tests | `make test` | logic, event plumbing, contracts we encode | ~40 s (parallel), free |
 | Install parity | `make parity-build` / `-check` | dependency/install/glibc breakage | ~1 min, free |
 | **Live validation** | `make live-smoke` | **platform-contract breakage** | ~10 min, ~$0.10 + build |
+| Model-provider check | `make live-openrouter` | provider-contract breakage (OpenRouter) | ~4 min, ~$0.75 |
+| Model-provider check, remote | `make live-openrouter-remote` | the same models + remote visibility on Agent Runtime | ~8-15 min, ~$0.56 + build |
+| Model attribution | `make live-attribution` | did the turn run the model we asked for — both harnesses | ~10 s, ~$0.06 |
+
+The two OpenRouter figures are measured (2026-08-22, all four models on both harnesses:
+26/26 local checks for $0.74, 128/128 remote checks for $0.56 of model spend plus the engine
+build). Most of `live-openrouter` is the big models: one DeepSeek v4 Pro basic turn on
+claude-code cost $0.083 and one Kimi K3 $0.069, while DeepSeek v4 Flash on codex cost $0.002.
+Set `MODELS=openrouter/deepseek/deepseek-v4-flash` to check the plumbing for about a cent.
 
 ## 1. Offline tests (`make test`)
+
+`make test` runs with `-n auto` (pytest-xdist). Each worker is its own process, so the
+autouse fixtures, the pricing cache and the signal-handler test stay isolated; `make
+test-serial` gives readable output when debugging. The wall clock is bounded by a few
+deliberate poll-cadence tests; the slowest takes about 15 seconds. Expect about 40 seconds
+overall.
 
 The pytest suite makes **no network calls**: no GCP, no model, no subprocesses talking to
 real services. Backends are exercised against the fakes in [`tests/fakes.py`](tests/fakes.py) /
@@ -90,6 +105,119 @@ a turn still runs, that `get_engine(version=…)` accepts the serving revision a
 non-serving one, and that `delete_version` prunes. Run it when you touch deploy, versioning,
 or traffic config. ~10 min: the two builds are **sequential** (the second is the update under
 test), so it costs about the same wall-clock as the smoke test's parallel pair.
+
+### The OpenRouter model check
+
+```bash
+OPENROUTER_API_KEY=... make live-openrouter
+MODELS=openrouter/z-ai/glm-5.3 make live-openrouter  # one model, both harnesses
+```
+
+This paid local test runs every model on both harnesses. Each model must call a shell tool,
+return its output, produce schema-valid structured output, hide provider credentials from the
+tool, report its selected upstream, and use OpenRouter's exact cost. It also checks resume, a
+strict provider choice, whole routing objects, and a tiny budget cap on both harnesses.
+
+Every model call goes through the local proxy (`harness/_openrouter_proxy.py`), so the test
+also requires an `http_status` on every `openrouter_request` event, which only the proxy
+reports. That shows the proxy saw the calls the run made. What keeps a call from going
+straight to OpenRouter is the environment: the test also asserts that the account key is
+absent from the tool environment, and the CLI only ever gets the proxy's per-run token. One
+row per harness runs with no provider pinned, because that case used to skip the proxy
+entirely.
+
+Three checks retry once on a soft miss: the basic turn, resume, and structured output. Models
+occasionally answer without running the command they were asked to run. Measured on DeepSeek
+v4 Pro under codex: one run answered 6 for `print(6 * 7)`, two immediate re-runs answered 42.
+
+Most model requests select one known provider and disable fallbacks. Kimi uses Moonshot AI,
+GLM uses Z.AI, and both DeepSeek models use Novita because the shared account's ZDR policy
+excludes DeepSeek's own endpoint. Those rows fail if OpenRouter reports a different provider.
+Three kinds of row do something else on purpose: the two rows named "unpinned" above, the two
+DeepSeek structured-output checks on Codex (the README footnote explains that exception), and
+the routing rows below, which send a whole provider object. Set `OPENROUTER_PROVIDER` to test
+every feature against one specific provider. To test one model with another provider:
+
+```bash
+MODELS=openrouter/moonshotai/kimi-k3 OPENROUTER_PROVIDER=fireworks \
+make live-openrouter
+```
+
+Set `SERIAL=1` for ordered output while debugging.
+
+Two rows per harness send a whole routing object instead of a single slug, both on Kimi K3
+because it has many providers (GLM-5.3 has one endpoint, which would prove nothing). The
+"closed" row sends `{"only": [moonshotai, fireworks]}` and requires that OpenRouter reports
+one of those two — either counts, because a closed set bounds who may serve a turn without
+keeping the turn on one of them — and that `provider_matches_request` is true. The "open" row
+sends `{"order": [fireworks, moonshotai], "allow_fallbacks": true}` and requires the opposite:
+the turn completes and `provider_matches_request` is null. The README explains when that verdict
+can be claimed. Both rows judge the reported provider name themselves rather than trusting the
+toolkit's own verdict. The second provider never has to be reachable — the primary is in both
+objects — so `OPENROUTER_ALTERNATE_PROVIDER` only needs changing to test a different pair.
+
+Other knobs: `HARNESSES=codex` (or `claude-code`) runs one harness instead of both, which
+roughly halves a pass, and `PROBE_REASONING_EFFORT` sets the effort every turn asks for.
+
+**It costs real money** (the summary table above has the current figure) and needs a key, so
+run it **by hand, sparingly, locally**. It must never run in CI: `pytest -q` stays free and credential-less
+(see §1 and `.github/workflows/ci.yml`) — the offline tests pin the config the harness
+emits, and that is what CI checks.
+
+### The OpenRouter model check on Agent Runtime
+
+```bash
+OPENROUTER_API_KEY=... make live-openrouter-remote
+```
+
+This paid remote test repeats the local checks on Gemini Agent Runtime. One engine contains both
+CLIs and serves every model through per-turn overrides. Every model runs a structured-output turn
+on both harnesses. Resume, direct provider selection, routing objects, and budget caps also run on
+both harnesses. The two routing rows are the same closed/open pair the local test runs, which is
+where a routing object is proven to survive the trip to a deployed worker.
+
+It also checks the remote-only surface: the worker's `effective_spec` echo names the model,
+`session.resource_samples()` returns worker CPU/RAM, `memory_peak_bytes` is stamped on the
+terminal result, `session.history()` replays the events, and **that session's** Cloud Trace
+root span carries the model and its cost. It needs `uv pip install google-cloud-trace`
+(dev-only, not a toolkit dependency). The trace check reports SKIP when the package is missing.
+
+The engine is deleted in `finally`; a failed teardown prints loudly, because an engine
+bills while it exists. `KEEP=1` leaves it up for debugging and hands you the cleanup.
+
+`MODELS=` narrows the model list here too. The deployment knobs are `PROJECT`, `LOCATION`,
+`SUFFIX` (the engine name's suffix), `MAX_INSTANCES` and `IMPERSONATE_SA`; each falls back to
+the same default the other live probes use.
+
+**Costs real money** (mostly the build; the summary table above has the current figures).
+Checks run concurrently; build time varies widely. Give it a generous timeout. Teardown
+also runs on SIGTERM/SIGINT, because a `timeout` that fires mid-run would otherwise leave an
+engine billing.
+
+DeepSeek v4 sometimes returns no final message under Claude Code (the README has the details).
+The test retries one soft failure and reports when the retry was used. It stays failed when the
+retry also has no answer; in the 2026-08-22 validation no retry was needed.
+
+### Model attribution: did we run what we asked for?
+
+```bash
+OPENROUTER_API_KEY=... OPENAI_API_KEY=... make live-attribution
+```
+
+`dev/live_model_attribution.py` checks evidence returned by the CLI, app-server, and
+OpenRouter:
+
+- **claude-code** — the CLI's `system/init` message names the model it resolved.
+- **codex** — the app-server's `thread.read()` names the thread's bound `model_provider`,
+  surfaced as a `model_routing` event. This is what proves an OpenRouter override took
+  effect; a mismatch is reported as `matches_request: false`.
+- **OpenRouter on both harnesses** — `openrouter_request` names the selected upstream and
+  reports exact cost for each model response.
+
+Checks run concurrently and cost a few cents. `SERIAL=1` gives ordered output. The claude-code
+check always runs, so it needs whatever Claude auth your shell already uses — an
+`ANTHROPIC_API_KEY` or a logged-in `claude` CLI. `CLAUDE_MODEL` and `OPENAI_MODEL` change the
+native models it checks alongside the OpenRouter ones.
 
 ### Writing a bespoke live probe
 

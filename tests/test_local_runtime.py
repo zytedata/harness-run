@@ -351,6 +351,37 @@ def test_late_harness_crash_keeps_finished_result(tmp_path):
     assert "result kept" in events[-1].summary
 
 
+def test_unknown_cost_reaches_the_caller_as_none(tmp_path):
+    """An unpriced run must not read as a free one.
+
+    The harness reports ``cost_usd=None`` when it could not price the model (no price
+    data, or OpenRouter reported no charge) and fires a ``cost_unknown`` status event.
+    ``RunResult.cost_usd`` carries that ``None`` through, so a caller can tell it apart
+    from a turn that really cost nothing.
+    """
+    ev = _result_ev()
+    ev.cost_usd = None
+    engine = local.deploy(AgentSpec(name="demo", model="m"), workdir=str(tmp_path / "wd"))
+    engine._harness = FakeHarness([ev])
+    session = engine.start_session()
+    asyncio.run(_await(session.run("go")))
+
+    assert session.last_result.cost_usd is None
+    assert session.last_result.num_turns == 3  # the rest of the accounting is unaffected
+
+
+def test_a_free_run_still_reports_zero(tmp_path):
+    """The other side of the same contract: 0.0 stays 0.0 and never becomes None."""
+    ev = _result_ev()
+    ev.cost_usd = 0.0
+    engine = local.deploy(AgentSpec(name="demo", model="m"), workdir=str(tmp_path / "wd"))
+    engine._harness = FakeHarness([ev])
+    session = engine.start_session()
+    asyncio.run(_await(session.run("go")))
+
+    assert session.last_result.cost_usd == 0.0
+
+
 def test_crash_before_result_is_still_an_error(tmp_path):
     # No terminal result → the exception is the outcome (unchanged semantics).
     engine = local.deploy(AgentSpec(name="demo", model="m"), workdir=str(tmp_path / "wd"))
@@ -359,6 +390,8 @@ def test_crash_before_result_is_still_an_error(tmp_path):
     asyncio.run(_await(session.run("go")))
     r = session.last_result
     assert r.is_error is True and "boom" in r.text and r.warning is None
+    # The run died before reporting anything, so its spend is unknown, not zero.
+    assert r.cost_usd is None
     assert session.stop_reason == StopReason.ERROR
 
 

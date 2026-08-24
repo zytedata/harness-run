@@ -51,7 +51,7 @@ async def main() -> int:
         text = " ".join((r.text or "").split())
         ok = warm and (not r.is_error) and "42" in text
         print(f"\nMEASURED: dispatch->first event {first:.1f}s, dispatch->result {total:.1f}s, "
-              f"cost=${r.cost_usd or 0:.4f}", flush=True)
+              f"cost={'unknown' if r.cost_usd is None else f'${r.cost_usd:.4f}'}", flush=True)
     except Exception:
         print(f"PROBE FAILED:\n{traceback.format_exc()}", flush=True)
     finally:

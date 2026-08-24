@@ -12,8 +12,8 @@ requires-python = ">=3.12,<3.14"
 # of these are hard to install, so keeping the surface flat beats making teams guess which
 # extra they need. Backend imports stay lazy, so `import remote_agent_toolkit` is still fast.
 dependencies = [
-    "claude-agent-sdk>=0.2.119",  # task-lifecycle messages + stderr callback + effort option
-    "openai-codex>=0.144.4",  # Codex harness; bundles a pinned codex CLI (openai-codex-cli-bin)
+    "claude-agent-sdk==0.2.130",  # matches the engine pin; validated on both runtimes
+    "openai-codex==0.147.0",  # custom-provider config used by the OpenRouter route
     "google-adk>=1.5",  # floor of the agentplatform AdkApp template (it raises below 1.5.0)
     # 1.163+ for the client-side runtime-revision surface (agent_engines.runtimes.revisions
     # + AgentEngineConfig.traffic_config), which `deploy`/`get_engine(version=…)` build on.
@@ -38,6 +38,9 @@ dev = [
     # that flag ~76 pre-existing spots. Bump together with that cleanup.
     "ruff<0.16",
     "mypy",
+    # `make test` runs -n auto; the suite is process-parallel safe (each worker is its own
+    # process, so the autouse fixtures and the signal test stay isolated).
+    "pytest-xdist",
 ]
 
 [tool.hatch.build.targets.wheel]

@@ -1,12 +1,19 @@
-"""Model pricing for harnesses that report tokens but no USD (Codex).
+"""Model pricing for harnesses that report tokens but no USD (Codex on OpenAI).
 
-Codex surfaces token counts only, so ``cost_usd`` and budget enforcement need a price
-source. Primary: **LiteLLM's community-maintained pricing dataset** (the same upstream
-``ccusage`` prices Codex sessions with), fetched once per process — new models are priced
-the day the dataset knows them, no toolkit release needed. Fallback: a small baked table
-of the current OpenAI flagships, so offline / air-gapped runs still price them. The fetch
-is best-effort with a short timeout and never raises; a total miss yields ``None`` (the
-harness then reports unknown cost and cannot enforce ``max_budget_usd``).
+Primary: **LiteLLM's community-maintained pricing dataset** (the same upstream ``ccusage``
+prices Codex sessions with), fetched once per process — new models are priced the day the
+dataset knows them, no toolkit release needed. Fallback: a small baked table of the current
+OpenAI flagships, so offline / air-gapped runs still price them. The fetch is best-effort
+with a short timeout and never raises; a total miss yields ``None`` (the harness then
+reports unknown cost and cannot enforce ``max_budget_usd``).
+
+**OpenRouter models are not priced here.** Every OpenRouter response carries its own
+``usage.cost``, which the proxy records, so the harnesses report that and nothing else. An
+estimate would be wrong in a way nobody could see: OpenRouter routes one model id to
+providers whose prices differ by up to 2.5x, so a single per-model number matches only the
+provider that happens to serve the call. Measured 2026-08-21 against the providers the
+probes pin — a table calibrated for one provider was 40% under and 46% over on the two
+DeepSeeks. A missing charge is reported as unknown cost instead.
 
 Stdlib-only (urllib). All prices are USD per single token.
 """
@@ -18,10 +25,19 @@ import threading
 from dataclasses import dataclass
 
 _LITELLM_PRICES_URL = (
-    "https://raw.githubusercontent.com/BerriAI/litellm/main/"
-    "model_prices_and_context_window.json"
+    "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"
 )
 _FETCH_TIMEOUT_S = 8.0
+
+# Context windows, not prices: both bindings pass these to their CLI because neither
+# catalogue has an entry for these ids (Claude Code would assume 200k and compact early,
+# Codex would warn and use generic metadata). An id that is missing here still runs.
+OPENROUTER_CONTEXT_WINDOWS: dict[str, int] = {
+    "openrouter/moonshotai/kimi-k3": 1_048_576,
+    "openrouter/z-ai/glm-5.3": 1_048_576,
+    "openrouter/deepseek/deepseek-v4-flash": 1_048_576,
+    "openrouter/deepseek/deepseek-v4-pro": 1_048_576,
+}
 
 # USD per 1M tokens: (input, cached input, output) — fallback only; LiteLLM wins when
 # reachable. Cache *writes* (billed at 1.25x input since 5.6) are not distinguishable in
@@ -92,8 +108,9 @@ def model_price(model: str) -> ModelPrice | None:
     """Resolve ``model`` to per-token USD prices, or ``None`` if unknown everywhere.
 
     LiteLLM keys are tried as the bare id then ``openai/<id>`` (Codex calls OpenAI
-    directly). May block up to the fetch timeout on first call — call it off the event
-    loop (``asyncio.to_thread``).
+    directly). The harnesses never call this for an ``openrouter/`` model — see the module
+    docstring. The first call may block for the fetch timeout; callers on an event loop
+    should run it in a worker thread.
     """
     data = _litellm_prices()
     if data:

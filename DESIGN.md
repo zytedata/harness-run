@@ -25,8 +25,12 @@ without re-learning the platform's sharp edges.
 **Non-goals (for now)**
 - Custom-LLM harnesses beyond the two that ship. We design the **seam** (a `Harness` protocol) and ship
   the **Claude Code (Agent SDK)** binding (default) and the **Codex (openai-codex SDK)** binding
-  (`spec.harness="codex"`, OpenAI models called directly). Other providers for Codex (e.g. OpenRouter
-  via a `model_provider` config override) are a later, separate step.
+  (`spec.harness="codex"`). Both can run `openrouter/` model ids: Claude Code uses OpenRouter's
+  Anthropic-compatible endpoint, and Codex uses `model_providers.*` config overrides. Providers beyond
+  OpenRouter are a later step. `openrouter_provider` selects one OpenRouter provider and
+  `openrouter_routing` carries OpenRouter's whole `provider` object, either one on the spec, a
+  session or a single turn.
+  The prefix keeps model selection per turn and preserves compatibility with existing engine configs.
 - Non-GCP backends. We design the **ports** (storage, events, dispatch, secrets) as protocols, but ship
   GCP adapters (GCS, Cloud Logging, Pub/Sub, Secret Manager) plus local/in-memory adapters for dev.
 - Replacing Scrapy-Cloud / monitoring logic — that stays in `gemini-agent-runtime` behind the seam.
@@ -258,7 +262,8 @@ ops action (`engine.set_traffic`), not a per-caller routing choice.
   `last_result`, `history()`, `fork()`.
 - `Run` — `__await__` (→ `RunResult`), `__aiter__` (→ `AgentEvent`s), `done`, `status`, `result`.
 - `AgentEvent` — `kind`, `summary`, `raw`; cost/usage carried on the terminal event.
-- `RunResult` — `text`, `structured_output`, `is_error`, `num_turns`, `cost_usd`, `usage`, `session_id`,
+- `RunResult` — `text`, `structured_output`, `is_error`, `num_turns`, `cost_usd` (`float | None`;
+  `None` means the spend is unknown, `0.0` means the run was free), `usage`, `session_id`,
   `artifacts`, `warning`. Error results keep their accounting (`cost_usd`/`num_turns`/`usage`): an
   `error_max_turns` run spends right up to its limit, so zeroing them under-reports exactly the most
   expensive runs (eval feedback).
@@ -539,7 +544,7 @@ Each is a `typing.Protocol`; concrete adapters ship for prod (GCP) and dev (loca
   token counts but no USD and enforces no caps — the harness prices tokens via LiteLLM's live
   pricing dataset (`harness/pricing.py`; the same upstream `ccusage` uses, fetched once per process,
   baked 5.6-family fallback for offline; models unknown to both: cost `None` + a `cost_unknown`
-  status, budget unenforceable; the result raw carries `price_source`), counts
+  status, budget unenforceable; the result raw carries `price_source`). The harness also counts
   `thread/tokenUsage/updated` notifications as model calls (= `num_turns`; verified live: one per
   call), and interrupts the turn at `max_turns` / `max_budget_usd` (`error_max_turns` /
   `error_budget_exceeded` result subtypes, accounting kept). **Checkpoint/resume**: the workspace
@@ -549,6 +554,19 @@ Each is a `typing.Protocol`; concrete adapters ship for prod (GCP) and dev (loca
   it before `thread_resume` on any worker. No Codex equivalent of Claude Code's background-task
   re-invocation exists (`spec.background_task_timeout` is inert); `allowed_tools`/`disallowed_tools`
   have no mapping and are ignored with a status warning.
+- **`openrouter/` models go through a per-run localhost proxy** (`harness/_openrouter_proxy.py`), on
+  **both** bindings, Claude Code and Codex. Two things force this. The CLIs cannot send OpenRouter's
+  `provider` request field, and they cannot report what OpenRouter charged. The proxy puts the
+  caller's routing object in the request body verbatim. `spec.openrouter_provider` is the shorthand
+  for pinning one provider and is resolved to `{"only": [slug], "allow_fallbacks": false}` before
+  the proxy starts, so only one form travels below the spec. It passes the response through
+  unchanged and reads the routing metadata and the charge out of it. Each response becomes one
+  `openrouter_request` event, failed responses included — nothing else can see a retried 429. The
+  CLI holds a random per-run token, never the account key. The summed charges become the result's
+  `cost_usd` (`price_source="openrouter"`). The Claude Code binding also keeps the CLI's own figure
+  as `cli_reported_cost_usd`; the Codex CLI reports no USD at all, so it has none to keep. These
+  models are never priced from the table, and a turn OpenRouter reports no charge for reports none.
+  The budget is measured against that total, and the proxy answers 402 once the cap is spent.
 - **Background-task semantics are honored** (eval feedback: a model armed the Monitor tool and ended its
   turn — correct, trained behavior — and the one-shot `query()` tore the CLI down, firing the advertised
   notification into the void; the run was scored no-deliverable). The CLI itself re-invokes the model when
@@ -641,6 +659,8 @@ remote-agent-toolkit/
 │   │   ├── claude_code.py         # ClaudeCodeHarness (drives a ClaudeSDKClient stream; ADK-free)
 │   │   ├── codex.py               # CodexHarness (drives an openai-codex AsyncCodex app-server)
 │   │   ├── _shared.py             # policy shared by the bindings (secret routing, env, checkpoint)
+│   │   ├── _openrouter_proxy.py   # per-run localhost proxy for openrouter/ models (both bindings)
+│   │   ├── pricing.py             # LiteLLM price lookup + baked OpenAI fallbacks, context windows
 │   │   └── translate.py           # Claude SDK message → AgentEvent (codex's lives in codex.py)
 │   ├── runtime/
 │   │   ├── base.py                # Engine + Session protocol + state machine + Run handle
@@ -728,8 +748,10 @@ saving all onboarding docs for the end.
   the platform session machinery that broke under us on 2026-07-28 (and our events are deliberately
   `partial`, i.e. not appended). Worth raising in the existing Google query-job telemetry thread: a
   native progress-stream for `asyncQuery` would let us delete this channel entirely.
-- **Structured outputs** — prefer the SDK's constrained-decoding `structured_output`; keep "parse last
-  JSON block" only as a fallback for harnesses that lack it. Confirm Vertex model support per model.
+- **Structured outputs — BUILT (2026-08).** Both harnesses send the schema through the CLI's own
+  structured-output option and keep "parse the last JSON block" only as a fallback. OpenRouter turns
+  also get the schema in the prompt, because OpenRouter accepts the schema but leaves enforcement to
+  the model. Still open: confirming Vertex model support per model.
 - **Outcomes / rubrics** — CMA's iterate-until-graded "definition of done" is attractive for autonomous
   background work; candidate post-P4 capability (a `verify=Rubric(...)` on `AgentSpec`).
 - **Second harness** — codex (subprocess) or a custom LLMNL harness behind the `Harness` protocol; the

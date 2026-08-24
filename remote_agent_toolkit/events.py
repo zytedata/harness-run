@@ -64,7 +64,10 @@ class RunResult:
             contain it.
         is_error: Whether the run terminated in error.
         num_turns: Number of agent turns consumed.
-        cost_usd: Total spend for the run.
+        cost_usd: Total spend for the run, or ``None`` when the spend is unknown:
+            the harness could not price the model, or OpenRouter reported no charge.
+            A ``cost_unknown`` status event fires in that case and ``max_budget_usd``
+            could not be enforced. ``0.0`` means the run really was free.
         usage: Raw token/usage accounting from the harness.
         session_id: The session this result belongs to (for re-attach/resume).
         artifacts: Blob keys/URIs of artifacts produced by the run.
@@ -78,7 +81,7 @@ class RunResult:
     structured_output_recovered: bool = False
     is_error: bool = False
     num_turns: int = 0
-    cost_usd: float = 0.0
+    cost_usd: float | None = None
     usage: dict | None = None
     session_id: str | None = None
     artifacts: tuple[str, ...] = field(default=())

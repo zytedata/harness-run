@@ -113,3 +113,55 @@ def test_agentspec_interactive_round_trip() -> None:
     explicit = AgentSpec(name="a", model="m", checkpoint=True, interactive=False)
     restored = AgentSpec.from_dict(explicit.to_dict())
     assert restored.interactive is False and restored.checkpoint is True
+
+
+def test_openrouter_provider_round_trip_and_validation() -> None:
+    spec = AgentSpec(
+        name="a",
+        model="openrouter/moonshotai/kimi-k3",
+        openrouter_provider="moonshotai",
+    )
+    assert AgentSpec.from_dict(spec.to_dict()) == spec
+    assert spec.to_dict()["openrouter_provider"] == "moonshotai"
+
+    with pytest.raises(ValueError, match="requires an openrouter/ model"):
+        AgentSpec(name="a", model="claude-sonnet-4-6", openrouter_provider="moonshotai")
+    with pytest.raises(ValueError, match="non-empty"):
+        AgentSpec(name="a", model="openrouter/moonshotai/kimi-k3", openrouter_provider="")
+
+
+def test_openrouter_routing_round_trip_and_validation() -> None:
+    routing = {"order": ["moonshotai", "fireworks"], "allow_fallbacks": True}
+    spec = AgentSpec(
+        name="a",
+        model="openrouter/moonshotai/kimi-k3",
+        openrouter_routing=routing,
+    )
+    assert AgentSpec.from_dict(spec.to_dict()) == spec
+    assert spec.to_dict()["openrouter_routing"] == routing
+
+    # The spec keeps its own copy, so a later edit of the caller's dict cannot reach it.
+    caller = {"only": ["moonshotai"]}
+    kept = AgentSpec(
+        name="a", model="openrouter/moonshotai/kimi-k3", openrouter_routing=caller
+    )
+    caller["only"] = ["novita"]
+    assert kept.openrouter_routing == {"only": ["moonshotai"]}
+
+    with pytest.raises(ValueError, match="requires an openrouter/ model"):
+        AgentSpec(name="a", model="claude-sonnet-4-6", openrouter_routing=routing)
+    with pytest.raises(ValueError, match="non-empty provider object"):
+        AgentSpec(name="a", model="openrouter/moonshotai/kimi-k3", openrouter_routing={})
+    with pytest.raises(ValueError, match="must be a mapping"):
+        AgentSpec(
+            name="a",
+            model="openrouter/moonshotai/kimi-k3",
+            openrouter_routing=["moonshotai"],
+        )
+    with pytest.raises(ValueError, match="cannot be combined"):
+        AgentSpec(
+            name="a",
+            model="openrouter/moonshotai/kimi-k3",
+            openrouter_provider="moonshotai",
+            openrouter_routing=routing,
+        )

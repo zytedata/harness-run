@@ -64,7 +64,9 @@ def build_result(result_ev: AgentEvent, session_id: str, spec: AgentSpec) -> tup
         structured_output_recovered=recovered,
         is_error=bool(raw.get("is_error")),
         num_turns=int(raw.get("num_turns") or 0),
-        cost_usd=float(result_ev.cost_usd or 0.0),
+        # Passed through as the harness reported it. ``None`` means the spend is
+        # unknown; coercing it to 0.0 here would read as a free run.
+        cost_usd=result_ev.cost_usd,
         usage=result_ev.usage,
         session_id=raw.get("session_id") or session_id,
     )

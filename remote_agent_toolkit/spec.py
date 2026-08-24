@@ -252,7 +252,8 @@ class AgentSpec:
     Attributes:
         name: Stable agent name. Maps to a deployed engine's display name (§5).
         model: Model id the harness runs, e.g. ``"claude-sonnet-4-6"`` (Claude Code) or
-            a GPT model id (Codex).
+            a GPT model id (Codex). An ``openrouter/<vendor>/<model>`` id runs through
+            OpenRouter on either harness.
         harness: The coding-agent loop to run: ``"claude-code"`` (default) or ``"codex"``.
             The spec's harness-shaped fields (``permission_mode``, tool lists, skills)
             are translated by each binding; see the harness module docstrings for the
@@ -296,6 +297,16 @@ class AgentSpec:
             nearest own: Codex maps ``max → xhigh`` (with a ``spec_warning`` status);
             Claude Code maps ``minimal``/``none`` ``→ low``. Unknown strings pass
             through to the SDK untouched.
+        openrouter_provider: OpenRouter provider slug to use for every model response, such
+            as ``"moonshotai"``. The toolkit sends it in OpenRouter's request body and
+            disables provider fallbacks. Leave it as ``None`` to use OpenRouter's normal
+            routing. This setting requires an ``openrouter/`` model.
+        openrouter_routing: OpenRouter's ``provider`` object, sent verbatim in the request
+            body — the full routing surface (``order``, ``only``, ``ignore``,
+            ``allow_fallbacks``, ``sort``, ``max_price``, ...) instead of the single strict
+            pin ``openrouter_provider`` expresses. Use it to allow several providers, to
+            keep fallbacks on, or to exclude providers. Requires an ``openrouter/`` model,
+            and cannot be combined with ``openrouter_provider``.
         background_task_timeout: Seconds to keep a turn open waiting for the agent's
             still-running background tasks after the model ends its turn (event-driven
             waiting: the harness holds the stream open and the CLI re-invokes the model
@@ -348,6 +359,8 @@ class AgentSpec:
     env: Mapping[str, str] | None = field(default=None)
     packages: tuple[str, ...] = ()
     harnesses: tuple[str, ...] = ()
+    openrouter_provider: str | None = None
+    openrouter_routing: Mapping[str, Any] | None = None
 
     def __post_init__(self) -> None:
         # Coerce list args to frozen-hashable tuples without breaking frozen-ness.
@@ -372,6 +385,30 @@ class AgentSpec:
             object.__setattr__(self, "allowed_tools", tuple(self.allowed_tools))
         if self.disallowed_tools is not None:
             object.__setattr__(self, "disallowed_tools", tuple(self.disallowed_tools))
+        if self.openrouter_provider is not None:
+            if not self.openrouter_provider.strip():
+                raise ValueError("openrouter_provider must be a non-empty provider slug")
+            if not self.model.startswith("openrouter/"):
+                raise ValueError("openrouter_provider requires an openrouter/ model")
+        if self.openrouter_routing is not None:
+            if self.openrouter_provider is not None:
+                # Both would write the same "provider" object, so one would win silently.
+                raise ValueError(
+                    "openrouter_provider and openrouter_routing cannot be combined; "
+                    "openrouter_routing already expresses a single-provider pin as "
+                    '{"only": [slug], "allow_fallbacks": False}'
+                )
+            if not isinstance(self.openrouter_routing, Mapping):
+                raise ValueError(
+                    "openrouter_routing must be a mapping — OpenRouter's provider object"
+                )
+            if not self.openrouter_routing:
+                raise ValueError("openrouter_routing must be a non-empty provider object")
+            if not all(isinstance(key, str) for key in self.openrouter_routing):
+                raise ValueError("openrouter_routing keys must be strings")
+            if not self.model.startswith("openrouter/"):
+                raise ValueError("openrouter_routing requires an openrouter/ model")
+            object.__setattr__(self, "openrouter_routing", dict(self.openrouter_routing))
 
     @property
     def baked_harnesses(self) -> tuple[str, ...]:
@@ -416,6 +453,10 @@ class AgentSpec:
             d["output_schema"] = _output_schema_to_dict(self.output_schema)
         if self.harnesses:
             d["harnesses"] = list(self.harnesses)
+        if self.openrouter_provider is not None:
+            d["openrouter_provider"] = self.openrouter_provider
+        if self.openrouter_routing is not None:
+            d["openrouter_routing"] = dict(self.openrouter_routing)
         return d
 
     @classmethod
@@ -456,6 +497,10 @@ class AgentSpec:
             env=dict(d["env"]) if d.get("env") is not None else None,
             packages=tuple(d.get("packages", ())),
             harnesses=tuple(d.get("harnesses", ())),
+            openrouter_provider=d.get("openrouter_provider"),
+            openrouter_routing=(
+                dict(d["openrouter_routing"]) if d.get("openrouter_routing") is not None else None
+            ),
         )
 
     def to_yaml(self) -> str:

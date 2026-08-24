@@ -12,6 +12,8 @@ Spec translation (parity notes):
                          ``OPENAI_API_KEY`` secret (or ambient env), routed to ``codex
                          login`` inside the per-job ``CODEX_HOME`` — the OpenAI API is
                          called directly (there is no Vertex path for OpenAI models).
+                         An ``openrouter/<vendor>/<model>`` id instead routes the turn
+                         through OpenRouter (see "OpenRouter models" below).
 * ``permission_mode``  → sandbox + approval policy (see ``_PERMISSION_MAP``).
 * ``system_prompt``    → plain ``str`` replaces Codex's base instructions;
                          ``SystemPrompt.append`` becomes developer instructions.
@@ -22,10 +24,9 @@ Spec translation (parity notes):
 * ``max_turns``        → enforced by the harness: each ``thread/tokenUsage/updated``
                          notification is one model call; the turn is interrupted at the
                          cap (Codex has no native turn cap).
-* ``max_budget_usd``   → enforced by the harness from token usage × the model's price
-                         (Codex reports no USD). Prices resolve via :mod:`pricing` —
-                         LiteLLM's live dataset first, a baked fallback offline; a model
-                         unknown to both runs uncapped with a status warning.
+* ``max_budget_usd``   → enforced by the harness. OpenRouter supplies its exact charge;
+                         OpenAI models use token usage × :mod:`pricing`. A model with no
+                         exact charge or known price runs uncapped with a status warning.
 * ``output_schema``    → per-turn ``output_schema`` (the final message is the JSON).
 * ``reasoning_effort`` → per-turn ``effort`` (thread-sticky server-side, and re-applied
                          on every turn, so resume keeps it). Codex has no ``max`` level;
@@ -41,6 +42,53 @@ Spec translation (parity notes):
                          itself is persisted by copying the thread's rollout file to the
                          BlobStore and restoring it into ``CODEX_HOME`` before
                          ``thread_resume`` (Codex's own session store is a local file).
+
+OpenRouter models
+-----------------
+
+A model id prefixed ``openrouter/`` (e.g. ``openrouter/moonshotai/kimi-k3``) runs the
+turn on OpenRouter instead of the OpenAI API, so non-OpenAI models — Kimi, GLM,
+DeepSeek — reach the same Engine/Session/Run surface. The prefix is the whole API: no
+new spec field, so the model stays a per-turn knob (``TurnConfig(model=...)``) and one
+session can move between OpenAI and OpenRouter models.
+
+Codex reaches a non-OpenAI provider through ``model_providers.*`` config overrides, the
+same ``--config`` channel the MCP servers use. What the binding emits, and why each part
+is needed (all four settings were established live against OpenRouter, 2026-08-20):
+
+* ``base_url``/``env_key`` — the key is referenced by env var NAME; its value goes into
+  the app-server's process env, never onto the argv-visible ``--config`` flags. Auth is
+  the per-invocation ``OPENROUTER_API_KEY`` secret; ``codex login`` is NOT used (it
+  writes OpenAI credentials, which this path never consults).
+* ``wire_api="responses"`` — Codex 0.147 dropped ``"chat"`` ("no longer supported"), and
+  OpenRouter serves a Responses endpoint, so this is the only wire left.
+* ``web_search="disabled"`` — Codex otherwise sends its server-side web-search tool as
+  ``{"type": "web_search", "external_web_access": true}``, and OpenRouter rejects that
+  extra field with ``400 Server tool request failed``, which kills the turn before the
+  first token. Web search is off for OpenRouter turns; agents get their normal shell and
+  file tools.
+* a non-``none`` reasoning effort — OpenRouter's Responses endpoint answers
+  ``400 Reasoning is mandatory for this endpoint and cannot be disabled``, and Codex
+  sends ``effort: "none"`` for a model whose metadata it does not know. When the spec
+  leaves ``reasoning_effort`` unset the binding sends ``low`` rather than letting the
+  turn fail.
+
+``output_schema`` needs the same treatment: OpenRouter accepts Codex's json_schema
+response format but does not enforce it, so the schema is ALSO stated in the developer
+instructions (:func:`_shared.openrouter_schema_steer`). Without that, a model that
+ignores the unenforced format returns prose and ``structured_output`` comes back ``None``.
+
+Codex ships no catalog entry for these models, so it falls back to generic metadata and
+warns that this "can degrade performance". :data:`pricing.OPENROUTER_CONTEXT_WINDOWS`
+carries the context window for the models we vouch for, passed as ``model_context_window``
+so the agent is not compacted at a guessed limit. Any other ``openrouter/*`` id still
+runs with Codex's generic context metadata. OpenRouter's response metadata supplies its
+exact cost and budget accounting.
+
+Every OpenRouter turn goes through the toolkit's own proxy (:mod:`._openrouter_proxy`),
+started and closed by :func:`_shared.run_with_openrouter_proxy`, which the Claude binding
+uses too. Only how Codex is pointed at it — ``model_providers.*`` overrides rather than
+environment variables — is this binding's own.
 """
 
 from __future__ import annotations
@@ -58,7 +106,14 @@ from . import pricing
 from ._shared import (
     GITHUB_MCP_TOKEN_KEYS,
     INTERACTIVE_SUFFIX,
+    OPENROUTER_KEY_ENV,
+    OPENROUTER_PREFIX,
+    drain_proxy,
     finalize_checkpoint,
+    missing_openrouter_key_error,
+    openrouter_cost_unknown,
+    openrouter_schema_steer,
+    run_with_openrouter_proxy,
     runtime_env,
 )
 
@@ -83,6 +138,18 @@ _PERMISSION_MAP = {
 _GITHUB_MCP_TOKEN_ENV = "RATK_GITHUB_MCP_TOKEN"
 _GITHUB_MCP_URL = "https://api.githubcopilot.com/mcp/"
 
+# OpenRouter routing (see "OpenRouter models" in the module docstring). The `openrouter/`
+# prefix is stripped before the id reaches Codex: OpenRouter's own ids are
+# `<vendor>/<model>`. The prefix, the key name and the proxy's own lifecycle are shared
+# with the Claude binding (see :mod:`._shared`).
+_OPENROUTER_PROVIDER = "openrouter"
+_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+_OPENROUTER_PROXY_KEY_ENV = "RATK_OPENROUTER_PROXY_TOKEN"
+_OPENROUTER_WIRE_API = "responses"
+# OpenRouter's Responses endpoint refuses a turn with reasoning disabled, and Codex sends
+# effort "none" for a model it has no metadata for.
+_OPENROUTER_MIN_EFFORT = "low"
+
 # Tool-result content kept in events is truncated: command output can be megabytes, and
 # events ride Cloud Logging on gemini (per-entry size limits).
 _CONTENT_CAP = 4000
@@ -101,6 +168,9 @@ class _CodexOptions:
     api_key: str | None
     codex_home: Path
     warnings: list[str] = field(default_factory=list)
+    # True when the model routes through OpenRouter: auth is the provider's env_key, so
+    # `run` must not call `codex login` (that path stores OpenAI credentials).
+    openrouter: bool = False
 
 
 class _RunAccounting:
@@ -134,9 +204,7 @@ class _RunAccounting:
     def cost_usd(self) -> float | None:
         if self.price is None:
             return None
-        return self.price.cost_usd(
-            self.input_tokens, self.cached_input_tokens, self.output_tokens
-        )
+        return self.price.cost_usd(self.input_tokens, self.cached_input_tokens, self.output_tokens)
 
     def usage(self) -> dict[str, int]:
         return {
@@ -293,8 +361,12 @@ class CodexEventTranslator:
                 yield AgentEvent(
                     kind="tool_result",
                     summary="WebSearch",
-                    raw={"tool": "webSearch", "id": item.id, "is_error": False,
-                         "content": item.query},
+                    raw={
+                        "tool": "webSearch",
+                        "id": item.id,
+                        "is_error": False,
+                        "content": item.query,
+                    },
                 )
         elif kind == "userMessage":
             pass  # the echo of our own prompt
@@ -333,9 +405,7 @@ class CodexHarness:
             args["developer_instructions"] = suffix
         return args
 
-    def _mcp_overrides(
-        self, spec: AgentSpec, ctx: RunContext
-    ) -> tuple[list[str], dict[str, str]]:
+    def _mcp_overrides(self, spec: AgentSpec, ctx: RunContext) -> tuple[list[str], dict[str, str]]:
         """Translate ``spec.mcp_servers`` into ``--config`` overrides (+ env for tokens).
 
         Codex has no programmatic MCP registration; servers are config entries. Values
@@ -373,7 +443,67 @@ class CodexHarness:
                     overrides.append(f"mcp_servers.{name}.args=[{arr}]")
         return overrides, env
 
-    def build_options(self, spec: AgentSpec, ctx: RunContext) -> _CodexOptions:
+    def _openrouter_overrides(
+        self,
+        model: str,
+        base_url: str | None = None,
+        key_env: str = OPENROUTER_KEY_ENV,
+    ) -> list[str]:
+        """``--config`` overrides that point Codex at OpenRouter for ``model``.
+
+        Values are literals here; the API key is referenced by env var NAME only (its
+        value goes into the process env), as with the github MCP token.
+        """
+        overrides = [
+            f"model_provider={json.dumps(_OPENROUTER_PROVIDER)}",
+            f'model_providers.{_OPENROUTER_PROVIDER}.name="OpenRouter"',
+            f"model_providers.{_OPENROUTER_PROVIDER}.base_url="
+            f"{json.dumps(base_url or _OPENROUTER_BASE_URL)}",
+            f"model_providers.{_OPENROUTER_PROVIDER}.env_key={json.dumps(key_env)}",
+            f"model_providers.{_OPENROUTER_PROVIDER}.wire_api={json.dumps(_OPENROUTER_WIRE_API)}",
+            # Codex's server-side web-search tool carries a field OpenRouter rejects
+            # outright (400 before the first token), so it is off for these turns.
+            'web_search="disabled"',
+        ]
+        window = pricing.OPENROUTER_CONTEXT_WINDOWS.get(model)
+        if window is not None:
+            overrides.append(f"model_context_window={window}")
+        return overrides
+
+    async def _resolved_routing(self, thread: Any) -> dict[str, Any]:
+        """Report the provider that the Codex app-server bound to this thread.
+
+        ``thread.read()`` confirms that the provider override took effect. OpenRouter's
+        selected upstream is reported separately by ``openrouter_request`` events.
+
+        What comes back today is ``model_provider``; the SDK's ``Thread`` carries no
+        settings block, so ``resolved_model`` is normally absent (the read is attempted
+        anyway, so it starts working if the SDK gains it). Best-effort throughout:
+        attribution must never fail a turn.
+        """
+        try:
+            resp = await thread.read()
+            thread_obj = getattr(resp, "thread", None)
+            provider = getattr(thread_obj, "model_provider", None)
+            out: dict[str, Any] = {}
+            if provider is not None:
+                out["resolved_model_provider"] = provider
+            settings = getattr(thread_obj, "settings", None)
+            model = getattr(settings, "model", None)
+            if model is not None:
+                out["resolved_model"] = model
+            return out
+        except Exception:  # noqa: BLE001 — reporting only; must not fail the turn
+            return {}
+
+    def build_options(
+        self,
+        spec: AgentSpec,
+        ctx: RunContext,
+        *,
+        openrouter_base_url: str | None = None,
+        openrouter_client_token: str | None = None,
+    ) -> _CodexOptions:
         """Build ``openai_codex`` config + thread/turn args from ``spec`` + runtime ``ctx``."""
         from openai_codex import ApprovalMode, CodexConfig, Sandbox
 
@@ -412,23 +542,56 @@ class CodexHarness:
             )
 
         mcp_overrides, mcp_env = self._mcp_overrides(spec, ctx)
+        model = spec.model or ""
+        openrouter = model.startswith(OPENROUTER_PREFIX)
         # The agent's shell env: Codex filters *KEY*/*SECRET*/*TOKEN*-named vars from the
         # shell by default — the opposite of the toolkit's contract (the caller's own
-        # secrets ARE for the agent). Lift the default excludes, but keep the two the
+        # secrets ARE for the agent). Lift the default excludes, but keep the ones the
         # harness consumes itself out of the shell explicitly.
         overrides = [
+            # A login shell can source ~/.bashrc and restore credentials removed below.
+            # The toolkit supplies PATH and caller-owned env explicitly.
+            "allow_login_shell=false",
             "shell_environment_policy.ignore_default_excludes=true",
-            f'shell_environment_policy.exclude=["OPENAI_API_KEY", "{_GITHUB_MCP_TOKEN_ENV}"]',
+            "shell_environment_policy.exclude=["
+            f'"OPENAI_API_KEY", "{OPENROUTER_KEY_ENV}", '
+            f'"{_OPENROUTER_PROXY_KEY_ENV}", "{_GITHUB_MCP_TOKEN_ENV}"]',
+            *(
+                self._openrouter_overrides(
+                    model,
+                    openrouter_base_url,
+                    _OPENROUTER_PROXY_KEY_ENV if openrouter_client_token else OPENROUTER_KEY_ENV,
+                )
+                if openrouter
+                else []
+            ),
             *mcp_overrides,
         ]
         env = runtime_env(spec, ctx)
+        # The app-server inherits this process's environment before applying ``env``.
+        # Clear unrelated ambient model credentials unless the caller explicitly included
+        # them in the spec/runtime environment for the agent to use.
+        for name in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"):
+            if name not in env:
+                env[name] = ""
         env["CODEX_HOME"] = str(codex_home)
         env.update(mcp_env)
 
-        api_key = ctx.secrets.get("OPENAI_API_KEY") or os.environ.get("OPENAI_API_KEY")
+        key_env = OPENROUTER_KEY_ENV if openrouter else "OPENAI_API_KEY"
+        api_key = ctx.secrets.get(key_env) or os.environ.get(key_env)
+        if openrouter and api_key:
+            # The provider reads its key from the app-server's env (env_key), so unlike
+            # the OpenAI path there is no login step — the value must be in the env.
+            if openrouter_client_token:
+                # Keep the real provider credential out of the CLI process. The random
+                # token only authenticates this run to its localhost proxy.
+                env[OPENROUTER_KEY_ENV] = ""
+                env[_OPENROUTER_PROXY_KEY_ENV] = openrouter_client_token
+            else:
+                env[OPENROUTER_KEY_ENV] = api_key
 
         thread_args: dict[str, Any] = {
-            "model": spec.model or None,
+            "model": model[len(OPENROUTER_PREFIX) :] if openrouter else (model or None),
             "cwd": str(ctx.workspace),
             "sandbox": Sandbox[sandbox_name],
             "approval_mode": ApprovalMode[approval_name],
@@ -440,16 +603,38 @@ class CodexHarness:
             if effort == "max":  # Claude-only level; xhigh is Codex's ceiling
                 warnings.append("reasoning_effort 'max' has no codex level; using 'xhigh'")
                 effort = "xhigh"
+            if openrouter and effort == "none":
+                # OpenRouter's Responses endpoint fails the turn outright with reasoning
+                # disabled, so 'none' is not an option we can honor here.
+                warnings.append(
+                    "reasoning_effort 'none' is rejected by OpenRouter (reasoning is "
+                    f"mandatory on its Responses endpoint); using {_OPENROUTER_MIN_EFFORT!r}"
+                )
+                effort = _OPENROUTER_MIN_EFFORT
             # A plain str, not openai_codex.types.ReasoningEffort: the enum is a str
             # subclass whose validation accepts arbitrary strings, so unknown levels
             # pass through to the SDK/CLI to reject in one place.
             run_args["effort"] = effort
+        elif openrouter:
+            # Codex sends effort "none" for a model it has no metadata for, which
+            # OpenRouter refuses — send its lowest real level instead of failing.
+            run_args["effort"] = _OPENROUTER_MIN_EFFORT
         if spec.output_schema is not None:
             from ..spec import _output_schema_to_dict
 
             schema = _output_schema_to_dict(spec.output_schema)
             if isinstance(schema, dict):
                 run_args["output_schema"] = schema
+                # Sent as well as asked for: if OpenRouter starts enforcing the format,
+                # the request already carries it.
+                steer = openrouter_schema_steer(spec)
+                if steer:
+                    existing = thread_args.get("developer_instructions", "")
+                    # The steer carries its own leading blank line for appending; with
+                    # nothing to append to it would just indent the instructions.
+                    thread_args["developer_instructions"] = (
+                        existing + steer if existing else steer.lstrip("\n")
+                    )
 
         return _CodexOptions(
             codex_config=CodexConfig(env=env, config_overrides=tuple(overrides)),
@@ -458,6 +643,7 @@ class CodexHarness:
             api_key=api_key,
             codex_home=codex_home,
             warnings=warnings,
+            openrouter=openrouter,
         )
 
     # -- conversation persistence (checkpoint/resume) ---------------------------
@@ -484,9 +670,7 @@ class CodexHarness:
         ctx.blobs.put_bytes(
             f"{_THREADS_PREFIX}/{ctx.session_id}/meta.json", json.dumps(meta).encode()
         )
-        ctx.blobs.put_bytes(
-            f"{_THREADS_PREFIX}/{ctx.session_id}/rollout.jsonl", path.read_bytes()
-        )
+        ctx.blobs.put_bytes(f"{_THREADS_PREFIX}/{ctx.session_id}/rollout.jsonl", path.read_bytes())
 
     def _restore_thread(self, ctx: RunContext, codex_home: Path) -> str | None:
         """Materialize a persisted conversation into ``CODEX_HOME``; return the thread id."""
@@ -502,8 +686,9 @@ class CodexHarness:
         dest.write_bytes(body)
         return meta["thread_id"]
 
-    def _finalize(self, spec: AgentSpec, ctx: RunContext, codex_home: Path,
-                  thread_id: str | None) -> AgentEvent | None:
+    def _finalize(
+        self, spec: AgentSpec, ctx: RunContext, codex_home: Path, thread_id: str | None
+    ) -> AgentEvent | None:
         """Inline checkpoint: workspace snapshot (shared) + the Codex conversation."""
         if thread_id and spec.checkpoint and ctx.blobs is not None:
             try:
@@ -523,6 +708,7 @@ class CodexHarness:
         ctx: RunContext,
         thread_id: str,
         limit: str | None,
+        exact_cost_usd: float | None = None,
     ) -> AgentEvent:
         status = getattr(turn.status, "value", turn.status)
         if limit == "max_turns":
@@ -543,7 +729,7 @@ class CodexHarness:
         return AgentEvent(
             kind="result",
             summary=text,
-            cost_usd=acct.cost_usd,
+            cost_usd=exact_cost_usd if exact_cost_usd is not None else acct.cost_usd,
             usage=acct.usage(),
             raw={
                 "subtype": subtype,
@@ -553,11 +739,22 @@ class CodexHarness:
                 "session_id": ctx.session_id,
                 "thread_id": thread_id,
                 "model": acct.model,
-                "price_source": acct.price.source if acct.price else None,
+                "price_source": "openrouter"
+                if exact_cost_usd is not None
+                else (acct.price.source if acct.price else None),
             },
         )
 
     async def run(self, spec: AgentSpec, ctx: RunContext) -> AsyncIterator[AgentEvent]:
+        """Run Codex, with a local metadata proxy for OpenRouter turns."""
+        async for event in run_with_openrouter_proxy(
+            spec, ctx, lambda proxy: self._run(spec, ctx, proxy)
+        ):
+            yield event
+
+    async def _run(
+        self, spec: AgentSpec, ctx: RunContext, proxy: Any | None
+    ) -> AsyncIterator[AgentEvent]:
         """Drive one turn over an ``AsyncCodex`` app-server, yielding ``AgentEvent``s.
 
         The stream is ``TurnHandle.stream()`` (terminates at ``turn/completed``); cost
@@ -568,11 +765,22 @@ class CodexHarness:
         """
         from openai_codex import AsyncCodex
 
-        options = self.build_options(spec, ctx)
+        options = self.build_options(
+            spec,
+            ctx,
+            openrouter_base_url=(f"{proxy.base_url}/api/v1" if proxy is not None else None),
+            openrouter_client_token=(proxy.client_token if proxy is not None else None),
+        )
         translator = CodexEventTranslator()
         # Price via the LiteLLM live dataset (baked fallback) — one fetch per process,
-        # off the loop; needed up front because budget enforcement runs mid-stream.
-        price = await asyncio.to_thread(pricing.model_price, spec.model)
+        # off the loop; needed up front because budget enforcement runs mid-stream. An
+        # OpenRouter turn is not priced here: it reports what OpenRouter charged, or
+        # nothing at all (see :mod:`pricing`).
+        price = (
+            None
+            if options.openrouter
+            else await asyncio.to_thread(pricing.model_price, spec.model)
+        )
         acct = _RunAccounting(spec.model, price)
         limit: str | None = None  # which cap tripped, if any
         thread_id = ""
@@ -580,7 +788,7 @@ class CodexHarness:
         async with AsyncCodex(config=options.codex_config) as codex:
             for w in options.warnings:
                 yield AgentEvent(kind="status", summary=w, raw={"event": "spec_warning"})
-            if price is None:
+            if price is None and proxy is None:
                 yield AgentEvent(
                     kind="status",
                     summary=(
@@ -590,7 +798,13 @@ class CodexHarness:
                     ),
                     raw={"event": "cost_unknown", "model": spec.model},
                 )
-            if options.api_key and not (options.codex_home / "auth.json").exists():
+            if options.openrouter:
+                # OpenRouter auth is the provider's env_key (already in the app-server's
+                # env), so there is nothing to log in with — `codex login` would store
+                # OpenAI credentials this path never reads.
+                if not options.api_key:
+                    raise missing_openrouter_key_error("codex")
+            elif options.api_key and not (options.codex_home / "auth.json").exists():
                 await codex.login_api_key(options.api_key)
             elif not options.api_key and not (options.codex_home / "auth.json").exists():
                 raise RuntimeError(
@@ -598,31 +812,58 @@ class CodexHarness:
                     "per-invocation secrets (or set it in the environment)"
                 )
 
-            restored_tid = self._restore_thread(ctx, options.codex_home) if (
-                ctx.resume_sid and ctx.blobs is not None
-            ) else None
+            restored_tid = (
+                self._restore_thread(ctx, options.codex_home)
+                if (ctx.resume_sid and ctx.blobs is not None)
+                else None
+            )
             if restored_tid:
                 resume_args = {
-                    k: v for k, v in options.thread_args.items()
+                    k: v
+                    for k, v in options.thread_args.items()
                     if k != "base_instructions"  # thread_resume keeps the original prompt shape
                 }
                 thread = await codex.thread_resume(restored_tid, **resume_args)
                 yield AgentEvent(
                     kind="status",
                     summary=f"codex thread resumed ({restored_tid})",
-                    raw={"event": "thread_resumed", "thread_id": restored_tid,
-                         "session_id": ctx.session_id},
+                    raw={
+                        "event": "thread_resumed",
+                        "thread_id": restored_tid,
+                        "session_id": ctx.session_id,
+                    },
                 )
             else:
                 thread = await codex.thread_start(**options.thread_args)
             thread_id = thread.id
 
+            routing = await self._resolved_routing(thread)
+            if routing:
+                asked = _OPENROUTER_PROVIDER if options.openrouter else "openai"
+                got = routing.get("resolved_model_provider")
+                yield AgentEvent(
+                    kind="status",
+                    summary=(
+                        f"model routing: provider={got or 'unreported'} "
+                        f"model={routing.get('resolved_model') or options.thread_args.get('model')}"
+                    ),
+                    raw={
+                        "event": "model_routing",
+                        "asked_provider": asked,
+                        **routing,
+                        "matches_request": got == asked if got is not None else None,
+                    },
+                )
+
             handle = await thread.turn(ctx.prompt, **options.run_args)
             async for notification in handle.stream():
+                if proxy is not None:
+                    for event in proxy.drain_events():
+                        yield event
                 if notification.method == "thread/tokenUsage/updated":
                     acct.observe(notification.payload.token_usage.last)
                     if limit is None:
-                        cost = acct.cost_usd
+                        cost = proxy.exact_cost_usd if proxy is not None else acct.cost_usd
                         if acct.model_calls >= spec.max_turns:
                             limit = "max_turns"
                         elif cost is not None and cost >= spec.max_budget_usd:
@@ -643,6 +884,21 @@ class CodexHarness:
                                 pass
                     continue
                 if notification.method == "turn/completed":
+                    async for event in drain_proxy(proxy):
+                        yield event
+                    exact_cost = proxy.exact_cost_usd if proxy is not None else None
+                    if (
+                        limit is None
+                        and exact_cost is not None
+                        and exact_cost >= spec.max_budget_usd
+                    ):
+                        limit = "budget"
+                    if proxy is not None and price is None and exact_cost is None:
+                        # A model with no price and no proxy already reported this before
+                        # the turn started; only the OpenRouter case is news here.
+                        yield openrouter_cost_unknown(spec.model)
+                    if proxy is not None and proxy.budget_blocked:
+                        limit = "budget"
                     fin = self._finalize(spec, ctx, options.codex_home, thread_id)
                     yield self._result_event(
                         turn=notification.payload.turn,
@@ -651,6 +907,7 @@ class CodexHarness:
                         ctx=ctx,
                         thread_id=thread_id,
                         limit=limit,
+                        exact_cost_usd=exact_cost,
                     )
                     if fin is not None:
                         yield fin

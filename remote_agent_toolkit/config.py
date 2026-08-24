@@ -105,6 +105,8 @@ _KNOB_FIELDS = (
     "allowed_tools",
     "disallowed_tools",
     "output_schema",
+    "openrouter_provider",
+    "openrouter_routing",
 )
 
 # Session-scoped fields: the conversation's world (created on turn 1, snapshot-restored
@@ -213,7 +215,7 @@ class SessionConfig(_ConfigBase):
             the deployed ``spec.env`` (deploy-only). Non-secret only, like ``spec.env``.
         model / reasoning_effort / max_turns / max_budget_usd / max_buffer_size /
             background_task_timeout / permission_mode / allowed_tools / disallowed_tools /
-            output_schema:
+            output_schema / openrouter_provider / openrouter_routing:
             session-wide defaults for the per-turn knobs (see :class:`TurnConfig`).
             ``output_schema`` also drives client-side structured parsing.
     """
@@ -239,6 +241,8 @@ class SessionConfig(_ConfigBase):
     allowed_tools: Sequence[str] | None | Any = INHERIT
     disallowed_tools: Sequence[str] | None | Any = INHERIT
     output_schema: Any = INHERIT
+    openrouter_provider: str | None | Any = INHERIT
+    openrouter_routing: Mapping[str, Any] | None | Any = INHERIT
 
     def __post_init__(self) -> None:
         for name in _SEQUENCE_FIELDS:
@@ -271,6 +275,8 @@ class TurnConfig(_ConfigBase):
     allowed_tools: Sequence[str] | None | Any = INHERIT
     disallowed_tools: Sequence[str] | None | Any = INHERIT
     output_schema: Any = INHERIT
+    openrouter_provider: str | None | Any = INHERIT
+    openrouter_routing: Mapping[str, Any] | None | Any = INHERIT
 
     def __post_init__(self) -> None:
         for name in ("allowed_tools", "disallowed_tools"):

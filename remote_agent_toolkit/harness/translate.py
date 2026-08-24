@@ -27,14 +27,22 @@ Mapping (SDK message type → ``AgentEvent.kind``):
 
 from __future__ import annotations
 
+import json
 from typing import Any, Iterator
 
 from ..events import AgentEvent
 
 # Tool-input keys worth surfacing in a one-line ``tool_use`` summary, in priority order.
 _SUMMARY_KEYS = (
-    "command", "file_path", "skill", "pattern", "url",
-    "description", "subagent_type", "prompt", "query",
+    "command",
+    "file_path",
+    "skill",
+    "pattern",
+    "url",
+    "description",
+    "subagent_type",
+    "prompt",
+    "query",
 )
 
 
@@ -165,7 +173,12 @@ class EventTranslator:
                 )
         elif isinstance(message, ResultMessage):
             usage = message.usage or {}
-            if message.is_error:
+            if message.structured_output is not None:
+                try:
+                    text = json.dumps(message.structured_output, separators=(",", ":"))
+                except (TypeError, ValueError):
+                    text = str(message.structured_output)
+            elif message.is_error:
                 text = message.result or "(run errored)"
             else:
                 text = message.result or "(no final text)"
@@ -180,6 +193,12 @@ class EventTranslator:
                     "num_turns": message.num_turns,
                     "duration_ms": message.duration_ms,
                     "session_id": message.session_id,
+                    "model_usage": message.model_usage,
+                    **(
+                        {"structured_output": message.structured_output}
+                        if message.structured_output is not None
+                        else {}
+                    ),
                 },
             )
-        # Other SDK message types (StreamEvent, RateLimitEvent) are intentionally dropped.
+        # Other SDK message types, including RateLimitEvent, are intentionally dropped.

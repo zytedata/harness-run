@@ -117,7 +117,8 @@ async def _drive(label: str, run):
     text = " ".join((r.text or "").split())
     print(
         f"[{label}] RESULT after {time.time() - t0:.0f}s: text={text[:120]!r} "
-        f"turns={r.num_turns} cost=${r.cost_usd or 0:.4f} error={r.is_error} "
+        f"turns={r.num_turns} cost={'unknown' if r.cost_usd is None else f'${r.cost_usd:.4f}'} "
+        f"error={r.is_error} "
         f"structured={r.structured_output!r}",
         flush=True,
     )

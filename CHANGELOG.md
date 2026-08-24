@@ -19,6 +19,72 @@ Release checklist: update this file (move the `Unreleased` section into a new
 version heading with the date), bump `version` in `pyproject.toml`, commit,
 tag `vX.Y.Z`, push the commit and the tag.
 
+## Unreleased
+
+### Added
+
+- Both harnesses can run `openrouter/*` models with an `OPENROUTER_API_KEY`
+  per-invocation secret. Kimi K3, GLM-5.3, and DeepSeek v4 Flash/Pro have known
+  context sizes. Each OpenRouter response reports its selected upstream and exact
+  charge as an `openrouter_request` event. Results and budget checks use that charge,
+  and an OpenRouter model is never priced from the toolkit's own table: a turn
+  OpenRouter reported no charge for gets `cost_usd=None` and a `cost_unknown` event
+  (why an estimate cannot replace it: the `harness/pricing.py` docstring).
+  `openrouter_provider` selects one OpenRouter provider per agent, session, or turn and
+  disables fallbacks. Paid local and Gemini Agent Runtime checks cover both
+  harnesses. ([#34])
+- `openrouter_routing` carries OpenRouter's whole `provider` object instead of that one
+  pinned slug — several providers, a deny list, fallbacks on, a price or throughput sort —
+  and sends it verbatim. Same three scopes, and the two fields cannot be combined.
+  `provider_matches_request` is only reported when the object names a closed set of
+  providers (`only`, or `order` with `allow_fallbacks` false); an open set reports `null`
+  instead of a verdict the request cannot support. Every `openrouter_request` event carries
+  the object as `requested_routing`, including the one a pinned slug resolves to — the slug is
+  turned into that object before the proxy starts. Because a config field is new, a client staging it
+  against an older engine fails closed, as the same-revision rule requires. ([#34])
+- Codex emits a `model_routing` status event from the app-server's thread record. ([#34])
+- Every OpenRouter model call, on both harnesses, passes through a per-run localhost
+  proxy, because the CLIs can neither send OpenRouter's provider field nor report what
+  OpenRouter charged. It also enforces the selected model and the budget, and keeps the
+  provider key in the parent process. See DESIGN.md.
+  The proxy's lifecycle, the key lookup, the schema steer, the metadata drain and the
+  `cost_unknown` event live once in `harness/_shared.py`; each binding keeps only how its
+  own CLI is pointed at the proxy (environment variables for Claude Code, `--config`
+  overrides for Codex). ([#34])
+
+### Backwards-incompatible
+
+- `RunResult.cost_usd` is now `float | None`, and defaults to `None`. It used to be
+  `float` defaulting to `0.0`, so a run whose spend the toolkit could not determine
+  reached the caller as `0.0` and read as a free run. The terminal event already
+  carried `None` for that case, alongside a `cost_unknown` status event; the result
+  object now carries it too. A run that died before reporting anything also reports
+  `None` rather than `0.0`. **Update note:** code that does arithmetic or formatting
+  on `result.cost_usd` needs a `None` check, e.g. `result.cost_usd or 0.0`. ([#34])
+
+### Changed
+
+- The harness SDKs are now pinned exactly: `claude-agent-sdk==0.2.130` and
+  `openai-codex==0.147.0`, matching what a deployed engine installs. Both were
+  validated together on the local and Agent Runtime paths, and `openai-codex`
+  ships the Codex CLI itself, whose behavior moves between versions (0.147
+  dropped the `chat` wire API the OpenRouter route used to have a choice
+  about). Installing this library therefore fixes those two versions ([#34]).
+
+### Fixed
+
+- Claude Code turns that finish without a final assistant message now return
+  `error_no_final_text` for OpenRouter models. This has occurred intermittently with
+  DeepSeek v4 and previously looked like a successful run with placeholder text. ([#34])
+- Claude Code now passes `output_schema` to the Agent SDK as its native JSON-schema
+  output format and preserves `ResultMessage.structured_output` in the terminal event.
+  Earlier versions only parsed the final text on the client, so the model received no
+  schema constraint and SDK-provided structured data was discarded. OpenRouter turns
+  also receive the schema in their prompt because its selected model may be responsible
+  for following it. ([#34])
+
+[#34]: https://github.com/zytedata/remote-agent-toolkit/pull/34
+
 ## 0.2.0 — 2026-08-24
 
 ### Added

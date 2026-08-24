@@ -97,7 +97,78 @@ def test_max_buffer_size_is_tunable_per_session_and_per_turn():
         apply_turn_config(spec, TurnConfig(max_buffer_size=0))
 
 
+def test_openrouter_provider_can_be_set_and_cleared_per_turn():
+    spec = _spec(model="openrouter/moonshotai/kimi-k3")
+    session_eff = apply_session_config(
+        spec, SessionConfig(openrouter_provider="moonshotai")
+    )
+    assert session_eff.openrouter_provider == "moonshotai"
+
+    turn_eff = apply_turn_config(session_eff, TurnConfig(openrouter_provider="fireworks"))
+    assert turn_eff.openrouter_provider == "fireworks"
+    assert TurnConfig.from_dict(TurnConfig(openrouter_provider="fireworks").to_dict()) == (
+        TurnConfig(openrouter_provider="fireworks")
+    )
+
+    unpinned = apply_turn_config(session_eff, TurnConfig(openrouter_provider=None))
+    assert unpinned.openrouter_provider is None
+    openai = apply_turn_config(
+        session_eff,
+        TurnConfig(model="gpt-5.6-luna", openrouter_provider=None),
+    )
+    assert openai.model == "gpt-5.6-luna"
+
+    with pytest.raises(ValueError, match="requires an openrouter/ model"):
+        apply_turn_config(session_eff, TurnConfig(model="gpt-5.6-luna"))
+
+
+def test_openrouter_routing_can_be_set_and_cleared_per_turn():
+    spec = _spec(model="openrouter/moonshotai/kimi-k3")
+    routing = {"order": ["moonshotai", "fireworks"], "allow_fallbacks": True}
+    session_eff = apply_session_config(spec, SessionConfig(openrouter_routing=routing))
+    assert session_eff.openrouter_routing == routing
+
+    turn = TurnConfig(openrouter_routing={"only": ["moonshotai"]})
+    turn_eff = apply_turn_config(session_eff, turn)
+    assert turn_eff.openrouter_routing == {"only": ["moonshotai"]}
+    assert TurnConfig.from_dict(turn.to_dict()) == turn
+
+    unpinned = apply_turn_config(session_eff, TurnConfig(openrouter_routing=None))
+    assert unpinned.openrouter_routing is None
+
+    # One turn can swap the whole routing object for the single-slug pin.
+    pinned = apply_turn_config(
+        session_eff, TurnConfig(openrouter_routing=None, openrouter_provider="moonshotai")
+    )
+    assert pinned.openrouter_provider == "moonshotai" and pinned.openrouter_routing is None
+
+    with pytest.raises(ValueError, match="cannot be combined"):
+        apply_turn_config(session_eff, TurnConfig(openrouter_provider="moonshotai"))
+    with pytest.raises(ValueError, match="requires an openrouter/ model"):
+        apply_turn_config(session_eff, TurnConfig(model="gpt-5.6-luna"))
+
+
 # ---------------------------------------------------------------- serialization
+
+
+def test_openrouter_model_switches_per_turn_on_a_codex_engine():
+    """One deployed engine, several providers: the model override is all it takes.
+
+    This is the mechanism the remote probe drives live — a codex engine baked with one
+    OpenRouter model serving turns on the others, with no redeploy.
+    """
+    baked = AgentSpec(
+        name="a", model="openrouter/deepseek/deepseek-v4-flash", harness="codex",
+        harnesses=("codex",),
+    )
+    session_eff = apply_session_config(baked, SessionConfig(harness="codex"))
+    turn_eff = apply_turn_config(session_eff, TurnConfig(model="openrouter/moonshotai/kimi-k3"))
+
+    assert turn_eff.model == "openrouter/moonshotai/kimi-k3"
+    assert turn_eff.harness == "codex"
+    validate_harness_choice(baked, turn_eff)  # the harness is baked; the model is free
+    # An OpenAI model on the same engine is just another override.
+    assert apply_turn_config(session_eff, TurnConfig(model="gpt-5.6-luna")).model == "gpt-5.6-luna"
 
 
 def test_sparse_round_trip_preserves_set_and_only_set_fields():

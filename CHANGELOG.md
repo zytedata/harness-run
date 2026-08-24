@@ -19,7 +19,7 @@ Release checklist: update this file (move the `Unreleased` section into a new
 version heading with the date), bump `version` in `pyproject.toml`, commit,
 tag `vX.Y.Z`, push the commit and the tag.
 
-## Unreleased
+## 0.2.0 — 2026-08-24
 
 ### Added
 
@@ -113,7 +113,7 @@ tag `vX.Y.Z`, push the commit and the tag.
   `verify_deploy_env()` — and CI — by design). Deploy venvs must carry 1.165.1
   from now on (`uv sync` suffices); already-deployed engines are unaffected,
   the pin is baked into their image. Verified with a clean `make live-smoke`
-  ([#24]).
+  ([#24], [#33]).
 - The default idle life of a warm-pool worker is now a day, up from 30
   minutes. An idle-expired worker exits **without replacement**, and a pool
   that drains to empty never self-recovers (the post-dispatch refill worker
@@ -134,7 +134,7 @@ tag `vX.Y.Z`, push the commit and the tag.
   one line) or gets a large tool result hit it routinely. The cap is now
   `AgentSpec.max_buffer_size`, default 32 MiB, and settable per session or per turn
   like the other invocation knobs. `claude-code` only: the Codex app-server SDK
-  frames its own stream and has no equivalent.
+  frames its own stream and has no equivalent ([#32]).
 - Structured output is no longer lost when a background-task notification arrives
   after the agent has already delivered its answer: the model's reply to the stale
   notification became the turn's final message, and structured parsing — which reads
@@ -196,6 +196,8 @@ tag `vX.Y.Z`, push the commit and the tag.
 [#27]: https://github.com/zytedata/remote-agent-toolkit/pull/27
 [#28]: https://github.com/zytedata/remote-agent-toolkit/pull/28
 [#29]: https://github.com/zytedata/remote-agent-toolkit/pull/29
+[#32]: https://github.com/zytedata/remote-agent-toolkit/pull/32
+[#33]: https://github.com/zytedata/remote-agent-toolkit/pull/33
 
 ## 0.1.0 — 2026-08-07
 

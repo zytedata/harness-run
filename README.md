@@ -33,7 +33,7 @@ Releases are git tags — pin one to shield yourself from in-development changes
 breaking changes):
 
 ```bash
-pip install "git+ssh://git@github.com/zytedata/remote-agent-toolkit.git@v0.1.0"
+pip install "git+ssh://git@github.com/zytedata/remote-agent-toolkit.git@v0.2.0"
 ```
 
 Developing on the toolkit itself (early users are expected to contribute)? Clone it and `uv sync` — that

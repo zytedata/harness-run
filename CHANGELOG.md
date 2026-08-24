@@ -52,6 +52,16 @@ tag `vX.Y.Z`, push the commit and the tag.
   own CLI is pointed at the proxy (environment variables for Claude Code, `--config`
   overrides for Codex). ([#34])
 
+### Backwards-incompatible
+
+- `RunResult.cost_usd` is now `float | None`, and defaults to `None`. It used to be
+  `float` defaulting to `0.0`, so a run whose spend the toolkit could not determine
+  reached the caller as `0.0` and read as a free run. The terminal event already
+  carried `None` for that case, alongside a `cost_unknown` status event; the result
+  object now carries it too. A run that died before reporting anything also reports
+  `None` rather than `0.0`. **Update note:** code that does arithmetic or formatting
+  on `result.cost_usd` needs a `None` check, e.g. `result.cost_usd or 0.0`. ([#34])
+
 ### Changed
 
 - The harness SDKs are now pinned exactly: `claude-agent-sdk==0.2.130` and

@@ -262,7 +262,8 @@ ops action (`engine.set_traffic`), not a per-caller routing choice.
   `last_result`, `history()`, `fork()`.
 - `Run` — `__await__` (→ `RunResult`), `__aiter__` (→ `AgentEvent`s), `done`, `status`, `result`.
 - `AgentEvent` — `kind`, `summary`, `raw`; cost/usage carried on the terminal event.
-- `RunResult` — `text`, `structured_output`, `is_error`, `num_turns`, `cost_usd`, `usage`, `session_id`,
+- `RunResult` — `text`, `structured_output`, `is_error`, `num_turns`, `cost_usd` (`float | None`;
+  `None` means the spend is unknown, `0.0` means the run was free), `usage`, `session_id`,
   `artifacts`, `warning`. Error results keep their accounting (`cost_usd`/`num_turns`/`usage`): an
   `error_max_turns` run spends right up to its limit, so zeroing them under-reports exactly the most
   expensive runs (eval feedback).

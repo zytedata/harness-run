@@ -203,8 +203,8 @@ price: OpenRouter routes one model id to providers whose prices differ by up to 
 per-model estimate would only match whoever served the call (the measured gap is in the
 [`pricing`](remote_agent_toolkit/harness/pricing.py) module docstring). A turn OpenRouter reports no
 charge for gets `cost_usd=None` on its result event, plus a `cost_unknown` status event, and its
-`max_budget_usd` cannot be enforced. Watch for that event if you need to tell an unreported charge
-from a free one: `RunResult.cost_usd` is a plain float, so both arrive there as `0.0`.
+`max_budget_usd` cannot be enforced. `RunResult.cost_usd` is `float | None` and carries that same
+`None`, so an unreported charge stays apart from a turn that really was free.
 
 The ⚠️ is about intermittency, not a permanent failure: under Claude Code, both DeepSeek models have
 finished a turn without returning a final answer in earlier runs, while the newest local and remote

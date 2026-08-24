@@ -94,6 +94,11 @@ ROUTING_MODEL = "openrouter/moonshotai/kimi-k3"
 ROUTING_ALTERNATE = os.environ.get("OPENROUTER_ALTERNATE_PROVIDER", "fireworks")
 
 
+def _usd(cost: float | None) -> str:
+    """Format a run's spend. ``None`` means nobody knows, which is not the same as free."""
+    return "unknown" if cost is None else f"${cost:.4f}"
+
+
 def _routing_cases(model: str) -> list[tuple[str, dict, bool | None]]:
     """The routing objects to check, with the verdict each one supports.
 
@@ -225,7 +230,7 @@ async def _check_model_once(model: str, key: str, harness: str = "codex") -> dic
             )
         print(
             f"[{label}] RESULT after {time.time() - t0:.0f}s: text={text[:80]!r} "
-            f"turns={row['turns']} cost=${r.cost_usd or 0:.4f} error={r.is_error}",
+            f"turns={row['turns']} cost={_usd(r.cost_usd)} error={r.is_error}",
             flush=True,
         )
     except Exception as exc:  # noqa: BLE001 — one model's failure must not hide the rest
@@ -488,8 +493,9 @@ async def _check_budget(harness: str, key: str) -> dict:
             and bool(through_proxy)
             and all(through_proxy)
         )
+        cost = "unknown" if result.cost_usd is None else f"{result.cost_usd:.6f}"
         row["note"] = (
-            f"stop={session.stop_reason} cost={result.cost_usd:.6f} source={source} "
+            f"stop={session.stop_reason} cost={cost} source={source} "
             f"subtype={subtype} enforcement={raw.get('budget_enforcement')}"
         )
     except Exception as exc:  # noqa: BLE001 — report, don't hide

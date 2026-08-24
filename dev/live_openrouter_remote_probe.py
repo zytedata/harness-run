@@ -7,7 +7,9 @@ history, and Cloud Trace.
 
 Run by hand with ``OPENROUTER_API_KEY=... make live-openrouter-remote``. Never run this in
 CI. A run usually takes 8-15 minutes and spends real money. The engine is deleted after the
-checks and on SIGTERM/SIGINT. ``KEEP=1`` leaves it running for debugging.
+checks and on SIGTERM/SIGINT, including an interrupt during the deploy itself (there is no
+engine object yet in that window, so it is deleted by name). ``KEEP=1`` leaves it running
+for debugging.
 
 Set ``PROJECT``, ``LOCATION``, ``SUFFIX``, ``IMPERSONATE_SA``, ``MAX_INSTANCES``, or
 ``SERIAL=1`` as needed. ``OPENROUTER_PROVIDER`` overrides the provider used by the checks;
@@ -495,36 +497,82 @@ def _trace_check(session_id: str, expect_model: str) -> tuple[bool | None, str]:
 
 
 _TORN_DOWN = False
+_ENGINE = None  # set as soon as gemini.deploy returns; read by the signal handler
+_CREDENTIALS = None  # set before the handler goes on, so a delete by name can authenticate
 
 
-def _teardown(engine) -> None:
+def _delete_by_name() -> str | None:
+    """Delete the engine when the run never got a handle for it. ``None`` if it went.
+
+    An interrupt during ``gemini.deploy`` leaves no engine object, but the platform may
+    already have created the engine, and it bills while it exists. ``NAME`` is fixed, so
+    look the engine up by it and delete it. On failure return the reason as one line: the
+    common case is that the deploy had not created anything yet, and a full traceback for
+    that would bury the message that matters.
+    """
+    try:
+        gemini.get_engine(NAME, PROJECT, LOCATION, credentials=_CREDENTIALS).delete()
+        return None
+    except Exception as exc:  # noqa: BLE001 — best effort; the caller says what to do
+        return f"{type(exc).__name__}: {str(exc)[:200]}"
+
+
+def _teardown() -> None:
     """Delete the engine, once, from either the normal path or a signal.
 
     SIGTERM and SIGINT can end the process before ``finally`` runs. The signal handler and
     this idempotent function ensure the engine is deleted once.
+
+    Before ``gemini.deploy`` returns there is no engine object, so that window deletes by
+    name instead.
     """
     global _TORN_DOWN
-    if _TORN_DOWN or engine is None:
+    if _TORN_DOWN:
         return
     _TORN_DOWN = True
     if os.environ.get("KEEP") == "1":
         print(f"\nKEEP=1 — engine {NAME} left running; delete it yourself.", flush=True)
         return
+    if _ENGINE is None:
+        # Interrupted before the deploy returned. The engine may exist anyway.
+        print(
+            f"\n{time.strftime('%H:%M:%S')} interrupted before the deploy returned; "
+            f"trying to delete {NAME} by name ...",
+            flush=True,
+        )
+        reason = _delete_by_name()
+        if reason is None:
+            print("teardown OK", flush=True)
+        else:
+            print(
+                f"\n!!! COULD NOT DELETE {NAME} ({reason}). It may exist in "
+                f"{PROJECT}/{LOCATION} and bills while it does. Check and delete it "
+                "manually !!!",
+                flush=True,
+            )
+        return
     try:
         print(f"\n{time.strftime('%H:%M:%S')} deleting {NAME} ...", flush=True)
-        engine.delete()
+        _ENGINE.delete()
         print("teardown OK", flush=True)
     except Exception:  # noqa: BLE001 — always say so loudly; an engine bills while it exists
         traceback.print_exc()
         print(f"\n!!! TEARDOWN FAILED — delete the engine {NAME} manually !!!", flush=True)
 
 
-def _install_signal_teardown(engine) -> None:
-    """On SIGTERM/SIGINT: delete the engine, then exit non-zero."""
+def _install_signal_teardown() -> None:
+    """On SIGTERM/SIGINT: delete the engine, then exit non-zero.
+
+    Installed BEFORE ``gemini.deploy``, because that call is the longest part of the run
+    (5-10 min) and the process is routinely wrapped in a ``timeout`` or interrupted. An
+    interrupt during the deploy would otherwise leave a billing engine behind with nothing
+    printed. There is no engine object yet in that window, so ``_teardown`` falls back to
+    deleting by name.
+    """
 
     def handler(signum, _frame):
         print(f"\nreceived signal {signum} — tearing down before exit", flush=True)
-        _teardown(engine)
+        _teardown()
         raise SystemExit(130)
 
     for sig in (signal.SIGTERM, signal.SIGINT):
@@ -535,6 +583,7 @@ def _install_signal_teardown(engine) -> None:
 
 
 async def main() -> int:
+    global _ENGINE, _CREDENTIALS
     key = os.environ.get("OPENROUTER_API_KEY")
     if not key:
         print("OPENROUTER_API_KEY is not set — nothing to probe.", file=sys.stderr)
@@ -549,6 +598,7 @@ async def main() -> int:
             target_principal=sa,
             target_scopes=["https://www.googleapis.com/auth/cloud-platform"],
         )
+    _CREDENTIALS = credentials
 
     spec = AgentSpec(
         name=NAME,
@@ -560,22 +610,25 @@ async def main() -> int:
         max_turns=8,
         max_budget_usd=0.50,
     )
+    # Installed before the deploy: the deploy takes 5-10 min, and an interrupt during it
+    # must still reach teardown. The deploy sits inside the try below for the same reason.
+    _install_signal_teardown()
     print(f"{time.strftime('%H:%M:%S')} deploying {NAME} ...", flush=True)
     t0 = time.time()
-    engine = await asyncio.to_thread(
-        gemini.deploy,
-        spec,
-        PROJECT,
-        LOCATION,
-        credentials=credentials,
-        # The checks run concurrently, so the engine needs room to serve them in parallel;
-        # with the default max_instances=1 they queue and the probe is back to ~40 min.
-        max_instances=MAX_INSTANCES,
-    )
-    print(f"{time.strftime('%H:%M:%S')} deployed in {time.time() - t0:.0f}s", flush=True)
-    _install_signal_teardown(engine)
 
     try:
+        _ENGINE = engine = await asyncio.to_thread(
+            gemini.deploy,
+            spec,
+            PROJECT,
+            LOCATION,
+            credentials=credentials,
+            # The checks run concurrently, so the engine needs room to serve them in
+            # parallel; with the default max_instances=1 they queue and the probe is back
+            # to ~40 min.
+            max_instances=MAX_INSTANCES,
+        )
+        print(f"{time.strftime('%H:%M:%S')} deployed in {time.time() - t0:.0f}s", flush=True)
         # Every check uses an independent session. Resume remains sequential inside its
         # session. SERIAL=1 gives ordered output for debugging.
         if os.environ.get("SERIAL") == "1":
@@ -641,7 +694,7 @@ async def main() -> int:
         traceback.print_exc()
         check("probe ran without exceptions", False, "see traceback above")
     finally:
-        _teardown(engine)
+        _teardown()
 
     print("\n=== VERDICTS ===")
     for label, state, note in VERDICTS:

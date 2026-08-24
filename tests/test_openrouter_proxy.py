@@ -25,6 +25,11 @@ from remote_agent_toolkit.harness._openrouter_proxy import (
 )
 
 
+def _pin(slug: str) -> dict:
+    """The routing object a harness builds from ``spec.openrouter_provider``."""
+    return {"only": [slug], "allow_fallbacks": False}
+
+
 def test_captures_responses_stream_cost_and_selected_endpoint():
     response = {
         "type": "response.completed",
@@ -47,11 +52,11 @@ def test_captures_responses_stream_cost_and_selected_endpoint():
     }
     body = f"event: response.completed\ndata: {json.dumps(response)}\n\n".encode()
 
-    found = _capture_request(body, "text/event-stream", None, "novita", None, 200)
+    found = _capture_request(body, "text/event-stream", None, _pin("novita"), 200)
 
     assert found is not None
     assert found.requested_model == "deepseek/deepseek-v4-flash"
-    assert found.requested_provider == "novita"
+    assert found.requested_routing == _pin("novita")
     assert found.provider == "Novita"
     assert found.provider_model == "snapshot"
     assert found.cost_usd == 0.0012
@@ -72,7 +77,7 @@ def test_captures_anthropic_json_shape():
         }
     ).encode()
 
-    found = _capture_request(body, "application/json", "asked", "z-ai", None, 200)
+    found = _capture_request(body, "application/json", "asked", _pin("z-ai"), 200)
 
     assert found is not None
     assert found.provider == "Z.AI"
@@ -110,7 +115,7 @@ def test_captures_anthropic_sse_shape():
     body = "".join(f"data: {json.dumps(event)}\n\n" for event in events).encode()
 
     found = _capture_request(
-        body, "text/event-stream", "moonshotai/kimi-k3", "moonshotai", None, 200
+        body, "text/event-stream", "moonshotai/kimi-k3", _pin("moonshotai"), 200
     )
 
     assert found is not None
@@ -122,7 +127,7 @@ def test_captures_anthropic_sse_shape():
 
 
 def test_ignores_responses_without_openrouter_fields():
-    assert _capture_request(b'{"ok":true}', "application/json", "m", None, None, 200) is None
+    assert _capture_request(b'{"ok":true}', "application/json", "m", None, 200) is None
 
 
 def test_capture_buffer_keeps_final_stream_metadata():
@@ -148,32 +153,11 @@ def test_model_scoped_proxy_rejects_missing_or_different_model():
     assert not _model_matches("vendor/model", None)
 
 
-def test_adds_strict_provider_choice_to_request_body():
-    body = json.dumps(
-        {
-            "model": "moonshotai/kimi-k3",
-            "messages": [{"role": "user", "content": "hello"}],
-            "provider": {"sort": "price"},
-        }
-    ).encode()
-
-    changed = _request_with_provider(body, "moonshotai")
-
-    assert changed is not None
-    request = json.loads(changed)
-    assert request["model"] == "moonshotai/kimi-k3"
-    assert request["messages"] == [{"role": "user", "content": "hello"}]
-    assert request["provider"] == {
-        "only": ["moonshotai"],
-        "allow_fallbacks": False,
-    }
-
-
 def test_provider_choice_requires_a_json_object():
     with pytest.raises(ValueError, match="JSON request body"):
-        _request_with_provider(b"not json", "moonshotai")
+        _request_with_provider(b"not json", _pin("moonshotai"))
     with pytest.raises(ValueError, match="JSON object"):
-        _request_with_provider(b"[]", "moonshotai")
+        _request_with_provider(b"[]", _pin("moonshotai"))
 
 
 def test_sends_a_routing_object_verbatim():
@@ -186,7 +170,7 @@ def test_sends_a_routing_object_verbatim():
     ).encode()
     routing = {"order": ["moonshotai", "fireworks"], "allow_fallbacks": True}
 
-    changed = _request_with_provider(body, None, routing)
+    changed = _request_with_provider(body, routing)
 
     assert changed is not None
     request = json.loads(changed)
@@ -195,16 +179,8 @@ def test_sends_a_routing_object_verbatim():
     assert request["provider"] == routing
 
 
-def test_routing_wins_over_the_single_slug_pin():
-    body = json.dumps({"model": "moonshotai/kimi-k3"}).encode()
-
-    changed = _request_with_provider(body, "novita", {"ignore": ["novita"]})
-
-    assert json.loads(changed)["provider"] == {"ignore": ["novita"]}
-
-
 def test_a_routing_object_leaves_the_body_alone_when_there_is_none():
-    assert _request_with_provider(b'{"model":"m"}', None, None) == b'{"model":"m"}'
+    assert _request_with_provider(b'{"model":"m"}', None) == b'{"model":"m"}'
 
 
 def test_routing_closes_the_provider_set_only_when_it_cannot_route_past_it():
@@ -297,7 +273,7 @@ def test_proxy_sends_provider_choice_to_openrouter(monkeypatch):
     with OpenRouterProxy(
         "real-key",
         expected_model="moonshotai/kimi-k3",
-        provider="moonshotai",
+        routing=_pin("moonshotai"),
     ) as proxy:
         target = urlsplit(proxy.base_url)
         conn = http.client.HTTPConnection(target.hostname, target.port, timeout=5)
@@ -319,13 +295,10 @@ def test_proxy_sends_provider_choice_to_openrouter(monkeypatch):
     assert len(upstream_requests) == 1
     method, path, body, headers = upstream_requests[0]
     assert (method, path) == ("POST", "/api/v1/responses")
-    assert json.loads(body)["provider"] == {
-        "only": ["moonshotai"],
-        "allow_fallbacks": False,
-    }
+    assert json.loads(body)["provider"] == _pin("moonshotai")
     assert headers["Authorization"] == "Bearer real-key"
     event = proxy.drain_events()[0]
-    assert event.raw["requested_provider"] == "moonshotai"
+    assert event.raw["requested_routing"] == _pin("moonshotai")
     assert event.raw["provider"] == "Moonshot AI"
     assert event.raw["provider_matches_request"] is True
 
@@ -425,7 +398,6 @@ def test_proxy_sends_a_routing_object_and_judges_it(monkeypatch, routing, matche
     assert json.loads(calls[0][2])["provider"] == routing
     event = proxy.drain_events()[0]
     assert event.raw["requested_routing"] == routing
-    assert event.raw["requested_provider"] is None
     assert event.raw["provider"] == "Moonshot AI"
     assert event.raw["provider_matches_request"] is matches
 
@@ -467,7 +439,7 @@ def test_error_status_response_is_recorded(monkeypatch):
     )
 
     with OpenRouterProxy(
-        "real-key", expected_model="moonshotai/kimi-k3", provider="moonshotai"
+        "real-key", expected_model="moonshotai/kimi-k3", routing=_pin("moonshotai")
     ) as proxy:
         status, _ = _proxy_post(
             proxy, body=json.dumps({"model": "moonshotai/kimi-k3", "input": "hi"})
@@ -479,7 +451,7 @@ def test_error_status_response_is_recorded(monkeypatch):
     assert event.raw["http_status"] == 429
     assert event.raw["provider"] is None
     assert event.raw["cost_usd"] is None
-    assert event.raw["requested_provider"] == "moonshotai"
+    assert event.raw["requested_routing"] == _pin("moonshotai")
     # The status says a request failed; only the message says what was wrong with it.
     assert event.raw["summary"] == "rate limited"
     assert proxy.exact_cost_usd is None
@@ -496,7 +468,7 @@ def test_error_message_wins_over_routing_metadata(monkeypatch):
     _fake_upstream(monkeypatch, response=_FakeResponse(status=400, body=body))
 
     with OpenRouterProxy(
-        "real-key", expected_model="deepseek/deepseek-v4-flash", provider="novita"
+        "real-key", expected_model="deepseek/deepseek-v4-flash", routing=_pin("novita")
     ) as proxy:
         _proxy_post(proxy, body=json.dumps({"model": "deepseek/deepseek-v4-flash"}))
         assert proxy.wait_until_idle()

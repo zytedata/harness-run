@@ -95,7 +95,7 @@ async def check_claude_openrouter(model: str, key: str) -> None:
         # checked below is only available because it did.
         bool(requests)
         and all("http_status" in request for request in requests)
-        and all(request.get("requested_provider") is None for request in requests),
+        and all(request.get("requested_routing") is None for request in requests),
         f"statuses={[request.get('http_status') for request in requests]}",
     )
     check(

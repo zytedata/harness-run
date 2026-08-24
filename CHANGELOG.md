@@ -39,7 +39,8 @@ tag `vX.Y.Z`, push the commit and the tag.
   `provider_matches_request` is only reported when the object names a closed set of
   providers (`only`, or `order` with `allow_fallbacks` false); an open set reports `null`
   instead of a verdict the request cannot support. Every `openrouter_request` event carries
-  the object as `requested_routing`. Because a config field is new, a client staging it
+  the object as `requested_routing`, including the one a pinned slug resolves to — the slug is
+  turned into that object before the proxy starts. Because a config field is new, a client staging it
   against an older engine fails closed, as the same-revision rule requires. ([#34])
 - Codex emits a `model_routing` status event from the app-server's thread record. ([#34])
 - Every OpenRouter model call, on both harnesses, passes through a per-run localhost

@@ -555,9 +555,10 @@ Each is a `typing.Protocol`; concrete adapters ship for prod (GCP) and dev (loca
   have no mapping and are ignored with a status warning.
 - **`openrouter/` models go through a per-run localhost proxy** (`harness/_openrouter_proxy.py`), on
   **both** bindings. Two things force this. The CLIs cannot send OpenRouter's `provider` request
-  field, and they cannot report what OpenRouter charged. The proxy puts the caller's choice in the
-  request body: `spec.openrouter_provider` as `only` with fallbacks off, or
-  `spec.openrouter_routing` verbatim. It passes the response through unchanged and reads
+  field, and they cannot report what OpenRouter charged. The proxy puts the caller's routing object
+  in the request body verbatim. `spec.openrouter_provider` is the shorthand for pinning one provider
+  and is resolved to `{"only": [slug], "allow_fallbacks": false}` before the proxy starts, so only
+  one form travels below the spec. It passes the response through unchanged and reads
   the routing metadata and the charge out of it. Each response becomes one `openrouter_request`
   event, failed responses included — nothing else can see a retried 429. The CLI holds a random
   per-run token, never the account key. The summed charges become the result's `cost_usd`

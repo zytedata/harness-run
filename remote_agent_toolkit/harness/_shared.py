@@ -111,6 +111,22 @@ def runtime_env(spec: AgentSpec, ctx: RunContext) -> dict[str, str]:
     return env
 
 
+def openrouter_provider_routing(spec: AgentSpec) -> dict[str, Any] | None:
+    """The OpenRouter ``provider`` object this spec asks for, or ``None`` for no preference.
+
+    ``spec.openrouter_provider`` is the shorthand for pinning one provider, and it means
+    exactly ``{"only": [slug], "allow_fallbacks": False}`` — ``AgentSpec`` says so in the
+    error it raises when both fields are set. Resolving it here means everything below the
+    spec carries one value instead of two, and never has to ask which of the two the caller
+    used.
+    """
+    if spec.openrouter_routing is not None:
+        return dict(spec.openrouter_routing)
+    if spec.openrouter_provider is not None:
+        return {"only": [spec.openrouter_provider], "allow_fallbacks": False}
+    return None
+
+
 def finalize_checkpoint(spec: AgentSpec, ctx: Any) -> AgentEvent | None:
     """Checkpoint the workspace inline at the terminal result event (DESIGN.md §6).
 

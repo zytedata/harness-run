@@ -102,6 +102,7 @@ from ._shared import (
     GITHUB_MCP_TOKEN_KEYS,
     INTERACTIVE_SUFFIX,
     finalize_checkpoint,
+    openrouter_provider_routing,
     runtime_env,
 )
 
@@ -759,8 +760,7 @@ class CodexHarness:
                     api_key,
                     spec.max_budget_usd,
                     model,
-                    provider=spec.openrouter_provider,
-                    routing=spec.openrouter_routing,
+                    routing=openrouter_provider_routing(spec),
                 ).start()
         try:
             async for event in self._run(spec, ctx, proxy):

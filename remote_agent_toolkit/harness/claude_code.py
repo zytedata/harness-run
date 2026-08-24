@@ -20,8 +20,9 @@ Those turns go through the toolkit's own proxy (:mod:`._openrouter_proxy`).
 pointed at ``127.0.0.1`` and gets a random token, so the OpenRouter key never leaves this
 process. What the proxy sees is the only record of what OpenRouter did:
 
-* ``spec.openrouter_provider`` reaches the request body through it. The CLI has no field
-  for it.
+* The caller's provider routing reaches the request body through it. The CLI has no field
+  for it. ``spec.openrouter_provider`` is resolved to a routing object before the proxy
+  starts, so the proxy handles one form.
 * Each response becomes an ``openrouter_request`` event: selected provider, model, region,
   HTTP status, and the charge. The result reports the summed charges as ``cost_usd`` with
   ``price_source="openrouter"``. The CLI's own estimate is wrong here, because it prices
@@ -54,6 +55,7 @@ from ._shared import (
     INTERACTIVE_SUFFIX as _INTERACTIVE_SUFFIX,
     finalize_checkpoint,
     harness_consumed_secret_names,
+    openrouter_provider_routing,
     runtime_env,
 )
 
@@ -522,8 +524,7 @@ class ClaudeCodeHarness:
                     api_key,
                     spec.max_budget_usd,
                     model,
-                    provider=spec.openrouter_provider,
-                    routing=spec.openrouter_routing,
+                    routing=openrouter_provider_routing(spec),
                 ).start()
         try:
             async for event in self._run(spec, ctx, proxy):

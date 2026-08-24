@@ -80,6 +80,11 @@ def _provider_for(model: str) -> str:
     )
 
 
+def _pinned_routing(model: str) -> dict:
+    """What ``openrouter_provider=_provider_for(model)`` becomes in the request."""
+    return {"only": [_provider_for(model)], "allow_fallbacks": False}
+
+
 # Routing objects are checked on Kimi K3: it is served by many providers, so a set of
 # two is a real choice. GLM 5.3 has a single endpoint, which would prove nothing.
 ROUTING_MODEL = "openrouter/moonshotai/kimi-k3"
@@ -183,7 +188,7 @@ async def _check_model_once(model: str, key: str, harness: str = "codex") -> dic
         through_proxy = all("http_status" in req for req in requests)
         succeeded = [req for req in requests if req.get("http_status") == 200]
         providers = [req.get("provider") for req in succeeded]
-        requested_providers = [req.get("requested_provider") for req in succeeded]
+        requested_routings = [req.get("requested_routing") for req in succeeded]
         provider_matches = [req.get("provider_matches_request") for req in succeeded]
         requested_models = [req.get("requested_model") for req in succeeded]
         exact_costs = [
@@ -202,7 +207,7 @@ async def _check_model_once(model: str, key: str, harness: str = "codex") -> dic
             and through_proxy
             and bool(succeeded)
             and all(providers)
-            and all(provider == _provider_for(model) for provider in requested_providers)
+            and all(routing == _pinned_routing(model) for routing in requested_routings)
             and all(match is True for match in provider_matches)
             and all(requested == bare_model for requested in requested_models)
             and bool(exact_costs)
@@ -214,7 +219,7 @@ async def _check_model_once(model: str, key: str, harness: str = "codex") -> dic
             row["note"] = (
                 f"error={r.is_error} turns={row['turns']} tools={row['tools']} "
                 f"cost={r.cost_usd!r} request_costs={exact_costs} providers={providers} "
-                f"requested_providers={requested_providers} matches={provider_matches} "
+                f"requested_routings={requested_routings} matches={provider_matches} "
                 f"requested={requested_models} statuses={statuses} source={price_source} "
                 f"text={text[:60]!r}"
             )
@@ -374,7 +379,7 @@ async def _check_unpinned(model: str, key: str, harness: str) -> dict:
             and bool(succeeded)
             and all(req.get("provider") for req in succeeded)
             # Nothing was asked for, so nothing is claimed about what was selected.
-            and all(req.get("requested_provider") is None for req in succeeded)
+            and all(req.get("requested_routing") is None for req in succeeded)
             and all(req.get("provider_matches_request") is None for req in succeeded)
             and isinstance(result.cost_usd, float)
             and bool(costs)
@@ -431,8 +436,6 @@ async def _check_routing(
             not result.is_error
             and bool(succeeded)
             and all(req.get("requested_routing") == routing for req in succeeded)
-            # The routing object replaces the single-slug pin; nothing sets both.
-            and all(req.get("requested_provider") is None for req in succeeded)
             and all(req.get("provider") for req in succeeded)
             and all(req.get("provider_matches_request") is expect_match for req in succeeded)
             and (not allowed or served_by_allowed)

@@ -713,7 +713,11 @@ async def test_openrouter_run_passes_provider_to_proxy(tmp_path, monkeypatch):
         proxy_init=seen,
     )
 
-    assert seen and seen[0][1]["provider"] == "moonshotai"
+    # The slug is resolved before the proxy starts, so the proxy sees one routing object.
+    assert seen and seen[0][1]["routing"] == {
+        "only": ["moonshotai"],
+        "allow_fallbacks": False,
+    }
     # The proxy holds the account key, the spec's cap, and the id it will serve — the
     # prefix already stripped, because that is what the CLI puts in the request body.
     assert seen[0][0] == ("sk-or-1", spec.max_budget_usd, "moonshotai/kimi-k3")
@@ -736,7 +740,6 @@ async def test_openrouter_run_passes_routing_to_proxy(tmp_path, monkeypatch):
     )
 
     assert seen and seen[0][1]["routing"] == routing
-    assert seen[0][1]["provider"] is None
 
 
 async def test_openrouter_run_without_key_raises(tmp_path, monkeypatch):

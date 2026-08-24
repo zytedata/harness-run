@@ -464,7 +464,11 @@ def test_openrouter_run_passes_provider_to_proxy(tmp_path, monkeypatch):
         secrets={"OPENROUTER_API_KEY": "real-key"},
     )
 
-    assert created and created[0]["provider"] == "moonshotai"
+    # The slug is resolved before the proxy starts, so the proxy sees one routing object.
+    assert created and created[0]["routing"] == {
+        "only": ["moonshotai"],
+        "allow_fallbacks": False,
+    }
     # The proxy holds the account key, the cap it enforces, and the only id it will serve.
     assert created[0]["api_key"] == "real-key"
     assert created[0]["max_budget_usd"] == spec.max_budget_usd
@@ -495,7 +499,6 @@ def test_openrouter_run_passes_routing_to_proxy(tmp_path, monkeypatch):
     )
 
     assert created and created[0]["routing"] == routing
-    assert created[0]["provider"] is None
     assert events[-1].kind == "result"
 
 
@@ -519,7 +522,7 @@ def test_openrouter_proxies_without_a_provider(tmp_path, monkeypatch):
         secrets={"OPENROUTER_API_KEY": "real-key"},
     )
 
-    assert created and created[0]["provider"] is None
+    assert created and created[0]["routing"] is None
     env = client_cls.instances[0].options.env
     assert env["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:1/api"
     assert env["ANTHROPIC_AUTH_TOKEN"] == "local-token"

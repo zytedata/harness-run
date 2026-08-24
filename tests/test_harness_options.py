@@ -14,7 +14,10 @@ from remote_agent_toolkit import (
 import pytest
 
 from remote_agent_toolkit.events import AgentEvent
-from remote_agent_toolkit.harness._shared import harness_consumed_secret_names
+from remote_agent_toolkit.harness._shared import (
+    harness_consumed_secret_names,
+    openrouter_provider_routing,
+)
 from remote_agent_toolkit.harness.claude_code import ClaudeCodeHarness
 from remote_agent_toolkit.harness.context import RunContext
 
@@ -446,3 +449,31 @@ def test_unpriced_openrouter_model_reports_no_cost():
     out = ClaudeCodeHarness()._final_result(event, turns_total=1, openrouter=True)
     assert out.cost_usd is None
     assert out.raw["cli_reported_cost_usd"] == 0.271
+
+
+# -- one routing value --------------------------------------------------------
+#
+# ``openrouter_provider`` is the shorthand for pinning one provider. It is resolved to a
+# routing object once, above the proxy, so nothing below has to ask which of the two
+# fields the caller used.
+
+
+def test_a_pinned_provider_becomes_a_closed_routing_object():
+    spec = AgentSpec(name="a", model=_OR, openrouter_provider="moonshotai")
+    assert openrouter_provider_routing(spec) == {
+        "only": ["moonshotai"],
+        "allow_fallbacks": False,
+    }
+
+
+def test_a_routing_object_is_passed_through_unchanged():
+    routing = {"order": ["moonshotai", "fireworks"], "allow_fallbacks": True}
+    spec = AgentSpec(name="a", model=_OR, openrouter_routing=routing)
+    resolved = openrouter_provider_routing(spec)
+
+    assert resolved == routing
+    assert resolved is not spec.openrouter_routing
+
+
+def test_no_provider_preference_resolves_to_nothing():
+    assert openrouter_provider_routing(AgentSpec(name="a", model=_OR)) is None

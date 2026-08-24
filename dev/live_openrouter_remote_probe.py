@@ -76,6 +76,11 @@ def _provider_for(model: str) -> str:
     )
 
 
+def _pinned_routing(model: str) -> dict:
+    """What ``openrouter_provider=_provider_for(model)`` becomes in the request."""
+    return {"only": [_provider_for(model)], "allow_fallbacks": False}
+
+
 def _schema_provider(model: str, harness: str) -> str | None:
     """Use normal routing where the selected provider lacks Codex JSON Schema support."""
     if os.environ.get("OPENROUTER_PROVIDER"):
@@ -239,7 +244,7 @@ async def _check_model(engine, model: str, key: str, harness: str = "codex") -> 
         for request in requests
         if isinstance(request.get("cost_usd"), (int, float))
     ]
-    requested_providers = [request.get("requested_provider") for request in requests]
+    requested_routings = [request.get("requested_routing") for request in requests]
     provider_matches = [request.get("provider_matches_request") for request in requests]
     bare_model = model.removeprefix("openrouter/")
     check(
@@ -254,10 +259,10 @@ async def _check_model(engine, model: str, key: str, harness: str = "codex") -> 
     )
     check(
         f"{label}: requested provider honored",
-        bool(requested_providers)
-        and all(provider == _provider_for(model) for provider in requested_providers)
+        bool(requested_routings)
+        and all(routing == _pinned_routing(model) for routing in requested_routings)
         and all(match is True for match in provider_matches),
-        f"requested={requested_providers} providers={providers} matches={provider_matches}",
+        f"requested={requested_routings} providers={providers} matches={provider_matches}",
     )
     check(
         f"{label}: OpenRouter reports the requested model",
@@ -371,8 +376,7 @@ async def _check_routing(
     check(
         f"{label}: routing object reached OpenRouter",
         bool(requests)
-        and all(request.get("requested_routing") == routing for request in requests)
-        and all(request.get("requested_provider") is None for request in requests),
+        and all(request.get("requested_routing") == routing for request in requests),
         f"routing={[request.get('requested_routing') for request in requests]}",
     )
     # Judge the reported provider here rather than trusting the toolkit's own verdict.

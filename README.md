@@ -233,8 +233,8 @@ tool environment, and Codex has its automatic login shell disabled because it co
 
 Each response uses [router metadata](https://openrouter.ai/docs/guides/features/router-metadata)
 and emits an `openrouter_request` status event. It reports the selected upstream provider,
-the provider's model name, region when available, the HTTP status, the exact request cost, and what
-the request asked for (`requested_provider` or `requested_routing`).
+the provider's model name, region when available, the HTTP status, the exact request cost, and the
+provider routing the request asked for (`requested_routing`).
 Failed responses are reported too, so a retried request is visible. The result uses the sum of
 the exact costs. `max_budget_usd` is checked between model responses, so one response may take
 the total above the cap. The proxy then refuses the next request.
@@ -282,6 +282,9 @@ The toolkit sends this rule with every model request:
 ```json
 {"provider": {"only": ["moonshotai"], "allow_fallbacks": false}}
 ```
+
+That object is also what the `openrouter_request` event reports as `requested_routing`, because it
+is what the request carried.
 
 OpenRouter must use that provider, and cannot switch to another one. A request that provider
 rejects or cannot serve therefore fails instead of moving elsewhere. You see it as an

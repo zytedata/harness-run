@@ -16,7 +16,9 @@ branch that touches any deploy/runtime contract — it validates, on real infras
       - a second turn on the SAME session passes ``TurnConfig(output_schema=...)`` — the
         worker steers the model to a JSON final message and the client parses it
         (``result.structured_output``), proving the per-turn overlay reaches both sides;
-        the marker must STILL be present (the session config persists across turns);
+        the session config must STILL be in force: the schema leaves no room for the
+        marker in the text, so its persistence shows in the turn's ``effective_spec``
+        echo, whose system prompt must still carry the marker;
       - both turns must stream the worker's ``effective_spec`` echo event carrying the
         config pointers — the durable ground-truth record of what actually ran.
 
@@ -166,15 +168,16 @@ async def _exercise_configs(mode: str, name: str, credentials, verdicts) -> None
             JSON_TASK,
             config=TurnConfig(output_schema=ANSWER_SCHEMA, reasoning_effort="low"),
         ))
-        text = " ".join((r.text or "").split())
         ok = (not r.is_error) and bool(r.num_turns)
         # The per-turn overlay reached the worker (JSON steering) and the client (parse).
         ok = ok and r.structured_output == {"answer": 42}
-        # The SESSION config persists across turns — the marker must still be there.
-        ok = ok and MARKER in text
+        # The SESSION config persists across turns. The schema steers the final message to
+        # pure JSON, so the marker cannot appear in the text — the proof lives in the
+        # worker's echo: the effective spec of THIS turn must still carry the marker prompt.
         ok = ok and any(
             e.get("turn_config_gcs") and e.get("session_config_gcs")
             and e["spec"].get("reasoning_effort") == "low"
+            and MARKER in str(e["spec"].get("system_prompt"))
             for e in echoes
         )
         verdicts[label] = ok

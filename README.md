@@ -208,7 +208,7 @@ from a free one: `RunResult.cost_usd` is a plain float, so both arrive there as 
 
 The ⚠️ is about intermittency, not a permanent failure: under Claude Code, both DeepSeek models have
 finished a turn without returning a final answer in earlier runs, while the newest local and remote
-runs (2026-08-22) had both of them answer on the first attempt. The same models under Codex have not
+runs (2026-08-24) had both of them answer on the first attempt. The same models under Codex have not
 shown it. So prefer Codex for DeepSeek v4 Flash and Pro when a single run has to produce an answer.
 A Claude Code turn that hits this is reported as `error_no_final_text` rather than a success, so the
 caller can retry or switch harness.

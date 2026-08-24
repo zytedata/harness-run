@@ -518,8 +518,10 @@ Each is a `typing.Protocol`; concrete adapters ship for prod (GCP) and dev (loca
   (the single seam both runtimes use). Shared policy — secret routing, agent-env layering, the
   interactive suffix, the inline workspace checkpoint — lives in `harness/_shared.py` so the bindings
   can't drift where the spec doesn't distinguish them. A **conformance suite**
-  (`run_harness_conformance`) pins what embedders read off `AgentEvent.raw`: the init payload (session
-  id included) and the terminal result's spend/turn count.
+  (`run_harness_conformance`) pins what embedders read off `AgentEvent.raw` across every backend: an
+  init status event and the terminal result's spend/turn count. `run_claude_code_harness_conformance`
+  layers Claude Code's stricter promise on top — the init payload's session id — which Codex's init
+  event does not carry.
 - **`CodexHarness`** (OpenAI Codex binding, `openai-codex` SDK) — one `AsyncCodex` app-server per run,
   against a per-job `CODEX_HOME` (auth.json, rollouts — bookkeeping level, beside the workspace).
   OpenAI models are called **directly** (no Vertex path): the `OPENAI_API_KEY` travels as a

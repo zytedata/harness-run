@@ -46,6 +46,34 @@ tag `vX.Y.Z`, push the commit and the tag.
   proxy, because the CLIs can neither send OpenRouter's provider field nor report what
   OpenRouter charged. It also enforces the selected model and the budget, and keeps the
   provider key in the parent process. See DESIGN.md. ([#34])
+
+### Changed
+
+- The harness SDKs are now pinned exactly: `claude-agent-sdk==0.2.130` and
+  `openai-codex==0.147.0`, matching what a deployed engine installs. Both were
+  validated together on the local and Agent Runtime paths, and `openai-codex`
+  ships the Codex CLI itself, whose behavior moves between versions (0.147
+  dropped the `chat` wire API the OpenRouter route used to have a choice
+  about). Installing this library therefore fixes those two versions ([#34]).
+
+### Fixed
+
+- Claude Code turns that finish without a final assistant message now return
+  `error_no_final_text` for OpenRouter models. This has occurred intermittently with
+  DeepSeek v4 and previously looked like a successful run with placeholder text. ([#34])
+- Claude Code now passes `output_schema` to the Agent SDK as its native JSON-schema
+  output format and preserves `ResultMessage.structured_output` in the terminal event.
+  Earlier versions only parsed the final text on the client, so the model received no
+  schema constraint and SDK-provided structured data was discarded. OpenRouter turns
+  also receive the schema in their prompt because its selected model may be responsible
+  for following it. ([#34])
+
+[#34]: https://github.com/zytedata/remote-agent-toolkit/pull/34
+
+## 0.2.0 — 2026-08-24
+
+### Added
+
 - Configuration now has three scopes, one type each: the `AgentSpec` baked at
   deploy, a `SessionConfig` bound once at `engine.start_session(config=…)`
   (the conversation's world: `repos`, `skills`, `mcp_servers`,
@@ -109,6 +137,18 @@ tag `vX.Y.Z`, push the commit and the tag.
   path), and `checkpoint=True` checkpoints the conversation only, so a resume
   continues in the directory as it stands instead of restoring a snapshot over it.
   `gemini.deploy(workspace=…)` raises — a worker's cwd is its own `/tmp` ([#29]).
+- `run_harness_conformance()` is the `Harness` port's conformance suite, the
+  sibling of `run_session_store_conformance()`: hand it a callable that runs one
+  turn and it asserts what callers read off `AgentEvent.raw` beyond the event's
+  own fields — an `init` status event and the terminal `result` event's spend
+  (a float, or `None` when the backend cannot price the run), usage and turn
+  count. `raw` is documented as a pass-through, so a harness or SDK reshaping
+  it broke downstream readers silently; run this against your own `Harness`
+  implementation, or against a shipped one after a toolkit or SDK upgrade, to
+  catch that at test time. `run_claude_code_harness_conformance()` layers
+  Claude Code's stricter promise on top — the `init` event's backend payload
+  under `raw["data"]`, with the session id in it — which Codex's `init` event
+  does not carry ([#27]).
 
 ### Changed
 
@@ -124,7 +164,7 @@ tag `vX.Y.Z`, push the commit and the tag.
   `verify_deploy_env()` — and CI — by design). Deploy venvs must carry 1.165.1
   from now on (`uv sync` suffices); already-deployed engines are unaffected,
   the pin is baked into their image. Verified with a clean `make live-smoke`
-  ([#24]).
+  ([#24], [#33]).
 - The default idle life of a warm-pool worker is now a day, up from 30
   minutes. An idle-expired worker exits **without replacement**, and a pool
   that drains to empty never self-recovers (the post-dispatch refill worker
@@ -132,12 +172,6 @@ tag `vX.Y.Z`, push the commit and the tag.
   any pool quiet for half an hour permanently cold. Note the cost implication
   on redeploy: idle workers now bill for up to a day; pass `pool_max_wait_s`
   to dial it back for pools with steady traffic ([#28]).
-- The harness SDKs are now pinned exactly: `claude-agent-sdk==0.2.130` and
-  `openai-codex==0.147.0`, matching what a deployed engine installs. Both were
-  validated together on the local and Agent Runtime paths, and `openai-codex`
-  ships the Codex CLI itself, whose behavior moves between versions (0.147
-  dropped the `chat` wire API the OpenRouter route used to have a choice
-  about). Installing this library therefore fixes those two versions ([#34]).
 
 ### Fixed
 
@@ -151,16 +185,7 @@ tag `vX.Y.Z`, push the commit and the tag.
   one line) or gets a large tool result hit it routinely. The cap is now
   `AgentSpec.max_buffer_size`, default 32 MiB, and settable per session or per turn
   like the other invocation knobs. `claude-code` only: the Codex app-server SDK
-  frames its own stream and has no equivalent.
-- Claude Code turns that finish without a final assistant message now return
-  `error_no_final_text` for OpenRouter models. This has occurred intermittently with
-  DeepSeek v4 and previously looked like a successful run with placeholder text. ([#34])
-- Claude Code now passes `output_schema` to the Agent SDK as its native JSON-schema
-  output format and preserves `ResultMessage.structured_output` in the terminal event.
-  Earlier versions only parsed the final text on the client, so the model received no
-  schema constraint and SDK-provided structured data was discarded. OpenRouter turns
-  also receive the schema in their prompt because its selected model may be responsible
-  for following it. ([#34])
+  frames its own stream and has no equivalent ([#32]).
 - Structured output is no longer lost when a background-task notification arrives
   after the agent has already delivered its answer: the model's reply to the stale
   notification became the turn's final message, and structured parsing — which reads
@@ -219,9 +244,11 @@ tag `vX.Y.Z`, push the commit and the tag.
 [#24]: https://github.com/zytedata/remote-agent-toolkit/pull/24
 [#25]: https://github.com/zytedata/remote-agent-toolkit/pull/25
 [#26]: https://github.com/zytedata/remote-agent-toolkit/pull/26
+[#27]: https://github.com/zytedata/remote-agent-toolkit/pull/27
 [#28]: https://github.com/zytedata/remote-agent-toolkit/pull/28
 [#29]: https://github.com/zytedata/remote-agent-toolkit/pull/29
-[#34]: https://github.com/zytedata/remote-agent-toolkit/pull/34
+[#32]: https://github.com/zytedata/remote-agent-toolkit/pull/32
+[#33]: https://github.com/zytedata/remote-agent-toolkit/pull/33
 
 ## 0.1.0 — 2026-08-07
 

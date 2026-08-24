@@ -33,7 +33,12 @@ def result_msg(subtype="success", is_error=False, num_turns=1, cost=0.01, result
 
 
 def init_msg():
-    return SystemMessage(subtype="init", data={"model": "m"})
+    # The CLI's init payload as it really arrives: the session id it picked and the
+    # resolved MCP servers ride along with the model (see run_harness_conformance).
+    return SystemMessage(
+        subtype="init",
+        data={"model": "m", "session_id": "claude-sid", "mcp_servers": []},
+    )
 
 
 def task_started_msg(task_id, description="bg work"):

@@ -1,7 +1,7 @@
 """The remote probe's engine teardown — offline, with a stub engine.
 
 A `dev/` script does not normally get tests. This one does, because the mechanism it
-guards costs real money when it fails: the probe runs for ~35-40 min, so it is routinely
+guards costs real money when it fails: the probe runs for many minutes, so it is routinely
 wrapped in a `timeout` or interrupted, and SIGTERM/SIGINT kill the process WITHOUT running
 `finally`. That happened while the probe was being written and left an Agent Engine
 billing until it was deleted by hand. These tests pin the three behaviors that prevent a

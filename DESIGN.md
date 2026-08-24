@@ -539,8 +539,7 @@ Each is a `typing.Protocol`; concrete adapters ship for prod (GCP) and dev (loca
   token counts but no USD and enforces no caps — the harness prices tokens via LiteLLM's live
   pricing dataset (`harness/pricing.py`; the same upstream `ccusage` uses, fetched once per process,
   baked 5.6-family fallback for offline; models unknown to both: cost `None` + a `cost_unknown`
-  status, budget unenforceable; the result raw carries `price_source`). An `openrouter/` model is
-  never priced this way — it reports the charge OpenRouter itself returned, or nothing. It also counts
+  status, budget unenforceable; the result raw carries `price_source`). The harness also counts
   `thread/tokenUsage/updated` notifications as model calls (= `num_turns`; verified live: one per
   call), and interrupts the turn at `max_turns` / `max_budget_usd` (`error_max_turns` /
   `error_budget_exceeded` result subtypes, accounting kept). **Checkpoint/resume**: the workspace
@@ -558,8 +557,9 @@ Each is a `typing.Protocol`; concrete adapters ship for prod (GCP) and dev (loca
   the routing metadata and the charge out of it. Each response becomes one `openrouter_request`
   event, failed responses included — nothing else can see a retried 429. The CLI holds a random
   per-run token, never the account key. The summed charges become the result's `cost_usd`
-  (`price_source="openrouter"`; the CLI's own figure is kept as `cli_reported_cost_usd`). The
-  budget is measured against that total, and the proxy answers 402 once the cap is spent.
+  (`price_source="openrouter"`; the CLI's own figure is kept as `cli_reported_cost_usd`) — these
+  models are never priced from the table, and a turn OpenRouter reports no charge for reports none.
+  The budget is measured against that total, and the proxy answers 402 once the cap is spent.
 - **Background-task semantics are honored** (eval feedback: a model armed the Monitor tool and ended its
   turn — correct, trained behavior — and the one-shot `query()` tore the CLI down, firing the advertised
   notification into the void; the run was scored no-deliverable). The CLI itself re-invokes the model when

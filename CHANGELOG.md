@@ -28,11 +28,11 @@ tag `vX.Y.Z`, push the commit and the tag.
   context sizes. Each OpenRouter response reports its selected upstream and exact
   charge as an `openrouter_request` event. Results and budget checks use that charge,
   and an OpenRouter model is never priced from the toolkit's own table: a turn
-  OpenRouter reported no charge for gets `cost_usd=None` and a `cost_unknown` event.
-  An estimate cannot match the charge, because OpenRouter routes one model id to
-  providers whose prices differ by up to 2.5x. `openrouter_provider` selects one
-  OpenRouter provider per agent, session, or turn and disables fallbacks. Paid local
-  and Gemini Agent Runtime checks cover both harnesses. ([#34])
+  OpenRouter reported no charge for gets `cost_usd=None` and a `cost_unknown` event
+  (why an estimate cannot replace it: the `harness/pricing.py` docstring).
+  `openrouter_provider` selects one OpenRouter provider per agent, session, or turn and
+  disables fallbacks. Paid local and Gemini Agent Runtime checks cover both
+  harnesses. ([#34])
 - `openrouter_routing` carries OpenRouter's whole `provider` object instead of that one
   pinned slug — several providers, a deny list, fallbacks on, a price or throughput sort —
   and sends it verbatim. Same three scopes, and the two fields cannot be combined.
@@ -43,12 +43,9 @@ tag `vX.Y.Z`, push the commit and the tag.
   against an older engine fails closed, as the same-revision rule requires. ([#34])
 - Codex emits a `model_routing` status event from the app-server's thread record. ([#34])
 - Every OpenRouter model call, on both harnesses, passes through a per-run localhost
-  proxy. The CLIs cannot send OpenRouter's provider field and cannot report what
-  OpenRouter charged; the proxy supplies both. It applies the provider choice and
-  records the routing, HTTP status, cost, and OpenRouter's message when a request is
-  rejected. It enforces the selected model and the budget, and passes the response
-  through unchanged. The CLI holds a random per-run token, so the provider key stays
-  in the parent process. ([#34])
+  proxy, because the CLIs can neither send OpenRouter's provider field nor report what
+  OpenRouter charged. It also enforces the selected model and the budget, and keeps the
+  provider key in the parent process. See DESIGN.md. ([#34])
 - Configuration now has three scopes, one type each: the `AgentSpec` baked at
   deploy, a `SessionConfig` bound once at `engine.start_session(config=…)`
   (the conversation's world: `repos`, `skills`, `mcp_servers`,

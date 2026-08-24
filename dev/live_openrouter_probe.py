@@ -6,9 +6,10 @@ Provider selection, whole routing objects, resume, and budget caps are checked o
 harnesses. Checks run concurrently unless ``SERIAL=1``.
 
 Run by hand with ``OPENROUTER_API_KEY=... make live-openrouter``. Never run this in CI.
-Use ``MODELS=...`` to limit the model list. ``OPENROUTER_PROVIDER`` overrides the provider
-used by the checks; this is mainly useful with a single model.
-``OPENROUTER_ALTERNATE_PROVIDER`` overrides the second provider in the routing checks.
+Use ``MODELS=...`` to limit the model list and ``HARNESSES=...`` to run one harness instead
+of both. ``OPENROUTER_PROVIDER`` overrides the provider used by the checks; this is mainly
+useful with a single model. ``OPENROUTER_ALTERNATE_PROVIDER`` overrides the second provider
+in the routing checks. ``PROBE_REASONING_EFFORT`` sets the effort every turn asks for.
 """
 
 from __future__ import annotations

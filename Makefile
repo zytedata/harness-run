@@ -31,8 +31,9 @@ live-revisions:
 	$(VENV)/bin/python dev/live_revisions.py
 
 # Live check of the OpenRouter models on both harnesses (local runtime, no cloud).
-# COSTS REAL MONEY (~$0.60 a pass) and needs OPENROUTER_API_KEY — run it by hand, sparingly,
-# never in CI. Run it when you touch the harness's provider wiring or the model list.
+# COSTS REAL MONEY and needs OPENROUTER_API_KEY — run it by hand, sparingly, never in CI.
+# Run it when you touch the harness's provider wiring or the model list. TESTING.md has the
+# current cost and runtime.
 live-openrouter:
 	$(VENV)/bin/python dev/live_openrouter_probe.py
 

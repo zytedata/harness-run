@@ -134,9 +134,9 @@ Most model requests select one known provider and disable fallbacks. Kimi uses M
 GLM uses Z.AI, and both DeepSeek models use Novita because the shared account's ZDR policy
 excludes DeepSeek's own endpoint. Those rows fail if OpenRouter reports a different provider.
 Three kinds of row do something else on purpose: the two rows named "unpinned" above, the two
-DeepSeek structured-output checks on Codex — Novita serves those models but does not accept
-Codex's `json_schema` format — and the routing rows below, which send a whole provider object. Set `OPENROUTER_PROVIDER` to test every feature against
-one specific provider. To test one model with another provider:
+DeepSeek structured-output checks on Codex (the README footnote explains that exception), and
+the routing rows below, which send a whole provider object. Set `OPENROUTER_PROVIDER` to test
+every feature against one specific provider. To test one model with another provider:
 
 ```bash
 MODELS=openrouter/moonshotai/kimi-k3 OPENROUTER_PROVIDER=fireworks \
@@ -179,9 +179,8 @@ where a routing object is proven to survive the trip to a deployed worker.
 It also checks the remote-only surface: the worker's `effective_spec` echo names the model,
 `session.resource_samples()` returns worker CPU/RAM, `memory_peak_bytes` is stamped on the
 terminal result, `session.history()` replays the events, and **that session's** Cloud Trace
-root span carries the model and its cost. It needs
-`uv pip install google-cloud-trace` (dev-only, not a toolkit dependency). The trace check
-reports SKIP when the package is missing.
+root span carries the model and its cost. It needs `uv pip install google-cloud-trace`
+(dev-only, not a toolkit dependency). The trace check reports SKIP when the package is missing.
 
 The engine is deleted in `finally`; a failed teardown prints loudly, because an engine
 bills while it exists. `KEEP=1` leaves it up for debugging and hands you the cleanup.
@@ -190,16 +189,14 @@ bills while it exists. `KEEP=1` leaves it up for debugging and hands you the cle
 `SUFFIX` (the engine name's suffix), `MAX_INSTANCES` and `IMPERSONATE_SA`; each falls back to
 the same default the other live probes use.
 
-**Costs real money** (mostly the build) and usually takes **~8-15 min**. Checks run
-concurrently; build time varies widely. Give it a generous timeout. Teardown
+**Costs real money** (mostly the build; the summary table above has the current figures).
+Checks run concurrently; build time varies widely. Give it a generous timeout. Teardown
 also runs on SIGTERM/SIGINT, because a `timeout` that fires mid-run would otherwise leave an
 engine billing.
 
-DeepSeek v4 sometimes returns no final message under Claude Code — both Flash and Pro have
-done it in earlier runs. It is intermittent: in the 2026-08-22 validation (128/128 remote,
-26/26 local) both models answered on the first attempt, with no retry used. The test retries
-one soft failure and reports when the retry was used. It stays failed when the retry also has
-no answer.
+DeepSeek v4 sometimes returns no final message under Claude Code (the README has the details).
+The test retries one soft failure and reports when the retry was used. It stays failed when the
+retry also has no answer; in the 2026-08-22 validation no retry was needed.
 
 ### Model attribution: did we run what we asked for?
 

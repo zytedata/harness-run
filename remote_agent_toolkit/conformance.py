@@ -8,7 +8,7 @@ violated invariant.
 
 from __future__ import annotations
 
-from typing import Any, Callable
+from typing import Any, AsyncIterator, Callable
 
 
 async def run_session_store_conformance(
@@ -78,3 +78,78 @@ async def run_session_store_conformance(
     await store.append({"session_id": sid, "subpath": "subagents/agent-X"}, [e2])
     subs = await store.list_subkeys({"session_id": sid})
     assert subs == ["subagents/agent-X"], f"subkeys failed: {subs!r}"
+
+
+def _check_result_contract(events: list[Any]) -> Any:
+    """Assert the terminal-result contract shared by every ``Harness`` backend; return the init event."""
+    assert events, "the turn yielded no events"
+
+    inits = [
+        e for e in events if e.kind == "status" and (e.raw or {}).get("subtype") == "init"
+    ]
+    assert inits, "no status event with raw['subtype'] == 'init'"
+
+    tail = list(reversed(events))
+    last_result = next((i for i, e in enumerate(tail) if e.kind == "result"), None)
+    assert last_result is not None, "the turn yielded no result event"
+    assert all(e.kind == "status" for e in tail[:last_result]), (
+        "only status events may follow the terminal result: "
+        f"{[e.kind for e in reversed(tail[:last_result])]}"
+    )
+    final = tail[last_result]
+    assert final.cost_usd is None or isinstance(final.cost_usd, float), (
+        f"result cost_usd must be a float or None: {final.cost_usd!r}"
+    )
+    assert isinstance(final.usage, dict), f"result usage must be a dict: {final.usage!r}"
+    raw = final.raw or {}
+    assert isinstance(raw.get("num_turns"), int), f"result raw['num_turns'] must be an int: {raw!r}"
+    assert isinstance(raw.get("is_error"), bool), f"result raw['is_error'] must be a bool: {raw!r}"
+    return inits[0]
+
+
+async def run_harness_conformance(
+    run_turn: Callable[[], AsyncIterator[Any]],
+) -> None:
+    """Validate a :class:`~remote_agent_toolkit.harness.base.Harness` implementation (DESIGN.md §7).
+
+    *run_turn* is a zero-arg callable returning the event iterator of ONE completed turn —
+    typically ``lambda: harness.run(spec, ctx)``, against a live backend or a scripted fake.
+    Backend-agnostic: holds for Claude Code, Codex, and any future ``Harness``. The suite
+    asserts what embedders read beyond ``AgentEvent``'s own fields, since ``raw`` is
+    otherwise a pass-through with no promise attached:
+
+    * **Init event** — a ``status`` event carries ``raw["subtype"] == "init"``.
+    * **Terminal result** — the turn ends at a ``result`` event (only ``status`` events, such
+      as a checkpoint notice, may follow it) whose spend is on ``cost_usd`` (a float, or
+      ``None`` when the backend cannot price the run), whose token accounting is a ``usage``
+      dict, and whose ``raw`` carries ``num_turns`` (an int) and ``is_error`` (a bool).
+
+    :func:`run_claude_code_harness_conformance` layers Claude Code's stricter init-payload
+    contract on top of this one.
+
+    Raises ``AssertionError`` on the first violated invariant; returns ``None`` on success.
+    """
+    events = [event async for event in run_turn()]
+    _check_result_contract(events)
+
+
+async def run_claude_code_harness_conformance(
+    run_turn: Callable[[], AsyncIterator[Any]],
+) -> None:
+    """Validate :class:`~remote_agent_toolkit.harness.claude_code.ClaudeCodeHarness` (DESIGN.md §7).
+
+    Everything :func:`run_harness_conformance` checks, plus the init payload only Claude
+    Code's SDK makes: the ``init`` status event's ``raw["data"]`` is the backend's own
+    payload, verbatim, including the session id at ``raw["data"]["session_id"]`` — that is
+    where a caller reads the id the backend actually used (and the resolved
+    ``mcp_servers``). Codex's init event carries no such payload, so this check does not
+    hold for :class:`~remote_agent_toolkit.harness.codex.CodexHarness`.
+
+    Raises ``AssertionError`` on the first violated invariant; returns ``None`` on success.
+    """
+    events = [event async for event in run_turn()]
+    init = _check_result_contract(events)
+    data = (init.raw or {}).get("data")
+    assert isinstance(data, dict), f"init raw['data'] must be the backend payload dict: {data!r}"
+    sid = data.get("session_id")
+    assert isinstance(sid, str) and sid, f"init raw['data']['session_id'] missing: {data!r}"

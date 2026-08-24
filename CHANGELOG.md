@@ -86,6 +86,18 @@ tag `vX.Y.Z`, push the commit and the tag.
   path), and `checkpoint=True` checkpoints the conversation only, so a resume
   continues in the directory as it stands instead of restoring a snapshot over it.
   `gemini.deploy(workspace=…)` raises — a worker's cwd is its own `/tmp` ([#29]).
+- `run_harness_conformance()` is the `Harness` port's conformance suite, the
+  sibling of `run_session_store_conformance()`: hand it a callable that runs one
+  turn and it asserts what callers read off `AgentEvent.raw` beyond the event's
+  own fields — an `init` status event and the terminal `result` event's spend
+  (a float, or `None` when the backend cannot price the run), usage and turn
+  count. `raw` is documented as a pass-through, so a harness or SDK reshaping
+  it broke downstream readers silently; run this against your own `Harness`
+  implementation, or against a shipped one after a toolkit or SDK upgrade, to
+  catch that at test time. `run_claude_code_harness_conformance()` layers
+  Claude Code's stricter promise on top — the `init` event's backend payload
+  under `raw["data"]`, with the session id in it — which Codex's `init` event
+  does not carry ([#27]).
 
 ### Changed
 
@@ -181,6 +193,7 @@ tag `vX.Y.Z`, push the commit and the tag.
 [#24]: https://github.com/zytedata/remote-agent-toolkit/pull/24
 [#25]: https://github.com/zytedata/remote-agent-toolkit/pull/25
 [#26]: https://github.com/zytedata/remote-agent-toolkit/pull/26
+[#27]: https://github.com/zytedata/remote-agent-toolkit/pull/27
 [#28]: https://github.com/zytedata/remote-agent-toolkit/pull/28
 [#29]: https://github.com/zytedata/remote-agent-toolkit/pull/29
 

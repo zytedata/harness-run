@@ -45,7 +45,9 @@ tag `vX.Y.Z`, push the commit and the tag.
   is now `cache_read_input_tokens`, `input_tokens` no longer includes the
   cached/cache-written share, `total_tokens` is gone (sum the keys), and per-thread
   subagent detail is at `raw["subagent_usage"]`. The harness conformance suite now
-  asserts the normalized shape. ([#36])
+  asserts the normalized shape. `num_turns` is unchanged and now documented: the
+  main agent's model calls on both harnesses, cumulative across re-invocation
+  segments, subagent calls not counted — the scope `max_turns` caps. ([#36])
 
 ### Added
 

@@ -63,7 +63,10 @@ class RunResult:
             message. The recovered value is real; this flags that ``text`` doesn't
             contain it.
         is_error: Whether the run terminated in error.
-        num_turns: Number of agent turns consumed.
+        num_turns: Model calls made by the main agent — the same unit on every
+            harness. Cumulative across background-task re-invocation segments;
+            subagent (Task/collab-agent) calls are NOT counted, matching what
+            ``max_turns`` caps.
         cost_usd: Total spend for the run, or ``None`` when the spend is unknown:
             the harness could not price the model, or OpenRouter reported no charge.
             A ``cost_unknown`` status event fires in that case and ``max_budget_usd``

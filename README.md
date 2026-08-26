@@ -577,7 +577,9 @@ informational). Both metrics cover the **whole turn**: subagent sessions and bac
 re-invocation segments included — on Claude Code aggregated from the CLI's complete per-model record, on
 Codex recovered from the subagent rollout files (Codex reports no subagent usage on its wire). The
 backends' own verbatim records stay on the result event's `raw`: `model_usage` and `cli_usage` on Claude
-Code, `subagent_usage` (per-thread) on Codex.
+Code, `subagent_usage` (per-thread) on Codex. `result.num_turns` counts the **main agent's** model calls
+(same unit on both harnesses): cumulative across re-invocation segments, subagent calls **not** included —
+the same scope `max_turns` caps.
 
 **Background tasks are honored.** If the agent starts a background job (Bash `run_in_background`) or arms
 the Monitor tool and then ends its turn — the trained, efficient behavior for waiting on long processes

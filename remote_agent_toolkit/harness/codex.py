@@ -417,14 +417,16 @@ class CodexEventTranslator:
             }
             self.subagent_threads.update(statuses)
             if not started:
+                tool = getattr(item, "tool", None)
+                tool = getattr(tool, "value", tool)
                 yield AgentEvent(
                     kind="status",
-                    summary=f"codex subagents ({getattr(item, 'tool', '?')}): "
+                    summary=f"codex subagents ({tool}): "
                     + (", ".join(f"{t}={s}" for t, s in statuses.items()) or "none")[:200],
                     raw={
                         "event": "codex_subagents",
                         "id": getattr(item, "id", None),
-                        "tool": getattr(item, "tool", None),
+                        "tool": tool,
                         "agent_statuses": statuses,
                     },
                 )
@@ -433,14 +435,16 @@ class CodexEventTranslator:
             if agent_tid:
                 self.subagent_threads.setdefault(agent_tid, None)
             if not started:
+                activity = getattr(item, "kind", None)
+                activity = getattr(activity, "value", activity)
                 yield AgentEvent(
                     kind="status",
-                    summary=f"codex subagent activity: {getattr(item, 'kind', '')}"[:160],
+                    summary=f"codex subagent activity: {activity}"[:160],
                     raw={
                         "event": "codex_subagent_activity",
                         "id": getattr(item, "id", None),
                         "agent_thread_id": agent_tid,
-                        "activity": str(getattr(item, "kind", None)),
+                        "activity": activity,
                     },
                 )
         elif kind == "userMessage":
@@ -731,29 +735,33 @@ class CodexHarness:
         matches = sorted(sessions.rglob(f"rollout-*-{thread_id}.jsonl"))
         return matches[-1] if matches else None
 
-    def _rollout_total_usage(self, path: Path) -> dict[str, int] | None:
-        """The thread's cumulative wire counters: the LAST ``token_count`` line's total.
+    def _rollout_usage_record(self, path: Path) -> tuple[dict, dict | None]:
+        """One rollout's ``(session_meta payload, last cumulative token total)``.
 
-        Rollout lines are ``{"type": "event_msg", "payload": {"type": "token_count",
-        "info": {"total_token_usage": {...}, ...}}}``; the totals are thread-cumulative,
-        so only the last one matters. ``None`` when the file has no usage record.
+        The first ``session_meta`` line identifies the thread (``id``) and, for a
+        subagent thread, names its ``parent_thread_id``. ``token_count`` lines ride
+        ``event_msg`` payloads whose ``info.total_token_usage`` is thread-cumulative,
+        so only the LAST one matters; ``None`` when the file has no usage record yet.
         """
+        meta: dict = {}
         total = None
         try:
             with path.open(encoding="utf-8") as lines:
                 for line in lines:
-                    if '"token_count"' not in line:
+                    if '"session_meta"' not in line and '"token_count"' not in line:
                         continue
                     try:
-                        payload = json.loads(line).get("payload") or {}
+                        record = json.loads(line)
                     except ValueError:
                         continue
-                    if payload.get("type") != "token_count":
-                        continue
-                    total = (payload.get("info") or {}).get("total_token_usage") or total
+                    payload = record.get("payload") or {}
+                    if record.get("type") == "session_meta":
+                        meta = meta or payload
+                    elif payload.get("type") == "token_count":
+                        total = (payload.get("info") or {}).get("total_token_usage") or total
         except OSError:
-            return None
-        return total
+            return {}, None
+        return meta, total
 
     def _collect_subagent_usage(
         self, codex_home: Path, parent_thread_id: str
@@ -761,11 +769,14 @@ class CodexHarness:
         """Wire-convention token deltas per subagent thread, read from their rollouts.
 
         Codex reports no subagent usage on the wire (openai/codex#14642), but every
-        subagent thread persists its own rollout under ``CODEX_HOME/sessions`` — and the
-        per-job ``CODEX_HOME`` holds nothing else, so every rollout except the parent
-        thread's belongs to a subagent. Rollout totals are thread-cumulative, so a state
-        file beside ``sessions/`` records what earlier turns already billed and only the
-        delta is returned — a session's next turn (same job dir) must not double-bill.
+        subagent thread persists its own rollout under ``CODEX_HOME/sessions``, and its
+        ``session_meta`` line names a ``parent_thread_id`` — that marker, not the
+        filename, is what identifies a subagent (a session's later turn starts a new
+        parent thread, whose rollout must never be billed as a subagent). Rollout
+        totals are thread-cumulative, so a state file beside ``sessions/`` records what
+        earlier turns already billed and only the delta is returned — a session's next
+        turn (same job dir) must not double-bill. Unrecognizable rollouts are skipped:
+        under-reporting is the safe failure mode, never billing someone else's thread.
         """
         sessions = codex_home / "sessions"
         if not sessions.is_dir():
@@ -775,19 +786,19 @@ class CodexHarness:
             previous = json.loads(state_path.read_text())
         except (OSError, ValueError):
             previous = {}
-        # Latest rollout per thread (a resumed thread gets a new file carrying the
-        # cumulative totals forward), keyed by the thread id ending the filename.
-        rollouts: dict[str, Path] = {
-            path.stem[-36:]: path
-            for path in sorted(sessions.rglob("rollout-*.jsonl"))
-            if not path.name.endswith(f"-{parent_thread_id}.jsonl")
-        }
+        # Latest total per thread: a resumed thread gets a new file carrying the
+        # cumulative totals forward, and the rglob sort puts it last.
+        totals: dict[str, dict] = {}
+        for path in sorted(sessions.rglob("rollout-*.jsonl")):
+            if path.name.endswith(f"-{parent_thread_id}.jsonl"):
+                continue
+            meta, total = self._rollout_usage_record(path)
+            if not meta.get("parent_thread_id") or not total:
+                continue  # not a subagent rollout (e.g. an earlier turn's parent thread)
+            totals[meta.get("id") or path.stem[-36:]] = total
         deltas: dict[str, dict[str, int | None]] = {}
         state = dict(previous)
-        for thread_id, path in rollouts.items():
-            total = self._rollout_total_usage(path)
-            if not total:
-                continue
+        for thread_id, total in totals.items():
             billed = previous.get(thread_id) or {}
             delta: dict[str, int | None] = {}
             for key in _CODEX_COUNTER_KEYS:
@@ -864,8 +875,9 @@ class CodexHarness:
         ``usage`` is the normalized record (see :mod:`._usage`) for the WHOLE turn:
         the parent thread's calls plus ``subagent_usage`` (per-thread wire-convention
         deltas from :meth:`_collect_subagent_usage`). ``cost_usd`` is OpenRouter's exact
-        charge when there is one; otherwise the token-priced cost, subagent tokens
-        included. The per-thread normalized detail rides ``raw["subagent_usage"]``.
+        charge when there is one — already subagent-inclusive, since subagent requests
+        ride the same proxy (verified live) — otherwise the token-priced cost, subagent
+        tokens included. The per-thread normalized detail rides ``raw["subagent_usage"]``.
         """
         status = getattr(turn.status, "value", turn.status)
         if limit == "max_turns":

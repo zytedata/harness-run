@@ -540,14 +540,26 @@ def _token_count_line(total: dict) -> str:
     )
 
 
-def _write_subagent_rollout(codex_home, thread_id, totals):
-    """A subagent rollout whose token_count lines carry cumulative ``totals``, in order."""
+def _write_rollout(codex_home, thread_id, totals, parent_thread_id=None):
+    """A rollout whose token_count lines carry cumulative ``totals``, in order.
+
+    ``parent_thread_id`` set makes it a subagent rollout (that session_meta marker is
+    how the harness identifies one); ``None`` makes it a parent-thread rollout.
+    """
     p = codex_home / "sessions" / "2026" / "07" / "21" / f"rollout-x-{thread_id}.jsonl"
     p.parent.mkdir(parents=True, exist_ok=True)
-    lines = ['{"type": "session_meta", "payload": {}}']
+    meta = {"id": thread_id, "source": "vscode"}
+    if parent_thread_id is not None:
+        meta["parent_thread_id"] = parent_thread_id
+        meta["source"] = {"subagent": {"thread_spawn": {"parent_thread_id": parent_thread_id}}}
+    lines = [json.dumps({"timestamp": "t", "type": "session_meta", "payload": meta})]
     lines += [_token_count_line(t) for t in totals]
     p.write_text("\n".join(lines) + "\n")
     return p
+
+
+def _write_subagent_rollout(codex_home, thread_id, totals):
+    return _write_rollout(codex_home, thread_id, totals, parent_thread_id="thr-fake")
 
 
 async def test_subagent_usage_merged_into_result(tmp_path, monkeypatch):
@@ -606,6 +618,7 @@ async def test_subagent_usage_merged_into_result(tmp_path, monkeypatch):
     # The completed collab item surfaced as a status event with the per-agent statuses.
     sub_events = [e for e in events if (e.raw or {}).get("event") == "codex_subagents"]
     assert sub_events and sub_events[-1].raw["agent_statuses"] == {_SUB_TID: "completed"}
+    assert sub_events[-1].raw["tool"] == "spawnAgent"  # plain str, not the SDK enum
     # All tracked threads ended terminal: no partial-usage warning.
     assert not [e for e in events if (e.raw or {}).get("event") == "subagent_usage_partial"]
 
@@ -629,18 +642,26 @@ def test_collect_subagent_usage_bills_deltas_across_turns(tmp_path):
     harness = CodexHarness()
     home = tmp_path / "codex_home"
     parent = "01a00000-0000-0000-0000-00000000feed"
-    _write_subagent_rollout(
+    _write_rollout(  # the current parent's own rollout: excluded by filename AND meta
         home, parent,
         [{"input_tokens": 9, "cached_input_tokens": 0, "output_tokens": 9,
           "reasoning_output_tokens": 0, "total_tokens": 18}],
     )
-    _write_subagent_rollout(
+    _write_rollout(  # an EARLIER turn's parent thread (live-caught bug: a session's
+        # next turn starts a new thread id, so "everything but the current parent"
+        # would bill this as a subagent) — no parent_thread_id marker, never billed
+        home, "01a00000-0000-0000-0000-0000000feed0",
+        [{"input_tokens": 7, "cached_input_tokens": 0, "output_tokens": 7,
+          "reasoning_output_tokens": 0, "total_tokens": 14}],
+    )
+    _write_rollout(
         home, _SUB_TID,
         [{"input_tokens": 100, "cached_input_tokens": 40, "output_tokens": 10,
           "reasoning_output_tokens": 1, "total_tokens": 110}],
+        parent_thread_id=parent,
     )
     first = harness._collect_subagent_usage(home, parent)
-    assert set(first) == {_SUB_TID}  # the parent's own rollout is never a subagent
+    assert set(first) == {_SUB_TID}  # only the session_meta-marked subagent bills
     assert first[_SUB_TID]["input_tokens"] == 100
     assert first[_SUB_TID]["cache_write_input_tokens"] is None
 

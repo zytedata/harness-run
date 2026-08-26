@@ -76,8 +76,9 @@ class RunResult:
             meaning on every harness (see ``harness/_usage.py``). A flat dict whose
             five keys are always present: ``input_tokens``, ``cache_read_input_tokens``,
             ``cache_creation_input_tokens``, ``output_tokens``,
-            ``reasoning_output_tokens`` — disjoint buckets, ``None`` where the harness
-            reports no such number (never a fake ``0``). The harness's own verbatim
+            ``reasoning_output_tokens`` — the input buckets disjoint, reasoning a share
+            of output — ``None`` where the harness reports no such number (never a
+            fake ``0``). The harness's own verbatim
             records stay on the result event's ``raw`` (``model_usage``/``cli_usage``
             on claude-code, ``subagent_usage`` on codex).
         session_id: The session this result belongs to (for re-attach/resume).

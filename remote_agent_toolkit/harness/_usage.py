@@ -3,7 +3,8 @@
 ``RunResult.usage`` is a flat dict with a fixed key set, covering the **whole turn**:
 subagent sessions and background-task re-invocation segments included. Every key is
 always present; ``None`` means the harness did not report that number (never "zero").
-All buckets are mutually disjoint, following Anthropic's convention:
+The input buckets are mutually disjoint (Anthropic's convention); ``reasoning_output_tokens``
+is a share of ``output_tokens``, so total tokens = the three input buckets + ``output_tokens``:
 
 * ``input_tokens``                 — uncached input, not written to a prompt cache
 * ``cache_read_input_tokens``      — input served from the prompt cache

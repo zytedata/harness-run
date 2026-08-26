@@ -1258,3 +1258,36 @@ def test_skills_subdir_mapping():
     assert skills_subdir("codex") == ".agents/skills"
     assert skills_subdir("claude-code") == ".claude/skills"
     assert skills_subdir("anything-else") == ".claude/skills"
+
+
+async def test_subagent_spend_crossing_the_budget_is_not_a_success(tmp_path, monkeypatch):
+    # Subagent usage is only known at turn end, after the mid-turn budget checks; a turn
+    # it pushes over max_budget_usd must end error_budget_exceeded, not success.
+    spec = AgentSpec(name="a", model="gpt-5.6-luna", harness="codex", max_budget_usd=0.005)
+    ctx = _ctx(tmp_path, spec)
+
+    def write_rollout(client):
+        _write_subagent_rollout(
+            ctx.job_dir / "codex_home",
+            _SUB_TID,
+            [{"input_tokens": 1_000_000, "cached_input_tokens": 0, "output_tokens": 0,
+              "reasoning_output_tokens": 0, "total_tokens": 1_000_000}],  # $1 on luna
+        )
+
+    script = [
+        turn_started(),
+        collab_agent_tool_call(started=True, agents={_SUB_TID: "running"}),
+        write_rollout,
+        collab_agent_tool_call(agents={_SUB_TID: "completed"}),
+        agent_message("done"),
+        token_usage(in_tok=1000, out_tok=100),  # parent alone is well under the cap
+        turn_completed(),
+    ]
+    events, client = await _events_of(script, tmp_path, monkeypatch, spec=spec, ctx=ctx)
+    result = events[-1]
+    assert not client.interrupted  # nothing to interrupt: the turn had already ended
+    assert result.raw["subtype"] == "error_budget_exceeded"
+    assert result.cost_usd > 1.0
+    assert ("status", "limit_exceeded") in [
+        (e.kind, (e.raw or {}).get("event")) for e in events
+    ]

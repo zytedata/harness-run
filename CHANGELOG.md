@@ -26,8 +26,9 @@ tag `vX.Y.Z`, push the commit and the tag.
 - `RunResult.usage` is now a toolkit-normalized token record: the same flat dict on
   every harness, whose five keys are always present — `input_tokens`,
   `cache_read_input_tokens`, `cache_creation_input_tokens`, `output_tokens`,
-  `reasoning_output_tokens` — as disjoint buckets, with `None` for a number the
-  harness does not report (never a fake `0`). It also became complete: it covers the
+  `reasoning_output_tokens` — with `None` for a number the harness does not report
+  (never a fake `0`). The three input buckets are disjoint; `reasoning_output_tokens`
+  is the reasoning share of `output_tokens`. It also became complete: it covers the
   whole turn, subagent sessions and background-task re-invocation segments included.
   Previously it was each CLI's own dict, verbatim — on Claude Code that meant main
   conversation loop only and, on re-invoked turns, the final segment only (up to a
@@ -36,16 +37,22 @@ tag `vX.Y.Z`, push the commit and the tag.
   collab-subagent threads entirely, since Codex reports no subagent usage on its
   wire ([openai/codex#14642](https://github.com/openai/codex/issues/14642)) — the
   harness now recovers those post-hoc from their rollout files, and a natively
-  priced Codex `cost_usd` includes that spend too (mid-turn `max_turns`/
-  `max_budget_usd` checks still cannot see it while the turn runs; a subagent still
-  running at turn end is flagged by a `subagent_usage_partial` status event).
+  priced Codex `cost_usd` includes that spend too. The mid-turn `max_turns`/
+  `max_budget_usd` checks still cannot see it while the turn runs, but the budget
+  is re-checked at turn end, so subagent spend that crosses the cap yields
+  `error_budget_exceeded` rather than `success`; a subagent still running at turn
+  end is flagged by a `subagent_usage_partial` status event.
   **Update notes:** readers of Claude Code's verbatim dicts find them on the result
   event's `raw` — `raw["model_usage"]` (the CLI's complete per-model record) and
   `raw["cli_usage"]` (the old `usage` value). Codex readers: `cached_input_tokens`
   is now `cache_read_input_tokens`, `input_tokens` no longer includes the
-  cached/cache-written share, `total_tokens` is gone (sum the keys), and per-thread
-  subagent detail is at `raw["subagent_usage"]`. The harness conformance suite now
-  asserts the normalized shape. `num_turns` is unchanged and now documented: the
+  cached/cache-written share, `total_tokens` is gone (it is the three input buckets
+  + `output_tokens`; `reasoning_output_tokens` is already inside `output_tokens`), and
+  per-thread subagent detail is at `raw["subagent_usage"]`. The harness conformance
+  suite now asserts the normalized shape. The harness code runs inside the engine,
+  so a deployed gemini engine keeps emitting the legacy `usage` shape until it is
+  redeployed with this version (the client passes results through unchanged), and
+  events already recorded stay in the legacy shape. `num_turns` is unchanged and now documented: the
   main agent's model calls on both harnesses, cumulative across re-invocation
   segments, subagent calls not counted — the scope `max_turns` caps. ([#36])
 

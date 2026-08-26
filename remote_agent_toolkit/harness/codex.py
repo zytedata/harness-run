@@ -31,8 +31,11 @@ Spec translation (parity notes):
                          (openai/codex#14642), so the harness recovers it post-hoc from
                          the subagent rollout files under ``CODEX_HOME/sessions``: the
                          terminal ``usage`` and (natively priced) ``cost_usd`` include
-                         subagent spend, but the mid-turn ``max_budget_usd``/``max_turns``
-                         checks cannot see it while the turn is running.
+                         subagent spend. The mid-turn ``max_budget_usd``/``max_turns``
+                         checks cannot see it while the turn runs; the budget is
+                         re-checked once it is known (at turn end), so a turn that
+                         subagent spend pushes over the cap ends
+                         ``error_budget_exceeded``, never ``success``.
 * ``output_schema``    → per-turn ``output_schema`` (the final message is the JSON).
 * ``reasoning_effort`` → per-turn ``effort`` (thread-sticky server-side, and re-applied
                          on every turn, so resume keeps it). Codex has no ``max`` level;
@@ -858,6 +861,26 @@ class CodexHarness:
 
     # -- run loop ---------------------------------------------------------------
 
+    @staticmethod
+    def _native_cost_usd(
+        acct: _RunAccounting, subagent_usage: dict[str, dict[str, int | None]] | None
+    ) -> float | None:
+        """Token-priced cost of the whole turn: the parent's calls plus subagent deltas.
+
+        Subagent spend is priced with the parent model's price (subagents run on the
+        thread's model family); the wire deltas keep Codex's inclusive input convention,
+        which is what ``ModelPrice.cost_usd`` expects. ``None`` when the model is unpriced.
+        """
+        cost_usd = acct.cost_usd
+        if cost_usd is not None and subagent_usage:
+            for delta in subagent_usage.values():
+                cost_usd += acct.price.cost_usd(
+                    int(delta.get("input_tokens") or 0),
+                    int(delta.get("cached_input_tokens") or 0),
+                    int(delta.get("output_tokens") or 0),
+                )
+        return cost_usd
+
     def _result_event(
         self,
         *,
@@ -907,17 +930,7 @@ class CodexHarness:
         }
         cost_usd = exact_cost_usd
         if cost_usd is None:
-            cost_usd = acct.cost_usd
-            if cost_usd is not None and subagent_usage:
-                # Subagent spend priced with the parent model's price (subagents run on
-                # the thread's model family); the wire deltas keep Codex's inclusive
-                # input convention, which is what ``ModelPrice.cost_usd`` expects.
-                for delta in subagent_usage.values():
-                    cost_usd += acct.price.cost_usd(
-                        int(delta.get("input_tokens") or 0),
-                        int(delta.get("cached_input_tokens") or 0),
-                        int(delta.get("output_tokens") or 0),
-                    )
+            cost_usd = self._native_cost_usd(acct, subagent_usage)
         raw = {
             "subtype": subtype,
             "is_error": is_error,
@@ -1097,6 +1110,20 @@ class CodexHarness:
                     subagent_usage = self._collect_subagent_usage(
                         options.codex_home, thread_id
                     )
+                    if limit is None and exact_cost is None and subagent_usage:
+                        # Subagent spend only becomes visible here, after the mid-turn
+                        # checks; a turn it pushes over the cap must not report success.
+                        native_cost = self._native_cost_usd(acct, subagent_usage)
+                        if native_cost is not None and native_cost >= spec.max_budget_usd:
+                            limit = "budget"
+                            yield AgentEvent(
+                                kind="status",
+                                summary=(
+                                    f"budget cap hit with subagent spend "
+                                    f"(cost=${native_cost:.4f}); the turn had already ended"
+                                ),
+                                raw={"event": "limit_exceeded", "limit": "budget"},
+                            )
                     pending = sorted(
                         tid
                         for tid, sub_status in translator.subagent_threads.items()

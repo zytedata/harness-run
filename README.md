@@ -138,8 +138,10 @@ What to know when running Codex:
   model neither source knows you get `cost_usd=None`, a `cost_unknown` status event, and no budget
   enforcement; the result event records which source priced the run (`price_source`). Collab-subagent
   spend is invisible on Codex's wire, so the harness recovers it post-hoc from the subagent rollout
-  files — the terminal `usage`/`cost_usd` include it (see "What the numbers count"), but the mid-turn
-  `max_turns`/`max_budget_usd` checks can't see it while the turn is running.
+  files — the terminal `usage`/`cost_usd` include it (see "What the numbers count"). The mid-turn
+  `max_turns`/`max_budget_usd` checks can't see it while the turn is running; the budget is re-checked
+  at turn end once it is known, so a turn that subagent spend pushes over the cap still ends
+  `error_budget_exceeded` (it just can't be interrupted early).
 - **Checkpoint/resume** works cross-worker: the Codex conversation (a local rollout file) is
   persisted to the blob store alongside the workspace snapshot and restored on `send()`.
 - **Reasoning effort**: `spec.reasoning_effort` becomes the SDK's per-turn `effort`, re-applied on
@@ -570,8 +572,9 @@ event and embedded in the error text.
 backend can't price it — never a guess). `result.usage` is the toolkit-normalized token record, identical
 in shape and meaning on every harness and both runtimes: a flat dict whose five keys are always present —
 `input_tokens`, `cache_read_input_tokens`, `cache_creation_input_tokens`, `output_tokens`,
-`reasoning_output_tokens` — as disjoint buckets (input splits into fresh/cache-read/cache-written;
-reasoning is the reasoning share of output). A key is `None` when the backend doesn't report that number
+`reasoning_output_tokens`. The three input buckets are disjoint (fresh / cache-read / cache-written), and
+`reasoning_output_tokens` is the reasoning *share* of `output_tokens`, not a further bucket — so total
+tokens = the three input buckets + `output_tokens`. A key is `None` when the backend doesn't report that number
 (Anthropic has no reasoning split; OpenAI doesn't bill cache writes separately, the count is
 informational). Both metrics cover the **whole turn**: subagent sessions and background-task
 re-invocation segments included — on Claude Code aggregated from the CLI's complete per-model record, on

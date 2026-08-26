@@ -68,7 +68,15 @@ class RunResult:
             the harness could not price the model, or OpenRouter reported no charge.
             A ``cost_unknown`` status event fires in that case and ``max_budget_usd``
             could not be enforced. ``0.0`` means the run really was free.
-        usage: Raw token/usage accounting from the harness.
+        usage: Normalized token accounting for the WHOLE turn — subagent sessions and
+            background-task re-invocation segments included — identical in shape and
+            meaning on every harness (see ``harness/_usage.py``). A flat dict whose
+            five keys are always present: ``input_tokens``, ``cache_read_input_tokens``,
+            ``cache_creation_input_tokens``, ``output_tokens``,
+            ``reasoning_output_tokens`` — disjoint buckets, ``None`` where the harness
+            reports no such number (never a fake ``0``). The harness's own verbatim
+            records stay on the result event's ``raw`` (``model_usage``/``cli_usage``
+            on claude-code, ``subagent_usage`` on codex).
         session_id: The session this result belongs to (for re-attach/resume).
         artifacts: Blob keys/URIs of artifacts produced by the run.
         warning: Non-fatal anomaly note — e.g. the harness process exited abnormally

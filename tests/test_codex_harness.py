@@ -12,8 +12,10 @@ import pytest
 from codex_fakes import (
     agent_message,
     codex_error,
+    collab_agent_tool_call,
     command_execution,
     make_async_codex,
+    sub_agent_activity,
     token_usage,
     turn_completed,
     turn_started,
@@ -349,9 +351,15 @@ async def test_run_happy_path(tmp_path, monkeypatch):
     assert result.summary == "all done"
     assert result.raw["num_turns"] == 2  # one per token-usage notification
     assert result.raw["thread_id"] == "thr-fake"
-    assert result.usage["input_tokens"] == 3000
-    assert result.usage["cached_input_tokens"] == 1000
-    assert result.usage["output_tokens"] == 150
+    # Normalized (disjoint) buckets: the wire's inclusive input minus its cached part.
+    # No call reported cache_write, so cache_creation stays None (not a fake 0).
+    assert result.usage == {
+        "input_tokens": 2000,
+        "cache_read_input_tokens": 1000,
+        "cache_creation_input_tokens": None,
+        "output_tokens": 150,
+        "reasoning_output_tokens": 0,
+    }
     # luna: (3000-1000)*1 + 1000*0.1 + 150*6 per MTok
     assert result.cost_usd == pytest.approx((2000 * 1.0 + 1000 * 0.1 + 150 * 6.0) / 1e6)
     kinds = [e.kind for e in events]
@@ -503,6 +511,187 @@ async def test_resume_without_persisted_thread_starts_fresh(tmp_path, monkeypatc
     script = [turn_started(), agent_message("hi"), token_usage(), turn_completed()]
     _, client = await _events_of(script, tmp_path, monkeypatch, spec=spec, ctx=ctx)
     assert client.thread_starts and not client.thread_resumes
+
+
+# -- subagent usage (recovered from rollout files) -----------------------------
+
+# Codex reports no subagent token usage on the wire (openai/codex#14642); the harness
+# reads each subagent thread's rollout file and bills the LAST token_count line's
+# cumulative total_token_usage (deltas only, via the state file, on later turns).
+
+_SUB_TID = "01a00000-0000-0000-0000-000000000001"  # rollout ids are 36-char UUIDs
+
+
+def _token_count_line(total: dict) -> str:
+    return json.dumps(
+        {
+            "timestamp": "t",
+            "type": "event_msg",
+            "payload": {
+                "type": "token_count",
+                "info": {
+                    "total_token_usage": total,
+                    "last_token_usage": total,
+                    "model_context_window": 258_400,
+                },
+                "rate_limits": None,
+            },
+        }
+    )
+
+
+def _write_subagent_rollout(codex_home, thread_id, totals):
+    """A subagent rollout whose token_count lines carry cumulative ``totals``, in order."""
+    p = codex_home / "sessions" / "2026" / "07" / "21" / f"rollout-x-{thread_id}.jsonl"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    lines = ['{"type": "session_meta", "payload": {}}']
+    lines += [_token_count_line(t) for t in totals]
+    p.write_text("\n".join(lines) + "\n")
+    return p
+
+
+async def test_subagent_usage_merged_into_result(tmp_path, monkeypatch):
+    spec = AgentSpec(name="a", model="gpt-5.6-luna", harness="codex")
+    ctx = _ctx(tmp_path, spec)
+
+    def write_rollout(client):
+        _write_subagent_rollout(
+            ctx.job_dir / "codex_home",
+            _SUB_TID,
+            [
+                {"input_tokens": 100, "cached_input_tokens": 0, "output_tokens": 10,
+                 "reasoning_output_tokens": 0, "total_tokens": 110},
+                # cumulative; only this LAST line may be billed
+                {"input_tokens": 3000, "cached_input_tokens": 1000,
+                 "cache_write_input_tokens": 500, "output_tokens": 200,
+                 "reasoning_output_tokens": 20, "total_tokens": 3200},
+            ],
+        )
+
+    script = [
+        turn_started(),
+        collab_agent_tool_call(started=True, agents={_SUB_TID: "running"}),
+        sub_agent_activity(agent_thread_id=_SUB_TID),
+        write_rollout,
+        collab_agent_tool_call(agents={_SUB_TID: "completed"}),
+        agent_message("done"),
+        token_usage(in_tok=1000, out_tok=100),
+        turn_completed(),
+    ]
+    events, _ = await _events_of(script, tmp_path, monkeypatch, spec=spec, ctx=ctx)
+    result = events[-1]
+    # Parent (1000 in / 100 out) + subagent rollout total, both normalized to
+    # disjoint buckets (subagent fresh input: 3000 - 1000 cached - 500 written).
+    assert result.usage == {
+        "input_tokens": 1000 + 1500,
+        "cache_read_input_tokens": 0 + 1000,
+        "cache_creation_input_tokens": 500,  # parent reported none (None) — not summed as 0
+        "output_tokens": 100 + 200,
+        "reasoning_output_tokens": 0 + 20,
+    }
+    assert result.raw["subagent_usage"] == {
+        _SUB_TID: {
+            "input_tokens": 1500,
+            "cache_read_input_tokens": 1000,
+            "cache_creation_input_tokens": 500,
+            "output_tokens": 200,
+            "reasoning_output_tokens": 20,
+        }
+    }
+    # Subagent spend priced with the parent model's price, on the inclusive wire numbers.
+    # luna per MTok: fresh 1.0 / cached 0.1 / output 6.0.
+    parent = (1000 * 1.0 + 100 * 6.0) / 1e6
+    sub = ((3000 - 1000) * 1.0 + 1000 * 0.1 + 200 * 6.0) / 1e6
+    assert result.cost_usd == pytest.approx(parent + sub)
+    # The completed collab item surfaced as a status event with the per-agent statuses.
+    sub_events = [e for e in events if (e.raw or {}).get("event") == "codex_subagents"]
+    assert sub_events and sub_events[-1].raw["agent_statuses"] == {_SUB_TID: "completed"}
+    # All tracked threads ended terminal: no partial-usage warning.
+    assert not [e for e in events if (e.raw or {}).get("event") == "subagent_usage_partial"]
+
+
+async def test_subagent_nonterminal_status_warns_partial_usage(tmp_path, monkeypatch):
+    script = [
+        turn_started(),
+        collab_agent_tool_call(agents={_SUB_TID: "running"}),
+        agent_message("done"),
+        token_usage(),
+        turn_completed(),
+    ]
+    events, _ = await _events_of(script, tmp_path, monkeypatch)
+    partial = [e for e in events if (e.raw or {}).get("event") == "subagent_usage_partial"]
+    assert partial and partial[0].raw["threads"] == [_SUB_TID]
+
+
+def test_collect_subagent_usage_bills_deltas_across_turns(tmp_path):
+    # Rollout totals are thread-cumulative and the job dir persists across a session's
+    # turns, so a second collection must bill only what the first did not.
+    harness = CodexHarness()
+    home = tmp_path / "codex_home"
+    parent = "01a00000-0000-0000-0000-00000000feed"
+    _write_subagent_rollout(
+        home, parent,
+        [{"input_tokens": 9, "cached_input_tokens": 0, "output_tokens": 9,
+          "reasoning_output_tokens": 0, "total_tokens": 18}],
+    )
+    _write_subagent_rollout(
+        home, _SUB_TID,
+        [{"input_tokens": 100, "cached_input_tokens": 40, "output_tokens": 10,
+          "reasoning_output_tokens": 1, "total_tokens": 110}],
+    )
+    first = harness._collect_subagent_usage(home, parent)
+    assert set(first) == {_SUB_TID}  # the parent's own rollout is never a subagent
+    assert first[_SUB_TID]["input_tokens"] == 100
+    assert first[_SUB_TID]["cache_write_input_tokens"] is None
+
+    # Same turn state, nothing new: nothing more to bill.
+    assert harness._collect_subagent_usage(home, parent) == {}
+
+    # The subagent thread runs again (cumulative totals grow): only the delta bills.
+    _write_subagent_rollout(
+        home, _SUB_TID,
+        [{"input_tokens": 100, "cached_input_tokens": 40, "output_tokens": 10,
+          "reasoning_output_tokens": 1, "total_tokens": 110},
+         {"input_tokens": 350, "cached_input_tokens": 140, "output_tokens": 35,
+          "reasoning_output_tokens": 3, "total_tokens": 385}],
+    )
+    second = harness._collect_subagent_usage(home, parent)
+    assert second == {
+        _SUB_TID: {
+            "input_tokens": 250,
+            "cached_input_tokens": 100,
+            "cache_write_input_tokens": None,
+            "output_tokens": 25,
+            "reasoning_output_tokens": 2,
+        }
+    }
+
+
+def test_translator_tracks_subagent_threads():
+    tr = CodexEventTranslator()
+    list(tr.translate(collab_agent_tool_call(started=True, agents={_SUB_TID: "pendingInit"})))
+    other = "01a00000-0000-0000-0000-000000000002"
+    list(tr.translate(sub_agent_activity(agent_thread_id=other)))
+    list(tr.translate(collab_agent_tool_call(agents={_SUB_TID: "completed"})))
+    # collab statuses override; activity-only threads are tracked with status unknown.
+    assert tr.subagent_threads == {_SUB_TID: "completed", other: None}
+
+
+async def test_cache_write_tokens_normalize_to_cache_creation(tmp_path, monkeypatch):
+    script = [
+        turn_started(),
+        agent_message("hi"),
+        token_usage(in_tok=1000, cached=300, cache_write=200, out_tok=50),
+        turn_completed(),
+    ]
+    events, _ = await _events_of(script, tmp_path, monkeypatch)
+    assert events[-1].usage == {
+        "input_tokens": 500,  # 1000 wire-inclusive - 300 cached - 200 written
+        "cache_read_input_tokens": 300,
+        "cache_creation_input_tokens": 200,
+        "output_tokens": 50,
+        "reasoning_output_tokens": 0,
+    }
 
 
 # -- openrouter provider ------------------------------------------------------

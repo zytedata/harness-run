@@ -24,11 +24,27 @@ from claude_agent_sdk import (
 )
 
 
-def result_msg(subtype="success", is_error=False, num_turns=1, cost=0.01, result="done"):
+def result_msg(
+    subtype="success", is_error=False, num_turns=1, cost=0.01, result="done",
+    usage=None, model_usage=None,
+):
+    # Realistic defaults mirroring the CLI: the flat `usage` covers only the main loop's
+    # final segment, while `model_usage` is the complete per-model record (subagents
+    # included, cumulative across segments) the harness normalizes `usage` from.
+    if usage is None:
+        usage = {"input_tokens": 1, "output_tokens": 2}
+    if model_usage is None:
+        model_usage = {
+            "claude-sonnet-5": {
+                "inputTokens": 1, "outputTokens": 2, "cacheReadInputTokens": 3,
+                "cacheCreationInputTokens": 4, "webSearchRequests": 0,
+                "costUSD": cost or 0.0, "contextWindow": 200_000,
+            },
+        }
     return ResultMessage(
         subtype=subtype, duration_ms=10, duration_api_ms=8, is_error=is_error,
         num_turns=num_turns, session_id="claude-sid", total_cost_usd=cost, result=result,
-        usage={"input_tokens": 1},
+        usage=usage, model_usage=model_usage,
     )
 
 

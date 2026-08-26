@@ -178,13 +178,30 @@ def test_turn_stays_open_across_task_reinvocation(tmp_path, monkeypatch):
     # The observed live sequence: model starts a task, ends its turn; the notification
     # arrives; the CLI re-invokes; the SECOND result ends the turn. Exactly one result
     # event must come out (the final one), with the cumulative turn count.
+    def seg_model_usage(in_tok, out_tok):
+        return {
+            "claude-sonnet-5": {
+                "inputTokens": in_tok, "outputTokens": out_tok,
+                "cacheReadInputTokens": 0, "cacheCreationInputTokens": 0,
+                "costUSD": 0.01, "contextWindow": 200_000,
+            },
+        }
+
     script = [
         init_msg(),
         task_started_msg("t1"),
-        result_msg(num_turns=2, cost=0.02, result="WAITING"),  # segment boundary
+        result_msg(  # segment boundary; its model_usage is the spend so far
+            num_turns=2, cost=0.02, result="WAITING",
+            usage={"input_tokens": 100, "output_tokens": 10},
+            model_usage=seg_model_usage(100, 10),
+        ),
         task_done_msg("t1"),
         init_msg(),  # the CLI's re-invocation
-        result_msg(num_turns=3, cost=0.05, result="verified, all done"),
+        result_msg(  # the CLI's model_usage is CUMULATIVE across segments already
+            num_turns=3, cost=0.05, result="verified, all done",
+            usage={"input_tokens": 40, "output_tokens": 4},  # final segment only
+            model_usage=seg_model_usage(140, 14),
+        ),
     ]
     events, client_cls = _events_of(script, tmp_path, monkeypatch)
 
@@ -193,6 +210,16 @@ def test_turn_stays_open_across_task_reinvocation(tmp_path, monkeypatch):
     assert results[0].summary == "verified, all done"
     assert results[0].raw["num_turns"] == 5  # 2 + 3, cumulative across re-invocations
     assert results[0].cost_usd == 0.05  # the CLI's total_cost_usd is already cumulative
+    # usage = the FINAL segment's model_usage normalized (already cumulative — summing
+    # segments would double-count); the CLI's flat dict survives as raw["cli_usage"].
+    assert results[0].usage == {
+        "input_tokens": 140,
+        "cache_read_input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "output_tokens": 14,
+        "reasoning_output_tokens": None,
+    }
+    assert results[0].raw["cli_usage"] == {"input_tokens": 40, "output_tokens": 4}
     # The demoted first result surfaced as an awaiting_tasks status, before the final one.
     kinds = [(e.kind, (e.raw or {}).get("event")) for e in events]
     assert ("status", "awaiting_tasks") in kinds

@@ -49,6 +49,7 @@ from ..events import AgentEvent
 from ..spec import SystemPrompt
 from ..structured import parse_structured_output
 from . import pricing
+from ._usage import from_claude_cli_usage, from_claude_model_usage
 from ._shared import (
     GITHUB_MCP_TOKEN_KEYS as _GITHUB_MCP_TOKEN_KEYS,
     INTERACTIVE_SUFFIX as _INTERACTIVE_SUFFIX,
@@ -428,11 +429,25 @@ class ClaudeCodeHarness:
         catalogue, which has no entry for these ids, so it bills them at a default rate
         (measured 1.67x over Kimi K3's real rate) — and there is no estimate to fall back
         on (see :mod:`pricing`). It is kept as ``cli_reported_cost_usd`` either way.
+
+        ``usage`` becomes the normalized complete record (see :mod:`._usage`), aggregated
+        from the CLI's ``model_usage`` — subagent sessions included, already cumulative
+        across re-invocation segments. The CLI's own flat dict (main loop, final segment
+        only) moves to ``raw["cli_usage"]``; ``raw["model_usage"]`` keeps the per-model
+        verbatim record. On a demoted (segment-boundary) result used as a crash fallback,
+        that segment's ``model_usage`` is the correct spend-so-far.
         """
         if event.raw is not None:
             event.raw["num_turns"] = turns_total
             if segment_summaries:
                 event.raw["segment_summaries"] = list(segment_summaries)
+            event.raw["cli_usage"] = event.usage
+            normalized = from_claude_model_usage(event.raw.get("model_usage"))
+            event.usage = (
+                normalized
+                if normalized is not None
+                else from_claude_cli_usage(event.usage)  # no model_usage on this message
+            )
         if exact_openrouter_cost is not None:
             if event.raw is not None:
                 event.raw["cli_reported_cost_usd"] = event.cost_usd

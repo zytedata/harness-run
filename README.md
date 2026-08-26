@@ -138,7 +138,9 @@ What to know when running Codex:
   model neither source knows you get `cost_usd=None`, a `cost_unknown` status event, and no budget
   enforcement; the result event records which source priced the run (`price_source`). Collab-subagent
   spend is invisible on Codex's wire, so the harness recovers it post-hoc from the subagent rollout
-  files — the terminal `usage`/`cost_usd` include it (see "What the numbers count"). The mid-turn
+  files — the terminal `usage`/`cost_usd` include it (see "What the numbers count"), each thread priced
+  at the model its own rollout names (a subagent role can run a different model than the parent; an
+  unpriced one falls back to the parent's rate with a `subagent_price_unknown` status event). The mid-turn
   `max_turns`/`max_budget_usd` checks can't see it while the turn is running; the budget is re-checked
   at turn end once it is known, so a turn that subagent spend pushes over the cap still ends
   `error_budget_exceeded` (it just can't be interrupted early).

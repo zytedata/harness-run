@@ -31,7 +31,10 @@ Spec translation (parity notes):
                          (openai/codex#14642), so the harness recovers it post-hoc from
                          the subagent rollout files under ``CODEX_HOME/sessions``: the
                          terminal ``usage`` and (natively priced) ``cost_usd`` include
-                         subagent spend. The mid-turn ``max_budget_usd``/``max_turns``
+                         subagent spend — each thread priced at the model its rollout
+                         says it ran on (a role can pin a different model), the
+                         parent's rate standing in, with a warning, for an unpriced
+                         one. The mid-turn ``max_budget_usd``/``max_turns``
                          checks cannot see it while the turn runs; the budget is
                          re-checked once it is known (at turn end), so a turn that
                          subagent spend pushes over the cap ends
@@ -738,38 +741,54 @@ class CodexHarness:
         matches = sorted(sessions.rglob(f"rollout-*-{thread_id}.jsonl"))
         return matches[-1] if matches else None
 
-    def _rollout_usage_record(self, path: Path) -> tuple[dict, dict | None]:
-        """One rollout's ``(session_meta payload, last cumulative token total)``.
+    def _rollout_usage_record(self, path: Path) -> tuple[dict, dict | None, str | None]:
+        """One rollout's ``(session_meta payload, last cumulative token total, model)``.
 
         The first ``session_meta`` line identifies the thread (``id``) and, for a
         subagent thread, names its ``parent_thread_id``. ``token_count`` lines ride
         ``event_msg`` payloads whose ``info.total_token_usage`` is thread-cumulative,
         so only the LAST one matters; ``None`` when the file has no usage record yet.
+        Each turn opens with a ``turn_context`` line naming the ``model`` that turn ran
+        on — a subagent's role config can put it on a different model than its parent,
+        so the LAST one is what its spend is priced with (a thread switching models
+        mid-way would need per-turn attribution; not observed, not attempted).
         """
         meta: dict = {}
         total = None
+        model = None
         try:
             with path.open(encoding="utf-8") as lines:
                 for line in lines:
-                    if '"session_meta"' not in line and '"token_count"' not in line:
+                    if (
+                        '"session_meta"' not in line
+                        and '"token_count"' not in line
+                        and '"turn_context"' not in line
+                    ):
                         continue
                     try:
                         record = json.loads(line)
                     except ValueError:
                         continue
                     payload = record.get("payload") or {}
-                    if record.get("type") == "session_meta":
+                    kind = record.get("type")
+                    if kind == "session_meta":
                         meta = meta or payload
+                    elif kind == "turn_context":
+                        model = payload.get("model") or model
                     elif payload.get("type") == "token_count":
                         total = (payload.get("info") or {}).get("total_token_usage") or total
         except OSError:
-            return {}, None
-        return meta, total
+            return {}, None, None
+        return meta, total, model
 
     def _collect_subagent_usage(
         self, codex_home: Path, parent_thread_id: str
-    ) -> dict[str, dict[str, int | None]]:
+    ) -> dict[str, dict[str, Any]]:
         """Wire-convention token deltas per subagent thread, read from their rollouts.
+
+        Each delta also carries ``"model"``: the model the thread's rollout says it ran
+        on (``None`` when the file has no ``turn_context`` yet), so its spend can be
+        priced at its own rate rather than the parent's.
 
         Codex reports no subagent usage on the wire (openai/codex#14642), but every
         subagent thread persists its own rollout under ``CODEX_HOME/sessions``, and its
@@ -791,19 +810,19 @@ class CodexHarness:
             previous = {}
         # Latest total per thread: a resumed thread gets a new file carrying the
         # cumulative totals forward, and the rglob sort puts it last.
-        totals: dict[str, dict] = {}
+        totals: dict[str, tuple[dict, str | None]] = {}
         for path in sorted(sessions.rglob("rollout-*.jsonl")):
             if path.name.endswith(f"-{parent_thread_id}.jsonl"):
                 continue
-            meta, total = self._rollout_usage_record(path)
+            meta, total, model = self._rollout_usage_record(path)
             if not meta.get("parent_thread_id") or not total:
                 continue  # not a subagent rollout (e.g. an earlier turn's parent thread)
-            totals[meta.get("id") or path.stem[-36:]] = total
-        deltas: dict[str, dict[str, int | None]] = {}
+            totals[meta.get("id") or path.stem[-36:]] = (total, model)
+        deltas: dict[str, dict[str, Any]] = {}
         state = dict(previous)
-        for thread_id, total in totals.items():
+        for thread_id, (total, model) in totals.items():
             billed = previous.get(thread_id) or {}
-            delta: dict[str, int | None] = {}
+            delta: dict[str, Any] = {}
             for key in _CODEX_COUNTER_KEYS:
                 value = total.get(key)
                 delta[key] = (
@@ -811,6 +830,7 @@ class CodexHarness:
                 )
             state[thread_id] = total
             if any(delta.values()):
+                delta["model"] = model
                 deltas[thread_id] = delta
         try:
             state_path.write_text(json.dumps(state))
@@ -861,20 +881,65 @@ class CodexHarness:
 
     # -- run loop ---------------------------------------------------------------
 
+    async def _subagent_prices(
+        self, acct: _RunAccounting, subagent_usage: dict[str, dict[str, Any]]
+    ) -> tuple[dict[str, pricing.ModelPrice | None], list[AgentEvent]]:
+        """Resolve the price each subagent thread's spend is billed at.
+
+        A thread whose rollout names the parent's model (or none) takes the parent's
+        price. One on a different model is priced at that model's own rate; when that
+        model is unknown to :mod:`pricing` the parent's price stands in, and a status
+        event says so — an approximation must never be silent.
+        """
+        prices: dict[str, pricing.ModelPrice | None] = {}
+        events: list[AgentEvent] = []
+        resolved: dict[str, pricing.ModelPrice | None] = {}
+        for thread_id, delta in subagent_usage.items():
+            model = delta.get("model")
+            if not model or model == acct.model:
+                prices[thread_id] = acct.price
+                continue
+            if model not in resolved:
+                resolved[model] = await asyncio.to_thread(pricing.model_price, model)
+            price = resolved[model]
+            if price is None:
+                price = acct.price
+                events.append(
+                    AgentEvent(
+                        kind="status",
+                        summary=(
+                            f"subagent thread {thread_id} ran on {model}, which has no "
+                            f"known price; its spend is priced at the parent's "
+                            f"({acct.model}) rate"
+                        ),
+                        raw={
+                            "event": "subagent_price_unknown",
+                            "thread_id": thread_id,
+                            "model": model,
+                        },
+                    )
+                )
+            prices[thread_id] = price
+        return prices, events
+
     @staticmethod
     def _native_cost_usd(
-        acct: _RunAccounting, subagent_usage: dict[str, dict[str, int | None]] | None
+        acct: _RunAccounting,
+        subagent_usage: dict[str, dict[str, Any]] | None,
+        subagent_prices: dict[str, pricing.ModelPrice | None] | None = None,
     ) -> float | None:
         """Token-priced cost of the whole turn: the parent's calls plus subagent deltas.
 
-        Subagent spend is priced with the parent model's price (subagents run on the
-        thread's model family); the wire deltas keep Codex's inclusive input convention,
-        which is what ``ModelPrice.cost_usd`` expects. ``None`` when the model is unpriced.
+        Each subagent delta is priced with its thread's price from
+        :meth:`_subagent_prices` (falling back to the parent's); the wire deltas keep
+        Codex's inclusive input convention, which is what ``ModelPrice.cost_usd``
+        expects. ``None`` when the parent model is unpriced.
         """
         cost_usd = acct.cost_usd
         if cost_usd is not None and subagent_usage:
-            for delta in subagent_usage.values():
-                cost_usd += acct.price.cost_usd(
+            for thread_id, delta in subagent_usage.items():
+                price = (subagent_prices or {}).get(thread_id) or acct.price
+                cost_usd += price.cost_usd(
                     int(delta.get("input_tokens") or 0),
                     int(delta.get("cached_input_tokens") or 0),
                     int(delta.get("output_tokens") or 0),
@@ -891,7 +956,8 @@ class CodexHarness:
         thread_id: str,
         limit: str | None,
         exact_cost_usd: float | None = None,
-        subagent_usage: dict[str, dict[str, int | None]] | None = None,
+        subagent_usage: dict[str, dict[str, Any]] | None = None,
+        subagent_prices: dict[str, pricing.ModelPrice | None] | None = None,
     ) -> AgentEvent:
         """Build the terminal ``result`` event.
 
@@ -900,7 +966,9 @@ class CodexHarness:
         deltas from :meth:`_collect_subagent_usage`). ``cost_usd`` is OpenRouter's exact
         charge when there is one — already subagent-inclusive, since subagent requests
         ride the same proxy (verified live) — otherwise the token-priced cost, subagent
-        tokens included. The per-thread normalized detail rides ``raw["subagent_usage"]``.
+        tokens included, each thread at its own model's price (``subagent_prices``).
+        The per-thread normalized detail, plus each thread's ``model``, rides
+        ``raw["subagent_usage"]``.
         """
         status = getattr(turn.status, "value", turn.status)
         if limit == "max_turns":
@@ -919,18 +987,21 @@ class CodexHarness:
             subtype, is_error = "success", False
             text = translator.final_text or "(no final text)"
         per_thread = {
-            tid: from_codex_counts(
-                int(delta.get("input_tokens") or 0),
-                int(delta.get("cached_input_tokens") or 0),
-                delta.get("cache_write_input_tokens"),
-                int(delta.get("output_tokens") or 0),
-                int(delta.get("reasoning_output_tokens") or 0),
-            )
+            tid: {
+                **from_codex_counts(
+                    int(delta.get("input_tokens") or 0),
+                    int(delta.get("cached_input_tokens") or 0),
+                    delta.get("cache_write_input_tokens"),
+                    int(delta.get("output_tokens") or 0),
+                    int(delta.get("reasoning_output_tokens") or 0),
+                ),
+                "model": delta.get("model"),
+            }
             for tid, delta in (subagent_usage or {}).items()
         }
         cost_usd = exact_cost_usd
         if cost_usd is None:
-            cost_usd = self._native_cost_usd(acct, subagent_usage)
+            cost_usd = self._native_cost_usd(acct, subagent_usage, subagent_prices)
         raw = {
             "subtype": subtype,
             "is_error": is_error,
@@ -1110,10 +1181,19 @@ class CodexHarness:
                     subagent_usage = self._collect_subagent_usage(
                         options.codex_home, thread_id
                     )
+                    subagent_prices: dict[str, pricing.ModelPrice | None] = {}
+                    if subagent_usage and exact_cost is None and acct.price is not None:
+                        subagent_prices, price_events = await self._subagent_prices(
+                            acct, subagent_usage
+                        )
+                        for event in price_events:
+                            yield event
                     if limit is None and exact_cost is None and subagent_usage:
                         # Subagent spend only becomes visible here, after the mid-turn
                         # checks; a turn it pushes over the cap must not report success.
-                        native_cost = self._native_cost_usd(acct, subagent_usage)
+                        native_cost = self._native_cost_usd(
+                            acct, subagent_usage, subagent_prices
+                        )
                         if native_cost is not None and native_cost >= spec.max_budget_usd:
                             limit = "budget"
                             yield AgentEvent(
@@ -1148,6 +1228,7 @@ class CodexHarness:
                         limit=limit,
                         exact_cost_usd=exact_cost,
                         subagent_usage=subagent_usage,
+                        subagent_prices=subagent_prices,
                     )
                     if fin is not None:
                         yield fin

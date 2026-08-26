@@ -540,11 +540,12 @@ def _token_count_line(total: dict) -> str:
     )
 
 
-def _write_rollout(codex_home, thread_id, totals, parent_thread_id=None):
+def _write_rollout(codex_home, thread_id, totals, parent_thread_id=None, model=None):
     """A rollout whose token_count lines carry cumulative ``totals``, in order.
 
     ``parent_thread_id`` set makes it a subagent rollout (that session_meta marker is
     how the harness identifies one); ``None`` makes it a parent-thread rollout.
+    ``model`` writes the turn_context line each real turn opens with.
     """
     p = codex_home / "sessions" / "2026" / "07" / "21" / f"rollout-x-{thread_id}.jsonl"
     p.parent.mkdir(parents=True, exist_ok=True)
@@ -553,13 +554,17 @@ def _write_rollout(codex_home, thread_id, totals, parent_thread_id=None):
         meta["parent_thread_id"] = parent_thread_id
         meta["source"] = {"subagent": {"thread_spawn": {"parent_thread_id": parent_thread_id}}}
     lines = [json.dumps({"timestamp": "t", "type": "session_meta", "payload": meta})]
+    if model is not None:
+        lines.append(json.dumps(
+            {"timestamp": "t", "type": "turn_context", "payload": {"model": model, "effort": "high"}}
+        ))
     lines += [_token_count_line(t) for t in totals]
     p.write_text("\n".join(lines) + "\n")
     return p
 
 
-def _write_subagent_rollout(codex_home, thread_id, totals):
-    return _write_rollout(codex_home, thread_id, totals, parent_thread_id="thr-fake")
+def _write_subagent_rollout(codex_home, thread_id, totals, model=None):
+    return _write_rollout(codex_home, thread_id, totals, parent_thread_id="thr-fake", model=model)
 
 
 async def test_subagent_usage_merged_into_result(tmp_path, monkeypatch):
@@ -608,6 +613,7 @@ async def test_subagent_usage_merged_into_result(tmp_path, monkeypatch):
             "cache_creation_input_tokens": 500,
             "output_tokens": 200,
             "reasoning_output_tokens": 20,
+            "model": None,  # no turn_context in this rollout → parent's model assumed
         }
     }
     # Subagent spend priced with the parent model's price, on the inclusive wire numbers.
@@ -684,6 +690,7 @@ def test_collect_subagent_usage_bills_deltas_across_turns(tmp_path):
             "cache_write_input_tokens": None,
             "output_tokens": 25,
             "reasoning_output_tokens": 2,
+            "model": None,
         }
     }
 
@@ -1291,3 +1298,41 @@ async def test_subagent_spend_crossing_the_budget_is_not_a_success(tmp_path, mon
     assert ("status", "limit_exceeded") in [
         (e.kind, (e.raw or {}).get("event")) for e in events
     ]
+
+
+async def test_subagent_on_another_model_is_priced_at_its_own_rate(tmp_path, monkeypatch):
+    # A subagent's role config can put it on a different model; its rollout's
+    # turn_context names it, and that model's price — not the parent's — bills its spend.
+    spec = AgentSpec(name="a", model="gpt-5.6-luna", harness="codex")
+    ctx = _ctx(tmp_path, spec)
+    sub_total = {"input_tokens": 2000, "cached_input_tokens": 0, "output_tokens": 100,
+                 "reasoning_output_tokens": 0, "total_tokens": 2100}
+    unknown_tid = "01a00000-0000-0000-0000-000000000002"
+
+    def write_rollouts(client):
+        home = ctx.job_dir / "codex_home"
+        _write_subagent_rollout(home, _SUB_TID, [sub_total], model="gpt-5.6-sol")
+        _write_subagent_rollout(home, unknown_tid, [sub_total], model="gpt-99-unpriced")
+
+    script = [
+        turn_started(),
+        collab_agent_tool_call(started=True, agents={_SUB_TID: "running", unknown_tid: "running"}),
+        write_rollouts,
+        collab_agent_tool_call(agents={_SUB_TID: "completed", unknown_tid: "completed"}),
+        agent_message("done"),
+        token_usage(in_tok=1000, out_tok=100),
+        turn_completed(),
+    ]
+    events, _ = await _events_of(script, tmp_path, monkeypatch, spec=spec, ctx=ctx)
+    result = events[-1]
+    assert result.raw["subagent_usage"][_SUB_TID]["model"] == "gpt-5.6-sol"
+    assert result.raw["subagent_usage"][unknown_tid]["model"] == "gpt-99-unpriced"
+    # luna: 1.0 / 0.1 / 6.0 per MTok; sol: 5.0 / 0.5 / 30.0. The unpriced model falls
+    # back to the parent's (luna) rate, with a warning.
+    parent = (1000 * 1.0 + 100 * 6.0) / 1e6
+    on_sol = (2000 * 5.0 + 100 * 30.0) / 1e6
+    on_luna_fallback = (2000 * 1.0 + 100 * 6.0) / 1e6
+    assert result.cost_usd == pytest.approx(parent + on_sol + on_luna_fallback)
+    warnings = [e for e in events if (e.raw or {}).get("event") == "subagent_price_unknown"]
+    assert [w.raw["thread_id"] for w in warnings] == [unknown_tid]
+    assert "gpt-99-unpriced" in warnings[0].summary

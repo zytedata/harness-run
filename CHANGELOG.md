@@ -21,6 +21,17 @@ tag `vX.Y.Z`, push the commit and the tag.
 
 ## Unreleased
 
+### Backwards-incompatible
+
+- The harness SDKs (`claude-agent-sdk`, `openai-codex`) moved from the base
+  install to a new `local` install extra. The remote path (deploying and
+  driving Gemini Agent Runtime engines) is unaffected — engines install the
+  SDKs from their own baked requirements. **Update note**: if you run agents
+  locally (`local.deploy`), install `remote-agent-toolkit[local]`; a missing
+  SDK now fails with an error message pointing at the extra. Motivation:
+  `claude-agent-sdk` pins `mcp<2`, which blocked remote-only clients from
+  using the mcp 2.x SDK.
+
 ### Added
 
 - Both harnesses can run `openrouter/*` models with an `OPENROUTER_API_KEY`

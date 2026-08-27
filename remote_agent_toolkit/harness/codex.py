@@ -505,7 +505,13 @@ class CodexHarness:
         openrouter_client_token: str | None = None,
     ) -> _CodexOptions:
         """Build ``openai_codex`` config + thread/turn args from ``spec`` + runtime ``ctx``."""
-        from openai_codex import ApprovalMode, CodexConfig, Sandbox
+        try:
+            from openai_codex import ApprovalMode, CodexConfig, Sandbox
+        except ModuleNotFoundError as exc:
+            raise ModuleNotFoundError(
+                "openai-codex is not installed. Local Codex execution needs the "
+                "harness SDKs: install remote-agent-toolkit with the [local] extra."
+            ) from exc
 
         # Beside, not inside, the workspace (bookkeeping level) — holds auth.json, the
         # session rollouts, logs. The codex CLI refuses a CODEX_HOME that doesn't exist.

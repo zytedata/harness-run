@@ -323,7 +323,13 @@ class ClaudeCodeHarness:
         openrouter_client_token: str | None = None,
     ) -> Any:
         """Build ``ClaudeAgentOptions`` from ``spec`` + runtime ``ctx``."""
-        from claude_agent_sdk import ClaudeAgentOptions
+        try:
+            from claude_agent_sdk import ClaudeAgentOptions
+        except ModuleNotFoundError as exc:
+            raise ModuleNotFoundError(
+                "claude-agent-sdk is not installed. Local Claude Code execution needs "
+                "the harness SDKs: install remote-agent-toolkit with the [local] extra."
+            ) from exc
 
         extra: dict[str, Any] = {}
         if ctx.session_store is not None:

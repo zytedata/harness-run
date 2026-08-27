@@ -26,7 +26,8 @@ RUN apt-get update \
 WORKDIR /opt/toolkit
 COPY pyproject.toml README.md ./
 COPY remote_agent_toolkit ./remote_agent_toolkit
-RUN pip install --no-cache-dir .
+# [local]: the parity image runs the harness in-process (parity-shell), like the engine.
+RUN pip install --no-cache-dir ".[local]"
 
 # The agent's declared spec.packages, installed with uv exactly as the deployed engine will
 # (pass them at build time so version/import conflicts show up here, not in the cloud).

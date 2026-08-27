@@ -8,12 +8,10 @@ version = "0.2.0"
 description = "Define and run remote/background coding agents (Claude Code, Codex) locally and on Gemini Agent Runtime."
 readme = "README.md"
 requires-python = ">=3.12,<3.14"
-# One install pulls everything (local + Gemini Agent Runtime) — no extras to choose. None
-# of these are hard to install, so keeping the surface flat beats making teams guess which
-# extra they need. Backend imports stay lazy, so `import remote_agent_toolkit` is still fast.
+# The base install covers the remote path (deploy + drive Gemini Agent Runtime engines);
+# the harness SDKs live in the `local` extra below. Backend imports stay lazy, so
+# `import remote_agent_toolkit` is still fast.
 dependencies = [
-    "claude-agent-sdk==0.2.130",  # matches the engine pin; validated on both runtimes
-    "openai-codex==0.147.0",  # custom-provider config used by the OpenRouter route
     "google-adk>=1.5",  # floor of the agentplatform AdkApp template (it raises below 1.5.0)
     # 1.163+ for the client-side runtime-revision surface (agent_engines.runtimes.revisions
     # + AgentEngineConfig.traffic_config), which `deploy`/`get_engine(version=…)` build on.
@@ -27,11 +25,27 @@ dependencies = [
     "jsonschema",
 ]
 
+[project.optional-dependencies]
+# LOCAL in-process execution (`local.deploy`) runs the harness SDKs on your machine.
+# The remote path doesn't need them client-side: engines install claude-agent-sdk from
+# their own baked requirements (runtime/gemini/_deploy.py), which stay pinned regardless
+# of this extra. Kept out of the base install because the SDKs drag in heavyweight or
+# conflicting pins (claude-agent-sdk requires mcp<2, which blocks apps on the mcp 2.x
+# SDK; openai-codex bundles the codex CLI binary).
+local = [
+    "claude-agent-sdk==0.2.130",  # matches the engine pin; validated on both runtimes
+    "openai-codex==0.147.0",  # custom-provider config used by the OpenRouter route
+]
+
 # Dev tooling lives in a dependency group (PEP 735), not an install extra: `pip install
 # git+…` (or the github URL) gets a clean runtime install; developers add tooling with
 # `uv sync` / `uv pip install --group dev`.
 [dependency-groups]
 dev = [
+    # The suite exercises both harnesses, so the dev group carries the `local` extra's
+    # SDKs too — keep these two lines in lockstep with [project.optional-dependencies].
+    "claude-agent-sdk==0.2.130",
+    "openai-codex==0.147.0",
     "pytest",
     "pytest-asyncio",
     # Pinned to the CI-green series: 0.16 added rules (RUF022, UP035/41, S110, ...)

@@ -33,8 +33,9 @@ Spec translation (parity notes):
                          terminal ``usage`` and (natively priced) ``cost_usd`` include
                          subagent spend — each thread priced at the model its rollout
                          says it ran on (a role can pin a different model), the
-                         parent's rate standing in, with a warning, for an unpriced
-                         one. A wire-seen thread with no rollout found raises a
+                         with an unpriced subagent model making ``cost_usd`` ``None``
+                         (never a guess), flagged by a warning. A wire-seen thread
+                         with no rollout found raises a
                          ``subagent_usage_missing`` status event (the recovery reads
                          non-public rollout details; ``make live-usage`` re-checks
                          them live). The mid-turn ``max_budget_usd``/``max_turns``
@@ -898,8 +899,9 @@ class CodexHarness:
 
         A thread whose rollout names the parent's model (or none) takes the parent's
         price. One on a different model is priced at that model's own rate; when that
-        model is unknown to :mod:`pricing` the parent's price stands in, and a status
-        event says so — an approximation must never be silent.
+        model is unknown to :mod:`pricing` its entry is ``None`` and a status event
+        says so — the turn's ``cost_usd`` then becomes ``None`` (usage stays complete),
+        because a cost is a real number or absent, never a guess (README contract).
         """
         prices: dict[str, pricing.ModelPrice | None] = {}
         events: list[AgentEvent] = []
@@ -913,14 +915,13 @@ class CodexHarness:
                 resolved[model] = await asyncio.to_thread(pricing.model_price, model)
             price = resolved[model]
             if price is None:
-                price = acct.price
                 events.append(
                     AgentEvent(
                         kind="status",
                         summary=(
                             f"subagent thread {thread_id} ran on {model}, which has no "
-                            f"known price; its spend is priced at the parent's "
-                            f"({acct.model}) rate"
+                            "known price; cost_usd is reported as unknown (its tokens "
+                            "are still in usage and raw['subagent_usage'])"
                         ),
                         raw={
                             "event": "subagent_price_unknown",
@@ -941,14 +942,18 @@ class CodexHarness:
         """Token-priced cost of the whole turn: the parent's calls plus subagent deltas.
 
         Each subagent delta is priced with its thread's price from
-        :meth:`_subagent_prices` (falling back to the parent's); the wire deltas keep
-        Codex's inclusive input convention, which is what ``ModelPrice.cost_usd``
-        expects. ``None`` when the parent model is unpriced.
+        :meth:`_subagent_prices` (a thread absent from the mapping takes the parent's
+        price); the wire deltas keep Codex's inclusive input convention, which is what
+        ``ModelPrice.cost_usd`` expects. ``None`` when the parent model is unpriced —
+        or when any thread's price is explicitly ``None`` (an unpriced subagent model):
+        a partial total would be a guess, and the contract is a real number or absent.
         """
         cost_usd = acct.cost_usd
         if cost_usd is not None and subagent_usage:
             for thread_id, delta in subagent_usage.items():
-                price = (subagent_prices or {}).get(thread_id) or acct.price
+                price = (subagent_prices or {}).get(thread_id, acct.price)
+                if price is None:
+                    return None
                 cost_usd += price.cost_usd(
                     int(delta.get("input_tokens") or 0),
                     int(delta.get("cached_input_tokens") or 0),
@@ -1195,15 +1200,27 @@ class CodexHarness:
                     if missing:
                         # A thread the wire announced but no rollout accounts for: the
                         # recovery relies on non-public rollout details, so say loudly
-                        # that usage/cost are undercounting rather than fail the turn.
+                        # that the numbers are undercounting rather than fail the turn.
+                        # With an exact OpenRouter charge only token usage is affected —
+                        # subagent requests ride the same proxy, so cost is complete.
+                        affected = (
+                            "usage (cost_usd is the provider's exact charge, which "
+                            "already includes subagent requests)"
+                            if exact_cost is not None
+                            else "usage/cost"
+                        )
                         yield AgentEvent(
                             kind="status",
                             summary=(
                                 "no rollout found for subagent thread(s) "
-                                f"{', '.join(missing)}; their usage is NOT in this "
-                                "result's usage/cost"
+                                f"{', '.join(missing)}; their tokens are NOT in this "
+                                f"result's {affected}"
                             ),
-                            raw={"event": "subagent_usage_missing", "threads": missing},
+                            raw={
+                                "event": "subagent_usage_missing",
+                                "threads": missing,
+                                "cost_included": exact_cost is not None,
+                            },
                         )
                     subagent_prices: dict[str, pricing.ModelPrice | None] = {}
                     if subagent_usage and exact_cost is None and acct.price is not None:

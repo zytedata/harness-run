@@ -32,6 +32,7 @@ import sys
 from pathlib import Path
 
 from remote_agent_toolkit import AgentSpec, local
+from remote_agent_toolkit.harness import pricing
 from remote_agent_toolkit.harness._usage import USAGE_KEYS, from_claude_model_usage
 
 OUT_DIR = Path.cwd()
@@ -167,6 +168,32 @@ async def run_scenario(name: str) -> list[str]:
         checks["ok_no_missing_rollouts"] = not status_events(
             events, "subagent_usage_missing"
         )
+        # ...and actually MERGED: for every bucket a thread reports, the aggregate
+        # covers at least the threads' sum (the parent's own calls come on top).
+        checks["ok_subagent_usage_merged"] = all(
+            (usage.get(key) or 0) >= sum(d.get(key) or 0 for d in sub.values())
+            for key in USAGE_KEYS
+            if any(d.get(key) is not None for d in sub.values())
+        )
+        # ...and priced into cost_usd: the total is at least the subagent spend alone,
+        # re-priced here from the per-thread record (inclusive input = the disjoint
+        # buckets recombined). Only checkable when every thread's model has a price.
+        thread_prices = {
+            tid: pricing.model_price(str(d.get("model"))) for tid, d in sub.items()
+        }
+        if sub and all(thread_prices.values()) and result.cost_usd is not None:
+            sub_spend = sum(
+                thread_prices[tid].cost_usd(
+                    (d.get("input_tokens") or 0)
+                    + (d.get("cache_read_input_tokens") or 0)
+                    + (d.get("cache_creation_input_tokens") or 0),
+                    d.get("cache_read_input_tokens") or 0,
+                    d.get("output_tokens") or 0,
+                )
+                for tid, d in sub.items()
+            )
+            checks["subagent_spend_usd"] = round(sub_spend, 6)
+            checks["ok_cost_includes_subagents"] = result.cost_usd >= sub_spend
         checks["partial_warnings"] = status_events(events, "subagent_usage_partial")
         if name == "or-codex-subagent":
             # OpenRouter's exact charge is already subagent-inclusive; the harness

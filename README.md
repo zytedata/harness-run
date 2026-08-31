@@ -139,8 +139,9 @@ What to know when running Codex:
   enforcement; the result event records which source priced the run (`price_source`). Collab-subagent
   spend is invisible on Codex's wire, so the harness recovers it post-hoc from the subagent rollout
   files — the terminal `usage`/`cost_usd` include it (see "What the numbers count"), each thread priced
-  at the model its own rollout names (a subagent role can run a different model than the parent; an
-  unpriced one falls back to the parent's rate with a `subagent_price_unknown` status event). A thread
+  at the model its own rollout names (a subagent role can run a different model than the parent; one on a model
+  `pricing` doesn't know makes `cost_usd` `None` — never a guess — with a `subagent_price_unknown`
+  status event; its tokens stay in `usage`). A thread
   seen on the wire with no rollout found raises a `subagent_usage_missing` status event — the tripwire
   for the recovery's reliance on non-public rollout details (`make live-usage` re-checks them live). The mid-turn
   `max_turns`/`max_budget_usd` checks can't see it while the turn is running; the budget is re-checked

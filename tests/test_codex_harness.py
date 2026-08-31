@@ -1310,18 +1310,17 @@ async def test_subagent_on_another_model_is_priced_at_its_own_rate(tmp_path, mon
     ctx = _ctx(tmp_path, spec)
     sub_total = {"input_tokens": 2000, "cached_input_tokens": 0, "output_tokens": 100,
                  "reasoning_output_tokens": 0, "total_tokens": 2100}
-    unknown_tid = "01a00000-0000-0000-0000-000000000002"
 
-    def write_rollouts(client):
-        home = ctx.job_dir / "codex_home"
-        _write_subagent_rollout(home, _SUB_TID, [sub_total], model="gpt-5.6-sol")
-        _write_subagent_rollout(home, unknown_tid, [sub_total], model="gpt-99-unpriced")
+    def write_rollout(client):
+        _write_subagent_rollout(
+            ctx.job_dir / "codex_home", _SUB_TID, [sub_total], model="gpt-5.6-sol"
+        )
 
     script = [
         turn_started(),
-        collab_agent_tool_call(started=True, agents={_SUB_TID: "running", unknown_tid: "running"}),
-        write_rollouts,
-        collab_agent_tool_call(agents={_SUB_TID: "completed", unknown_tid: "completed"}),
+        collab_agent_tool_call(started=True, agents={_SUB_TID: "running"}),
+        write_rollout,
+        collab_agent_tool_call(agents={_SUB_TID: "completed"}),
         agent_message("done"),
         token_usage(in_tok=1000, out_tok=100),
         turn_completed(),
@@ -1329,16 +1328,46 @@ async def test_subagent_on_another_model_is_priced_at_its_own_rate(tmp_path, mon
     events, _ = await _events_of(script, tmp_path, monkeypatch, spec=spec, ctx=ctx)
     result = events[-1]
     assert result.raw["subagent_usage"][_SUB_TID]["model"] == "gpt-5.6-sol"
-    assert result.raw["subagent_usage"][unknown_tid]["model"] == "gpt-99-unpriced"
-    # luna: 1.0 / 0.1 / 6.0 per MTok; sol: 5.0 / 0.5 / 30.0. The unpriced model falls
-    # back to the parent's (luna) rate, with a warning.
+    # luna: 1.0 / 0.1 / 6.0 per MTok; sol: 5.0 / 0.5 / 30.0.
     parent = (1000 * 1.0 + 100 * 6.0) / 1e6
     on_sol = (2000 * 5.0 + 100 * 30.0) / 1e6
-    on_luna_fallback = (2000 * 1.0 + 100 * 6.0) / 1e6
-    assert result.cost_usd == pytest.approx(parent + on_sol + on_luna_fallback)
+    assert result.cost_usd == pytest.approx(parent + on_sol)
+    assert not [e for e in events if (e.raw or {}).get("event") == "subagent_price_unknown"]
+
+
+async def test_subagent_on_an_unpriced_model_makes_cost_unknown(tmp_path, monkeypatch):
+    # A cost is a real number or absent, never a guess (README contract): a subagent on
+    # a model pricing doesn't know nulls cost_usd — with a warning — instead of being
+    # approximated at the parent's rate (which could even trip the budget cap falsely).
+    # Its tokens still count: usage and raw["subagent_usage"] stay complete.
+    spec = AgentSpec(name="a", model="gpt-5.6-luna", harness="codex", max_budget_usd=0.001)
+    ctx = _ctx(tmp_path, spec)
+    sub_total = {"input_tokens": 2000, "cached_input_tokens": 0, "output_tokens": 100,
+                 "reasoning_output_tokens": 0, "total_tokens": 2100}
+
+    def write_rollout(client):
+        _write_subagent_rollout(
+            ctx.job_dir / "codex_home", _SUB_TID, [sub_total], model="gpt-99-unpriced"
+        )
+
+    script = [
+        turn_started(),
+        collab_agent_tool_call(started=True, agents={_SUB_TID: "running"}),
+        write_rollout,
+        collab_agent_tool_call(agents={_SUB_TID: "completed"}),
+        agent_message("done"),
+        token_usage(in_tok=100, out_tok=10),  # parent alone is under the tiny cap
+        turn_completed(),
+    ]
+    events, _ = await _events_of(script, tmp_path, monkeypatch, spec=spec, ctx=ctx)
+    result = events[-1]
+    assert result.cost_usd is None
+    assert result.raw["subtype"] == "success"  # unknown cost must not trip the budget
+    assert result.raw["subagent_usage"][_SUB_TID]["model"] == "gpt-99-unpriced"
+    assert result.usage["input_tokens"] == 100 + 2000  # tokens still fully counted
     warnings = [e for e in events if (e.raw or {}).get("event") == "subagent_price_unknown"]
-    assert [w.raw["thread_id"] for w in warnings] == [unknown_tid]
-    assert "gpt-99-unpriced" in warnings[0].summary
+    assert len(warnings) == 1 and warnings[0].raw["thread_id"] == _SUB_TID
+    assert "unknown" in warnings[0].summary
 
 
 async def test_wire_seen_subagent_without_a_rollout_warns_usage_missing(tmp_path, monkeypatch):

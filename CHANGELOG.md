@@ -38,9 +38,9 @@ tag `vX.Y.Z`, push the commit and the tag.
   wire ([openai/codex#14642](https://github.com/openai/codex/issues/14642)) — the
   harness now recovers those post-hoc from their rollout files, and a natively
   priced Codex `cost_usd` includes that spend too — each subagent thread priced at
-  the model its rollout names (`raw["subagent_usage"][thread]["model"]`), the
-  parent's rate standing in, with a `subagent_price_unknown` status event, for a
-  model `pricing` does not know. The mid-turn `max_turns`/
+  the model its rollout names (`raw["subagent_usage"][thread]["model"]`); a model
+  `pricing` does not know makes `cost_usd` `None` — never a guess — with a
+  `subagent_price_unknown` status event, tokens still counted in `usage`. The mid-turn `max_turns`/
   `max_budget_usd` checks still cannot see it while the turn runs, but the budget
   is re-checked at turn end, so subagent spend that crosses the cap yields
   `error_budget_exceeded` rather than `success`; a subagent still running at turn

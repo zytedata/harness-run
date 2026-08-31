@@ -966,9 +966,11 @@ lookup instead of running unknown code), and `set_traffic` is the ops action tha
 Two callers cannot address two revisions of one engine concurrently.
 
 A traffic pin survives later deploys — a fresh revision won't serve until you `set_traffic()` again, and
-`deploy` warns when it lands in that state. For warm pools, note that workers already blocked on the
-dispatch subscription keep running the revision they cold-started with, so an update has a window where
-turns may land on either; `delete()` the pool (or deploy with `new_engine=True`) for a hard cutover.
+`deploy` warns when it lands in that state. Warm pools cut over atomically on update: each deploy mints a
+fresh, deploy-scoped dispatch topic/subscription and deletes the previous pair once the new pool is filled,
+so workers still running the old revision can never claim a post-deploy turn — they fail their next claim
+poll and exit within seconds (a worker mid-turn finishes that turn on its own revision). With pinned
+traffic nothing is retired: the serving revision's pair stays the live one.
 
 ## Past jobs: listing sessions & reading history
 
@@ -1115,7 +1117,7 @@ project (tighten to your policy):
 | `roles/storage.admin` (or objectAdmin on the buckets) | stage the deploy bundle; read job output |
 | `roles/logging.viewer` | tail the per-step event stream from the client |
 | `roles/cloudbuild.builds.editor` | the deploy builds the engine image |
-| `roles/pubsub.editor` _(warm pool only)_ | create the dispatch topic/subscription + publish turns |
+| `roles/pubsub.editor` _(warm pool only)_ | create/retire the per-deploy dispatch topic/subscription + publish turns |
 
 The principal that impersonates it needs `roles/iam.serviceAccountTokenCreator` **on this SA**.
 
@@ -1212,7 +1214,9 @@ A run is then dispatched to a free worker, so the turn goes nearly straight to t
 one-tool Haiku turn, vs ~2.5 min cold) — the worker's claim pickup plus one ~0.5 s mirror flush and one
 tail poll; events then stream **~1–2 s** behind the agent for the rest of the turn. (Before the GCS event
 stream this number was ~10–20 s, dominated by Cloud Logging's ingestion lag.) On claim the pool refills, so
-the next turn is warm too.
+the next turn is warm too. The dispatch topic/subscription pair is scoped to the deploy: a redeploy mints a
+fresh pair and retires the old one, so turns dispatched after it can only land on new-revision workers —
+stale idle workers exit promptly instead of serving turns with the previous revision's baked spec/skills.
 
 > _Keeping the pool full:_ an idle worker waits `pool_max_wait_s` (a `deploy()` parameter; default a day)
 > for an assignment, then exits — **without replacement**. And a pool that has drained to empty does not

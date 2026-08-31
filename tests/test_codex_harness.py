@@ -626,7 +626,8 @@ async def test_subagent_usage_merged_into_result(tmp_path, monkeypatch):
     assert sub_events and sub_events[-1].raw["agent_statuses"] == {_SUB_TID: "completed"}
     assert sub_events[-1].raw["tool"] == "spawnAgent"  # plain str, not the SDK enum
     # All tracked threads ended terminal: no partial-usage warning.
-    assert not [e for e in events if (e.raw or {}).get("event") == "subagent_usage_partial"]
+    for kind in ("subagent_usage_partial", "subagent_usage_missing"):
+        assert not [e for e in events if (e.raw or {}).get("event") == kind]
 
 
 async def test_subagent_nonterminal_status_warns_partial_usage(tmp_path, monkeypatch):
@@ -666,13 +667,15 @@ def test_collect_subagent_usage_bills_deltas_across_turns(tmp_path):
           "reasoning_output_tokens": 1, "total_tokens": 110}],
         parent_thread_id=parent,
     )
-    first = harness._collect_subagent_usage(home, parent)
+    first, found = harness._collect_subagent_usage(home, parent)
     assert set(first) == {_SUB_TID}  # only the session_meta-marked subagent bills
+    assert found == {_SUB_TID}  # parent rollouts are not "found" subagents either
     assert first[_SUB_TID]["input_tokens"] == 100
     assert first[_SUB_TID]["cache_write_input_tokens"] is None
 
-    # Same turn state, nothing new: nothing more to bill.
-    assert harness._collect_subagent_usage(home, parent) == {}
+    # Same turn state, nothing new: nothing more to bill — but the rollout is still
+    # FOUND (a zero-delta thread must not read as a missing rollout).
+    assert harness._collect_subagent_usage(home, parent) == ({}, {_SUB_TID})
 
     # The subagent thread runs again (cumulative totals grow): only the delta bills.
     _write_subagent_rollout(
@@ -682,7 +685,7 @@ def test_collect_subagent_usage_bills_deltas_across_turns(tmp_path):
          {"input_tokens": 350, "cached_input_tokens": 140, "output_tokens": 35,
           "reasoning_output_tokens": 3, "total_tokens": 385}],
     )
-    second = harness._collect_subagent_usage(home, parent)
+    second, _ = harness._collect_subagent_usage(home, parent)
     assert second == {
         _SUB_TID: {
             "input_tokens": 250,
@@ -1336,3 +1339,24 @@ async def test_subagent_on_another_model_is_priced_at_its_own_rate(tmp_path, mon
     warnings = [e for e in events if (e.raw or {}).get("event") == "subagent_price_unknown"]
     assert [w.raw["thread_id"] for w in warnings] == [unknown_tid]
     assert "gpt-99-unpriced" in warnings[0].summary
+
+
+async def test_wire_seen_subagent_without_a_rollout_warns_usage_missing(tmp_path, monkeypatch):
+    # The tripwire for the rollout recovery's reliance on non-public details: the wire
+    # announced a subagent thread, but no rollout under CODEX_HOME/sessions accounts for
+    # it — usage/cost are undercounting and the run must say so (without failing).
+    spec = AgentSpec(name="a", model="gpt-5.6-luna", harness="codex")
+    script = [
+        turn_started(),
+        collab_agent_tool_call(started=True, agents={_SUB_TID: "running"}),
+        collab_agent_tool_call(agents={_SUB_TID: "completed"}),
+        agent_message("done"),
+        token_usage(in_tok=1000, out_tok=100),
+        turn_completed(),
+    ]
+    events, _ = await _events_of(script, tmp_path, monkeypatch, spec=spec)
+    missing = [e for e in events if (e.raw or {}).get("event") == "subagent_usage_missing"]
+    assert len(missing) == 1 and missing[0].raw["threads"] == [_SUB_TID]
+    result = events[-1]
+    assert result.kind == "result" and not result.raw["is_error"]
+    assert "subagent_usage" not in result.raw  # nothing recovered — and no fake zeros

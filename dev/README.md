@@ -47,4 +47,5 @@ money, so they run by hand, never in CI. See [`TESTING.md`](../TESTING.md) for w
 | [`live_openrouter_probe.py`](live_openrouter_probe.py) | `make live-openrouter` | the OpenRouter models on both harnesses, locally |
 | [`live_openrouter_remote_probe.py`](live_openrouter_remote_probe.py) | `make live-openrouter-remote` | the same models on Agent Runtime, plus the remote-only visibility surface |
 | [`live_model_attribution.py`](live_model_attribution.py) | `make live-attribution` | did the turn run the model we asked for, from evidence the CLI and provider return |
+| [`live_usage_probe.py`](live_usage_probe.py) | `make live-usage` | usage/cost accounting on both harnesses — incl. the Codex subagent rollout recovery, which rides non-public rollout details; `SCENARIO=<name>` for one scenario |
 | [`openrouter_endpoints.py`](openrouter_endpoints.py) | — | lists a model's OpenRouter providers and their advertised features; free unless you pass `--probe` |

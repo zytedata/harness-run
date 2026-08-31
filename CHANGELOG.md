@@ -44,7 +44,9 @@ tag `vX.Y.Z`, push the commit and the tag.
   `max_budget_usd` checks still cannot see it while the turn runs, but the budget
   is re-checked at turn end, so subagent spend that crosses the cap yields
   `error_budget_exceeded` rather than `success`; a subagent still running at turn
-  end is flagged by a `subagent_usage_partial` status event.
+  end is flagged by a `subagent_usage_partial` status event, and a wire-seen
+  subagent thread with no rollout found by a `subagent_usage_missing` one (the
+  recovery reads non-public rollout details; `make live-usage` re-checks them).
   **Update notes:** readers of Claude Code's verbatim dicts find them on the result
   event's `raw` — `raw["model_usage"]` (the CLI's complete per-model record) and
   `raw["cli_usage"]` (the old `usage` value). Codex readers: `cached_input_tokens`

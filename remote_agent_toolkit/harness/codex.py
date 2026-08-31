@@ -34,7 +34,10 @@ Spec translation (parity notes):
                          subagent spend — each thread priced at the model its rollout
                          says it ran on (a role can pin a different model), the
                          parent's rate standing in, with a warning, for an unpriced
-                         one. The mid-turn ``max_budget_usd``/``max_turns``
+                         one. A wire-seen thread with no rollout found raises a
+                         ``subagent_usage_missing`` status event (the recovery reads
+                         non-public rollout details; ``make live-usage`` re-checks
+                         them live). The mid-turn ``max_budget_usd``/``max_turns``
                          checks cannot see it while the turn runs; the budget is
                          re-checked once it is known (at turn end), so a turn that
                          subagent spend pushes over the cap ends
@@ -783,8 +786,15 @@ class CodexHarness:
 
     def _collect_subagent_usage(
         self, codex_home: Path, parent_thread_id: str
-    ) -> dict[str, dict[str, Any]]:
+    ) -> tuple[dict[str, dict[str, Any]], set[str]]:
         """Wire-convention token deltas per subagent thread, read from their rollouts.
+
+        Returns ``(deltas, found)``: ``found`` is every subagent thread id a rollout
+        exists for — a superset of ``deltas`` (a thread fully billed on an earlier turn
+        has a rollout but no new delta). The run loop compares ``found`` against the
+        thread ids seen on the wire to detect a rollout that never appeared
+        (``subagent_usage_missing``) — the tripwire for this recovery relying on
+        non-public rollout details.
 
         Each delta also carries ``"model"``: the model the thread's rollout says it ran
         on (``None`` when the file has no ``turn_context`` yet), so its spend can be
@@ -802,7 +812,7 @@ class CodexHarness:
         """
         sessions = codex_home / "sessions"
         if not sessions.is_dir():
-            return {}
+            return {}, set()
         state_path = codex_home / _SUBAGENT_STATE_FILE
         try:
             previous = json.loads(state_path.read_text())
@@ -836,7 +846,7 @@ class CodexHarness:
             state_path.write_text(json.dumps(state))
         except OSError:
             pass  # bookkeeping is best-effort; worst case a later turn re-bills
-        return deltas
+        return deltas, set(totals)
 
     def _persist_thread(self, ctx: RunContext, codex_home: Path, thread_id: str) -> None:
         """Copy the thread's rollout file to the BlobStore, keyed by OUR session id.
@@ -1178,9 +1188,23 @@ class CodexHarness:
                         yield openrouter_cost_unknown(spec.model)
                     if proxy is not None and proxy.budget_blocked:
                         limit = "budget"
-                    subagent_usage = self._collect_subagent_usage(
+                    subagent_usage, subagent_found = self._collect_subagent_usage(
                         options.codex_home, thread_id
                     )
+                    missing = sorted(set(translator.subagent_threads) - subagent_found)
+                    if missing:
+                        # A thread the wire announced but no rollout accounts for: the
+                        # recovery relies on non-public rollout details, so say loudly
+                        # that usage/cost are undercounting rather than fail the turn.
+                        yield AgentEvent(
+                            kind="status",
+                            summary=(
+                                "no rollout found for subagent thread(s) "
+                                f"{', '.join(missing)}; their usage is NOT in this "
+                                "result's usage/cost"
+                            ),
+                            raw={"event": "subagent_usage_missing", "threads": missing},
+                        )
                     subagent_prices: dict[str, pricing.ModelPrice | None] = {}
                     if subagent_usage and exact_cost is None and acct.price is not None:
                         subagent_prices, price_events = await self._subagent_prices(

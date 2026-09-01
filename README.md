@@ -1105,6 +1105,17 @@ Deploying on Gemini Agent Runtime involves **two identities** — granting roles
 single most common setup mistake, so they're called out explicitly. Everything below can be created by a team
 in their own project; the concrete values are the shared `my-project` setup we use for testing.
 
+> **One command sets all of this up:** `ratk-gcp-setup --project <your-project>` (installed with the
+> toolkit; plain ADC, no gcloud needed) audits a project against everything in this section, shows
+> what's missing, asks for confirmation, applies it, and re-audits. It is **additive only** and
+> idempotent — safe to run, and re-run, against existing non-empty projects. `--check` audits without
+> changing anything (exit 0 iff ready); `--yes` skips the prompt (CI/agents); `--verify` proves the
+> end state with a real throwaway deploy + one Haiku turn (a few cents, ~10 min — it also triggers
+> creation of the runtime service agent, whose grants otherwise stay pending until the first deploy).
+> Two things stay manual: enabling Claude in Vertex Model Garden (the tool checks and links the exact
+> console page) and, on a project with APIs fully disabled, the Service Usage API bootstrap. The
+> tables below remain the reference for what it grants and why.
+
 **1. The operator service account** — you (a human or CI) *impersonate* it to run the control plane:
 `gemini.deploy`, `get_engine`, `list_engines`, submitting runs, and tailing Cloud Logging. Roles on the
 project (tighten to your policy):

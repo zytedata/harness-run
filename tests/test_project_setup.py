@@ -127,6 +127,7 @@ def test_settings_operator_email_and_bucket_overrides():
 def test_exit_code():
     ok = ps.Item("a", ps.OK, "d")
     assert ps.exit_code([ok]) == 0
+    assert ps.exit_code([ok, ps.Item("b", ps.NOTE, "d")]) == 0  # informational only
     for status in (ps.FIX, ps.BLOCKED, ps.PENDING, ps.MANUAL):
         assert ps.exit_code([ok, ps.Item("b", status, "d")]) == 2
 
@@ -144,9 +145,11 @@ OPERATOR = f"serviceAccount:agent-runtime@{PROJECT}.iam.gserviceaccount.com"
 class FakeGcp:
     """In-memory project state implementing the GcpApi surface audit/apply use."""
 
-    def __init__(self, *, enabled=None, runtime_agent_exists=True, model_ok=True):
+    def __init__(self, *, enabled=None, runtime_agent_exists=True, model_ok=True,
+                 disabled_models=()):
         self.project = PROJECT
         self.enabled = set(enabled if enabled is not None else ps.REQUIRED_SERVICES)
+        self.disabled_models = set(disabled_models)  # model_ok=False disables all
         self.buckets: dict[str, dict] = {}
         self.bucket_policies: dict[str, dict] = {}
         self.service_accounts: dict[str, dict] = {}
@@ -224,7 +227,9 @@ class FakeGcp:
 
     # model + identity
     def model_ping(self, model, location="global"):
-        return (True, f"{model} ok") if self.model_ok else (False, "HTTP 403: no access")
+        if self.model_ok and model not in self.disabled_models:
+            return (True, f"{model} ok")
+        return (False, "HTTP 403: no access")
 
     def adc_email(self):
         return "dev@example.com"
@@ -295,8 +300,10 @@ def test_model_check_runs_before_the_gate_when_aiplatform_is_enabled():
                   model_ok=False)
     items = ps.audit(api, ps.Settings(project=PROJECT))
     by = _by_key(items)
-    assert by["Claude on Vertex"].status == ps.MANUAL
-    assert "model-garden/claude-haiku-4-5" in by["Claude on Vertex"].detail
+    assert by["model:claude-haiku-4-5"].status == ps.MANUAL
+    assert "model-garden/claude-haiku-4-5" in by["model:claude-haiku-4-5"].detail
+    # an unavailable OPTIONAL model is a NOTE, not a readiness failure
+    assert by["model:claude-fable-5"].status == ps.NOTE
     assert by["everything else"].status == ps.BLOCKED
 
 
@@ -304,10 +311,12 @@ def test_verify_blockers_allow_only_runtime_agent_and_impersonation():
     ok = ps.Item("APIs", ps.OK, "d")
     pending_agent = ps.Item("runtime agent", ps.PENDING, "d")
     manual_imp = ps.Item("impersonation", ps.MANUAL, "d")
-    model_manual = ps.Item("Claude on Vertex", ps.MANUAL, "d")
+    model_manual = ps.Item("Claude on Vertex (claude-haiku-4-5)", ps.MANUAL, "d")
+    model_note = ps.Item("Claude on Vertex (claude-fable-5)", ps.NOTE, "d")
     bucket_fix = ps.Item("staging bucket", ps.FIX, "d")
-    # the two legitimate leftovers do not block a verify (it resolves/ignores them) ...
-    assert ps.verify_blockers([ok, pending_agent, manual_imp]) == []
+    # the two legitimate leftovers do not block a verify (it resolves/ignores them),
+    # and neither does an informational NOTE (an optional model being unavailable) ...
+    assert ps.verify_blockers([ok, pending_agent, manual_imp, model_note]) == []
     # ... anything else does — the deploy or the turn would fail after minutes of build
     assert ps.verify_blockers([ok, model_manual]) == [model_manual]
     assert ps.verify_blockers([ok, bucket_fix]) == [bucket_fix]
@@ -340,7 +349,8 @@ def test_apply_rounds_converge_on_an_empty_project():
     assert by[f"operator-bucket:{PROJECT}-agent-staging"].status == ps.OK
     assert by[f"operator-bucket:{PROJECT}-agent-output"].status == ps.OK
     assert by["impersonation"].status == ps.OK
-    assert by["Claude on Vertex"].status == ps.OK
+    for model in (*ps.DEFAULT_CHECK_MODELS, *ps.DEFAULT_OPTIONAL_MODELS):
+        assert by[f"model:{model}"].status == ps.OK
     # the one legitimate leftover: the runtime service agent is created on first deploy
     assert by["runtime agent"].status == ps.PENDING
     assert api.identity_generated  # we did try to provision it ahead of time
@@ -391,14 +401,48 @@ def test_existing_foreign_bucket_is_reported_not_recreated():
     assert len(rules) == 3
 
 
-def test_model_check_failure_is_manual_with_console_pointer():
-    api = FakeGcp(model_ok=False)
+def test_required_model_failure_is_manual_with_console_pointer():
+    api = FakeGcp(disabled_models={"claude-opus-5"})
     cfg = ps.Settings(project=PROJECT)
     items = ps._apply_rounds(api, cfg, ps.audit(api, cfg))
     by = _by_key(items)
-    assert by["Claude on Vertex"].status == ps.MANUAL
-    assert "model-garden/claude-haiku-4-5" in by["Claude on Vertex"].detail
-    assert ps.exit_code(items) == 2
+    assert by["model:claude-opus-5"].status == ps.MANUAL
+    assert "model-garden/claude-opus-5" in by["model:claude-opus-5"].detail
+    assert by["model:claude-haiku-4-5"].status == ps.OK
+    assert ps.exit_code(items) == 2  # a REQUIRED model missing -> not ready
+
+
+def test_optional_model_failure_is_note_and_still_ready():
+    api = FakeGcp(enabled={"serviceusage.googleapis.com"},
+                  disabled_models={"claude-fable-5"})
+    cfg = ps.Settings(project=PROJECT)
+    items = ps._apply_rounds(api, cfg, ps.audit(api, cfg))
+    by = _by_key(items)
+    assert by["model:claude-fable-5"].status == ps.NOTE
+    assert "model-garden/claude-fable-5" in by["model:claude-fable-5"].detail
+    assert ps.exit_code(items) == 0  # optional -> project still counts as ready
+    assert ps.verify_blockers(items) == []  # ... and a --verify would proceed
+
+
+def test_model_flags_wire_into_settings(monkeypatch):
+    seen = {}
+
+    def fake_audit(api, cfg, pending=frozenset()):
+        seen["cfg"] = cfg
+        return [ps.Item("APIs", ps.OK, "d")]
+
+    monkeypatch.setattr(ps, "GcpApi", lambda project: object())
+    monkeypatch.setattr(ps, "audit", fake_audit)
+    ps.main(["--project", PROJECT, "--check",
+             "--model", "claude-sonnet-5", "--optional-model", "claude-opus-5"])
+    assert seen["cfg"].models == ("claude-sonnet-5",)
+    assert seen["cfg"].optional_models == ("claude-opus-5",)
+    ps.main(["--project", PROJECT, "--check"])
+    assert seen["cfg"].models == ps.DEFAULT_CHECK_MODELS
+    assert seen["cfg"].optional_models == ps.DEFAULT_OPTIONAL_MODELS
+    ps.main(["--project", PROJECT, "--check", "--skip-model-check"])
+    assert seen["cfg"].models == ()
+    assert seen["cfg"].optional_models == ()
 
 
 def test_no_operator_sa_skips_sa_steps():

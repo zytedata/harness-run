@@ -51,10 +51,13 @@ from .handoff import handoff_lifecycle_rules
 
 DEFAULT_LOCATION = "us-central1"
 DEFAULT_OPERATOR_SA_ID = "agent-runtime"
-# The cheapest Claude the toolkit's own probes use — the model-access check costs a
-# handful of input tokens + 1 output token. `translate.py` defaults CLOUD_ML_REGION to
-# `global`, so that's the location whose enablement actually matters for deployed runs.
-DEFAULT_CHECK_MODEL = "claude-haiku-4-5"
+# The models checked in Vertex Model Garden. Each check costs a handful of input tokens
+# + 1 output token. `translate.py` defaults CLOUD_ML_REGION to `global`, so that's the
+# location whose enablement actually matters for deployed runs. The FIRST required model
+# is also what `--verify`'s throwaway turn runs on — keep the cheapest one first.
+DEFAULT_CHECK_MODELS: tuple[str, ...] = ("claude-haiku-4-5", "claude-sonnet-5", "claude-opus-5")
+# Checked and reported, but absence doesn't fail readiness — not every project needs them.
+DEFAULT_OPTIONAL_MODELS: tuple[str, ...] = ("claude-fable-5",)
 MODEL_CHECK_LOCATION = "global"
 
 # Every API a gemini-backend project needs (README "GCP setup & required permissions").
@@ -101,6 +104,7 @@ FIX = "FIX"  # will be applied by this tool (after confirmation)
 BLOCKED = "BLOCKED"  # can't even audit yet (waiting on an earlier fix); re-audited after apply
 PENDING = "PENDING"  # applies only after the first deploy creates the runtime service agent
 MANUAL = "MANUAL"  # a human console action this tool cannot perform
+NOTE = "NOTE"  # informational — reported, but does not affect readiness or the exit code
 
 
 class GcpError(RuntimeError):
@@ -210,6 +214,7 @@ class GcpApi:
         self.project = project
         self._credentials = credentials
         self._session: Any = None
+        self._ping_cache: dict[tuple[str, str], tuple[bool, str]] = {}
 
     # -- plumbing ---------------------------------------------------------------
 
@@ -389,7 +394,18 @@ class GcpApi:
     # -- Vertex model access ---------------------------------------------------------
 
     def model_ping(self, model: str, location: str = MODEL_CHECK_LOCATION) -> tuple[bool, str]:
-        """One 1-output-token Claude call through Vertex — the model-enablement probe."""
+        """One 1-output-token Claude call through Vertex — the model-enablement probe.
+
+        Cached per (model, location): the audit runs several rounds per invocation and
+        enablement can't change from anything this tool does.
+        """
+        cached = self._ping_cache.get((model, location))
+        if cached is None:
+            cached = self._model_ping_uncached(model, location)
+            self._ping_cache[(model, location)] = cached
+        return cached
+
+    def _model_ping_uncached(self, model: str, location: str) -> tuple[bool, str]:
         host = (
             "aiplatform.googleapis.com"
             if location == "global"
@@ -437,7 +453,8 @@ class Settings:
     impersonators: tuple[str, ...] = ()  # IAM members granted tokenCreator on the operator SA
     staging_bucket: str | None = None  # gs:// URI; None = the backend.deploy default
     output_bucket: str | None = None
-    model: str | None = DEFAULT_CHECK_MODEL  # None = skip the model-access check
+    models: tuple[str, ...] = DEFAULT_CHECK_MODELS  # required; () = skip the model checks
+    optional_models: tuple[str, ...] = DEFAULT_OPTIONAL_MODELS  # absence doesn't fail readiness
 
     def buckets(self) -> tuple[str, str]:
         staging, output = default_buckets(self.project)
@@ -540,33 +557,55 @@ def _grant_runtime_agent(api: GcpApi, cfg: Settings, project_number: str) -> Non
                 raise
 
 
-def _model_item(api: GcpApi, cfg: Settings, enabled: set[str]) -> Item | None:
-    """The Claude-on-Vertex row: a 1-output-token live probe (check only — accepting the
-    Anthropic terms in Model Garden is a console action this tool cannot perform).
+def _model_items(api: GcpApi, cfg: Settings, enabled: set[str]) -> list[Item]:
+    """The Claude-on-Vertex rows: a 1-output-token live probe per model (check only —
+    accepting the Anthropic terms in Model Garden is a console action this tool cannot
+    perform, so a missing model reports MANUAL with the exact console page).
 
     Runs as early as the audit can (right after the API check, needing only the
-    aiplatform API) so a missing model enablement is visible in the FIRST report — not
-    discovered by a paid `--verify` deploy minutes in.
+    aiplatform API) so a missing enablement is visible in the FIRST report — not
+    discovered by a paid `--verify` deploy minutes in. A missing *optional* model
+    reports NOTE: visible, but it neither fails readiness nor blocks a verify.
     """
-    if not cfg.model:
-        return None
+    checks = [(m, True) for m in cfg.models] + [(m, False) for m in cfg.optional_models]
+    if not checks:
+        return []
     if "aiplatform.googleapis.com" not in enabled:
-        return Item(
-            "Claude on Vertex", BLOCKED, "probed once the aiplatform API is enabled"
+        return [Item("Claude on Vertex", BLOCKED, "probed once the aiplatform API is enabled")]
+    items: list[Item] = []
+    for model, required in checks:
+        ok, note = api.model_ping(model)
+        step, key = f"Claude on Vertex ({model})", f"model:{model}"
+        url = (
+            "https://console.cloud.google.com/vertex-ai/publishers/anthropic/"
+            f"model-garden/{model}?project={cfg.project}"
         )
-    ok, note = api.model_ping(cfg.model)
-    if ok:
-        return Item("Claude on Vertex", OK, note)
-    return Item(
-        "Claude on Vertex",
-        MANUAL,
-        f"{cfg.model} not callable yet ({note.splitlines()[0][:160]}). Enable it "
-        "(accept the Anthropic terms) once in Vertex Model Garden:\n"
-        f"           https://console.cloud.google.com/vertex-ai/publishers/anthropic/"
-        f"model-garden/{cfg.model}?project={cfg.project}\n"
-        "           (or deploy with use_vertex=False and pass ANTHROPIC_API_KEY "
-        "per-invocation)",
-    )
+        if ok:
+            items.append(Item(step, OK, note, key=key))
+        elif required:
+            items.append(
+                Item(
+                    step,
+                    MANUAL,
+                    f"not callable yet ({note.splitlines()[0][:160]}). Enable it "
+                    "(accept the Anthropic terms) once in Vertex Model Garden:\n"
+                    f"           {url}\n"
+                    "           (or deploy with use_vertex=False and pass "
+                    "ANTHROPIC_API_KEY per-invocation)",
+                    key=key,
+                )
+            )
+        else:
+            items.append(
+                Item(
+                    step,
+                    NOTE,
+                    "not enabled — optional, so this does not block readiness; if this "
+                    f"project needs it, enable it in Vertex Model Garden:\n           {url}",
+                    key=key,
+                )
+            )
+    return items
 
 
 def audit(api: GcpApi, cfg: Settings, pending: set[str] = frozenset()) -> list[Item]:  # type: ignore[assignment]
@@ -589,10 +628,8 @@ def audit(api: GcpApi, cfg: Settings, pending: set[str] = frozenset()) -> list[I
     else:
         items.append(Item("APIs", OK, f"all {len(REQUIRED_SERVICES)} required services enabled"))
 
-    # 2. Claude model enablement — checked as early as possible (see _model_item).
-    model_row = _model_item(api, cfg, enabled)
-    if model_row:
-        items.append(model_row)
+    # 2. Claude model enablement — checked as early as possible (see _model_items).
+    items.extend(_model_items(api, cfg, enabled))
 
     # Steps below need these APIs to even audit; with any of them missing, report the
     # rest as BLOCKED — the apply loop re-audits right after enabling.
@@ -824,8 +861,11 @@ def print_report(items: Sequence[Item], header: str | None = None) -> None:
 
 
 def exit_code(items: Sequence[Item]) -> int:
-    """0 = ready; 2 = not ready (unapplied fixes, blocked audits, or manual steps left)."""
-    return 0 if all(i.status == OK for i in items) else 2
+    """0 = ready; 2 = not ready (unapplied fixes, blocked audits, or manual steps left).
+
+    NOTE rows are informational (e.g. an optional model not enabled) — still ready.
+    """
+    return 0 if all(i.status in (OK, NOTE) for i in items) else 2
 
 
 def _apply_rounds(
@@ -890,7 +930,7 @@ def verify_blockers(items: Sequence[Item]) -> list[Item]:
     affect whether the engine deploys and runs).
     """
     allowed = {"runtime agent", "impersonation"}
-    return [i for i in items if i.status != OK and i.step not in allowed]
+    return [i for i in items if i.status not in (OK, NOTE) and i.step not in allowed]
 
 
 def verify(api: GcpApi, cfg: Settings, items: Sequence[Item]) -> tuple[bool, list[Item]]:
@@ -924,7 +964,7 @@ def verify(api: GcpApi, cfg: Settings, items: Sequence[Item]) -> tuple[bool, lis
     user = re.sub(r"[^a-z0-9-]", "-", getpass.getuser().lower()) or "user"
     spec = AgentSpec(
         name=f"ratk-setup-verify-{user}",
-        model=cfg.model or DEFAULT_CHECK_MODEL,
+        model=cfg.models[0] if cfg.models else DEFAULT_CHECK_MODELS[0],
         max_turns=8,
         max_budget_usd=1.0,
     )
@@ -1016,11 +1056,27 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--output-bucket", help="override gs://<project>-agent-output")
     p.add_argument(
         "--model",
-        default=DEFAULT_CHECK_MODEL,
-        help=f"Claude model for the Vertex access check (default {DEFAULT_CHECK_MODEL})",
+        action="append",
+        default=None,
+        metavar="MODEL",
+        help=(
+            "required Claude model(s) to check on Vertex; repeatable, replaces the default "
+            f"list {', '.join(DEFAULT_CHECK_MODELS)} — the FIRST one is also what --verify's "
+            "turn runs on"
+        ),
     )
     p.add_argument(
-        "--skip-model-check", action="store_true", help="skip the live Vertex model probe"
+        "--optional-model",
+        action="append",
+        default=None,
+        metavar="MODEL",
+        help=(
+            "Claude model(s) checked but whose absence doesn't fail readiness; repeatable, "
+            f"replaces the default list {', '.join(DEFAULT_OPTIONAL_MODELS)}"
+        ),
+    )
+    p.add_argument(
+        "--skip-model-check", action="store_true", help="skip the live Vertex model probes"
     )
     p.add_argument(
         "--check",
@@ -1049,7 +1105,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         impersonators=tuple(args.impersonator),
         staging_bucket=normalize_bucket_uri(args.staging_bucket) if args.staging_bucket else None,
         output_bucket=normalize_bucket_uri(args.output_bucket) if args.output_bucket else None,
-        model=None if args.skip_model_check else args.model,
+        models=()
+        if args.skip_model_check
+        else tuple(args.model) if args.model else DEFAULT_CHECK_MODELS,
+        optional_models=()
+        if args.skip_model_check
+        else tuple(args.optional_model) if args.optional_model else DEFAULT_OPTIONAL_MODELS,
     )
     api = GcpApi(cfg.project)
 
@@ -1110,7 +1171,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if code == 0:
         print(f"\n{cfg.project} is ready.", flush=True)
     else:
-        left = [i for i in items if i.status != OK]
+        left = [i for i in items if i.status not in (OK, NOTE)]
         print(
             f"\nnot fully ready yet — {len(left)} item(s) above remain "
             f"({', '.join(sorted({i.status for i in left}))}).",

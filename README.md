@@ -1111,7 +1111,10 @@ in their own project; the concrete values are the shared `my-project` setup we u
 > idempotent — safe to run, and re-run, against existing non-empty projects. `--check` audits without
 > changing anything (exit 0 iff ready); `--yes` skips the prompt (CI/agents); `--verify` proves the
 > end state with a real throwaway deploy + one Haiku turn (a few cents, ~10 min — it also triggers
-> creation of the runtime service agent, whose grants otherwise stay pending until the first deploy).
+> creation of the runtime service agent, whose grants otherwise stay pending until the first deploy),
+> and refuses to spend on the deploy while any check it depends on is still failing (the model check
+> runs as a 1-token live probe in the first report, so a missing Model Garden enablement surfaces
+> before any money is spent).
 > Two things stay manual: enabling Claude in Vertex Model Garden (the tool checks and links the exact
 > console page) and, on a project with APIs fully disabled, the Service Usage API bootstrap. The
 > tables below remain the reference for what it grants and why.

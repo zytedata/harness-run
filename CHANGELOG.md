@@ -72,7 +72,9 @@ tag `vX.Y.Z`, push the commit and the tag.
   model check — then asks for confirmation, applies what's missing, and re-audits.
   Additive-only and idempotent, so it is safe on existing non-empty projects.
   `--check` audits without changing anything; `--yes` applies without a prompt;
-  `--verify` proves the end state with a throwaway warm-pool deploy + one Haiku turn.
+  `--verify` proves the end state with a throwaway warm-pool deploy + one Haiku turn
+  (and refuses to spend on the deploy while a check it depends on still fails — the
+  model check itself is a 1-token live probe, reported before anything is applied).
 
 - Both harnesses can run `openrouter/*` models with an `OPENROUTER_API_KEY`
   per-invocation secret. Kimi K3, GLM-5.3, and DeepSeek v4 Flash/Pro have known

@@ -279,8 +279,48 @@ def test_audit_ready_project_is_all_ok():
 def test_audit_blocks_everything_behind_missing_gate_apis():
     api = FakeGcp(enabled={"serviceusage.googleapis.com"})
     items = ps.audit(api, ps.Settings(project=PROJECT))
-    assert [i.status for i in items] == [ps.FIX, ps.BLOCKED]
+    assert [(i.step, i.status) for i in items] == [
+        ("APIs", ps.FIX),
+        ("Claude on Vertex", ps.BLOCKED),  # aiplatform API itself not enabled yet
+        ("everything else", ps.BLOCKED),
+    ]
     assert "iam.googleapis.com" in items[0].detail
+
+
+def test_model_check_runs_before_the_gate_when_aiplatform_is_enabled():
+    """The expensive-mistake guard: with aiplatform already on (as on a fresh Vertex
+    project), the model row must be a REAL probe result in the very first report, even
+    while everything else is still blocked behind the other APIs."""
+    api = FakeGcp(enabled={"serviceusage.googleapis.com", "aiplatform.googleapis.com"},
+                  model_ok=False)
+    items = ps.audit(api, ps.Settings(project=PROJECT))
+    by = _by_key(items)
+    assert by["Claude on Vertex"].status == ps.MANUAL
+    assert "model-garden/claude-haiku-4-5" in by["Claude on Vertex"].detail
+    assert by["everything else"].status == ps.BLOCKED
+
+
+def test_verify_blockers_allow_only_runtime_agent_and_impersonation():
+    ok = ps.Item("APIs", ps.OK, "d")
+    pending_agent = ps.Item("runtime agent", ps.PENDING, "d")
+    manual_imp = ps.Item("impersonation", ps.MANUAL, "d")
+    model_manual = ps.Item("Claude on Vertex", ps.MANUAL, "d")
+    bucket_fix = ps.Item("staging bucket", ps.FIX, "d")
+    # the two legitimate leftovers do not block a verify (it resolves/ignores them) ...
+    assert ps.verify_blockers([ok, pending_agent, manual_imp]) == []
+    # ... anything else does — the deploy or the turn would fail after minutes of build
+    assert ps.verify_blockers([ok, model_manual]) == [model_manual]
+    assert ps.verify_blockers([ok, bucket_fix]) == [bucket_fix]
+
+
+def test_verify_refuses_to_deploy_with_blockers(capsys):
+    """No backend import, no deploy, no spend — just the printed refusal."""
+    api = FakeGcp()  # would explode if verify() touched real deploy paths anyway
+    items = [ps.Item("Claude on Vertex", ps.MANUAL, "not enabled")]
+    ok, out_items = ps.verify(api, ps.Settings(project=PROJECT), items)
+    assert ok is False
+    assert out_items == items
+    assert "NOT deploying" in capsys.readouterr().out
 
 
 def test_apply_rounds_converge_on_an_empty_project():

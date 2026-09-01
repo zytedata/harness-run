@@ -540,6 +540,35 @@ def _grant_runtime_agent(api: GcpApi, cfg: Settings, project_number: str) -> Non
                 raise
 
 
+def _model_item(api: GcpApi, cfg: Settings, enabled: set[str]) -> Item | None:
+    """The Claude-on-Vertex row: a 1-output-token live probe (check only — accepting the
+    Anthropic terms in Model Garden is a console action this tool cannot perform).
+
+    Runs as early as the audit can (right after the API check, needing only the
+    aiplatform API) so a missing model enablement is visible in the FIRST report — not
+    discovered by a paid `--verify` deploy minutes in.
+    """
+    if not cfg.model:
+        return None
+    if "aiplatform.googleapis.com" not in enabled:
+        return Item(
+            "Claude on Vertex", BLOCKED, "probed once the aiplatform API is enabled"
+        )
+    ok, note = api.model_ping(cfg.model)
+    if ok:
+        return Item("Claude on Vertex", OK, note)
+    return Item(
+        "Claude on Vertex",
+        MANUAL,
+        f"{cfg.model} not callable yet ({note.splitlines()[0][:160]}). Enable it "
+        "(accept the Anthropic terms) once in Vertex Model Garden:\n"
+        f"           https://console.cloud.google.com/vertex-ai/publishers/anthropic/"
+        f"model-garden/{cfg.model}?project={cfg.project}\n"
+        "           (or deploy with use_vertex=False and pass ANTHROPIC_API_KEY "
+        "per-invocation)",
+    )
+
+
 def audit(api: GcpApi, cfg: Settings, pending: set[str] = frozenset()) -> list[Item]:  # type: ignore[assignment]
     """Audit the project; return report rows whose FIX items carry their own apply()."""
     items: list[Item] = []
@@ -560,6 +589,11 @@ def audit(api: GcpApi, cfg: Settings, pending: set[str] = frozenset()) -> list[I
     else:
         items.append(Item("APIs", OK, f"all {len(REQUIRED_SERVICES)} required services enabled"))
 
+    # 2. Claude model enablement — checked as early as possible (see _model_item).
+    model_row = _model_item(api, cfg, enabled)
+    if model_row:
+        items.append(model_row)
+
     # Steps below need these APIs to even audit; with any of them missing, report the
     # rest as BLOCKED — the apply loop re-audits right after enabling.
     gate = {"cloudresourcemanager.googleapis.com", "iam.googleapis.com", "storage.googleapis.com"}
@@ -575,7 +609,7 @@ def audit(api: GcpApi, cfg: Settings, pending: set[str] = frozenset()) -> list[I
 
     staging_uri, output_uri = cfg.buckets()
 
-    # 2. Buckets (uniform access + public-access prevention; lifecycle on the output one).
+    # 3. Buckets (uniform access + public-access prevention; lifecycle on the output one).
     for label, uri in (("staging bucket", staging_uri), ("output bucket", output_uri)):
         name = bucket_name_of(uri)
         wanted_rules: list[dict] = []
@@ -619,7 +653,7 @@ def audit(api: GcpApi, cfg: Settings, pending: set[str] = frozenset()) -> list[I
             else:
                 items.append(Item("output lifecycle", OK, "handoff reaper rules present"))
 
-    # 3. Operator service account + its grants.
+    # 4. Operator service account + its grants.
     op_email = cfg.operator_email()
     if op_email:
         member = f"serviceAccount:{op_email}"
@@ -697,7 +731,7 @@ def audit(api: GcpApi, cfg: Settings, pending: set[str] = frozenset()) -> list[I
                     )
                 )
 
-        # 4. Who may impersonate the operator SA.
+        # 5. Who may impersonate the operator SA.
         members = [principal(m) for m in cfg.impersonators]
         if not members:
             adc = api.adc_email()
@@ -743,7 +777,7 @@ def audit(api: GcpApi, cfg: Settings, pending: set[str] = frozenset()) -> list[I
                     Item("impersonation", OK, f"tokenCreator held by {', '.join(members)}")
                 )
 
-    # 5. The runtime service agent's grants (the engine's identity at run time).
+    # 6. The runtime service agent's grants (the engine's identity at run time).
     agent_email = runtime_agent_email(number)
     agent_member = f"serviceAccount:{agent_email}"
     rt_needed = [(role, agent_member) for role in RUNTIME_AGENT_PROJECT_ROLES]
@@ -777,25 +811,6 @@ def audit(api: GcpApi, cfg: Settings, pending: set[str] = frozenset()) -> list[I
         )
     else:
         items.append(Item("runtime agent", OK, f"{agent_email} fully granted"))
-
-    # 6. Claude enabled in Vertex Model Garden (check only — acceptance is console-only).
-    if cfg.model:
-        ok, note = api.model_ping(cfg.model)
-        if ok:
-            items.append(Item("Claude on Vertex", OK, note))
-        else:
-            items.append(
-                Item(
-                    "Claude on Vertex",
-                    MANUAL,
-                    f"{cfg.model} not callable yet ({note.splitlines()[0][:160]}). Enable it "
-                    "(accept the Anthropic terms) once in Vertex Model Garden:\n"
-                    f"           https://console.cloud.google.com/vertex-ai/publishers/anthropic/"
-                    f"model-garden/{cfg.model}?project={cfg.project}\n"
-                    "           (or deploy with use_vertex=False and pass ANTHROPIC_API_KEY "
-                    "per-invocation)",
-                )
-            )
 
     return items
 
@@ -865,13 +880,37 @@ VERIFY_TASK = (
 )
 
 
-def verify(api: GcpApi, cfg: Settings) -> tuple[bool, list[Item]]:
+def verify_blockers(items: Sequence[Item]) -> list[Item]:
+    """The report rows that make a paid verify pointless — deploy anyway and the build
+    or the turn fails minutes in (a failed model check is the expensive classic).
+
+    Two rows may legitimately be non-OK and still verify: the runtime service agent
+    (the first deploy is exactly what creates it — verify closes that loop), and the
+    impersonation grant (control-plane convenience for *other* principals; it does not
+    affect whether the engine deploys and runs).
+    """
+    allowed = {"runtime agent", "impersonation"}
+    return [i for i in items if i.status != OK and i.step not in allowed]
+
+
+def verify(api: GcpApi, cfg: Settings, items: Sequence[Item]) -> tuple[bool, list[Item]]:
     """Deploy a throwaway warm-pool engine, run one Haiku turn, tear down.
 
     Exercises every grant end-to-end (build, staging, dispatch, logging, the model), and
     — because the first deploy is what creates the runtime service agent — re-applies
-    any grants that were PENDING before returning the final audit.
+    any grants that were PENDING before returning the final audit. Refuses to spend on
+    the deploy while `verify_blockers` remain (``items`` is the latest audit).
     """
+    blockers = verify_blockers(items)
+    if blockers:
+        print(
+            "\nverify: NOT deploying — resolve these first (the deploy or the turn "
+            "would fail after minutes of build):",
+            flush=True,
+        )
+        print_report(blockers)
+        return False, list(items)
+
     import asyncio
     import os
 
@@ -1057,7 +1096,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if args.verify:
         try:
-            ok, items = verify(api, cfg)
+            ok, items = verify(api, cfg, items)
         except Exception as e:  # noqa: BLE001 — verify failure is a verdict, not a crash
             print(f"verify FAILED: {e}", file=sys.stderr, flush=True)
             ok = False

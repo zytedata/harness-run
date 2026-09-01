@@ -11,12 +11,22 @@ can only break in ways the earlier rungs can't see.
 | Model-provider check | `make live-openrouter` | provider-contract breakage (OpenRouter) | ~4 min, ~$0.75 |
 | Model-provider check, remote | `make live-openrouter-remote` | the same models + remote visibility on Agent Runtime | ~8-15 min, ~$0.56 + build |
 | Model attribution | `make live-attribution` | did the turn run the model we asked for — both harnesses | ~10 s, ~$0.06 |
+| Usage accounting | `make live-usage` | usage/cost accounting drift — esp. the Codex subagent rollout recovery (non-public details) | ~5 min, well under $1 |
 
 The two OpenRouter figures are measured (2026-08-22, all four models on both harnesses:
 26/26 local checks for $0.74, 128/128 remote checks for $0.56 of model spend plus the engine
 build). Most of `live-openrouter` is the big models: one DeepSeek v4 Pro basic turn on
 claude-code cost $0.083 and one Kimi K3 $0.069, while DeepSeek v4 Flash on codex cost $0.002.
 Set `MODELS=openrouter/deepseek/deepseek-v4-flash` to check the plumbing for about a cent.
+
+`make live-usage` re-establishes the usage/cost contracts the normalization relies on
+([`dev/live_usage_probe.py`](dev/live_usage_probe.py)): Claude's `model_usage` being
+subagent-inclusive and segment-cumulative, and — the fragile one — Codex's subagent rollout
+layout (`session_meta` `parent_thread_id`, `turn_context.model`, cumulative `token_count`),
+which is non-public and has no wire alternative (openai/codex#14642 closed as not-planned).
+Run it after bumping the pinned Codex CLI or `openai-codex` SDK, or when touching
+`harness/_usage.py` / the subagent recovery in `harness/codex.py`. `SCENARIO=codex-subagent`
+runs the core recovery check alone.
 
 ## 1. Offline tests (`make test`)
 

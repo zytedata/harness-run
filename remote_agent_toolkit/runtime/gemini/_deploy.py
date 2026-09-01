@@ -44,8 +44,10 @@ if TYPE_CHECKING:
 # baked deps (``spec.packages``) are appended by ``build_requirements``.
 _BASE_REQUIREMENTS: tuple[str, ...] = (
     # 1.154+ so the runtime can unpickle the ``agentplatform.agent_engines`` AdkApp the
-    # client stages (the pre-rename ``vertexai`` template module is a different class).
-    "google-cloud-aiplatform[adk,agent_engines]>=1.154",
+    # client stages (the pre-rename ``vertexai`` template module is a different class);
+    # <2 because aiplatform 2.0 (2026-08) is not validated here yet — migrate deliberately
+    # (the constraints.txt pin keeps engine builds on 1.165.x either way).
+    "google-cloud-aiplatform[adk,agent_engines]>=1.154,<2",
     "cloudpickle",
     "pydantic",
     "claude-agent-sdk==0.2.130",  # keep in lockstep with pyproject and constraints

@@ -136,7 +136,17 @@ What to know when running Codex:
   (fetched once per process, so new models are priced without a toolkit release; a small baked table
   covers the GPT-5.6 family offline) and interrupts the run at `max_turns` / `max_budget_usd`. For a
   model neither source knows you get `cost_usd=None`, a `cost_unknown` status event, and no budget
-  enforcement; the result event records which source priced the run (`price_source`).
+  enforcement; the result event records which source priced the run (`price_source`). Collab-subagent
+  spend is invisible on Codex's wire, so the harness recovers it post-hoc from the subagent rollout
+  files — the terminal `usage`/`cost_usd` include it (see "What the numbers count"), each thread priced
+  at the model its own rollout names (a subagent role can run a different model than the parent; one on a model
+  `pricing` doesn't know makes `cost_usd` `None` — never a guess — with a `subagent_price_unknown`
+  status event; its tokens stay in `usage`). A thread
+  seen on the wire with no rollout found raises a `subagent_usage_missing` status event — the tripwire
+  for the recovery's reliance on non-public rollout details (`make live-usage` re-checks them live). The mid-turn
+  `max_turns`/`max_budget_usd` checks can't see it while the turn is running; the budget is re-checked
+  at turn end once it is known, so a turn that subagent spend pushes over the cap still ends
+  `error_budget_exceeded` (it just can't be interrupted early).
 - **Checkpoint/resume** works cross-worker: the Codex conversation (a local rollout file) is
   persisted to the blob store alongside the workspace snapshot and restored on `send()`.
 - **Reasoning effort**: `spec.reasoning_effort` becomes the SDK's per-turn `effort`, re-applied on
@@ -563,14 +573,31 @@ error. For post-mortems, the CLI's stderr is captured to `<workdir>/jobs/<sessio
 not inside, the workspace); on a CLI-exit failure its tail is also surfaced as a `claude_stderr` status
 event and embedded in the error text.
 
+**What the numbers count.** `result.cost_usd` is the turn's total spend in dollars (or `None` when the
+backend can't price it — never a guess). `result.usage` is the toolkit-normalized token record, identical
+in shape and meaning on every harness and both runtimes: a flat dict whose five keys are always present —
+`input_tokens`, `cache_read_input_tokens`, `cache_creation_input_tokens`, `output_tokens`,
+`reasoning_output_tokens`. The three input buckets are disjoint (fresh / cache-read / cache-written), and
+`reasoning_output_tokens` is the reasoning *share* of `output_tokens`, not a further bucket — so total
+tokens = the three input buckets + `output_tokens`. A key is `None` when the backend doesn't report that number
+(Anthropic has no reasoning split; OpenAI doesn't bill cache writes separately, the count is
+informational). Both metrics cover the **whole turn**: subagent sessions and background-task
+re-invocation segments included — on Claude Code aggregated from the CLI's complete per-model record, on
+Codex recovered from the subagent rollout files (Codex reports no subagent usage on its wire). The
+backends' own verbatim records stay on the result event's `raw`: `model_usage` and `cli_usage` on Claude
+Code, `subagent_usage` (per-thread) on Codex. `result.num_turns` counts the **main agent's** model calls
+(same unit on both harnesses): cumulative across re-invocation segments, subagent calls **not** included —
+the same scope `max_turns` caps.
+
 **Background tasks are honored.** If the agent starts a background job (Bash `run_in_background`) or arms
 the Monitor tool and then ends its turn — the trained, efficient behavior for waiting on long processes
 like a verification crawl — the run does **not** end there: the harness holds the session open and the
 model is re-invoked when the task completes, exactly as in interactive Claude Code. Interim turn ends
 surface as `awaiting_tasks` status events; the run's single `result` comes when no work is pending.
 `spec.background_task_timeout` (seconds, default 3600) bounds how long a turn waits on still-running
-tasks — size it to the longest job the agent legitimately waits on. Two accounting notes: `num_turns` is
-cumulative across these re-invocations, and `max_turns` caps each invocation segment rather than the
+tasks — size it to the longest job the agent legitimately waits on. Two accounting notes: `num_turns`,
+`cost_usd` and `usage` are cumulative across these re-invocations (see "What the numbers count"), and
+`max_turns` caps each invocation segment rather than the
 whole run (`max_budget_usd` remains a global cap). Event-driven waiting instead of poll-loops is exactly
 what keeps long crawls nearly free in turns.
 

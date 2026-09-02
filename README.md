@@ -29,6 +29,19 @@ pip install "git+ssh://git@github.com/zytedata/remote-agent-toolkit.git"
 # or:  uv pip install "git+ssh://git@github.com/zytedata/remote-agent-toolkit.git"
 ```
 
+The base install covers the **remote path** (deploying and driving Gemini Agent Runtime
+engines — the engine installs the harness SDKs from its own baked requirements). Running
+agents **locally** (`local.deploy`) also runs the harness SDKs on your machine, so add the
+`local` extra:
+
+```bash
+pip install "remote-agent-toolkit[local] @ git+ssh://git@github.com/zytedata/remote-agent-toolkit.git"
+```
+
+(Kept out of the base install because the SDKs are heavy and pin aggressively — e.g.
+`claude-agent-sdk` requires `mcp<2`, which conflicts with apps on the mcp 2.x SDK, and
+`openai-codex` bundles the codex CLI binary.)
+
 Releases are git tags — pin one to shield yourself from in-development changes on `main`
 (see [`CHANGELOG.md`](CHANGELOG.md) for what's in each release and how to upgrade across
 breaking changes):
@@ -38,7 +51,8 @@ pip install "git+ssh://git@github.com/zytedata/remote-agent-toolkit.git@v0.2.0"
 ```
 
 Developing on the toolkit itself (early users are expected to contribute)? Clone it and `uv sync` — that
-installs the runtime deps plus the `dev` group (pytest, ruff, mypy).
+installs the runtime deps plus the `dev` group (pytest, ruff, mypy, and the harness SDKs —
+the suite exercises both harnesses).
 
 ## Define an agent
 

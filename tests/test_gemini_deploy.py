@@ -50,6 +50,7 @@ def test_build_requirements_merges_constraints() -> None:
     aip = next(r for r in reqs if r.startswith("google-cloud-aiplatform"))
     assert "[adk,agent_engines]" in aip  # extras survive the merge
     assert "==" in aip and ">=1.154" in aip  # base floor and constraint pin intersect
+    assert "<2" in aip  # aiplatform 2.0 (2026-08) is excluded until validated
     # Constrained packages nothing requires directly are appended as pinned requirements.
     assert any(r.startswith("google-auth==") for r in reqs)
     # Unconstrained base deps stay untouched.

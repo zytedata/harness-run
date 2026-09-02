@@ -23,7 +23,10 @@ from openai_codex.generated.notification_registry import (
 )
 from openai_codex.generated.v2_all import (
     AgentMessageThreadItem,
+    CollabAgentState,
+    CollabAgentToolCallThreadItem,
     CommandExecutionThreadItem,
+    SubAgentActivityThreadItem,
     ThreadItem,
     ThreadTokenUsage,
     TokenUsageBreakdown,
@@ -99,23 +102,71 @@ def command_execution(
 
 def token_usage(
     *, in_tok: int = 1000, cached: int = 0, out_tok: int = 100, reasoning: int = 0,
-    total_in: int | None = None,
+    total_in: int | None = None, cache_write: int | None = None,
 ) -> SimpleNamespace:
     last = TokenUsageBreakdown(
         input_tokens=in_tok, cached_input_tokens=cached, output_tokens=out_tok,
         reasoning_output_tokens=reasoning, total_tokens=in_tok + out_tok,
+        cache_write_input_tokens=cache_write,
     )
     total = TokenUsageBreakdown(
         input_tokens=total_in if total_in is not None else in_tok,
         cached_input_tokens=cached, output_tokens=out_tok,
         reasoning_output_tokens=reasoning,
         total_tokens=(total_in if total_in is not None else in_tok) + out_tok,
+        cache_write_input_tokens=cache_write,
     )
     return note(
         "thread/tokenUsage/updated",
         ThreadTokenUsageUpdatedNotification(
             thread_id=_TID, turn_id=_TURN_ID,
             token_usage=ThreadTokenUsage(last=last, total=total),
+        ),
+    )
+
+
+def collab_agent_tool_call(
+    *, started: bool = False, agents: dict[str, str] | None = None,
+    tool: str = "spawnAgent",
+) -> SimpleNamespace:
+    """A collab-agent (subagent) tool call carrying per-thread CollabAgentStatus values."""
+    agents = agents if agents is not None else {"thr-sub-1": "completed"}
+    item = ThreadItem(
+        CollabAgentToolCallThreadItem(
+            id="ca1", type="collabAgentToolCall", tool=tool,
+            status="inProgress" if started else "completed",
+            sender_thread_id=_TID, receiver_thread_ids=list(agents),
+            agents_states={tid: CollabAgentState(status=s) for tid, s in agents.items()},
+        )
+    )
+    if started:
+        return note(
+            "item/started",
+            ItemStartedNotification(
+                started_at_ms=0, item=item, thread_id=_TID, turn_id=_TURN_ID
+            ),
+        )
+    return note(
+        "item/completed",
+        ItemCompletedNotification(
+            completed_at_ms=0, item=item, thread_id=_TID, turn_id=_TURN_ID
+        ),
+    )
+
+
+def sub_agent_activity(
+    *, agent_thread_id: str = "thr-sub-1", activity: str = "started",
+) -> SimpleNamespace:
+    item = ThreadItem(
+        SubAgentActivityThreadItem(
+            id="sa1", type="subAgentActivity", agent_path=f"{_TID}/0",
+            agent_thread_id=agent_thread_id, kind=activity,
+        )
+    )
+    return note(
+        "item/completed",
+        ItemCompletedNotification(
+            completed_at_ms=0, item=item, thread_id=_TID, turn_id=_TURN_ID
         ),
     )
 

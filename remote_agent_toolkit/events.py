@@ -63,12 +63,24 @@ class RunResult:
             message. The recovered value is real; this flags that ``text`` doesn't
             contain it.
         is_error: Whether the run terminated in error.
-        num_turns: Number of agent turns consumed.
+        num_turns: Model calls made by the main agent — the same unit on every
+            harness. Cumulative across background-task re-invocation segments;
+            subagent (Task/collab-agent) calls are NOT counted, matching what
+            ``max_turns`` caps.
         cost_usd: Total spend for the run, or ``None`` when the spend is unknown:
             the harness could not price the model, or OpenRouter reported no charge.
             A ``cost_unknown`` status event fires in that case and ``max_budget_usd``
             could not be enforced. ``0.0`` means the run really was free.
-        usage: Raw token/usage accounting from the harness.
+        usage: Normalized token accounting for the WHOLE turn — subagent sessions and
+            background-task re-invocation segments included — identical in shape and
+            meaning on every harness (see ``harness/_usage.py``). A flat dict whose
+            five keys are always present: ``input_tokens``, ``cache_read_input_tokens``,
+            ``cache_creation_input_tokens``, ``output_tokens``,
+            ``reasoning_output_tokens`` — the input buckets disjoint, reasoning a share
+            of output — ``None`` where the harness reports no such number (never a
+            fake ``0``). The harness's own verbatim
+            records stay on the result event's ``raw`` (``model_usage``/``cli_usage``
+            on claude-code, ``subagent_usage`` on codex).
         session_id: The session this result belongs to (for re-attach/resume).
         artifacts: Blob keys/URIs of artifacts produced by the run.
         warning: Non-fatal anomaly note — e.g. the harness process exited abnormally

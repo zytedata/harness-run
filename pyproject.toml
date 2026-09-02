@@ -15,7 +15,8 @@ dependencies = [
     "google-adk>=1.5",  # floor of the agentplatform AdkApp template (it raises below 1.5.0)
     # 1.163+ for the client-side runtime-revision surface (agent_engines.runtimes.revisions
     # + AgentEngineConfig.traffic_config), which `deploy`/`get_engine(version=…)` build on.
-    "google-cloud-aiplatform[adk,agent-engines]>=1.163",
+    # <2: aiplatform 2.0 (released 2026-08) is not validated yet — migrate deliberately.
+    "google-cloud-aiplatform[adk,agent-engines]>=1.163,<2",
     "google-cloud-storage",
     "google-cloud-logging",
     "google-cloud-pubsub",

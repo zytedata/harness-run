@@ -44,6 +44,7 @@ money, so they run by hand, never in CI. See [`TESTING.md`](../TESTING.md) for w
 |---|---|---|
 | [`live_smoke.py`](live_smoke.py) | `make live-smoke` | the standard live validation: throwaway engines from your checkout, one turn through the cold and warm dispatch paths, teardown in `finally` |
 | [`live_revisions.py`](live_revisions.py) | `make live-revisions` | the revision control plane: deploy-as-update, traffic rollback, pinning |
+| [`live_pool_cutover_probe.py`](live_pool_cutover_probe.py) | `make live-pool-cutover` | the warm-pool redeploy cutover (#38): fresh dispatch pair per deploy, old workers exit, `get_engine` discovery, post-redeploy turn on the new revision |
 | [`live_openrouter_probe.py`](live_openrouter_probe.py) | `make live-openrouter` | the OpenRouter models on both harnesses, locally |
 | [`live_openrouter_remote_probe.py`](live_openrouter_remote_probe.py) | `make live-openrouter-remote` | the same models on Agent Runtime, plus the remote-only visibility surface |
 | [`live_model_attribution.py`](live_model_attribution.py) | `make live-attribution` | did the turn run the model we asked for, from evidence the CLI and provider return |

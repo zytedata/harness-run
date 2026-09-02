@@ -112,6 +112,10 @@ tag `vX.Y.Z`, push the commit and the tag.
 
 ### Changed
 
+- `google-cloud-aiplatform` is now pinned `<2`: 2.0 was released in late August 2026 and
+  is not validated with the toolkit yet, and the previous `>=1.163` floor would resolve
+  to it on a fresh install (engine builds were already held at `1.165.1` by
+  `constraints.txt`). Migration to 2.x is tracked separately. ([#38])
 - The harness SDKs are now pinned exactly: `claude-agent-sdk==0.2.130` and
   `openai-codex==0.147.0`, matching what a deployed engine installs. Both were
   validated together on the local and Agent Runtime paths, and `openai-codex`
@@ -121,6 +125,23 @@ tag `vX.Y.Z`, push the commit and the tag.
 
 ### Fixed
 
+- Warm-pool workers cold-started under a previous engine revision no longer claim turns
+  dispatched after a redeploy (they used to serve them with the old deploy-baked
+  spec/skills for up to `pool_max_wait_s`, silently). Each `gemini.deploy(warm_pool=True)`
+  now mints a deploy-scoped dispatch topic/subscription pair and deletes the previous
+  pair once the new pool is filled, so stale idle workers fail their next claim poll and
+  exit within seconds. `get_engine(warm_pool=True)` reads the live subscription back from
+  the deployed engine's env (the serving revision's when traffic is pinned) instead of
+  deriving it from the engine name, and `wait_until_warm` tails the deploy-scoped
+  readiness marker, so a previous pool's markers never count as this one being warm.
+  With traffic pinned to an older revision, dispatch stays on the pinned (serving)
+  revision's pair — resolved from that revision's own baked env, not the engine-level
+  env, which under a pin names the latest, never-served revision's listener-less pair —
+  and nothing is retired: each such deploy's fresh pair is kept (a later promotion
+  needs it), and `delete(delete_pool_resources=True)` sweeps every revision's pair. A
+  failed subscription read in `get_engine(warm_pool=True)` now raises (retryable)
+  instead of silently falling back to legacy fixed names that fail only at the first
+  publish. ([#38])
 - Claude Code turns that finish without a final assistant message now return
   `error_no_final_text` for OpenRouter models. This has occurred intermittently with
   DeepSeek v4 and previously looked like a successful run with placeholder text. ([#34])
@@ -133,6 +154,7 @@ tag `vX.Y.Z`, push the commit and the tag.
 
 [#34]: https://github.com/zytedata/remote-agent-toolkit/pull/34
 [#36]: https://github.com/zytedata/remote-agent-toolkit/pull/36
+[#38]: https://github.com/zytedata/remote-agent-toolkit/issues/38
 
 ## 0.2.0 — 2026-08-24
 

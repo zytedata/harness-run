@@ -297,7 +297,10 @@ def deploy(
     that turn on its own revision; a dispatch still queued unclaimed on the old pair at
     that moment (a turn racing the redeploy) is dropped with it. Exception: when the
     engine's traffic is pinned to a previous revision, the pair its workers pull is kept
-    and dispatched to, and nothing is retired (see :meth:`GeminiEngine.set_traffic`).
+    and dispatched to, and nothing is retired (see :meth:`GeminiEngine.set_traffic`); the
+    fresh pair stays too (the new revision's baked env names it, so a later promotion
+    needs it) — pairs of revisions never promoted are swept by
+    ``delete(delete_pool_resources=True)``, which removes every revision's pair.
 
     **Warm workers idle-expire, and the pool does not self-recover.** An idle worker waits
     ``pool_max_wait_s`` (default: a day) for an assignment, then exits — silently, and
@@ -429,14 +432,16 @@ def deploy(
     # Engine identity is the display name: update the existing engine (minting a revision)
     # rather than piling up look-alike engines. Only a first deploy creates one.
     existing = None if new_engine else _find_engine(client, spec.name)
-    # The previous revision's dispatch pair, read back from its baked env — retired once
-    # the new pool is filled, so its idle workers exit promptly instead of idling out.
+    # The dispatch pair live workers currently pull, read back from the deployed env of
+    # the SERVING revision — under a pin that is the pinned revision's pair, NOT the
+    # engine-level env, which reflects the latest revision: one that never served has no
+    # listeners on its pair, so dispatching there would strand turns unclaimed (PR #39
+    # review). Retired once the new pool is filled, so its idle workers exit promptly
+    # instead of idling out.
     old_topic = old_subscription = None
     if warm_pool and existing:
         try:
-            old_subscription = _env_pool_subscription(
-                client.agent_engines.get(name=existing).api_resource
-            )
+            old_subscription = _serving_pool_subscription(client, existing)
             old_topic = topic_for_subscription(old_subscription) if old_subscription else None
         except Exception:  # noqa: BLE001 — cutover cleanup is best-effort, never blocks a deploy
             old_topic = old_subscription = None
@@ -453,9 +458,27 @@ def deploy(
     if warm_pool and pinned and old_subscription and old_subscription != subscription:
         # Traffic stays pinned to a previous revision, so live workers — and any refill,
         # which always cold-starts on the SERVING revision — pull the OLD pair. Dispatch
-        # there and retire nothing; the fresh pair becomes live when traffic moves.
+        # there and retire nothing. The fresh pair is deliberately KEPT even though nothing
+        # pulls it yet: its names are baked into the new revision's env, so a later
+        # promotion (set_traffic) makes it live — deleting it here would permanently break
+        # that revision. Pairs of revisions never promoted thus accumulate under a pin;
+        # delete(delete_pool_resources=True) sweeps every revision's pair.
         topic, subscription = old_topic, old_subscription
         old_topic = old_subscription = None
+    elif warm_pool and pinned and not old_subscription:
+        import warnings
+
+        # The pin means live workers pull SOME previous pair, but we could not learn which
+        # (env read failed, or an engine deployed before the env carried it). The handle
+        # will dispatch to the fresh pair, which those workers do not pull — loud, so a
+        # turn sitting unclaimed afterwards is traceable to this deploy.
+        warnings.warn(
+            "traffic is pinned but the serving revision's dispatch subscription could not "
+            "be read; dispatching to this deploy's fresh pair, which the pinned revision's "
+            "workers do NOT pull — turns may sit unclaimed until traffic moves "
+            "(set_traffic) or the pool is re-addressed via get_engine",
+            stacklevel=2,
+        )
     geng = GeminiEngine(
         resource=engine.api_resource.name,
         spec=spec,
@@ -542,6 +565,31 @@ def _env_pool_subscription(api_resource: Any) -> str | None:
     return None
 
 
+def _serving_pool_subscription(client: Any, resource: str) -> str | None:
+    """``AGENT_POOL_SUBSCRIPTION`` of the revision pool workers actually run on, or ``None``.
+
+    Workers always cold-start on the SERVING revision, so with traffic pinned the pair
+    they pull is the pinned revision's. The engine-level env reflects the *latest*
+    revision instead — under a pin possibly one that never served, whose pair has no
+    listeners — so it is only the fallback (and the answer when traffic is unpinned or
+    split). ``None`` means the env was read but carries no subscription; a failed read
+    raises, and each caller decides how to degrade.
+    """
+    from . import revisions as rev
+
+    api = client.agent_engines.get(name=resource).api_resource
+    targets = rev.traffic_targets(getattr(api, "traffic_config", None))
+    if len(targets) == 1:
+        pinned = rev.revision_resource(resource, targets[0][0])
+        for revision in client.agent_engines.runtimes.revisions.list(name=resource):
+            if getattr(revision.api_resource, "name", "") == pinned:
+                sub = _env_pool_subscription(revision.api_resource)
+                if sub:
+                    return sub
+                break
+    return _env_pool_subscription(api)
+
+
 def _discover_pool_paths(
     client: Any, resource: str, project: str | None, name: str
 ) -> tuple[str, str]:
@@ -549,29 +597,17 @@ def _discover_pool_paths(
 
     The pair is generation-scoped (a fresh pair per deploy — the #38 cutover), so it cannot
     be derived from the engine name: read ``AGENT_POOL_SUBSCRIPTION`` back from the deployed
-    env instead — the serving revision's env when traffic is pinned (workers always
-    cold-start on the serving revision), the engine's own (= the latest revision's)
-    otherwise. When no subscription can be read (an engine deployed without ``warm_pool``,
-    or an unreadable resource), fall back to the legacy fixed names.
+    env instead (:func:`_serving_pool_subscription`). The legacy fixed names are used only
+    when the env was READ successfully and simply has no subscription (an engine deployed
+    without ``warm_pool``, or from a toolkit older than the baked env var). A *failed* read
+    raises so the caller can retry: silently falling back on, say, a network timeout handed
+    out legacy names that were never created for a generation-scoped engine — a handle that
+    looks fine and only fails at its first publish, with a ``NotFound`` nothing ties back
+    to the read error (PR #39 review).
     """
-    from . import revisions as rev
-
-    try:
-        api = client.agent_engines.get(name=resource).api_resource
-        sub = None
-        targets = rev.traffic_targets(getattr(api, "traffic_config", None))
-        if len(targets) == 1:
-            pinned = rev.revision_resource(resource, targets[0][0])
-            for revision in client.agent_engines.runtimes.revisions.list(name=resource):
-                if getattr(revision.api_resource, "name", "") == pinned:
-                    sub = _env_pool_subscription(revision.api_resource)
-                    break
-        if sub is None:
-            sub = _env_pool_subscription(api)
-        if sub:
-            return topic_for_subscription(sub), sub
-    except Exception:  # noqa: BLE001 — discovery degrades to the legacy fixed names
-        pass
+    sub = _serving_pool_subscription(client, resource)
+    if sub:
+        return topic_for_subscription(sub), sub
     if not project:
         raise ValueError(
             "warm_pool=True could not discover the engine's dispatch subscription from its "
@@ -1361,6 +1397,24 @@ class GeminiEngine:
         import re
 
         ae = self._agent_engines()
+        # Collect every revision's dispatch pair BEFORE the engine — and with it the
+        # revision list — is gone: deploys made while traffic was pinned each left their
+        # fresh pair idle (see deploy()), so the handle's own pair is not necessarily the
+        # only one to clean up. Best-effort: the handle's own pair is swept regardless.
+        pool_pairs: dict[str | None, str | None] = {}
+        if delete_pool_resources:
+            if self._topic or self._subscription:
+                pool_pairs[self._subscription] = self._topic
+            try:
+                revisions = self._client().agent_engines.runtimes.revisions.list(
+                    name=self._resource
+                )
+                for revision in revisions:
+                    sub = _env_pool_subscription(revision.api_resource)
+                    if sub:
+                        pool_pairs.setdefault(sub, topic_for_subscription(sub))
+            except Exception:  # noqa: BLE001 — sweep is best-effort
+                pass
         for job_name in self._pool_jobs:  # fast path: jobs this process submitted
             try:
                 ae.cancel_query_job(name=self._resource, config={"operation_name": job_name})
@@ -1384,8 +1438,8 @@ class GeminiEngine:
                         pass
                 time.sleep(15)
 
-        if delete_pool_resources and (self._topic or self._subscription):
-            _delete_pool_pair(self._topic, self._subscription, self._credentials)
+        for sub, topic in pool_pairs.items():
+            _delete_pool_pair(topic, sub, self._credentials)
 
     def versions(self) -> list[str]:
         """This engine's runtime-revision ids, newest first (see :meth:`revisions`)."""

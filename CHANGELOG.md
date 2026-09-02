@@ -126,8 +126,14 @@ tag `vX.Y.Z`, push the commit and the tag.
   the deployed engine's env (the serving revision's when traffic is pinned) instead of
   deriving it from the engine name, and `wait_until_warm` tails the deploy-scoped
   readiness marker, so a previous pool's markers never count as this one being warm.
-  With traffic pinned to an older revision, dispatch stays on that revision's pair and
-  nothing is retired. ([#38])
+  With traffic pinned to an older revision, dispatch stays on the pinned (serving)
+  revision's pair — resolved from that revision's own baked env, not the engine-level
+  env, which under a pin names the latest, never-served revision's listener-less pair —
+  and nothing is retired: each such deploy's fresh pair is kept (a later promotion
+  needs it), and `delete(delete_pool_resources=True)` sweeps every revision's pair. A
+  failed subscription read in `get_engine(warm_pool=True)` now raises (retryable)
+  instead of silently falling back to legacy fixed names that fail only at the first
+  publish. ([#38])
 - Claude Code turns that finish without a final assistant message now return
   `error_no_final_text` for OpenRouter models. This has occurred intermittently with
   DeepSeek v4 and previously looked like a successful run with placeholder text. ([#34])

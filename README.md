@@ -784,16 +784,18 @@ scrapes, a file in a repo) into revealing whatever it can reach: environment var
 token it was handed. The toolkit does **not** pretend to hide credentials from the agent. Instead it shrinks
 the blast radius:
 
-1. **Per-invocation, not baked/shared** — a run only ever has the secrets that *that* call passed. One
-   deployed engine serves many tenants without any of them sharing credentials.
+1. **Per-invocation, not baked/shared** — a run only ever has the secrets that *that* call passed, and
+   (since the run-scoped GCS tokens below) can reach only its own staged objects, so one deployed engine
+   serves many tenants without any of them sharing credentials.
 2. **Scope the credentials** — prefer short-lived, narrowly-scoped tokens (a GitHub **App installation
    token** for one repo, a Bitbucket **repository access token**) over broad personal tokens. If a run is
    coerced, the exposure is limited to that one scoped token for that one run.
 3. **Least secrets per run** — pass only what the task needs.
 
 **LLM API key.** By default `gemini` routes the model through **Vertex** (the engine authenticates as its own
-GCP identity — **no LLM key is ever in the agent's environment**). This is the recommended, prompt-injection-
-safe default. `deploy(..., use_vertex=False)` switches to API-key mode, where you pass `ANTHROPIC_API_KEY` as
+GCP identity — **no LLM key is ever in the agent's environment**). This is the recommended default, and
+the one case where a coerced agent cannot leak a model key; what the agent CAN reach through that identity
+is the subject of [The runtime identity is reachable by the agent](#the-runtime-identity-is-reachable-by-the-agent) below. `deploy(..., use_vertex=False)` switches to API-key mode, where you pass `ANTHROPIC_API_KEY` as
 a per-invocation secret — but then the agent's process (hence the `Bash` tool) can read it, so use Vertex for
 anything exposed to untrusted input. Locally the agent likewise inherits your shell's environment (including
 your own `ANTHROPIC_API_KEY`, or — with no key set — your `claude.ai` subscription login: see
@@ -812,6 +814,112 @@ completion, and deploy installs a 1-day GCS lifecycle rule on the `invocation-se
 last-resort reaper for objects orphaned by a crash on both sides. The toolkit **never** writes secret
 values to Cloud Logging, to an `AgentEvent`, or to a checkpoint — push tokens are scrubbed from `.git/config`
 before a workspace snapshot and re-embedded on resume. Don't log the `secrets` dict yourself.
+
+### The runtime identity is reachable by the agent
+
+Found and verified live on 2026-09-02 (`dev/live_isolation_probe.py`). On Agent Runtime the worker
+container runs everything as one user (`appuser`, PID 1 included), and the harness authenticates to
+Vertex as the **Agent Runtime service agent** through the metadata server. The agent's shell is a child
+of the harness in that container, so one shell command gets that identity's access token. The probe, a
+plain Haiku turn, printed:
+
+| Check from the agent's shell | Result |
+|---|---|
+| user | `appuser`, uid 1000; `/proc/1/environ` readable |
+| `GET .../service-accounts/default/token` on the metadata server | 200, a token for `service-<number>@gcp-sa-aiplatform-re.iam.gserviceaccount.com` |
+| list `invocation-secrets/` in the shared output bucket with it | 200 (5 other runs' staged secrets present at that moment; none read) |
+| read the run's own staged secrets object with it | 200 |
+| list `session-config/`, `turn-config/`, `events/` | 200, 50+ objects each |
+
+The bucket is `gs://<project>-agent-output` by default, shared by every engine in the project, and the
+service agent held `objectAdmin` on it. So, **before the fix below**, any run could read, from a shell:
+
+| What | Severity | Scenario |
+|---|---|---|
+| Every other in-flight run's staged secrets (`invocation-secrets/`, plain JSON until its turn ends): repo push tokens, API keys, anything passed as `secrets=` | **Critical** | A prompt-injected or misbehaving agent in tenant A's run lists the prefix and reads tenant B's GitHub App token and API keys while B's turn runs; the lifecycle rule leaves orphans up to a day |
+| Every run's transcripts, workspace snapshots, session and turn configs (`checkpoints/`, `session-config/`, `turn-config/`), and the platform's persisted job inputs (`jobs/<sid>_input.jsonl`, the full prompt) | **High** | Cross-tenant read of prompts, repo contents in snapshots, and the pointers of other runs; overwrite of another run's checkpoint |
+| Another run's live event stream (`events/<sid>/`, what the client tails and reads back as history) | **High** | Write a fake terminal `result` into another session's mirror: its client sees a finished run with invented output |
+| Vertex model calls as the service agent | **Medium** | Spend outside the run's `max_budget_usd`; no data exposure |
+| Cloud Logging writes (`logging.logWriter`) | **Low** | Noise and forged ops log lines; clients no longer tail Cloud Logging |
+| Warm pool: pull other runs' turn assignments (`pubsub.subscriber`) | **High, warm mode only** | A dispatched message carries the other run's pointers (and, with the fix, its run-scoped token); pull it, ack it, and the other run never starts |
+
+**The fix: run-scoped GCS tokens.** The client mints one short-lived, downscoped token per turn
+(a [Credential Access Boundary](https://cloud.google.com/iam/docs/downscoping-short-lived-credentials):
+this bucket, only this run's object prefixes — its secrets object, its config objects, its events mirror,
+its checkpoints, its artifacts) and hands it to the worker with the invocation (a directive line on the
+cold path, a payload field on the warm path). The worker does **all** of the turn's GCS work with that
+token instead of the runtime identity (`runtime/gemini/scoped_gcs.py`; `GcsBlobStore` takes it as the
+process default). The client refreshes the token while the run lives by overwriting one object under the
+run's own secrets prefix, which the worker's credentials re-read shortly before expiry. On by default
+(`get_engine(..., scoped_gcs=True)`); a minting failure fails the turn rather than silently falling back
+to the runtime identity.
+
+With every worker on run-scoped tokens, the service agent needs no read or list right on the output
+bucket. Its remaining need there is to **create** the platform's own job output under `jobs/` (and,
+for warm pools, the readiness marker under `events/<pool id>/`, written before any turn exists).
+
+**Where the bucket has to live.** The service agent also holds the Google-managed project role
+`roles/aiplatform.reasoningEngineServiceAgent` on the engine's project, and that role carries
+`storage.objects.get` and `storage.objects.list` on **every bucket in that project**. A bucket binding
+cannot take a project-level permission away (verified 2026-09-02: on a fresh bucket in the engine
+project bound only to `objectCreator` on `jobs/`, the agent's shell still listed every prefix with the
+runtime identity). So the output bucket must be somewhere that role does not reach:
+
+* **an output bucket in another project**, where the service agent gets two conditional bindings on
+  the `jobs/` prefix and nothing else: `roles/storage.objectCreator` (the platform writes the job
+  output there) and `roles/storage.legacyObjectReader` (the platform's job runner downloads the job
+  INPUT from `jobs/<job id>_input.jsonl` by exact name, as the runtime identity; that role has
+  `objects.get` and no `objects.list`), both with
+  `resource.name.startsWith("projects/_/buckets/<bucket>/objects/jobs/")` (plus `.../objects/events/ratk-`
+  for warm pools). This is what `dev/live_scoped_gcs.py` builds and verifies: the secrets turn and the
+  checkpoint completed on the run token, and from the agent's shell every list and read on the bucket
+  with the runtime identity returned 403; or
+* **an IAM deny policy** on the engine project denying the service agent `storage.googleapis.com/objects.get`
+  and `objects.list` except on the deploy staging bucket (deny conditions work on resource tags, so tag
+  that bucket). Needs `roles/iam.denyAdmin`, which a project owner does not have; not verified here.
+
+**The runtime identity must hold nothing beyond the Google-managed service agent role** (plus
+`logging.logWriter`, and `pubsub.subscriber` for warm pools). In the shared test project it also held
+`roles/aiplatform.user`, a project binding nobody needed: that role includes `aiplatform.operations.list`
+(every run's job id, which is the name of its persisted input file), `reasoningEngines.query`,
+`.create`, `.update` and `.delete`. With it, a shell in one run can start jobs on any engine in the
+project, delete engines, and read other runs' persisted inputs by name. Remove it.
+
+**What stays reachable after the fix**, because the container has no second user and no firewall:
+the service agent's token itself, hence Vertex model spend outside the run budget, Cloud Logging
+writes, read access to every other bucket in the engine project through the service agent role
+(keep nothing sensitive in that project's buckets), the run's own persisted job input (which carries
+its own run-scoped token: worth its own objects, which it already holds), and in warm mode the
+subscription pull. Another run's persisted input is reachable only by exact job id, which nothing
+the identity holds can list once `aiplatform.user` is gone. None of this exposes a credential or
+another run's data once the output bucket is out of reach; treat **warm mode as trusted-agents-only**
+until the platform offers per-run identities.
+
+**Migration (next thing to do, with a date).** Moving the bucket must wait for every engine that
+uses it to run a toolkit revision with run-scoped tokens, because an older worker still does its GCS
+work as the service agent and would break the moment the bucket is out of its reach.
+
+1. Redeploy every engine in the project from a revision that includes `scoped_gcs.py` (list them with
+   `gemini.list_engines`). Clients upgrade at the same time: an older worker leaves the `AGENT_GCS_TOKEN`
+   directive as prompt text (the run still works on the runtime identity; the leftover is a token worth
+   that run's own objects), and an older client gives a new worker no token (the worker falls back to the
+   runtime identity). Both mixed states are safe but not fixed.
+2. Create the new output bucket in a project where the service agent has no project role (uniform
+   bucket-level access on), bind the service agent to `roles/storage.objectCreator` and
+   `roles/storage.legacyObjectReader`, both conditioned on `objects/jobs/` (and `objects/events/ratk-`
+   for warm pools), and redeploy every engine with `output_bucket=` pointing at it (clients:
+   `get_engine(..., output_bucket=...)`). The old bucket keeps the history; nothing in flight is moved.
+3. Remove `roles/aiplatform.user` (and any other project role beyond the managed service agent role,
+   `logging.logWriter` and `pubsub.subscriber`) from the service agent on the engine project, and the
+   `objectAdmin` binding from the old bucket.
+4. Re-run `dev/live_isolation_probe.py` against a production engine with the new bucket name: every list
+   and read must be 403.
+
+Proposed hard date for steps 2 and 3 on the shared `my-project` setup: **2026-09-19**. After that date
+an engine that has not been redeployed onto the new bucket keeps working on the old one, which is the
+unfixed state, so the old bucket's `objectAdmin` binding for the service agent is removed on that date
+too, and any engine still pointing at it stops finding its staged secrets and configs, which is the
+intended failure.
 
 ## Pre-baked engine dependencies
 
@@ -1126,7 +1234,7 @@ project (tighten to your policy):
 | Role | Why |
 |---|---|
 | `roles/aiplatform.user` | create/list engines, run query jobs, create sessions |
-| `roles/storage.admin` (or objectAdmin on the buckets) | stage the deploy bundle; read job output |
+| `roles/storage.admin` (or objectAdmin on the buckets) | stage the deploy bundle; read job output; mint the per-turn run-scoped GCS tokens (a downscoped token can only carry rights its source already has) |
 | `roles/logging.viewer` | tail the per-step event stream from the client |
 | `roles/cloudbuild.builds.editor` | the deploy builds the engine image |
 | `roles/pubsub.editor` _(warm pool only)_ | create the dispatch topic/subscription + publish turns |
@@ -1140,7 +1248,7 @@ for the running job. Grant it:
 
 | Role | Scope | Why |
 |---|---|---|
-| `roles/storage.objectAdmin` | the output/checkpoint bucket | workspace snapshots, artifacts, the session store |
+| `roles/storage.objectCreator` and `roles/storage.legacyObjectReader`, both conditioned on `objects/jobs/` (and `objects/events/ratk-` for warm pools) | the output/checkpoint bucket, which must live in a project where this identity has no project role | the platform's job runner reads the job input by exact name and writes the job output there, and the pool readiness marker. Until the [migration](#the-runtime-identity-is-reachable-by-the-agent) completes this is still `roles/storage.objectAdmin` on a bucket in the engine project, which the agent's shell can use to read every run's staged objects |
 | `roles/logging.logWriter` | project | the agent emits structured step logs |
 | `roles/pubsub.subscriber` | project _(warm pool)_ | warm-pool workers pull turns; project-level since the toolkit auto-creates a per-engine subscription |
 

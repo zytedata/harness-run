@@ -98,7 +98,9 @@ def test_warm_session_dispatches_and_tails(monkeypatch):
     result = asyncio.run(_await(session.run("go")))
 
     # The turn was dispatched to the pool (not cold-started) and the pool was refilled.
-    assert published == [{"session_id": "warm-sid", "message": "go", "resume": False}]
+    # The payload carries the run-scoped GCS token (a fake here: conftest stubs minting).
+    assert published == [{"session_id": "warm-sid", "message": "go", "resume": False,
+                          "gcs_token": "fake-run-token"}]
     assert refilled == [1]
     assert result.text == "done" and result.num_turns == 3
     assert session.status == RunStatus.IDLE and session.stop_reason == StopReason.END_TURN
@@ -226,10 +228,12 @@ def test_pool_worker_claims_and_runs(monkeypatch):
     seen = {}
 
     async def fake_run_turn(spec_, session_id, prompt, resume_sid, secrets_uri=None,
-                            invocation_id="", session_config_uri=None, turn_config_uri=None):
+                            invocation_id="", session_config_uri=None, turn_config_uri=None,
+                            gcs_token=None):
         seen.update(session_id=session_id, prompt=prompt, resume_sid=resume_sid,
                     secrets_uri=secrets_uri, invocation_id=invocation_id,
-                    session_config_uri=session_config_uri, turn_config_uri=turn_config_uri)
+                    session_config_uri=session_config_uri, turn_config_uri=turn_config_uri,
+                    gcs_token=gcs_token)
         yield "turn-event"
 
     monkeypatch.setattr(agent, "_run_turn", fake_run_turn)
@@ -246,7 +250,8 @@ def test_pool_worker_claims_and_runs(monkeypatch):
                     "secrets_uri": "gs://bkt/invocation-secrets/dispatched-sid-x.json",
                     "session_config_uri": "gs://bkt/session-config/dispatched-sid.json",
                     "turn_config_uri": "gs://bkt/turn-config/dispatched-sid-x.json",
-                    "invocation_id": "e-inv-77"}
+                    "invocation_id": "e-inv-77",
+                    "gcs_token": None}
 
 
 def test_pool_worker_idle_expires_at_the_deadline(monkeypatch):

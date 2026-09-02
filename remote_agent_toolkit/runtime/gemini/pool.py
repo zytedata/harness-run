@@ -62,6 +62,7 @@ def dispatch_payload(
     secrets_gcs: str | None = None,
     session_config_gcs: str | None = None,
     turn_config_gcs: str | None = None,
+    gcs_token: str | None = None,
 ) -> dict:
     """The turn payload published to the pool: the worker adopts ``session_id`` for the turn.
 
@@ -84,6 +85,13 @@ def dispatch_payload(
         payload["session_config_gcs"] = session_config_gcs
     if turn_config_gcs:
         payload["turn_config_gcs"] = turn_config_gcs
+    if gcs_token:
+        # The run-scoped GCS token (scoped_gcs.py): a bearer token worth this run's own
+        # objects for at most an hour. It is the one credential-like value in the payload,
+        # and it is what lets the worker stop using the runtime identity for GCS. A message
+        # is retained until acked, which is why warm mode stays "trusted agents only" (a
+        # rogue shell in another pool worker could pull it) — see README.
+        payload["gcs_token"] = gcs_token
     return payload
 
 

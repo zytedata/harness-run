@@ -229,6 +229,22 @@ check always runs, so it needs whatever Claude auth your shell already uses — 
 `ANTHROPIC_API_KEY` or a logged-in `claude` CLI. `CLAUDE_MODEL` and `OPENAI_MODEL` change the
 native models it checks alongside the OpenRouter ones.
 
+### The isolation probe and the run-scoped GCS check
+
+`dev/live_isolation_probe.py` deploys a throwaway cold engine, runs one Haiku turn whose task is a
+fixed read-only script, prints the script's output and deletes the engine. The script prints only
+statuses, counts, lengths and key names: the shell's user, whether the metadata server hands out the
+runtime identity's token, and what that token can list and read in the output bucket. It is the
+record of the 2026-09-02 finding (README "The runtime identity is reachable by the agent") and the
+check to repeat after the bucket-role migration, when every list must come back 403.
+
+`dev/live_scoped_gcs.py` proves the fix without touching the shared bucket: it creates a fresh
+bucket in another project (`OUTPUT_PROJECT`, where the service agent has no project role) with the
+service agent allowed only to create objects under `jobs/`, deploys a throwaway engine on it, runs a turn with a secret and checkpointing (must succeed: the worker used the run-scoped token
+for everything), then runs the probe script (metadata token still 200, every bucket list and read
+with it 403), and deletes the engine and the bucket. `KEEP=1` leaves both for inspection. Run it for
+any change to `scoped_gcs.py`, `GcsBlobStore`, the handoff module or the directive/payload shape.
+
 ### Writing a bespoke live probe
 
 When the smoke test doesn't cover your change (e.g. validating crash/retry behavior, or a

@@ -21,6 +21,28 @@ tag `vX.Y.Z`, push the commit and the tag.
 
 ## Unreleased
 
+### Security
+
+- **The Agent Runtime service agent was reachable from the agent's shell, and with it
+  every run's staged secrets in the shared output bucket** (found and verified
+  2026-09-02; README "The runtime identity is reachable by the agent"). Fixed by
+  **run-scoped GCS tokens**: the client mints a downscoped token per turn, limited to
+  the run's own object prefixes, and the worker does all of its GCS work with it
+  (`runtime/gemini/scoped_gcs.py`; `GcsBlobStore(credentials=...)` and a process
+  default the worker sets at turn start). The token rides the cold path as the last
+  `AGENT_GCS_TOKEN=` directive and the warm path as `gcs_token` in the payload; the
+  client refreshes it while the run lives. On by default (`get_engine(...,
+  scoped_gcs=True)`); a minting failure fails the turn. **Update note**: redeploy every
+  engine from this revision, then move the output bucket to a project where the service
+  agent has no project role (its Google-managed `reasoningEngineServiceAgent` role reads
+  every bucket in the engine project) with one `objectCreator` binding on `jobs/`
+  and `legacyObjectReader` (the platform reads the job input by name), and remove
+  `roles/aiplatform.user` from the service agent (README, "Migration"); proposed date
+  for the shared setup: 2026-09-19. Mixed
+  client/engine versions keep working on the runtime identity, which is the unfixed
+  state. New dev scripts: `dev/live_isolation_probe.py` (the finding) and
+  `dev/live_scoped_gcs.py` (the fix, on a fresh bucket in another project).
+
 ### Backwards-incompatible
 
 - The harness SDKs (`claude-agent-sdk`, `openai-codex`) moved from the base

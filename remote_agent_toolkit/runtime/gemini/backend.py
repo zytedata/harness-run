@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import threading
 import time
 import uuid
 from typing import Any, AsyncIterator, TYPE_CHECKING
@@ -529,9 +530,14 @@ def get_engine(
     output_bucket: str | None = None,
     warm_pool: bool = False,
     credentials: Any | None = None,
+    scoped_gcs: bool = True,
     **kwargs: Any,
 ) -> Engine:
     """Look up a deployed engine by ``name`` (the app-code hot path; never deploys).
+
+    ``scoped_gcs`` (default on) mints a run-scoped GCS token per turn so the worker never
+    touches the bucket with the runtime identity (``scoped_gcs.py``). Turn it off only to
+    drive an engine deployed from a pre-token toolkit revision during a migration.
 
     Pure ADDRESSING: the handle identifies which engine turns run against; it carries no
     execution configuration. Runs execute the engine's deploy-baked spec, overlaid with
@@ -578,6 +584,7 @@ def get_engine(
         subscription=subscription,
         version=pinned,
         spec_known=False,
+        scoped_gcs=scoped_gcs,
     )
 
 
@@ -620,6 +627,7 @@ class GeminiSession:
         self._status = RunStatus.PENDING
         self._stop_reason: StopReason | None = None
         self._last_result: RunResult | None = None
+        self._gcs_token_stop: threading.Event | None = None  # stops the token refresher
         self._current_run: DrivenRun | None = None
         self._last_job: Any | None = None
         self._staged_secrets_uri: str | None = None  # staged handoff object (cleanup on complete)
@@ -677,6 +685,59 @@ class GeminiSession:
         return self._submit(
             message, resume=True, secrets=secrets, turn_config=config, hooks=hooks
         )
+
+    def _mint_gcs_token(self) -> str | None:
+        """Mint this turn's run-scoped GCS token and start refreshing it while the run lives.
+
+        Returns ``None`` only when the engine handle was built with ``scoped_gcs=False``.
+        A minting failure raises: running the turn on the runtime identity instead would
+        silently reopen the bucket to the agent (README "Secrets & security").
+        """
+        engine = self._engine
+        if not getattr(engine, "_scoped_gcs", True):
+            return None
+        from .scoped_gcs import REFRESH_EVERY_S, mint_run_token, write_run_token
+
+        sid = self._session_id
+        try:
+            token, expiry = mint_run_token(engine._credentials, engine._output_bucket, sid)
+        except Exception as exc:  # noqa: BLE001 — re-raise with the fix spelled out
+            raise RuntimeError(
+                "could not mint the run-scoped GCS token for this turn "
+                f"({type(exc).__name__}: {str(exc)[:200]}). The client identity needs "
+                "object access on the engine's output bucket (README, IAM). To drive a "
+                "pre-token engine during a migration pass scoped_gcs=False to get_engine()."
+            ) from exc
+        self._stop_gcs_token_refresh()
+        stop = threading.Event()
+        self._gcs_token_stop = stop
+
+        def refresh_loop() -> None:
+            while not stop.wait(REFRESH_EVERY_S):
+                try:
+                    fresh, fresh_expiry = mint_run_token(
+                        engine._credentials, engine._output_bucket, sid
+                    )
+                    write_run_token(engine._output_bucket, sid, fresh, fresh_expiry)
+                except Exception:  # noqa: BLE001 — the worker keeps its current token
+                    logger.warning("run-scoped GCS token refresh failed for %s", sid, exc_info=True)
+
+        threading.Thread(target=refresh_loop, name=f"gcs-token-refresh-{sid}", daemon=True).start()
+        return token
+
+    def _stop_gcs_token_refresh(self) -> None:
+        stop = self._gcs_token_stop
+        if stop is not None:
+            stop.set()
+            self._gcs_token_stop = None
+            engine = self._engine
+            if engine._output_bucket:
+                from .scoped_gcs import delete_run_token
+
+                try:
+                    delete_run_token(engine._output_bucket, self._session_id)
+                except Exception:  # noqa: BLE001 — the 1-day lifecycle rule backs this up
+                    pass
 
     def _stage_secrets(self, secrets: dict[str, str] | None) -> str | None:
         """Stage per-invocation secrets to a nonce-keyed GCS object; return its gs:// URI."""
@@ -774,6 +835,7 @@ class GeminiSession:
         since = time.time() - 5
         secrets_uri = self._stage_secrets(secrets)
         self._staged_secrets_uri = secrets_uri  # cleaned up on completion (worker deletes at turn end)
+        gcs_token = self._mint_gcs_token()  # run-scoped GCS token (scoped_gcs.py), or None
         self._resolve_session_config()  # re-attach: recover the opener's persisted config
         turn_config_uri = None
         if turn_config is not None and turn_config.set_fields():
@@ -794,6 +856,7 @@ class GeminiSession:
                     sid, message, resume, secrets_uri,
                     session_config_gcs=self._session_config_uri,
                     turn_config_gcs=turn_config_uri,
+                    gcs_token=gcs_token,
                 )
             )
             try:
@@ -814,6 +877,11 @@ class GeminiSession:
                 directives += f"AGENT_TURN_CONFIG_GCS={turn_config_uri}\n"
             if resume:
                 directives += f"AGENT_RESUME={sid}\n"
+            if gcs_token:
+                # LAST on purpose: a pre-token worker strips the earlier lines in order and
+                # leaves this one as prompt text, still running the turn on the runtime
+                # identity; the leftover is a token worth this run's own objects only.
+                directives += f"AGENT_GCS_TOKEN={gcs_token}\n"
             prompt = directives + message
             # Two platform-runner regressions of 2026-07-28 shape this payload (engines
             # created before still work the old way; this form works on both):
@@ -896,6 +964,7 @@ class GeminiSession:
         self._last_result = result
         self._stop_reason = stop_reason
         self._status = RunStatus.IDLE
+        self._stop_gcs_token_refresh()  # the run is over: no more tokens for it
         # Backstop cleanup of the staged SECRETS object; the worker normally deletes it at
         # turn end, but a run that failed before the worker fetched would otherwise leave
         # it for the lifecycle rule. Config objects are deliberately NOT deleted — they are
@@ -1062,8 +1131,10 @@ class GeminiEngine:
         subscription: str | None = None,
         version: str | None = None,
         spec_known: bool = True,
+        scoped_gcs: bool = True,
     ) -> None:
         self._resource = resource
+        self._scoped_gcs = scoped_gcs
         # The deploy handle carries the real deployed spec; a get_engine handle carries a
         # minimal fallback (addressing only), flagged by ``spec_known=False`` so nothing
         # client-side reads its defaults as the deployed truth. Either way runs execute the

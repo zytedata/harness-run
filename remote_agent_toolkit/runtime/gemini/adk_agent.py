@@ -33,6 +33,7 @@ _SESSION_CONFIG_DIRECTIVE = re.compile(
     r"^\s*AGENT_SESSION_CONFIG_GCS=(\S+)[ \t]*\r?\n", re.IGNORECASE
 )
 _TURN_CONFIG_DIRECTIVE = re.compile(r"^\s*AGENT_TURN_CONFIG_GCS=(\S+)[ \t]*\r?\n", re.IGNORECASE)
+_GCS_TOKEN_DIRECTIVE = re.compile(r"^\s*AGENT_GCS_TOKEN=(\S+)[ \t]*\r?\n", re.IGNORECASE)
 _AGENT_DESCRIPTION = "A remote-agent-toolkit agent: a Claude Code session driven by the toolkit harness."
 
 
@@ -94,6 +95,42 @@ def _split_config_directives(prompt: str) -> tuple[str | None, str | None, str]:
     if m:
         turn_uri, prompt = m.group(1), prompt[m.end():]
     return session_uri, turn_uri, prompt
+
+
+def _split_gcs_token_directive(prompt: str) -> tuple[str | None, str]:
+    """Strip a leading ``AGENT_GCS_TOKEN=<token>`` directive (the run-scoped GCS token).
+
+    The token is the one credential-like directive: the worker authorizes every GCS
+    access of the turn with it instead of the runtime identity (``scoped_gcs.py``). It is
+    written LAST by the client so a pre-token worker, which strips the other directives
+    in order and leaves this line as prompt text, still runs the turn correctly (on the
+    runtime identity, as before) — the leftover is a token worth this run's own objects.
+    Consumed here so the model never sees it on a current worker.
+    """
+    m = _GCS_TOKEN_DIRECTIVE.match(prompt)
+    if m:
+        return m.group(1), prompt[m.end():]
+    return None, prompt
+
+
+def _use_run_gcs_token(gcs_token: str | None, session_id: str) -> bool:
+    """Point every GcsBlobStore of this turn at the run's scoped token (or back to ADC).
+
+    Returns whether a token is in force. Called first thing in a turn, before any config,
+    secret, mirror or checkpoint access.
+    """
+    from ...ports.blobstore import set_default_gcs_credentials
+
+    if not gcs_token:
+        set_default_gcs_credentials(None)
+        return False
+    from .scoped_gcs import output_bucket_from_env, worker_credentials
+
+    creds = worker_credentials(
+        gcs_token, output_bucket_from_env(os.environ.get("AGENT_EVENTS_GCS")), session_id
+    )
+    set_default_gcs_credentials(creds)
+    return True
 
 
 def _fetch_secrets(secrets_uri: str | None) -> tuple[dict, AgentEvent | None]:
@@ -274,6 +311,7 @@ class ToolkitAgent(BaseAgent):
         secrets_uri, prompt = _split_secrets_directive(prompt)
         session_config_uri, turn_config_uri, prompt = _split_config_directives(prompt)
         resume_sid, prompt = _split_resume_directive(prompt)
+        gcs_token, prompt = _split_gcs_token_directive(prompt)
         # The toolkit session id is the stable token: it tags the Cloud Logging stream the
         # client tails, and pins the Claude session id for checkpoint keying. It rides the
         # AGENT_SESSION directive (cold jobs run under a throwaway auto-created ADK
@@ -286,6 +324,7 @@ class ToolkitAgent(BaseAgent):
         async for event in self._run_turn(
             spec, session_id, prompt, resume_sid, secrets_uri, invocation_id,
             session_config_uri=session_config_uri, turn_config_uri=turn_config_uri,
+            gcs_token=gcs_token,
         ):
             yield event
 
@@ -293,6 +332,7 @@ class ToolkitAgent(BaseAgent):
         self, spec: Any, session_id: str, prompt: str, resume_sid: str | None,
         secrets_uri: str | None = None, invocation_id: str = "",
         session_config_uri: str | None = None, turn_config_uri: str | None = None,
+        gcs_token: str | None = None,
     ) -> AsyncGenerator[Any, None]:
         """Process one turn under ``session_id``: prep workspace, drive the harness, surface events.
 
@@ -311,6 +351,11 @@ class ToolkitAgent(BaseAgent):
         A missing/unreadable config, an unknown config field, or a harness the image
         doesn't bake FAILS the turn: silently running the baked spec instead of the
         requested configuration would be a wrong-configuration run.
+
+        ``gcs_token`` is the run-scoped GCS token (``scoped_gcs.py``). When present, every
+        GCS access of this turn (configs, secrets, the mirror, checkpoints) authorizes with
+        it instead of the runtime identity; when absent (a pre-token client) the turn runs
+        on the runtime identity as before.
         """
         from ...harness import resolve_harness
         from ...harness.context import RunContext
@@ -318,6 +363,7 @@ class ToolkitAgent(BaseAgent):
         from .tracing import TurnTracer
         from .translate import to_adk_event
 
+        scoped_gcs = _use_run_gcs_token(gcs_token, session_id)
         # The RAW session id keys the Cloud Logging stream (what the client tails); the
         # Claude/checkpoint side needs a canonical UUID, mapped deterministically from it.
         sink = CloudLoggingSink(session_id=session_id)
@@ -465,6 +511,7 @@ class ToolkitAgent(BaseAgent):
             if secrets_warning is not None:  # value-free: staged secrets were unavailable
                 yield surface(secrets_warning)
             prep = await asyncio.to_thread(_prepare_workspace, rc, prefer_baked_skills)
+            prep["scoped_gcs"] = scoped_gcs  # durable record: GCS access ran on the run token
             yield surface(AgentEvent(kind="status", summary=prep["summary"], raw=prep))
 
             async for event in resolve_harness(spec).run(spec, rc):
@@ -588,11 +635,13 @@ class ToolkitAgent(BaseAgent):
         secrets_uri = claimed.get("secrets_gcs")  # pointer only; values are staged in GCS
         session_config_uri = claimed.get("session_config_gcs")  # config pointers (_run_turn)
         turn_config_uri = claimed.get("turn_config_gcs")
+        gcs_token = claimed.get("gcs_token")  # the run-scoped GCS token (scoped_gcs.py)
         async for event in self._run_turn(
             spec, session_id, message,
             resume_sid=session_id if resume else None, secrets_uri=secrets_uri,
             invocation_id=invocation_id,
             session_config_uri=session_config_uri, turn_config_uri=turn_config_uri,
+            gcs_token=gcs_token,
         ):
             yield event
 

@@ -246,6 +246,19 @@ class _StreamPhase(Enum):
     BETWEEN_INVOCATIONS = "between_invocations"
 
 
+def _sdk() -> Any:
+    """The ``claude_agent_sdk`` module — ALL lazy SDK imports go through this seam.
+
+    Routing them here (not only ``build_options``) keeps the [local]-extra message on
+    the real path: ``_run`` imports the SDK before it ever calls ``build_options``.
+    """
+    from ._local_sdk import import_local_sdk
+
+    return import_local_sdk(
+        "claude_agent_sdk", "claude-agent-sdk", "Local Claude Code execution"
+    )
+
+
 class ClaudeCodeHarness:
     """The Claude Agent SDK harness (implements ``harness.base.Harness``)."""
 
@@ -324,13 +337,7 @@ class ClaudeCodeHarness:
         openrouter_client_token: str | None = None,
     ) -> Any:
         """Build ``ClaudeAgentOptions`` from ``spec`` + runtime ``ctx``."""
-        try:
-            from claude_agent_sdk import ClaudeAgentOptions
-        except ModuleNotFoundError as exc:
-            raise ModuleNotFoundError(
-                "claude-agent-sdk is not installed. Local Claude Code execution needs "
-                "the harness SDKs: install remote-agent-toolkit with the [local] extra."
-            ) from exc
+        ClaudeAgentOptions = _sdk().ClaudeAgentOptions
 
         extra: dict[str, Any] = {}
         if ctx.session_store is not None:
@@ -527,7 +534,7 @@ class ClaudeCodeHarness:
         the structured output when the model's reply to a stale task notification
         displaced it from the turn's final message.
         """
-        from claude_agent_sdk import ClaudeSDKClient
+        ClaudeSDKClient = _sdk().ClaudeSDKClient
 
         from .translate import EventTranslator
 

@@ -469,6 +469,17 @@ class CodexEventTranslator:
             )
 
 
+def _sdk() -> Any:
+    """The ``openai_codex`` module — ALL lazy SDK imports go through this seam.
+
+    Routing them here (not only ``build_options``) keeps the [local]-extra message on
+    the real path: ``_run`` imports the SDK before it ever calls ``build_options``.
+    """
+    from ._local_sdk import import_local_sdk
+
+    return import_local_sdk("openai_codex", "openai-codex", "Local Codex execution")
+
+
 class CodexHarness:
     """The OpenAI Codex SDK harness (implements ``harness.base.Harness``)."""
 
@@ -594,13 +605,8 @@ class CodexHarness:
         openrouter_client_token: str | None = None,
     ) -> _CodexOptions:
         """Build ``openai_codex`` config + thread/turn args from ``spec`` + runtime ``ctx``."""
-        try:
-            from openai_codex import ApprovalMode, CodexConfig, Sandbox
-        except ModuleNotFoundError as exc:
-            raise ModuleNotFoundError(
-                "openai-codex is not installed. Local Codex execution needs the "
-                "harness SDKs: install remote-agent-toolkit with the [local] extra."
-            ) from exc
+        sdk = _sdk()
+        ApprovalMode, CodexConfig, Sandbox = sdk.ApprovalMode, sdk.CodexConfig, sdk.Sandbox
 
         # Beside, not inside, the workspace (bookkeeping level) — holds auth.json, the
         # session rollouts, logs. The codex CLI refuses a CODEX_HOME that doesn't exist.
@@ -1063,7 +1069,7 @@ class CodexHarness:
         Codex enforces neither natively. Checkpoint (workspace + conversation rollout)
         finalizes inline at the terminal result event, as in the Claude binding.
         """
-        from openai_codex import AsyncCodex
+        AsyncCodex = _sdk().AsyncCodex
 
         options = self.build_options(
             spec,

@@ -819,7 +819,8 @@ before a workspace snapshot and re-embedded on resume. Don't log the `secrets` d
 
 Found and verified live on 2026-09-02 (`dev/live_isolation_probe.py`). On Agent Runtime the worker
 container runs everything as one user (`appuser`, PID 1 included), and the harness authenticates to
-Vertex as the **Agent Runtime service agent** through the metadata server. The agent's shell is a child
+Vertex as the engine's runtime identity through the metadata server: by default the **Agent Runtime
+service agent**, shared by every engine in the project. The agent's shell is a child
 of the harness in that container, so one shell command gets that identity's access token. The probe, a
 plain Haiku turn, printed:
 
@@ -854,72 +855,87 @@ run's own secrets prefix, which the worker's credentials re-read shortly before 
 (`get_engine(..., scoped_gcs=True)`); a minting failure fails the turn rather than silently falling back
 to the runtime identity.
 
-With every worker on run-scoped tokens, the service agent needs no read or list right on the output
-bucket. Its remaining need there is to **create** the platform's own job output under `jobs/` (and,
-for warm pools, the readiness marker under `events/<pool id>/`, written before any turn exists).
+With every worker on run-scoped tokens, the runtime identity needs no read or list right on the output
+bucket. Its remaining needs there are to **create** the platform's own job output under `jobs/`, to
+**read the job input by exact name** (the platform's job runner downloads `jobs/<job id>_input.jsonl`
+as the runtime identity before the worker starts) and, for warm pools, to write the readiness marker
+under `events/<pool id>/` before any turn exists. Two conditional bucket bindings cover that:
+`roles/storage.objectCreator` and `roles/storage.legacyObjectReader` (`objects.get` and no
+`objects.list`), both with `resource.name.startsWith("projects/_/buckets/<bucket>/objects/jobs/")`
+(plus `.../objects/events/ratk-` for warm pools). `dev/live_scoped_gcs.py::_make_bucket` has the exact
+bindings.
 
-**Where the bucket has to live.** The service agent also holds the Google-managed project role
-`roles/aiplatform.reasoningEngineServiceAgent` on the engine's project, and that role carries
-`storage.objects.get` and `storage.objects.list` on **every bucket in that project**. A bucket binding
-cannot take a project-level permission away (verified 2026-09-02: on a fresh bucket in the engine
-project bound only to `objectCreator` on `jobs/`, the agent's shell still listed every prefix with the
-runtime identity). So the output bucket must be somewhere that role does not reach:
+**Which identity the engine runs as.** The default runtime identity, the Agent Runtime service agent,
+also holds the Google-managed project role `roles/aiplatform.reasoningEngineServiceAgent` on the
+engine's project, and that role carries `storage.objects.get` and `storage.objects.list` on **every
+bucket in that project**. A bucket binding cannot take a project-level permission away (verified
+2026-09-02: on a fresh bucket in the engine project bound only to `objectCreator` on `jobs/`, the
+agent's shell still listed every prefix with the runtime identity). So the engine has to run as an
+identity that has no such project role:
 
-* **an output bucket in another project**, where the service agent gets two conditional bindings on
-  the `jobs/` prefix and nothing else: `roles/storage.objectCreator` (the platform writes the job
-  output there) and `roles/storage.legacyObjectReader` (the platform's job runner downloads the job
-  INPUT from `jobs/<job id>_input.jsonl` by exact name, as the runtime identity; that role has
-  `objects.get` and no `objects.list`), both with
-  `resource.name.startsWith("projects/_/buckets/<bucket>/objects/jobs/")` (plus `.../objects/events/ratk-`
-  for warm pools). This is what `dev/live_scoped_gcs.py` builds and verifies: the secrets turn and the
-  checkpoint completed on the run token, and from the agent's shell every list and read on the bucket
-  with the runtime identity returned 403; or
-* **an IAM deny policy** on the engine project denying the service agent `storage.googleapis.com/objects.get`
-  and `objects.list` except on the deploy staging bucket (deny conditions work on resource tags, so tag
-  that bucket). Needs `roles/iam.denyAdmin`, which a project owner does not have; not verified here.
+* **A custom runtime service account** (recommended; verified live 2026-09-03 on a throwaway engine
+  in the shared project). Create a service account with the roles listed in
+  [GCP setup & required permissions](#gcp-setup--required-permissions) and deploy with
+  `gemini.deploy(..., service_account="<its email>")`. The metadata server then hands the agent's
+  shell that account's token, and the account holds only what you granted: from the shell, the shared
+  output bucket returned 403 on every prefix and listing the project's buckets returned 403, while the
+  turn itself (staged secrets, checkpoint) completed on the run token. The bucket stays in the engine
+  project; no cross-project move. One gotcha: the platform's job runner downloads the job input as the
+  engine's identity with a quota project on the request, so the account needs
+  `roles/serviceusage.serviceUsageConsumer` on the project. Without it the runner retried the download
+  four times over six minutes and the job failed with no worker event at all (the client only said
+  "worker likely died mid-run"; the 403 was in Cloud Logging). The default service agent's managed role
+  includes that permission, which is why nobody hit it before.
+* **An Agent Identity** (`identity_type=AGENT_IDENTITY` on the deploy config: a per-engine principal
+  with no long-lived keys). Same reasoning; not verified here. Google's docs say agent identities cannot
+  be granted the legacy bucket roles, so the `legacyObjectReader` binding may need `objectViewer` under
+  the same `jobs/` condition, or a custom role, instead.
+* Considered and set aside: an output bucket in another project with the default service agent
+  (`dev/live_scoped_gcs.py` with `RUNTIME_SA` unset builds it and it works, but it leaves the identity's
+  project-wide read on every other bucket in place and moves the bucket), and an IAM deny policy on the
+  engine project (needs `roles/iam.denyAdmin`, which a project owner does not have; not verified).
 
-**The runtime identity must hold nothing beyond the Google-managed service agent role** (plus
-`logging.logWriter`, and `pubsub.subscriber` for warm pools). In the shared test project it also held
-`roles/aiplatform.user`, a project binding nobody needed: that role includes `aiplatform.operations.list`
-(every run's job id, which is the name of its persisted input file), `reasoningEngines.query`,
-`.create`, `.update` and `.delete`. With it, a shell in one run can start jobs on any engine in the
-project, delete engines, and read other runs' persisted inputs by name. Remove it.
+**The runtime identity must hold no project role it does not need.** In the shared test project the
+default service agent held `roles/aiplatform.user`, a project binding nobody had asked for: that role
+includes `aiplatform.operations.list` (every run's job id, which is the name of its persisted input
+file), `reasoningEngines.query`, `.create`, `.update` and `.delete`. With it, a shell in one run can
+start jobs on any engine in the project, delete engines, and read other runs' persisted inputs by
+name. Remove it from the service agent. The custom runtime service account needs to reach Vertex for
+the model calls; the live check ran it with `roles/aiplatform.user`, which carries the same
+permissions, so the least role that still serves the model calls (a custom role around
+`aiplatform.endpoints.predict`) is still to be verified.
 
 **What stays reachable after the fix**, because the container has no second user and no firewall:
-the service agent's token itself, hence Vertex model spend outside the run budget, Cloud Logging
-writes, read access to every other bucket in the engine project through the service agent role
-(keep nothing sensitive in that project's buckets), the run's own persisted job input (which carries
-its own run-scoped token: worth its own objects, which it already holds), and in warm mode the
-subscription pull. Another run's persisted input is reachable only by exact job id, which nothing
-the identity holds can list once `aiplatform.user` is gone. None of this exposes a credential or
-another run's data once the output bucket is out of reach; treat **warm mode as trusted-agents-only**
-until the platform offers per-run identities.
+the runtime identity's token itself, hence Vertex model spend outside the run budget, Cloud Logging
+writes, the run's own persisted job input (which carries its own run-scoped token: worth its own
+objects, which it already holds), and in warm mode the subscription pull. That pull is the one
+remaining way to reach another run's data: every warm worker of an engine pulls the same dispatch
+subscription as the same identity, so a shell in one worker can start a background puller and take
+another run's dispatch message, which carries that run's pointers and, with this fix, its run-scoped
+token; acking it means that run never starts. The fix for that is **per-worker dispatch**: one
+subscription per worker, created by the client in `fill_pool`, its name passed only in that worker's
+job input, and each turn dispatched to one idle worker the client picks. `roles/pubsub.subscriber`
+has no list or get permission, so a shell in worker X can only pull X's channel, and X is busy from
+the moment its turn was dispatched, so nothing else ever lands there. Background jobs get a fresh
+sandbox per job (verified 2026-09-03: three sessions on one engine, different `boot_id`s), so a
+background process left by one run cannot survive into the next. Per-worker dispatch is in progress
+on this branch; until it lands, run warm pools only with trusted agents.
 
-**Migration (next thing to do, with a date).** Moving the bucket must wait for every engine that
-uses it to run a toolkit revision with run-scoped tokens, because an older worker still does its GCS
-work as the service agent and would break the moment the bucket is out of its reach.
+**Migration, with no fixed date.** An older worker still does its GCS work as the runtime identity, so
+nothing is taken from the default service agent while an engine that runs as it is still in use.
 
-1. Redeploy every engine in the project from a revision that includes `scoped_gcs.py` (list them with
-   `gemini.list_engines`). Clients upgrade at the same time: an older worker leaves the `AGENT_GCS_TOKEN`
-   directive as prompt text (the run still works on the runtime identity; the leftover is a token worth
-   that run's own objects), and an older client gives a new worker no token (the worker falls back to the
-   runtime identity). Both mixed states are safe but not fixed.
-2. Create the new output bucket in a project where the service agent has no project role (uniform
-   bucket-level access on), bind the service agent to `roles/storage.objectCreator` and
-   `roles/storage.legacyObjectReader`, both conditioned on `objects/jobs/` (and `objects/events/ratk-`
-   for warm pools), and redeploy every engine with `output_bucket=` pointing at it (clients:
-   `get_engine(..., output_bucket=...)`). The old bucket keeps the history; nothing in flight is moved.
-3. Remove `roles/aiplatform.user` (and any other project role beyond the managed service agent role,
-   `logging.logWriter` and `pubsub.subscriber`) from the service agent on the engine project, and the
-   `objectAdmin` binding from the old bucket.
-4. Re-run `dev/live_isolation_probe.py` against a production engine with the new bucket name: every list
-   and read must be 403.
-
-Proposed hard date for steps 2 and 3 on the shared `my-project` setup: **2026-09-19**. After that date
-an engine that has not been redeployed onto the new bucket keeps working on the old one, which is the
-unfixed state, so the old bucket's `objectAdmin` binding for the service agent is removed on that date
-too, and any engine still pointing at it stops finding its staged secrets and configs, which is the
-intended failure.
+1. Create the runtime service account and its bindings (the gcloud sketch in
+   [GCP setup & required permissions](#gcp-setup--required-permissions)), then redeploy every engine
+   in the project (list them with `gemini.list_engines`) from a revision that includes `scoped_gcs.py`,
+   with `service_account=` set to it. Clients upgrade at the same time: an older worker leaves the
+   `AGENT_GCS_TOKEN` directive as prompt text (the run still works on the runtime identity; the
+   leftover is a token worth that run's own objects), and an older client gives a new worker no token
+   (the worker falls back to the runtime identity). Both mixed states are safe but not fixed.
+2. Once no engine still runs as the default service agent, remove its `objectAdmin` binding from the
+   output bucket and `roles/aiplatform.user` (and any other project role beyond the managed service
+   agent role) from it on the engine project. An engine that was not redeployed by then stops finding
+   its staged secrets and configs, which is the intended failure.
+3. Re-run `dev/live_isolation_probe.py` against a production engine: every list and read must be 403.
 
 ## Pre-baked engine dependencies
 
@@ -1238,27 +1254,37 @@ project (tighten to your policy):
 | `roles/logging.viewer` | tail the per-step event stream from the client |
 | `roles/cloudbuild.builds.editor` | the deploy builds the engine image |
 | `roles/pubsub.editor` _(warm pool only)_ | create the dispatch topic/subscription + publish turns |
+| `roles/iam.serviceAccountUser` **on the runtime service account** | deploy with `service_account=`: the deploy acts as that account ([Google's troubleshooting page](https://docs.cloud.google.com/gemini-enterprise-agent-platform/troubleshooting/agent-deployment): "You do not have permission to act as service_account" means this role is missing) |
 
 The principal that impersonates it needs `roles/iam.serviceAccountTokenCreator` **on this SA**.
 
-**2. The Agent Runtime service agent** — the engine's *runtime* identity, auto-created by Google as
-`service-<PROJECT_NUMBER>@gcp-sa-aiplatform-re.iam.gserviceaccount.com`. **All runtime resource access
-authorizes against this agent, not the operator SA** — granting the operator SA a runtime role does nothing
-for the running job. Grant it:
+**2. The runtime identity** — the identity the engine's workers run as, and the one the agent's shell
+can use (see [The runtime identity is reachable by the agent](#the-runtime-identity-is-reachable-by-the-agent)).
+Create a service account for it and deploy with `gemini.deploy(..., service_account="<its email>")`.
+Without `service_account=` the engine runs as the Google-managed **Agent Runtime service agent**,
+`service-<PROJECT_NUMBER>@gcp-sa-aiplatform-re.iam.gserviceaccount.com`, whose managed project role
+reads every bucket in the project. **All runtime resource access authorizes against this identity, not
+the operator SA** — granting the operator SA a runtime role does nothing for the running job. Grant the
+runtime service account (verified live 2026-09-03 with this set):
 
 | Role | Scope | Why |
 |---|---|---|
-| `roles/storage.objectCreator` and `roles/storage.legacyObjectReader`, both conditioned on `objects/jobs/` (and `objects/events/ratk-` for warm pools) | the output/checkpoint bucket, which must live in a project where this identity has no project role | the platform's job runner reads the job input by exact name and writes the job output there, and the pool readiness marker. Until the [migration](#the-runtime-identity-is-reachable-by-the-agent) completes this is still `roles/storage.objectAdmin` on a bucket in the engine project, which the agent's shell can use to read every run's staged objects |
+| `roles/aiplatform.user` | project | the harness calls the model through Vertex. It also carries `aiplatform.operations.list` and `reasoningEngines.*`; a narrower custom role around `aiplatform.endpoints.predict` is still to be verified |
 | `roles/logging.logWriter` | project | the agent emits structured step logs |
+| `roles/serviceusage.serviceUsageConsumer` | project | the platform's job runner downloads the job input with a quota project on the request; without it the job dies before any worker event |
+| `roles/telemetry.metricsWriter`, `roles/telemetry.tracesWriter` | project | span and metric export; without them every batch fails with 403 (the default service agent holds both in the shared project) |
+| `roles/storage.objectViewer` | the staging bucket | the platform pulls the deploy bundle |
+| `roles/storage.objectCreator` and `roles/storage.legacyObjectReader`, both conditioned on `objects/jobs/` (and `objects/events/ratk-` for warm pools) | the output/checkpoint bucket | the platform's job runner reads the job input by exact name and writes the job output there, and the pool readiness marker. Everything else in the bucket is done with the run-scoped token. Until the [migration](#the-runtime-identity-is-reachable-by-the-agent) completes the default service agent still holds `roles/storage.objectAdmin` there, which the agent's shell can use to read every run's staged objects |
 | `roles/pubsub.subscriber` | project _(warm pool)_ | warm-pool workers pull turns; project-level since the toolkit auto-creates a per-engine subscription |
 
-No `secretmanager.secretAccessor` is needed for the runtime agent: **secrets are passed per-invocation, not
+No `secretmanager.secretAccessor` is needed for the runtime identity: **secrets are passed per-invocation, not
 resolved from Secret Manager by the engine** (see [Secrets & security](#secrets--security)). If a *caller*
 keeps secret values in Secret Manager, that caller (the operator identity) reads them before the call.
 
 **Prerequisites** (create with admin creds; `deploy` ensures the buckets it needs):
 
-- A staging bucket `gs://<project>-agent-staging` and an output bucket `gs://<project>-agent-output`.
+- A staging bucket `gs://<project>-agent-staging` and an output bucket `gs://<project>-agent-output`,
+  the latter with uniform bucket-level access on (the conditional bindings above need it).
 - **Claude model access** — see the note below; the deployed engine can't run without it.
 - _(warm pool)_ a Pub/Sub topic + subscription for turn dispatch — `gemini.deploy(warm_pool=True)` **creates
   these for you** (given the operator SA's `pubsub.editor`); no manual setup needed.
@@ -1280,28 +1306,44 @@ the key, so prefer Vertex for anything exposed to untrusted input (see
 [Secrets & security](#secrets--security)).
 
 **Concrete shared setup** (`my-project`): location `us-central1` (Claude: `us-central1` + `global`);
-operator SA `agent-runtime@my-project.iam.gserviceaccount.com`; runtime agent
-`service-123456789012@gcp-sa-aiplatform-re.iam.gserviceaccount.com`. Sketch for a fresh project:
+operator SA `agent-runtime@my-project.iam.gserviceaccount.com`; the engines there still run
+as the default service agent `service-123456789012@gcp-sa-aiplatform-re.iam.gserviceaccount.com` until the
+migration above is done. Sketch for a fresh project:
 
 ```bash
-PROJECT=your-project; NUM=$(gcloud projects describe $PROJECT --format='value(projectNumber)')
-RE="service-$NUM@gcp-sa-aiplatform-re.iam.gserviceaccount.com"     # runtime identity
-OP="agent-runtime@$PROJECT.iam.gserviceaccount.com"                # operator SA you create
+PROJECT=your-project
+OP="agent-runtime@$PROJECT.iam.gserviceaccount.com"        # operator SA you create
+RT="ratk-runtime@$PROJECT.iam.gserviceaccount.com"         # runtime identity you create
+OUT="gs://$PROJECT-agent-output"
 
 gcloud iam service-accounts create agent-runtime --project $PROJECT
+gcloud iam service-accounts create ratk-runtime --project $PROJECT
 for R in roles/aiplatform.user roles/storage.admin roles/logging.viewer roles/cloudbuild.builds.editor \
          roles/pubsub.editor; do  # pubsub.editor only needed for warm pools
   gcloud projects add-iam-policy-binding $PROJECT --member "serviceAccount:$OP" --role $R; done
-gcloud projects add-iam-policy-binding $PROJECT --member "serviceAccount:$RE" --role roles/logging.logWriter
+for R in roles/aiplatform.user roles/logging.logWriter roles/serviceusage.serviceUsageConsumer \
+         roles/telemetry.metricsWriter roles/telemetry.tracesWriter \
+         roles/pubsub.subscriber; do  # pubsub.subscriber only needed for warm pools
+  gcloud projects add-iam-policy-binding $PROJECT --member "serviceAccount:$RT" --role $R; done
 gcloud services enable telemetry.googleapis.com cloudtrace.googleapis.com --project $PROJECT  # tracing
-# grant $RE objectAdmin on the output bucket; let yourself impersonate $OP (no secretAccessor needed —
+# the runtime identity: read the deploy bundle; create + read-by-name under jobs/ in the output bucket
+gcloud storage buckets create $OUT --project $PROJECT --uniform-bucket-level-access
+gcloud storage buckets add-iam-policy-binding gs://$PROJECT-agent-staging \
+  --member "serviceAccount:$RT" --role roles/storage.objectViewer
+for R in roles/storage.objectCreator roles/storage.legacyObjectReader; do
+  gcloud storage buckets add-iam-policy-binding $OUT --member "serviceAccount:$RT" --role $R \
+    --condition="title=platform job input and output only,expression=resource.name.startsWith(\"projects/_/buckets/$PROJECT-agent-output/objects/jobs/\")"
+done
+# the operator deploys AS the runtime identity; let yourself impersonate $OP (no secretAccessor needed —
 # secrets are passed per-invocation, not read from Secret Manager by the engine):
+gcloud iam service-accounts add-iam-policy-binding $RT --member "serviceAccount:$OP" \
+  --role roles/iam.serviceAccountUser
 gcloud iam service-accounts add-iam-policy-binding $OP --member "user:you@org.com" \
   --role roles/iam.serviceAccountTokenCreator
 ```
 
 Then authenticate impersonating the operator SA (`gcloud auth application-default login
---impersonate-service-account=$OP`) before running `gemini.deploy`.
+--impersonate-service-account=$OP`) and pass `service_account=$RT` to every `gemini.deploy`.
 
 ## Latency & cost (the `gemini` path)
 

@@ -2,22 +2,37 @@
 
 What it proves, on real infrastructure, without touching the shared output bucket:
 
-1. A turn with secrets and checkpointing completes on a bucket where the Agent Runtime
-   service agent can only CREATE objects under ``jobs/`` (the platform's own job output).
-   So the worker did all of its GCS work (secrets, mirror, checkpoint) with the run's
-   scoped token, and the client saw the durable record it expects.
+1. A turn with secrets and checkpointing completes on a bucket where the engine's runtime
+   identity can only CREATE objects under ``jobs/`` and read them by name (the platform's
+   own job input and output). So the worker did all of its GCS work (secrets, mirror,
+   checkpoint) with the run's scoped token, and the client saw the durable record it expects.
 2. The probe script run as a second turn on the same engine shows the runtime identity
    is still reachable from the agent's shell (metadata token: 200) but can no longer
    list the bucket or read a staged secrets object (403).
 
-Steps: create the bucket (uniform access) in OUTPUT_PROJECT, a project where the runtime
-identity has no project-level role → bind the RE agent to objectCreator limited to ``jobs/``
-→ deploy a throwaway cold engine (in PROJECT) on that bucket → run the two turns → delete
-the engine → delete the bucket and its objects. Everything is deleted in ``finally``.
+Two ways to keep the runtime identity out of the bucket, picked by ``RUNTIME_SA``:
 
-Env: PROJECT (default my-project), OUTPUT_PROJECT (default other-project), LOCATION
-(us-central1), SUFFIX (username), KEEP=1 to keep the engine and bucket for inspection.
-Run:  .venv/bin/python dev/live_scoped_gcs.py
+* ``RUNTIME_SA=<email>`` (the recommended setup): the engine is deployed with
+  ``service_account=RUNTIME_SA``, a service account you created with only the roles in the
+  README ("The runtime identity is reachable by the agent"). It has no Google-managed
+  project role, so the bucket can live in the engine project and bucket-level bindings are
+  enough. The probe also checks the metadata server hands out that account, and that its
+  token cannot list the bucket.
+* unset: the engine runs as the default Agent Runtime service agent, whose managed project
+  role reads every bucket in the engine project, so the bucket is created in
+  ``OUTPUT_PROJECT`` (a project where that identity has no project role).
+
+Steps: create the bucket (uniform access) → bind the runtime identity to objectCreator +
+legacyObjectReader limited to ``jobs/`` → deploy a throwaway cold engine (in PROJECT) on
+that bucket → run the two turns → delete the engine → delete the bucket and its objects.
+Everything is deleted in ``finally``. The service account itself is yours to create and
+delete (see the README's gcloud sketch).
+
+Env: PROJECT (default my-project), RUNTIME_SA (default unset), OUTPUT_PROJECT
+(default: PROJECT with RUNTIME_SA, else other-project), LOCATION (us-central1), SUFFIX
+(username), KEEP=1 to keep the engine and bucket for inspection.
+Run:  RUNTIME_SA=ratk-runtime-probe@my-project.iam.gserviceaccount.com \
+      .venv/bin/python dev/live_scoped_gcs.py
 Cost: one ~4 min build + cents of Haiku.
 """
 from __future__ import annotations
@@ -36,12 +51,16 @@ from remote_agent_toolkit.ports.blobstore import GcsBlobStore
 
 PROJECT = os.environ.get("PROJECT", "my-project")
 LOCATION = os.environ.get("LOCATION", "us-central1")
-# The bucket's project. The Agent Runtime service agent holds the Google-managed
-# ``roles/aiplatform.reasoningEngineServiceAgent`` on the ENGINE project, and that role
-# carries storage.objects.get/list on every bucket there, so a bucket in the engine project
-# stays readable to it whatever the bucket's own bindings say (verified 2026-09-02). The
-# output bucket therefore lives in a project where the identity has no project role.
-OUTPUT_PROJECT = os.environ.get("OUTPUT_PROJECT", "other-project")
+# The engine's runtime identity. Set: a service account you created, deployed with
+# ``service_account=``; it holds only what you grant. Unset: the default Agent Runtime
+# service agent, which holds the Google-managed ``roles/aiplatform.reasoningEngineServiceAgent``
+# on the ENGINE project, and that role carries storage.objects.get/list on every bucket
+# there, so a bucket in the engine project stays readable to it whatever the bucket's own
+# bindings say (verified 2026-09-02).
+RUNTIME_SA = os.environ.get("RUNTIME_SA") or None
+# The bucket's project: the engine project with a custom runtime identity, otherwise a
+# project where the default service agent has no project role.
+OUTPUT_PROJECT = os.environ.get("OUTPUT_PROJECT") or (PROJECT if RUNTIME_SA else "other-project")
 SUFFIX = re.sub(r"[^a-z0-9-]", "-", (os.environ.get("SUFFIX") or getpass.getuser()).lower())
 NAME = f"ratk-scoped-gcs-{SUFFIX}"
 BUCKET = f"{PROJECT}-agent-output-scoped-{SUFFIX}"
@@ -107,7 +126,7 @@ def _make_bucket() -> None:
     client.create_bucket(bucket, location="US")
     policy = bucket.get_iam_policy(requested_policy_version=3)
     policy.version = 3
-    re_agent = _runtime_agent(storage.Client(project=PROJECT))
+    identity = _runtime_identity(storage.Client(project=PROJECT))
     # The platform's job runner, as the runtime identity, downloads the job INPUT by exact
     # name (jobs/<job id>_input.jsonl) and writes the job output next to it. So: create,
     # plus get-by-name WITHOUT list (legacyObjectReader has objects.get and no objects.list),
@@ -115,18 +134,21 @@ def _make_bucket() -> None:
     for role in ("roles/storage.objectCreator", "roles/storage.legacyObjectReader"):
         policy.bindings.append({
             "role": role,
-            "members": {f"serviceAccount:{re_agent}"},
+            "members": {f"serviceAccount:{identity}"},
             "condition": {
                 "title": "platform job input and output only",
                 "expression": f'resource.name.startsWith("projects/_/buckets/{BUCKET}/objects/jobs/")',
             },
         })
     bucket.set_iam_policy(policy)
-    print(f"bucket gs://{BUCKET} created in {OUTPUT_PROJECT}; {re_agent} = objectCreator + "
+    print(f"bucket gs://{BUCKET} created in {OUTPUT_PROJECT}; {identity} = objectCreator + "
           "legacyObjectReader on jobs/ only", flush=True)
 
 
-def _runtime_agent(client) -> str:
+def _runtime_identity(client) -> str:
+    """The engine's runtime identity: RUNTIME_SA, else the project's Agent Runtime service agent."""
+    if RUNTIME_SA:
+        return RUNTIME_SA
     number = client.get_service_account_email().split("@")[0].split("-")[-1]
     return f"service-{number}@gcp-sa-aiplatform-re.iam.gserviceaccount.com"
 
@@ -166,7 +188,8 @@ async def main() -> int:
         print(f"deploying {NAME} ...", flush=True)
         t0 = time.time()
         engine = await asyncio.to_thread(
-            gemini.deploy, _spec(), PROJECT, LOCATION, output_bucket=f"gs://{BUCKET}"
+            gemini.deploy, _spec(), PROJECT, LOCATION, output_bucket=f"gs://{BUCKET}",
+            service_account=RUNTIME_SA,
         )
         print(f"deployed in {time.time() - t0:.0f}s", flush=True)
 
@@ -197,6 +220,9 @@ async def main() -> int:
         print("\n===== PROBE OUTPUT =====\n" + (r2.text or ""), flush=True)
         text = r2.text or ""
         ok = ok and (not r2.is_error) and "token_status=200" in text
+        if RUNTIME_SA:
+            # The metadata server must hand out the custom account, not the default agent.
+            ok = ok and f"email={RUNTIME_SA}" in text
         ok = ok and all(f"list prefix={p} status=403" in text
                         for p in ("invocation-secrets/", "session-config/", "events/", "checkpoints/", "jobs/"))
         ok = ok and "get session-config with runtime identity status=403" in text

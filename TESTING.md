@@ -239,11 +239,17 @@ record of the 2026-09-02 finding (README "The runtime identity is reachable by t
 check to repeat after the bucket-role migration, when every list must come back 403.
 
 `dev/live_scoped_gcs.py` proves the fix without touching the shared bucket: it creates a fresh
-bucket in another project (`OUTPUT_PROJECT`, where the service agent has no project role) with the
-service agent allowed only to create objects under `jobs/`, deploys a throwaway engine on it, runs a turn with a secret and checkpointing (must succeed: the worker used the run-scoped token
-for everything), then runs the probe script (metadata token still 200, every bucket list and read
-with it 403), and deletes the engine and the bucket. `KEEP=1` leaves both for inspection. Run it for
-any change to `scoped_gcs.py`, `GcsBlobStore`, the handoff module or the directive/payload shape.
+bucket where the engine's runtime identity may only create objects under `jobs/` and read them by
+name, deploys a throwaway engine on it, runs a turn with a secret and checkpointing (must succeed:
+the worker used the run-scoped token for everything), then runs the probe script (metadata token
+still 200, every bucket list and read with it 403), and deletes the engine and the bucket. With
+`RUNTIME_SA=<email>` the engine is deployed with `service_account=` set to that account (create it
+first with the README's gcloud sketch) and the bucket lives in the engine project; the probe also
+checks the metadata server hands out that account. With `RUNTIME_SA` unset the engine runs as the
+default service agent and the bucket is created in `OUTPUT_PROJECT` (a project where that identity
+has no project role). `KEEP=1` leaves the engine and bucket for inspection. Run it for any change to
+`scoped_gcs.py`, `GcsBlobStore`, the handoff module, the directive/payload shape or the deploy
+config's identity fields.
 
 ### Writing a bespoke live probe
 

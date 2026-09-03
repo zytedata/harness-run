@@ -218,6 +218,19 @@ def test_build_engine_config_resource_limits() -> None:
     assert cfg["resource_limits"] is not limits  # defensive copy
 
 
+def test_build_engine_config_service_account_passthrough() -> None:
+    """service_account (the engine's runtime identity): set → forwarded verbatim; omitted →
+    absent from the config so the platform default (the Agent Runtime service agent) applies."""
+    kw = dict(project="proj", location="us-central1", staging_bucket="gs://staging",
+              extra_packages=[])
+    cfg = deploy.build_engine_config(_spec(), **kw)
+    assert "service_account" not in cfg
+
+    sa = "ratk-runtime@proj.iam.gserviceaccount.com"
+    cfg = deploy.build_engine_config(_spec(), service_account=sa, **kw)
+    assert cfg["service_account"] == sa
+
+
 def test_build_engine_config_pool_max_wait_passthrough() -> None:
     cfg = deploy.build_engine_config(
         _spec(),

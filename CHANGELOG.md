@@ -32,16 +32,24 @@ tag `vX.Y.Z`, push the commit and the tag.
   default the worker sets at turn start). The token rides the cold path as the last
   `AGENT_GCS_TOKEN=` directive and the warm path as `gcs_token` in the payload; the
   client refreshes it while the run lives. On by default (`get_engine(...,
-  scoped_gcs=True)`); a minting failure fails the turn. **Update note**: redeploy every
-  engine from this revision, then move the output bucket to a project where the service
-  agent has no project role (its Google-managed `reasoningEngineServiceAgent` role reads
-  every bucket in the engine project) with one `objectCreator` binding on `jobs/`
-  and `legacyObjectReader` (the platform reads the job input by name), and remove
-  `roles/aiplatform.user` from the service agent (README, "Migration"); proposed date
-  for the shared setup: 2026-09-19. Mixed
-  client/engine versions keep working on the runtime identity, which is the unfixed
-  state. New dev scripts: `dev/live_isolation_probe.py` (the finding) and
-  `dev/live_scoped_gcs.py` (the fix, on a fresh bucket in another project).
+  scoped_gcs=True)`); a minting failure fails the turn. **Update note**: create a runtime
+  service account with the roles in the README IAM table (the default Agent Runtime
+  service agent cannot be locked out of the bucket: its Google-managed
+  `reasoningEngineServiceAgent` role reads every bucket in the engine project), give it
+  `objectCreator` + `legacyObjectReader` on `jobs/` in the output bucket (the platform
+  writes the job output and reads the job input by name), redeploy every engine from
+  this revision with the new `gemini.deploy(..., service_account=...)`, and only then
+  remove the service agent's `objectAdmin` on the bucket and its `roles/aiplatform.user`
+  on the project (README, "Migration"). No date: the removal waits until no engine runs
+  as the service agent. Mixed client/engine versions keep working on the runtime
+  identity, which is the unfixed state. In warm mode the shared dispatch subscription
+  still lets one worker's shell take another run's message (now carrying its token);
+  per-worker dispatch closes that and is part of this change set. New dev scripts:
+  `dev/live_isolation_probe.py` (the finding) and `dev/live_scoped_gcs.py` (the fix:
+  `RUNTIME_SA=<email>` for the custom runtime identity, unset for a bucket in another
+  project).
+- `gemini.deploy(..., service_account=)` sets the engine's runtime identity (forwarded to
+  `AgentEngineConfig.service_account`); omitted, the platform default applies as before.
 
 ### Backwards-incompatible
 

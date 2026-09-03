@@ -258,6 +258,7 @@ def deploy(
     min_instances: int = 0,
     max_instances: int = 1,
     resource_limits: dict[str, str] | None = None,
+    service_account: str | None = None,
     pool_size: int = 2,
     pool_max_wait_s: float | None = None,
     new_engine: bool = False,
@@ -317,6 +318,14 @@ def deploy(
     work (dependency builds, whole-project imports) — under the default 4Gi the platform's
     job runner can OOM-kill a worker mid-turn, losing the attempt's work and spend even
     though the retry (see the handoff docs) picks the turn up from scratch.
+
+    ``service_account`` sets the engine's runtime identity (a service account email you
+    created; the deployer needs ``roles/iam.serviceAccountUser`` on it). Omitted → the
+    platform default, the Agent Runtime service agent shared by every engine in the
+    project. That default holds a Google-managed project role that reads every bucket in
+    the project, and the agent's shell can use its token, so a custom service account with
+    only the bindings the worker needs is the recommended setup (README "The runtime
+    identity is reachable by the agent" lists the roles).
     """
     # Fail fast BEFORE any side effect (pub/sub ensure, staging, the ~4 min billable build).
     if workspace is not None:
@@ -411,6 +420,7 @@ def deploy(
         min_instances=min_instances,
         max_instances=max_instances,
         resource_limits=resource_limits,
+        service_account=service_account,
     )
     client = agentplatform.Client(project=project, location=location, credentials=credentials)
     # Engine identity is the display name: update the existing engine (minting a revision)

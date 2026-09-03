@@ -413,6 +413,7 @@ def build_engine_config(
     min_instances: int = 0,
     max_instances: int = 1,
     resource_limits: dict[str, str] | None = None,
+    service_account: str | None = None,
 ) -> dict:
     """Build the kwargs dict for ``agentplatform.types.AgentEngineConfig(**kwargs)``.
 
@@ -427,10 +428,18 @@ def build_engine_config(
     memory-heavy agent work (dependency builds, big imports) can OOM-kill the worker
     mid-turn; raise it (up to ``"32Gi"``) for such agents. The kwarg is omitted from the
     config when None so the platform default stays authoritative.
+
+    ``service_account`` is the engine's runtime identity (the email of a service account
+    you created). Omitted → the platform default, the Agent Runtime service agent shared
+    by every engine in the project, whose Google-managed project role reads every bucket
+    in the project (README "The runtime identity is reachable by the agent"). A custom
+    service account holds only what you grant it, so bucket-level bindings are enough.
     """
     if resource_limits is not None:
         validate_resource_limits(resource_limits)
     extra: dict = {"resource_limits": dict(resource_limits)} if resource_limits else {}
+    if service_account:
+        extra["service_account"] = service_account
     return {
         **extra,
         "display_name": spec.name,

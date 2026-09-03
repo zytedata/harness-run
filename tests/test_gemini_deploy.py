@@ -105,6 +105,9 @@ def test_build_env_no_baked_secrets_and_buckets() -> None:
     assert env["IS_SANDBOX"] == "1"
     assert env["AGENT_JOBS_ROOT"]  # set (non-empty)
     assert env["CLAUDE_AGENT_MODEL"] == spec.model
+    # One uvicorn worker process in the platform harness: the default (cpu_count + 1) costs
+    # ~3 GiB of private memory per job container before the agent runs.
+    assert env["NUM_WORKERS"] == "1"
 
     # No secrets are baked into the engine: every value is a plain str (non-secret machinery),
     # never a Secret Manager secret_ref dict. Secrets travel per-invocation instead.

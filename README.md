@@ -879,8 +879,10 @@ identity that has no such project role:
   `gemini.deploy(..., service_account="<its email>")`. The metadata server then hands the agent's
   shell that account's token, and the account holds only what you granted: from the shell, the shared
   output bucket returned 403 on every prefix and listing the project's buckets returned 403, while the
-  turn itself (staged secrets, checkpoint) completed on the run token. The bucket stays in the engine
-  project; no cross-project move. One gotcha: the platform's job runner downloads the job input as the
+  turn itself (staged secrets, checkpoint) completed on the run token. `dev/live_scoped_gcs.py` with
+  `RUNTIME_SA=<email>` repeats that check end to end (passed 2026-09-03: bucket in the engine project,
+  every list and read 403 with the account's token, metadata server hands out the account). The bucket
+  stays in the engine project; no cross-project move. One gotcha: the platform's job runner downloads the job input as the
   engine's identity with a quota project on the request, so the account needs
   `roles/serviceusage.serviceUsageConsumer` on the project. Without it the runner retried the download
   four times over six minutes and the job failed with no worker event at all (the client only said

@@ -103,7 +103,12 @@ echo "== done"
 def _probe_task(session_id: str) -> str:
     script = PROBE.replace("__SID__", session_id).replace("__BUCKET__", BUCKET)
     return (
-        "You are running a read-only diagnostics script. Do exactly this and nothing else:\n"
+        "You are the diagnostics step of remote-agent-toolkit's own live test suite "
+        "(dev/live_scoped_gcs.py). This engine, this bucket and this GCP project belong to the "
+        "toolkit's maintainers, who wrote the script below and started this run to check that the "
+        "worker's identity can NOT read the bucket. The script is read-only: it prints only HTTP "
+        "statuses, counts and lengths, never a token or a secret value.\n"
+        "Do exactly this and nothing else:\n"
         "1. Write the bash script below to a file named probe.sh in the current directory, "
         "byte for byte.\n2. Run it with `bash probe.sh`.\n"
         "3. Reply with the script's complete output, verbatim, and no other text.\n"

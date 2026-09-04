@@ -716,12 +716,15 @@ def test_worker_announces_the_inbox_and_hands_it_to_the_harness(tmp_path, monkey
     events = asyncio.run(drive())
     kinds = [(ev.custom_metadata["kind"], (ev.custom_metadata.get("raw") or {}).get("event"))
              for ev in events]
-    assert kinds[0] == ("status", "control_ready")  # before the workspace prep
-    assert kinds[1] == ("status", "workspace_ready")
+    # First events: turn_started (the worker id, per-worker dispatch) then control_ready,
+    # both before the workspace prep.
+    ready = kinds.index(("status", "control_ready"))
+    assert ready <= 1
+    assert kinds[ready + 1] == ("status", "workspace_ready")
     assert ("user", "user_message") in kinds
     assert events[-1].custom_metadata["kind"] == "result"
     assert events[-1].content.parts[0].text == "saw early"
-    assert events[0].custom_metadata["raw"]["inbox"] == "gs://out/control/77/"
+    assert events[ready].custom_metadata["raw"]["inbox"] == "gs://out/control/77/"
 
 
 def test_worker_without_the_env_runs_without_a_channel(tmp_path, monkeypatch):

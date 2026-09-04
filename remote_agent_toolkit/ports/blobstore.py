@@ -79,16 +79,37 @@ def _normalize_key(root: Path, key: str) -> Path:
     return candidate
 
 
-class GcsBlobStore:
-    """GCS-backed :class:`BlobStore` (runtime identity = the RE service agent).
+# Process-wide credentials for every GcsBlobStore built without its own. The gemini
+# WORKER sets the run's scoped token here at turn start (runtime/gemini/scoped_gcs.py) so
+# every GCS access of the turn authorizes with that token instead of the runtime identity.
+# ``None`` (the default, and what the client process always has) means ADC.
+_default_credentials: Any = None
 
+
+def set_default_gcs_credentials(credentials: Any | None) -> None:
+    """Set (or with ``None`` clear) the credentials new ``GcsBlobStore`` instances use."""
+    global _default_credentials
+    _default_credentials = credentials
+
+
+def default_gcs_credentials() -> Any | None:
+    return _default_credentials
+
+
+class GcsBlobStore:
+    """GCS-backed :class:`BlobStore`.
+
+    Authorizes with ``credentials`` when given, else with the process default set by
+    :func:`set_default_gcs_credentials` (the worker's run-scoped token), else with ADC
+    (the runtime identity in a worker, the operator identity in a client).
     ``google.cloud.storage`` is imported lazily inside the methods; the client and
     bucket handle are cached on first use.
     """
 
-    def __init__(self, bucket: str, prefix: str = "") -> None:
+    def __init__(self, bucket: str, prefix: str = "", credentials: Any | None = None) -> None:
         self.bucket = bucket
         self.prefix = prefix
+        self._credentials = credentials
         self._client: Any = None
         self._bucket_obj: Any = None
 
@@ -96,7 +117,14 @@ class GcsBlobStore:
         if self._bucket_obj is None:
             from google.cloud import storage  # lazy: keep import-time dep-free
 
-            self._client = storage.Client()
+            creds = self._credentials if self._credentials is not None else _default_credentials
+            if creds is not None:
+                # A bare access token carries no project; the storage client only needs one
+                # for bucket-level calls, which the toolkit never makes with these credentials.
+                project = os.environ.get("GOOGLE_CLOUD_PROJECT") or "_"
+                self._client = storage.Client(project=project, credentials=creds)
+            else:
+                self._client = storage.Client()
             self._bucket_obj = self._client.bucket(self.bucket)
         return self._bucket_obj
 

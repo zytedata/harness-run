@@ -837,16 +837,18 @@ scrapes, a file in a repo) into revealing whatever it can reach: environment var
 token it was handed. The toolkit does **not** pretend to hide credentials from the agent. Instead it shrinks
 the blast radius:
 
-1. **Per-invocation, not baked/shared** — a run only ever has the secrets that *that* call passed. One
-   deployed engine serves many tenants without any of them sharing credentials.
+1. **Per-invocation, not baked/shared** — a run only ever has the secrets that *that* call passed, and
+   (since the run-scoped GCS tokens below) can reach only its own staged objects, so one deployed engine
+   serves many tenants without any of them sharing credentials.
 2. **Scope the credentials** — prefer short-lived, narrowly-scoped tokens (a GitHub **App installation
    token** for one repo, a Bitbucket **repository access token**) over broad personal tokens. If a run is
    coerced, the exposure is limited to that one scoped token for that one run.
 3. **Least secrets per run** — pass only what the task needs.
 
 **LLM API key.** By default `gemini` routes the model through **Vertex** (the engine authenticates as its own
-GCP identity — **no LLM key is ever in the agent's environment**). This is the recommended, prompt-injection-
-safe default. `deploy(..., use_vertex=False)` switches to API-key mode, where you pass `ANTHROPIC_API_KEY` as
+GCP identity — **no LLM key is ever in the agent's environment**). This is the recommended default, and
+the one case where a coerced agent cannot leak a model key; what the agent CAN reach through that identity
+is the subject of [The runtime identity is reachable by the agent](#the-runtime-identity-is-reachable-by-the-agent) below. `deploy(..., use_vertex=False)` switches to API-key mode, where you pass `ANTHROPIC_API_KEY` as
 a per-invocation secret — but then the agent's process (hence the `Bash` tool) can read it, so use Vertex for
 anything exposed to untrusted input. Locally the agent likewise inherits your shell's environment (including
 your own `ANTHROPIC_API_KEY`, or — with no key set — your `claude.ai` subscription login: see
@@ -865,6 +867,47 @@ completion, and deploy installs a 1-day GCS lifecycle rule on the `invocation-se
 last-resort reaper for objects orphaned by a crash on both sides. The toolkit **never** writes secret
 values to Cloud Logging, to an `AgentEvent`, or to a checkpoint — push tokens are scrubbed from `.git/config`
 before a workspace snapshot and re-embedded on resume. Don't log the `secrets` dict yourself.
+
+### The runtime identity is reachable by the agent
+
+On Agent Runtime the worker container runs everything as one user, and the harness authenticates to
+Vertex as the engine's **runtime identity** through the metadata server. The agent's shell is a child of
+the harness, so one shell command gets that identity's access token (found and verified live 2026-09-02).
+Whatever the runtime identity can reach, a prompt-injected agent can reach. Three things follow; the
+toolkit does the first two for you:
+
+- **Run-scoped GCS tokens.** The worker never touches the output bucket as the runtime identity: the
+  client mints a short-lived, downscoped token per turn (this bucket, only this run's object prefixes) and
+  the worker does all of the turn's GCS work with it (`runtime/gemini/scoped_gcs.py`). On by default
+  (`get_engine(..., scoped_gcs=True)`); a minting failure fails the turn rather than falling back to the
+  runtime identity.
+- **Per-worker dispatch** for warm pools. Each worker pulls its own randomly named, filtered Pub/Sub
+  subscription that only ever carries the one turn addressed to it, so a shell in one worker cannot take
+  another run's turn (its pointers and token). Idle workers are tracked in a client-owned roster under
+  `pool/` in the output bucket. A warm engine deployed before this still runs one shared subscription
+  (`get_engine(warm_pool=True)` warns); redeploy it.
+- **Run the engine as a service account you create**, with `gemini.deploy(..., service_account=...)`. The
+  default identity, the Google-managed Agent Runtime service agent, holds a project role that reads every
+  bucket in the project, and a bucket binding cannot take a project-level permission away. Give your
+  runtime service account only the roles in [GCP setup & required permissions](#gcp-setup--required-permissions):
+  a predict-only custom role instead of `roles/aiplatform.user` (which would hand the shell every run's
+  job id and engine admin), no read or list right on the output bucket beyond the two conditional
+  `jobs/` bindings, and nothing under `pool/`.
+
+What the shell still reaches with the runtime identity's token: Vertex model calls (spend outside the
+run's `max_budget_usd`), Cloud Logging writes, and the run's own persisted job input. Background jobs get
+a fresh sandbox per job, so nothing a run leaves behind survives into the next one.
+
+**Migrating an existing project.** Create the runtime service account and its bindings (`ratk-gcp-setup
+--project <id>`, or the gcloud sketch in the setup section), redeploy every engine (`gemini.list_engines`)
+from this revision with
+`service_account=` set, and upgrade clients at the same time. Mixed versions keep working on the runtime
+identity, which is the unfixed state, never a broken one. Once no engine still runs as the default service
+agent, remove its `objectAdmin` on the output bucket and `roles/aiplatform.user` on the project; an engine
+not redeployed by then stops finding its staged objects, which is the intended failure. Run
+`dev/live_isolation_probe.py` against a production engine afterwards: every list and read must be 403.
+The full analysis (what was reachable and how badly, the alternatives considered, the live checks) is in
+DESIGN.md §6 and [PR #41](https://github.com/zytedata/remote-agent-toolkit/pull/41).
 
 ## Pre-baked engine dependencies
 
@@ -1034,7 +1077,8 @@ Two callers cannot address two revisions of one engine concurrently.
 
 A traffic pin survives later deploys — a fresh revision won't serve until you `set_traffic()` again, and
 `deploy` warns when it lands in that state. Warm pools cut over atomically on update: each deploy mints a
-fresh, deploy-scoped dispatch topic/subscription and deletes the previous pair once the new pool is filled,
+fresh, deploy-scoped dispatch topic and retires the previous generation (its worker subscriptions, topic
+and roster) once the new pool is filled,
 so workers still running the old revision can never claim a post-deploy turn — they fail their next claim
 poll and exit within seconds (a worker mid-turn finishes that turn on its own revision). With pinned
 traffic nothing is retired: the serving revision's pair stays the live one.
@@ -1183,11 +1227,14 @@ in their own project; the concrete values are the shared `my-project` setup we u
 > what's missing, asks for confirmation, applies it, and re-audits. It is **additive only** and
 > idempotent — safe to run, and re-run, against existing non-empty projects. `--check` audits without
 > changing anything (exit 0 iff ready); `--yes` skips the prompt (CI/agents); `--verify` proves the
-> end state with a real throwaway deploy + one Haiku turn (a few cents, ~10 min — it also triggers
-> creation of the runtime service agent, whose grants otherwise stay pending until the first deploy),
-> and refuses to spend on the deploy while any check it depends on is still failing (the model check
-> runs as a 1-token live probe in the first report, so a missing Model Garden enablement surfaces
-> before any money is spent).
+> end state with a real throwaway deploy, running as the runtime service account, + one Haiku turn (a
+> few cents, ~10 min), and refuses to spend on the deploy while any check it depends on is still
+> failing (the model check runs as a 1-token live probe in the first report, so a missing Model Garden
+> enablement surfaces before any money is spent). It creates the runtime service account
+> (`ratk-runtime@<project>.iam.gserviceaccount.com`, with the `ratkRuntimePredict` custom role and the
+> conditional bucket bindings below); pass its email as `service_account=` to every `gemini.deploy`.
+> It grants the default Agent Runtime service agent nothing, and reports grants that agent still holds
+> from the earlier identity model as a note to remove by hand (the tool never removes anything).
 > Two things stay manual: enabling Claude in Vertex Model Garden (the tool live-probes each model —
 > by default Haiku 4.5, Sonnet 5 and Opus 5 as required plus Fable 5 as optional/non-blocking; tune
 > with `--model`/`--optional-model` — and links the exact console page for a missing one) and, on a
@@ -1201,10 +1248,11 @@ project (tighten to your policy):
 | Role | Why |
 |---|---|
 | `roles/aiplatform.user` | create/list engines, run query jobs, create sessions |
-| `roles/storage.admin` (or objectAdmin on the buckets) | stage the deploy bundle; read job output |
+| `roles/storage.admin` (or objectAdmin on the buckets) | stage the deploy bundle; read job output; mint the per-turn run-scoped GCS tokens (a downscoped token can only carry rights its source already has) |
 | `roles/logging.viewer` | tail the per-step event stream from the client |
 | `roles/cloudbuild.builds.editor` | the deploy builds the engine image |
-| `roles/pubsub.editor` _(warm pool only)_ | create/retire the per-deploy dispatch topic/subscription + publish turns |
+| `roles/pubsub.editor` _(warm pool only)_ | create/retire the per-deploy dispatch topic and the per-worker subscriptions + publish turns |
+| `roles/iam.serviceAccountUser` **on the runtime service account** | deploy with `service_account=`: the deploy acts as that account ([Google's troubleshooting page](https://docs.cloud.google.com/gemini-enterprise-agent-platform/troubleshooting/agent-deployment): "You do not have permission to act as service_account" means this role is missing) |
 
 The principal that impersonates it needs `roles/iam.serviceAccountTokenCreator` **on this SA**.
 Impersonation is the pattern for callers that already have a Google identity (humans, GCP-hosted
@@ -1215,27 +1263,38 @@ services, CI with workload identity). A production app running *outside* GCP ins
 credential, so prefer impersonation or workload identity federation where they're available, and
 rotate keys you do hand out.
 
-**2. The Agent Runtime service agent** — the engine's *runtime* identity, auto-created by Google as
-`service-<PROJECT_NUMBER>@gcp-sa-aiplatform-re.iam.gserviceaccount.com`. **All runtime resource access
-authorizes against this agent, not the operator SA** — granting the operator SA a runtime role does nothing
-for the running job. Grant it:
+**2. The runtime identity** — the identity the engine's workers run as, and the one the agent's shell
+can use (see [The runtime identity is reachable by the agent](#the-runtime-identity-is-reachable-by-the-agent)).
+`ratk-gcp-setup` creates it as `ratk-runtime@<project>.iam.gserviceaccount.com` (or create one yourself)
+and every `gemini.deploy` names it as `service_account="<its email>"`.
+Without `service_account=` the engine runs as the Google-managed **Agent Runtime service agent**,
+`service-<PROJECT_NUMBER>@gcp-sa-aiplatform-re.iam.gserviceaccount.com`, whose managed project role
+reads every bucket in the project. **All runtime resource access authorizes against this identity, not
+the operator SA** — granting the operator SA a runtime role does nothing for the running job. Grant the
+runtime service account (verified live 2026-09-03 and 2026-09-04 with this set):
 
 | Role | Scope | Why |
 |---|---|---|
-| `roles/storage.objectAdmin` | the output/checkpoint bucket | workspace snapshots, artifacts, the session store |
+| a custom role with only `aiplatform.endpoints.predict` (`ratkRuntimePredict` in the sketch below) | project | the harness calls the model through Vertex. Do not use `roles/aiplatform.user` here: it also carries `aiplatform.operations.list` (every run's job id) and `reasoningEngines.*`, which the agent's shell would get back (verified 2026-09-04: the custom role is enough for the turn, and operations list returns 403) |
 | `roles/logging.logWriter` | project | the agent emits structured step logs |
-| `roles/pubsub.subscriber` | project _(warm pool)_ | warm-pool workers pull turns; project-level since the toolkit auto-creates a per-engine subscription |
+| `roles/serviceusage.serviceUsageConsumer` | project | the platform's job runner downloads the job input with a quota project on the request; without it the job dies before any worker event |
+| `roles/telemetry.metricsWriter`, `roles/telemetry.tracesWriter` | project | span and metric export; without them every batch fails with 403 (the default service agent holds both in the shared project) |
+| `roles/storage.objectViewer` | the staging bucket | the platform pulls the deploy bundle |
+| `roles/storage.objectCreator` and `roles/storage.legacyObjectReader`, both conditioned on `objects/jobs/` (and `objects/events/ratk-` for warm pools) | the output/checkpoint bucket | the platform's job runner reads the job input by exact name and writes the job output there, and the pool readiness marker. Everything else in the bucket is done with the run-scoped token. Never grant it anything under `pool/`: that prefix holds the warm pool's idle-worker roster, which decides which worker a turn (and its run-scoped token) is sent to. Until the [migration](#the-runtime-identity-is-reachable-by-the-agent) completes the default service agent still holds `roles/storage.objectAdmin` there, which the agent's shell can use to read every run's staged objects |
+| `roles/pubsub.subscriber` | project _(warm pool)_ | each warm-pool worker pulls its own subscription; project-level since the toolkit creates one per worker. The role is consume-by-name only (no list, no get), which is what keeps one worker's channel unreachable from another worker's shell |
 
-No `secretmanager.secretAccessor` is needed for the runtime agent: **secrets are passed per-invocation, not
+No `secretmanager.secretAccessor` is needed for the runtime identity: **secrets are passed per-invocation, not
 resolved from Secret Manager by the engine** (see [Secrets & security](#secrets--security)). If a *caller*
 keeps secret values in Secret Manager, that caller (the operator identity) reads them before the call.
 
 **Prerequisites** (create with admin creds; `deploy` ensures the buckets it needs):
 
-- A staging bucket `gs://<project>-agent-staging` and an output bucket `gs://<project>-agent-output`.
+- A staging bucket `gs://<project>-agent-staging` and an output bucket `gs://<project>-agent-output`,
+  the latter with uniform bucket-level access on (the conditional bindings above need it).
 - **Claude model access** — see the note below; the deployed engine can't run without it.
-- _(warm pool)_ a Pub/Sub topic + subscription for turn dispatch — `gemini.deploy(warm_pool=True)` **creates
-  these for you** (given the operator SA's `pubsub.editor`); no manual setup needed.
+- _(warm pool)_ a Pub/Sub topic per deploy and a subscription per pool worker for turn dispatch —
+  `gemini.deploy(warm_pool=True)` / `fill_pool` **create these for you** (given the operator SA's
+  `pubsub.editor`); no manual setup needed.
 
 **Claude model access.** By default the toolkit routes Claude through **Vertex AI** (the engine authenticates
 as its own GCP identity — no API key to manage). For that to work:
@@ -1254,28 +1313,47 @@ the key, so prefer Vertex for anything exposed to untrusted input (see
 [Secrets & security](#secrets--security)).
 
 **Concrete shared setup** (`my-project`): location `us-central1` (Claude: `us-central1` + `global`);
-operator SA `agent-runtime@my-project.iam.gserviceaccount.com`; runtime agent
-`service-123456789012@gcp-sa-aiplatform-re.iam.gserviceaccount.com`. Sketch for a fresh project:
+operator SA `agent-runtime@my-project.iam.gserviceaccount.com`; the engines there still run
+as the default service agent `service-123456789012@gcp-sa-aiplatform-re.iam.gserviceaccount.com` until the
+migration above is done. Sketch for a fresh project:
 
 ```bash
-PROJECT=your-project; NUM=$(gcloud projects describe $PROJECT --format='value(projectNumber)')
-RE="service-$NUM@gcp-sa-aiplatform-re.iam.gserviceaccount.com"     # runtime identity
-OP="agent-runtime@$PROJECT.iam.gserviceaccount.com"                # operator SA you create
+PROJECT=your-project
+OP="agent-runtime@$PROJECT.iam.gserviceaccount.com"        # operator SA you create
+RT="ratk-runtime@$PROJECT.iam.gserviceaccount.com"         # runtime identity you create
+OUT="gs://$PROJECT-agent-output"
 
 gcloud iam service-accounts create agent-runtime --project $PROJECT
+gcloud iam service-accounts create ratk-runtime --project $PROJECT
 for R in roles/aiplatform.user roles/storage.admin roles/logging.viewer roles/cloudbuild.builds.editor \
          roles/pubsub.editor; do  # pubsub.editor only needed for warm pools
   gcloud projects add-iam-policy-binding $PROJECT --member "serviceAccount:$OP" --role $R; done
-gcloud projects add-iam-policy-binding $PROJECT --member "serviceAccount:$RE" --role roles/logging.logWriter
+# the runtime identity reaches Vertex only for model calls: a custom role, never roles/aiplatform.user
+gcloud iam roles create ratkRuntimePredict --project $PROJECT --stage GA \
+  --title "ratk runtime: model calls only" --permissions aiplatform.endpoints.predict
+for R in projects/$PROJECT/roles/ratkRuntimePredict roles/logging.logWriter \
+         roles/serviceusage.serviceUsageConsumer roles/telemetry.metricsWriter roles/telemetry.tracesWriter \
+         roles/pubsub.subscriber; do  # pubsub.subscriber only needed for warm pools
+  gcloud projects add-iam-policy-binding $PROJECT --member "serviceAccount:$RT" --role $R; done
 gcloud services enable telemetry.googleapis.com cloudtrace.googleapis.com --project $PROJECT  # tracing
-# grant $RE objectAdmin on the output bucket; let yourself impersonate $OP (no secretAccessor needed —
+# the runtime identity: read the deploy bundle; create + read-by-name under jobs/ in the output bucket
+gcloud storage buckets create $OUT --project $PROJECT --uniform-bucket-level-access
+gcloud storage buckets add-iam-policy-binding gs://$PROJECT-agent-staging \
+  --member "serviceAccount:$RT" --role roles/storage.objectViewer
+for R in roles/storage.objectCreator roles/storage.legacyObjectReader; do
+  gcloud storage buckets add-iam-policy-binding $OUT --member "serviceAccount:$RT" --role $R \
+    --condition="title=platform job input and output only,expression=resource.name.startsWith(\"projects/_/buckets/$PROJECT-agent-output/objects/jobs/\")"
+done
+# the operator deploys AS the runtime identity; let yourself impersonate $OP (no secretAccessor needed —
 # secrets are passed per-invocation, not read from Secret Manager by the engine):
+gcloud iam service-accounts add-iam-policy-binding $RT --member "serviceAccount:$OP" \
+  --role roles/iam.serviceAccountUser
 gcloud iam service-accounts add-iam-policy-binding $OP --member "user:you@org.com" \
   --role roles/iam.serviceAccountTokenCreator
 ```
 
 Then authenticate impersonating the operator SA (`gcloud auth application-default login
---impersonate-service-account=$OP`) before running `gemini.deploy`.
+--impersonate-service-account=$OP`) and pass `service_account=$RT` to every `gemini.deploy`.
 
 ## Latency & cost (the `gemini` path)
 
@@ -1301,25 +1379,33 @@ expose it yet** — the run plane is built around the async + warm-pool paths, w
 interactive work. We can add sync later if a genuinely short-turn use case needs the lower start latency.
 
 **How `warm_pool=True` works.** `gemini.deploy(spec, warm_pool=True)` keeps a pool of pre-provisioned workers,
-each blocked on a Pub/Sub subscription (a competing-consumers *atomic claim*). A worker warms its logging +
+each blocked on **its own** Pub/Sub subscription (per-worker dispatch: a random, filtered subscription the
+client creates in `fill_pool` and names only in that worker's job input). A worker warms its logging +
 storage channels during its idle wait and reports ready — `engine.wait_until_warm()` blocks on that signal.
-A run is then dispatched to a free worker, so the turn goes nearly straight to the model. The first
-**observed** event lands **~4 s** after dispatch (measured: 3.8 s to first event, 10.9 s to the result of a
-one-tool Haiku turn, vs ~2.5 min cold) — the worker's claim pickup plus one ~0.5 s mirror flush and one
-tail poll; events then stream **~1–2 s** behind the agent for the rest of the turn. (Before the GCS event
-stream this number was ~10–20 s, dominated by Cloud Logging's ingestion lag.) On claim the pool refills, so
-the next turn is warm too. The dispatch topic/subscription pair is scoped to the deploy: a redeploy mints a
-fresh pair and retires the old one, so turns dispatched after it can only land on new-revision workers —
-stale idle workers exit promptly instead of serving turns with the previous revision's baked spec/skills.
+A run then takes one idle worker off the pool's roster (client-owned GCS objects under `pool/`, oldest
+worker first, claimed atomically so several client processes can share one pool) and publishes the turn
+addressed to that worker alone, so the turn goes nearly straight to the model. The first **observed** event
+lands **~4 s** after dispatch (measured 2026-09-04 with per-worker dispatch: 4.2 s to first event, 14.5 s to
+the result of a one-tool Haiku turn, vs ~2.5 min cold; 3.8 s / 10.9 s with the earlier shared-subscription
+design) — the roster claim (one GCS listing and one delete), the publish, the worker's pickup, one ~0.5 s
+mirror flush and one tail poll. Refilling the pool and dropping the worker's channel are Pub/Sub admin calls
+that take seconds each, so they run in the background and never sit in front of the turn's events. Events
+then stream **~1–2 s** behind the agent for the rest of the turn. (Before the GCS event stream this number was ~10–20 s, dominated by Cloud Logging's
+ingestion lag.) On dispatch the pool refills, so the next turn is warm too. If the addressed worker never
+starts the turn (it died at boot, or the platform killed it), the client re-dispatches to another worker
+once the worker's boot window plus a grace has passed, up to twice, then fails the run with an explained
+error. The dispatch topic is scoped to the deploy: a redeploy mints a fresh topic and retires the previous
+generation (its worker subscriptions, topic and roster), so turns dispatched after it can only land on
+new-revision workers — stale idle workers exit promptly instead of serving turns with the previous
+revision's baked spec/skills.
 
 > _Keeping the pool full:_ an idle worker waits `pool_max_wait_s` (a `deploy()` parameter; default a day)
-> for an assignment, then exits — **without replacement**. And a pool that has drained to empty does not
-> self-recover: the automatic one-worker refill after each dispatch just claims that pending dispatch
-> itself on an empty pool, so net pool size stays 0 and every turn goes cold (~2.5 min) until
-> `engine.fill_pool(n)` re-warms it by hand. Size `pool_max_wait_s` to your dispatch gaps — any quiet
-> stretch longer than it drains the pool. The platform's max **job** duration (7 days at the time of
-> writing — a platform limit that can change) caps the wait regardless: a worker that outlives it is
-> killed, also without replacement.
+> for an assignment, then exits — **without replacement**. A pool that has drained to empty does not strand
+> turns: a turn that finds no idle worker spawns one for itself and waits for its boot (~2.5 min, cold
+> latency), and the refill after it starts re-warming the pool; `engine.fill_pool(n)` re-warms it ahead of
+> time. Size `pool_max_wait_s` to your dispatch gaps — any quiet stretch longer than it drains the pool. The
+> platform's max **job** duration (7 days at the time of writing — a platform limit that can change) caps
+> the wait regardless: a worker that outlives it is killed, also without replacement.
 
 **Event streaming scales with your fleet.** The stream you consume with `async for ev in run` is the
 session's **GCS event mirror**, tailed live: the worker writes small batches as events happen and the

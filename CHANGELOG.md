@@ -21,6 +21,55 @@ tag `vX.Y.Z`, push the commit and the tag.
 
 ## Unreleased
 
+### Security
+
+- **The Agent Runtime service agent was reachable from the agent's shell, and with it
+  every run's staged secrets in the shared output bucket** (found and verified
+  2026-09-02; README "The runtime identity is reachable by the agent"). Fixed by
+  **run-scoped GCS tokens**: the client mints a downscoped token per turn, limited to
+  the run's own object prefixes, and the worker does all of its GCS work with it
+  (`runtime/gemini/scoped_gcs.py`; `GcsBlobStore(credentials=...)` and a process
+  default the worker sets at turn start). The token rides the cold path as the last
+  `AGENT_GCS_TOKEN=` directive and the warm path as `gcs_token` in the payload; the
+  client refreshes it while the run lives. On by default (`get_engine(...,
+  scoped_gcs=True)`); a minting failure fails the turn. **Update note**: create a runtime
+  service account with the roles in the README IAM table (the default Agent Runtime
+  service agent cannot be locked out of the bucket: its Google-managed
+  `reasoningEngineServiceAgent` role reads every bucket in the engine project), give it
+  `objectCreator` + `legacyObjectReader` on `jobs/` in the output bucket (the platform
+  writes the job output and reads the job input by name), redeploy every engine from
+  this revision with the new `gemini.deploy(..., service_account=...)`, and only then
+  remove the service agent's `objectAdmin` on the bucket and its `roles/aiplatform.user`
+  on the project (README, "Migration"). No date: the removal waits until no engine runs
+  as the service agent. Mixed client/engine versions keep working on the runtime
+  identity, which is the unfixed state. New dev scripts:
+  `dev/live_isolation_probe.py` (the finding) and `dev/live_scoped_gcs.py` (the fix:
+  `RUNTIME_SA=<email>` for the custom runtime identity, unset for a bucket in another
+  project).
+- `gemini.deploy(..., service_account=)` sets the engine's runtime identity (forwarded to
+  `AgentEngineConfig.service_account`); omitted, the platform default applies as before. The
+  account's Vertex role is a custom role with only `aiplatform.endpoints.predict` (README IAM
+  table), never `roles/aiplatform.user`.
+- **Per-worker dispatch for warm pools.** Every warm worker of an engine used to pull one
+  shared Pub/Sub subscription as the same identity, so a shell in one worker could take
+  another run's turn — its pointers and, with run-scoped tokens, its token — and ack it so
+  that run never started. Now `fill_pool` gives each worker its own randomly named,
+  filtered subscription (named only in that worker's job input; `roles/pubsub.subscriber`
+  can consume by name but not list) and records it in the pool's roster (client-owned GCS
+  objects under `pool/`, `runtime/gemini/roster.py`); each turn claims one idle worker off
+  the roster atomically and is published addressed to that worker alone, whose channel the
+  client deletes as soon as the worker has started the turn. Along the way: a turn that
+  finds no idle worker spawns one for itself instead of stranding (an empty pool now
+  degrades to cold latency), a worker that never starts its turn is replaced by a
+  re-dispatch (pickup watchdog), `interrupt()` cancels a warm turn's worker job, `delete()`
+  cancels idle workers other processes submitted, and every turn now opens with a
+  `turn_started` status event carrying the worker id. The engine env bakes
+  `AGENT_POOL_TOPIC` (the deploy's topic) instead of `AGENT_POOL_SUBSCRIPTION`. **Update
+  note**: redeploy warm engines. `get_engine(warm_pool=True)` on an engine deployed before
+  this change warns and keeps driving its shared subscription. Never grant the runtime
+  identity anything under the output bucket's `pool/` prefix: the roster decides where
+  turns go.
+
 ### Backwards-incompatible
 
 - The harness SDKs (`claude-agent-sdk`, `openai-codex`) moved from the base
@@ -76,15 +125,21 @@ tag `vX.Y.Z`, push the commit and the tag.
   for the `gemini` backend. Audits a project against the README's "GCP setup & required
   permissions" section — required APIs, the staging/output buckets (+ handoff lifecycle
   rules), the operator SA with project roles and *bucket-scoped* storage grants, the
-  impersonation grant, the runtime service agent's grants, and live Claude-on-Vertex
+  impersonation grant, the runtime service account engines run as (`ratk-runtime`: the
+  `ratkRuntimePredict` custom role with only `aiplatform.endpoints.predict`, its project
+  roles, `objectViewer` on the staging bucket, the conditional `jobs/` + `events/ratk-`
+  bindings on the output bucket, and the operator's `serviceAccountUser` on it; the
+  default Agent Runtime service agent is granted nothing, and grants it still holds from
+  the earlier identity model are reported as a migration note), and live Claude-on-Vertex
   model checks (1-token probes; by default Haiku 4.5 / Sonnet 5 / Opus 5 required and
   Fable 5 optional — reported but non-blocking; `--model` / `--optional-model` to tune)
   — then asks for confirmation, applies what's missing, and re-audits.
   Additive-only and idempotent, so it is safe on existing non-empty projects.
   `--check` audits without changing anything; `--yes` applies without a prompt;
-  `--verify` proves the end state with a throwaway warm-pool deploy + one Haiku turn
-  (and refuses to spend on the deploy while a check it depends on still fails — the
-  model check itself is a 1-token live probe, reported before anything is applied).
+  `--verify` proves the end state with a throwaway warm-pool deploy as the runtime
+  service account + one Haiku turn (and refuses to spend on the deploy while a check it
+  depends on still fails — the model check itself is a 1-token live probe, reported
+  before anything is applied).
 
 - Talking to a running turn ([#44]). `Session.send()` on a RUNNING session no longer
   dispatches a second concurrent turn (two workers writing one session's stream,

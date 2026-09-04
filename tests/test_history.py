@@ -122,7 +122,8 @@ def test_run_turn_writes_turn_mirror(tmp_path, monkeypatch):
 
     assert store.list("events/77/")  # streamed incrementally; file count is timing-dependent
     events = history.read_history("gs://bkt", "77", store=store)
-    assert [e.kind for e in events] == ["status", "result"]  # workspace_ready + the result
+    # turn_started + workspace_ready + the result
+    assert [e.kind for e in events] == ["status", "status", "result"]
     assert events[-1].summary == "mirrored"
 
 

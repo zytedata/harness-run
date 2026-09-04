@@ -1168,6 +1168,22 @@ Deploying on Gemini Agent Runtime involves **two identities** — granting roles
 single most common setup mistake, so they're called out explicitly. Everything below can be created by a team
 in their own project; the concrete values are the shared `my-project` setup we use for testing.
 
+> **One command sets all of this up:** `ratk-gcp-setup --project <your-project>` (installed with the
+> toolkit; plain ADC, no gcloud needed) audits a project against everything in this section, shows
+> what's missing, asks for confirmation, applies it, and re-audits. It is **additive only** and
+> idempotent — safe to run, and re-run, against existing non-empty projects. `--check` audits without
+> changing anything (exit 0 iff ready); `--yes` skips the prompt (CI/agents); `--verify` proves the
+> end state with a real throwaway deploy + one Haiku turn (a few cents, ~10 min — it also triggers
+> creation of the runtime service agent, whose grants otherwise stay pending until the first deploy),
+> and refuses to spend on the deploy while any check it depends on is still failing (the model check
+> runs as a 1-token live probe in the first report, so a missing Model Garden enablement surfaces
+> before any money is spent).
+> Two things stay manual: enabling Claude in Vertex Model Garden (the tool live-probes each model —
+> by default Haiku 4.5, Sonnet 5 and Opus 5 as required plus Fable 5 as optional/non-blocking; tune
+> with `--model`/`--optional-model` — and links the exact console page for a missing one) and, on a
+> project with APIs fully disabled, the Service Usage API bootstrap. The tables below remain the
+> reference for what it grants and why.
+
 **1. The operator service account** — you (a human or CI) *impersonate* it to run the control plane:
 `gemini.deploy`, `get_engine`, `list_engines`, submitting runs, and tailing Cloud Logging. Roles on the
 project (tighten to your policy):
@@ -1182,6 +1198,13 @@ project (tighten to your policy):
 | `roles/iam.serviceAccountUser` **on the runtime service account** | deploy with `service_account=`: the deploy acts as that account ([Google's troubleshooting page](https://docs.cloud.google.com/gemini-enterprise-agent-platform/troubleshooting/agent-deployment): "You do not have permission to act as service_account" means this role is missing) |
 
 The principal that impersonates it needs `roles/iam.serviceAccountTokenCreator` **on this SA**.
+Impersonation is the pattern for callers that already have a Google identity (humans, GCP-hosted
+services, CI with workload identity). A production app running *outside* GCP instead authenticates
+**as** the operator SA directly with a service-account **key** stored in the app's secret store
+(`gcloud iam service-accounts keys create key.json --iam-account=<operator SA>`, then point
+`GOOGLE_APPLICATION_CREDENTIALS` at it) — no `tokenCreator` involved. A key is a long-lived
+credential, so prefer impersonation or workload identity federation where they're available, and
+rotate keys you do hand out.
 
 **2. The runtime identity** — the identity the engine's workers run as, and the one the agent's shell
 can use (see [The runtime identity is reachable by the agent](#the-runtime-identity-is-reachable-by-the-agent)).

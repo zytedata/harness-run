@@ -58,6 +58,11 @@ dev = [
     "pytest-xdist",
 ]
 
+[project.scripts]
+# One-command GCP project setup for the gemini backend (audit -> confirm -> apply);
+# see the README's "GCP setup & required permissions" section.
+ratk-gcp-setup = "remote_agent_toolkit.runtime.gemini.project_setup:main"
+
 [tool.hatch.build.targets.wheel]
 packages = ["remote_agent_toolkit"]
 

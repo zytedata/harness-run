@@ -1051,6 +1051,10 @@ kill:
 - **A visible warning** — the first time memory crosses 85% of the limit, a `memory pressure: …` status
   event lands on the normal event stream, so a watcher sees trouble before the platform kills the worker at
   the limit (the fix: deploy with higher `resource_limits`, see above).
+
+The idle baseline of a worker is ~450 MiB: the toolkit deploys every engine with `NUM_WORKERS=1`, because
+the platform's serving harness otherwise starts `cpu_count + 1` worker processes (~300 MiB each, ~3 GiB of a
+4Gi container before the agent runs). What the samples show above that is your agent's own work.
 - **Peak in every result** — the terminal result's `raw` carries `memory_peak_bytes` /
   `memory_limit_bytes` / `cpu_usec`, so completed turns report their high-water mark for free.
 

@@ -257,6 +257,14 @@ def build_env(
         "AGENT_JOBS_ROOT": "/tmp/agent-jobs",
         # Model the embedded Claude Code harness uses (resolved at runtime by the agent).
         "CLAUDE_AGENT_MODEL": model or spec.model,
+        # The platform's serving harness (uvicorn, in the container base image) reads this
+        # and defaults to ``os.cpu_count() + 1`` worker PROCESSES — 10-11 on the nodes seen
+        # live — each importing the whole stack privately (spawn start method, no
+        # copy-on-write): ~300 MiB apiece, ~3 GiB of a 4Gi worker before the agent ran
+        # (measured 2026-09-03). A query job serves exactly one request per container, so
+        # the extra workers only cost memory; one worker brings the baseline to ~450 MiB
+        # and startup CPU from minutes to seconds. The harness handles ``"1"`` explicitly.
+        "NUM_WORKERS": "1",
     }
 
     # Produced files are uploaded under the output bucket after each run.

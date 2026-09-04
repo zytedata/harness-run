@@ -11,6 +11,10 @@ Runs the four transitions against real models, in one session per harness:
 4. **resume** — a plain ``send()`` afterwards must continue from that checkpoint (the
    model sees the file).
 
+It also prints a latency table: from the ``send()`` / ``interrupt()`` call to the harness
+reacting (``interrupt_requested``), to the ``user`` ack (the model has the message) and to
+the ``result`` (end to end, model time included). The 2026-09-04 numbers are in TESTING.md.
+
 COSTS REAL MONEY (a few cents: Haiku + a small Codex turn) and needs ``ANTHROPIC_API_KEY``
 and ``OPENAI_API_KEY``. Run it by hand when touching the harness run loops or
 ``control.py``; the offline suite covers the same transitions against fakes. Run from an
@@ -51,6 +55,14 @@ class Check:
     def __init__(self, harness: str) -> None:
         self.harness = harness
         self.failures: list[str] = []
+        self.latency: dict[str, float] = {}  # "<step> <from> -> <to>" -> seconds
+
+    def lat(self, step: str, clock: dict, to: str, start: str = "acted") -> None:
+        """Record ``clock[to] - clock[start]`` under a readable name, when both marks exist."""
+        if start in clock and to in clock:
+            self.latency[f"{step}: send -> {to}" if start == "acted" else f"{step}: {start} -> {to}"] = (
+                clock[to] - clock[start]
+            )
 
     def expect(self, cond: bool, what: str) -> None:
         tag = "PASS" if cond else "FAIL"
@@ -59,19 +71,32 @@ class Check:
             self.failures.append(what)
 
 
-async def _drive(run, *, on_tool_use=None, label: str, harness: str):
-    """Consume the run; call ``on_tool_use`` once, ~1.5 s after the first tool starts."""
+async def _drive(run, *, on_tool_use=None, label: str, harness: str, clock: dict | None = None):
+    """Consume the run; call ``on_tool_use`` once, ~1.5 s after the first tool starts.
+
+    ``clock`` (optional) collects wall-clock marks: ``clock["acted"]`` right before
+    ``on_tool_use`` runs, and ``clock[<kind or event tag>]`` the first time that event kind
+    (``user``, ``result``) or status tag (``interrupt_requested``) is seen. The latency table
+    at the end is these marks against ``acted``.
+    """
     events = []
     acted = False
     t0 = time.monotonic()
     async for ev in run:
+        now = time.monotonic()
         events.append(ev)
         tag = (ev.raw or {}).get("event") or (ev.raw or {}).get("subtype") or ""
-        print(f"[{harness} {label} {time.monotonic() - t0:6.1f}s] {ev.kind:11} {tag:20} "
+        if clock is not None:
+            clock.setdefault(ev.kind, now)
+            if tag:
+                clock.setdefault(tag, now)
+        print(f"[{harness} {label} {now - t0:6.1f}s] {ev.kind:11} {tag:20} "
               f"{' '.join(ev.summary.split())[:90]}", flush=True)
         if on_tool_use is not None and not acted and ev.kind == "tool_use":
             acted = True
             await asyncio.sleep(1.5)
+            if clock is not None:
+                clock["acted"] = time.monotonic()
             await on_tool_use()
     return events
 
@@ -92,7 +117,10 @@ async def probe(harness: str) -> Check:
         same = session.send(STEER_MSG, message_id="steer-1")
         check.expect(same is run, "send() on the running session returned the same Run")
 
-    events = await _drive(run, on_tool_use=steer, label="steer", harness=harness)
+    clock: dict = {}
+    events = await _drive(run, on_tool_use=steer, label="steer", harness=harness, clock=clock)
+    check.lat("steer", clock, "user")
+    check.lat("steer", clock, "result")
     users = [e for e in events if e.kind == "user"]
     results = [e for e in events if e.kind == "result"]
     check.expect(len(users) == 1 and users[0].raw["message_id"] == "steer-1",
@@ -109,7 +137,12 @@ async def probe(harness: str) -> Check:
         same = session.send(INTERRUPT_MSG, interrupt=True, message_id="int-1")
         check.expect(same is run, "send(interrupt=True) returned the same Run")
 
-    events = await _drive(run, on_tool_use=interrupt_continue, label="interrupt", harness=harness)
+    clock = {}
+    events = await _drive(run, on_tool_use=interrupt_continue, label="interrupt", harness=harness,
+                          clock=clock)
+    check.lat("interrupt+continue", clock, "interrupt_requested")
+    check.lat("interrupt+continue", clock, "user")
+    check.lat("interrupt+continue", clock, "result")
     tags = [(e.raw or {}).get("event") for e in events]
     check.expect("interrupt_requested" in tags, "the harness reported the interrupt request")
     check.expect(any(e.kind == "user" and e.raw.get("interrupt") for e in events),
@@ -133,8 +166,11 @@ async def probe(harness: str) -> Check:
             await asyncio.sleep(0.5)
         stopped_at["t"] = time.monotonic()
         await session.interrupt()
+        stopped_at["returned"] = time.monotonic()
 
     events = await _drive(run, on_tool_use=stop, label="stop", harness=harness)
+    if "returned" in stopped_at:
+        check.latency["stop: interrupt() -> returned"] = stopped_at["returned"] - stopped_at["t"]
     check.expect(run.done and session.stop_reason == StopReason.INTERRUPTED,
                  f"interrupt() ended the turn as INTERRUPTED (got {session.stop_reason})")
     check.expect(run.result is not None and not run.result.is_error, "the interrupted result is not an error")
@@ -160,6 +196,11 @@ async def main() -> int:
     print()
     for c in checks:
         print(f"{c.harness}: {'PASS' if not c.failures else 'FAIL'} ({len(c.failures)} failed checks)")
+    print()
+    print("Latency (seconds, local runtime; 'send' = the moment send()/interrupt() was called):")
+    for c in checks:
+        for name, secs in c.latency.items():
+            print(f"  [{c.harness}] {name:45} {secs:6.1f}")
     for harness, what in failed:
         print(f"  FAIL [{harness}] {what}")
     return 1 if failed else 0

@@ -103,7 +103,9 @@ tag `vX.Y.Z`, push the commit and the tag.
   the inbox existed raises the new typed `ControlUnavailable` (exported at package
   level) instead of writing into the void. `local` implements the same semantics over an
   in-process queue, and `make live-interactive` checks the four transitions against real
-  models on both harnesses.
+  models on both harnesses and prints how long a steer, an interrupt and a stop take
+  (TESTING.md has the numbers). `make chat` (`dev/chat.py`) is a local chat page for
+  trying turn control by hand; a dev tool like the live probes.
 - Both harnesses can run `openrouter/*` models with an `OPENROUTER_API_KEY`
   per-invocation secret. Kimi K3, GLM-5.3, and DeepSeek v4 Flash/Pro have known
   context sizes. Each OpenRouter response reports its selected upstream and exact

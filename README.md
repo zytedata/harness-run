@@ -845,8 +845,9 @@ What the shell still reaches with the runtime identity's token: Vertex model cal
 run's `max_budget_usd`), Cloud Logging writes, and the run's own persisted job input. Background jobs get
 a fresh sandbox per job, so nothing a run leaves behind survives into the next one.
 
-**Migrating an existing project.** Create the runtime service account and its bindings (the gcloud sketch
-in the setup section), redeploy every engine (`gemini.list_engines`) from this revision with
+**Migrating an existing project.** Create the runtime service account and its bindings (`ratk-gcp-setup
+--project <id>`, or the gcloud sketch in the setup section), redeploy every engine (`gemini.list_engines`)
+from this revision with
 `service_account=` set, and upgrade clients at the same time. Mixed versions keep working on the runtime
 identity, which is the unfixed state, never a broken one. Once no engine still runs as the default service
 agent, remove its `objectAdmin` on the output bucket and `roles/aiplatform.user` on the project; an engine
@@ -1173,11 +1174,14 @@ in their own project; the concrete values are the shared `my-project` setup we u
 > what's missing, asks for confirmation, applies it, and re-audits. It is **additive only** and
 > idempotent — safe to run, and re-run, against existing non-empty projects. `--check` audits without
 > changing anything (exit 0 iff ready); `--yes` skips the prompt (CI/agents); `--verify` proves the
-> end state with a real throwaway deploy + one Haiku turn (a few cents, ~10 min — it also triggers
-> creation of the runtime service agent, whose grants otherwise stay pending until the first deploy),
-> and refuses to spend on the deploy while any check it depends on is still failing (the model check
-> runs as a 1-token live probe in the first report, so a missing Model Garden enablement surfaces
-> before any money is spent).
+> end state with a real throwaway deploy, running as the runtime service account, + one Haiku turn (a
+> few cents, ~10 min), and refuses to spend on the deploy while any check it depends on is still
+> failing (the model check runs as a 1-token live probe in the first report, so a missing Model Garden
+> enablement surfaces before any money is spent). It creates the runtime service account
+> (`ratk-runtime@<project>.iam.gserviceaccount.com`, with the `ratkRuntimePredict` custom role and the
+> conditional bucket bindings below); pass its email as `service_account=` to every `gemini.deploy`.
+> It grants the default Agent Runtime service agent nothing, and reports grants that agent still holds
+> from the earlier identity model as a note to remove by hand (the tool never removes anything).
 > Two things stay manual: enabling Claude in Vertex Model Garden (the tool live-probes each model —
 > by default Haiku 4.5, Sonnet 5 and Opus 5 as required plus Fable 5 as optional/non-blocking; tune
 > with `--model`/`--optional-model` — and links the exact console page for a missing one) and, on a
@@ -1208,7 +1212,8 @@ rotate keys you do hand out.
 
 **2. The runtime identity** — the identity the engine's workers run as, and the one the agent's shell
 can use (see [The runtime identity is reachable by the agent](#the-runtime-identity-is-reachable-by-the-agent)).
-Create a service account for it and deploy with `gemini.deploy(..., service_account="<its email>")`.
+`ratk-gcp-setup` creates it as `ratk-runtime@<project>.iam.gserviceaccount.com` (or create one yourself)
+and every `gemini.deploy` names it as `service_account="<its email>"`.
 Without `service_account=` the engine runs as the Google-managed **Agent Runtime service agent**,
 `service-<PROJECT_NUMBER>@gcp-sa-aiplatform-re.iam.gserviceaccount.com`, whose managed project role
 reads every bucket in the project. **All runtime resource access authorizes against this identity, not

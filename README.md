@@ -1332,11 +1332,12 @@ storage channels during its idle wait and reports ready — `engine.wait_until_w
 A run then takes one idle worker off the pool's roster (client-owned GCS objects under `pool/`, oldest
 worker first, claimed atomically so several client processes can share one pool) and publishes the turn
 addressed to that worker alone, so the turn goes nearly straight to the model. The first **observed** event
-landed **~4 s** after dispatch with the previous shared-subscription design (3.8 s to first event, 10.9 s to
-the result of a one-tool Haiku turn, vs ~2.5 min cold) — the worker's pickup plus one ~0.5 s mirror flush
-and one tail poll; per-worker dispatch adds a roster read and claim (two GCS calls) before the publish, to
-be re-measured with `dev/live_warm_latency_probe.py`. Events then stream **~1–2 s** behind the agent for the
-rest of the turn. (Before the GCS event stream this number was ~10–20 s, dominated by Cloud Logging's
+lands **~4 s** after dispatch (measured 2026-09-04 with per-worker dispatch: 4.2 s to first event, 14.5 s to
+the result of a one-tool Haiku turn, vs ~2.5 min cold; 3.8 s / 10.9 s with the earlier shared-subscription
+design) — the roster claim (one GCS listing and one delete), the publish, the worker's pickup, one ~0.5 s
+mirror flush and one tail poll. Refilling the pool and dropping the worker's channel are Pub/Sub admin calls
+that take seconds each, so they run in the background and never sit in front of the turn's events. Events
+then stream **~1–2 s** behind the agent for the rest of the turn. (Before the GCS event stream this number was ~10–20 s, dominated by Cloud Logging's
 ingestion lag.) On dispatch the pool refills, so the next turn is warm too. If the addressed worker never
 starts the turn (it died at boot, or the platform killed it), the client re-dispatches to another worker
 once the worker's boot window plus a grace has passed, up to twice, then fails the run with an explained

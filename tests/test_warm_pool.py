@@ -21,9 +21,22 @@ async def _await(run):
 
 
 def test_pool_helpers(monkeypatch):
+    # Legacy (no generation): the fixed names shared by every revision — kept only as the
+    # get_engine discovery fallback.
     topic, sub = pool.pool_paths("proj", "Spider-Builder")
     assert topic == "projects/proj/topics/ratk-spider-builder-dispatch"
     assert sub == "projects/proj/subscriptions/ratk-spider-builder-dispatch-sub"
+
+    # Generation-scoped (every deploy since #38): a fresh pair per deploy, so workers of a
+    # previous revision can never claim a turn dispatched after a redeploy.
+    gtopic, gsub = pool.pool_paths("proj", "Spider-Builder", generation="abc12345")
+    assert gtopic == "projects/proj/topics/ratk-spider-builder-abc12345-dispatch"
+    assert gsub == "projects/proj/subscriptions/ratk-spider-builder-abc12345-dispatch-sub"
+    for pair_sub, pair_topic in ((sub, topic), (gsub, gtopic)):
+        assert pool.topic_for_subscription(pair_sub) == pair_topic  # env value → full pair
+
+    gen1, gen2 = pool.new_generation(), pool.new_generation()
+    assert gen1 != gen2 and gen1.isalnum()
 
     assert pool.dispatch_payload("s1", "go", True) == {
         "session_id": "s1", "message": "go", "resume": True,
@@ -46,9 +59,12 @@ def test_pool_helpers(monkeypatch):
     assert pool.resolve_max_wait_s() == 7200.0
 
     # Readiness pool-id is consistent: derived from the name (control plane) == from the
-    # subscription (worker side), so both tail/emit the same Cloud Logging key.
+    # subscription (worker side), so both tail/emit the same Cloud Logging key. With a
+    # generation it is scoped to the deploy, so a fresh pool never counts a previous
+    # deploy's readiness markers as its own.
     assert pool.pool_log_id("Spider-Builder") == "ratk-spider-builder-pool"
     assert pool.pool_log_id_from_subscription(sub) == pool.pool_log_id("Spider-Builder")
+    assert pool.pool_log_id_from_subscription(gsub) == "ratk-spider-builder-abc12345-pool"
 
 
 def test_deploy_rejects_pool_max_wait_without_pool():
@@ -279,3 +295,294 @@ def test_pool_worker_idle_expires_at_the_deadline(monkeypatch):
     raws = [ev.custom_metadata["raw"] for ev in events]
     assert raws[-1]["event"] == "pool_idle_expired"
     assert raws[:-1] and all(r["event"] == "pool_waiting" for r in raws[:-1])
+
+
+def _engine_resource(env: dict[str, str], name: str = "", traffic_targets=None):
+    """A minimal fake of an engine/revision api_resource carrying a deployment env."""
+    from types import SimpleNamespace as NS
+
+    traffic_config = None
+    if traffic_targets is not None:
+        traffic_config = NS(traffic_split_manual=NS(targets=[
+            NS(runtime_revision_name=rev_name, percent=percent)
+            for rev_name, percent in traffic_targets
+        ]))
+    return NS(
+        name=name,
+        traffic_config=traffic_config,
+        spec=NS(deployment_spec=NS(env=[NS(name=k, value=v) for k, v in env.items()])),
+    )
+
+
+class _FakeClient:
+    """agent_engines.get / runtimes.revisions.list, over fake api_resources."""
+
+    def __init__(self, engine_api, revision_apis=()):
+        class Wrapped:
+            def __init__(self, api):
+                self.api_resource = api
+
+        class Revisions:
+            def list(self, name):
+                return [Wrapped(api) for api in revision_apis]
+
+        class Runtimes:
+            revisions = Revisions()
+
+        class AgentEngines:
+            runtimes = Runtimes()
+
+            def get(self, name):
+                return Wrapped(engine_api)
+
+        self.agent_engines = AgentEngines()
+
+
+def test_get_engine_discovers_generation_scoped_pair_from_env():
+    """The #38 cutover makes the dispatch pair per-deploy, so get_engine can no longer
+    derive it from the engine name: it must read AGENT_POOL_SUBSCRIPTION back from the
+    deployed env (the same value the workers themselves read at runtime)."""
+    sub = "projects/proj/subscriptions/ratk-w-abc12345-dispatch-sub"
+    client = _FakeClient(_engine_resource({"AGENT_POOL_SUBSCRIPTION": sub}))
+
+    topic, found = backend._discover_pool_paths(client, "r/reasoningEngines/1", "proj", "w")
+    assert found == sub
+    assert topic == "projects/proj/topics/ratk-w-abc12345-dispatch"
+
+
+def test_get_engine_pool_discovery_prefers_the_pinned_revision():
+    """Workers always cold-start on the SERVING revision, so with traffic pinned the pair
+    they pull is the pinned revision's — not the latest deploy's."""
+    resource = "r/reasoningEngines/1"
+    old_sub = "projects/proj/subscriptions/ratk-w-old00000-dispatch-sub"
+    new_sub = "projects/proj/subscriptions/ratk-w-new11111-dispatch-sub"
+    pinned_rev = f"{resource}/runtimeRevisions/5"
+    client = _FakeClient(
+        _engine_resource({"AGENT_POOL_SUBSCRIPTION": new_sub},
+                         traffic_targets=[(pinned_rev, 100)]),
+        revision_apis=[
+            _engine_resource({"AGENT_POOL_SUBSCRIPTION": old_sub}, name=pinned_rev),
+            _engine_resource({"AGENT_POOL_SUBSCRIPTION": new_sub},
+                             name=f"{resource}/runtimeRevisions/6"),
+        ],
+    )
+
+    topic, found = backend._discover_pool_paths(client, resource, "proj", "w")
+    assert found == old_sub
+    assert topic == "projects/proj/topics/ratk-w-old00000-dispatch"
+
+
+def test_get_engine_pool_discovery_falls_back_to_legacy_names():
+    """No AGENT_POOL_SUBSCRIPTION in the deployed env (an engine deployed without
+    warm_pool) → the pre-#38 fixed names, so old addressing keeps working."""
+    client = _FakeClient(_engine_resource({}))
+    assert backend._discover_pool_paths(client, "r/reasoningEngines/1", "proj", "w") == (
+        "projects/proj/topics/ratk-w-dispatch",
+        "projects/proj/subscriptions/ratk-w-dispatch-sub",
+    )
+
+    import pytest
+
+    with pytest.raises(ValueError, match="dispatch subscription"):
+        backend._discover_pool_paths(client, "r/reasoningEngines/1", None, "w")
+
+
+def test_wait_until_warm_tails_the_generation_scoped_pool_id(monkeypatch):
+    """The readiness marker key must be the one THIS pool's workers emit under — derived
+    from the generation-scoped subscription, not the bare engine name."""
+    engine = backend.GeminiEngine(
+        resource="r/reasoningEngines/1", spec=AgentSpec(name="w", model="m"),
+        project=None, location=None, output_bucket="gs://out", warm=True,
+        topic="projects/p/topics/ratk-w-abc12345-dispatch",
+        subscription="projects/p/subscriptions/ratk-w-abc12345-dispatch-sub",
+    )
+    tailed = []
+
+    async def fake_tail(uri, sid, **kw):
+        tailed.append(sid)
+        yield AgentEvent(kind="status", summary="pool worker ready")
+
+    monkeypatch.setattr(backend, "tail_stream", fake_tail)
+    assert engine.wait_until_warm(timeout=5) is True
+    assert tailed == ["ratk-w-abc12345-pool"]
+
+
+def _deploy_with_fakes(monkeypatch, tmp_path, engine_api, revision_apis):
+    """Run the real backend.deploy() over an in-memory control plane (PR #39 review repro).
+
+    Everything expensive/external is faked at its seam: the agentplatform client, the
+    pub/sub ensure, packaging, the AdkApp build, the lifecycle backstop, and fill_pool.
+    Returns (engine_handle, ensured_pairs, retired_pairs).
+    """
+    import sys
+    import types as _types
+    from types import SimpleNamespace as NS
+
+    from remote_agent_toolkit.ports import dispatch as dispatch_mod
+    from remote_agent_toolkit.runtime.gemini import _deploy, handoff
+
+    class Wrapped:
+        def __init__(self, api):
+            self.api_resource = api
+
+    class Revisions:
+        def list(self, name):
+            return [Wrapped(api) for api in revision_apis]
+
+    class Runtimes:
+        revisions = Revisions()
+
+    class AgentEngines:
+        runtimes = Runtimes()
+
+        def list(self):
+            return [Wrapped(engine_api)]
+
+        def get(self, name):
+            return Wrapped(engine_api)
+
+        def update(self, name, agent, config):
+            return Wrapped(engine_api)
+
+        def create(self, agent, config):  # pragma: no cover - the update path must win
+            raise AssertionError("deploy() must update the existing engine, not create one")
+
+    client = NS(agent_engines=AgentEngines())
+    mod = _types.ModuleType("agentplatform")
+    mod.Client = lambda **kw: client
+    mod.types = NS(AgentEngineConfig=lambda **kw: NS(kw=kw))
+    monkeypatch.setitem(sys.modules, "agentplatform", mod)
+
+    monkeypatch.setattr(_deploy, "verify_deploy_env", lambda: None)
+    monkeypatch.setattr(_deploy, "stage_agent", lambda spec: (str(tmp_path), []))
+    monkeypatch.setattr(_deploy, "build_engine_config", lambda spec, **kw: {})
+    monkeypatch.setattr(backend, "build_adk_app", lambda spec, **kw: object())
+    monkeypatch.setattr(handoff, "ensure_handoff_lifecycle", lambda bucket: True)
+    monkeypatch.chdir(tmp_path)
+
+    ensured = []
+
+    class FakeDispatch:
+        def __init__(self, **kw):
+            self.kw = kw
+
+        def ensure(self):
+            ensured.append((self.kw["topic"], self.kw["subscription"]))
+
+    monkeypatch.setattr(dispatch_mod, "PubSubDispatch", FakeDispatch)
+    monkeypatch.setattr(backend.GeminiEngine, "fill_pool", lambda self, n: None)
+    retired = []
+    monkeypatch.setattr(
+        backend, "_delete_pool_pair", lambda topic, sub, creds: retired.append((topic, sub))
+    )
+
+    geng = backend.deploy(AgentSpec(name="w", model="m"), "proj", "loc", warm_pool=True)
+    return geng, ensured, retired
+
+
+def test_deploy_under_pin_dispatches_to_the_pinned_revisions_pair(monkeypatch, tmp_path):
+    """PR #39 review: pin v1, then deploy twice. The second pinned deploy used to resolve
+    the "old" pair from the ENGINE-level env — the latest revision's (v2's), a queue no
+    worker ever pulled because v2 never served — so its turns sat unclaimed forever. The
+    old pair must come from the PINNED revision's env (what live workers actually pull)."""
+    import warnings
+
+    resource = "projects/p/locations/l/reasoningEngines/9"
+    q1 = "projects/proj/subscriptions/ratk-w-gen00001-dispatch-sub"
+    q2 = "projects/proj/subscriptions/ratk-w-gen00002-dispatch-sub"
+    engine_api = _engine_resource(
+        {"AGENT_POOL_SUBSCRIPTION": q2},  # engine env == latest revision's (v2, never served)
+        name=resource,
+        traffic_targets=[(f"{resource}/runtimeRevisions/1", 100)],
+    )
+    engine_api.display_name = "w"
+    revisions = [
+        _engine_resource({"AGENT_POOL_SUBSCRIPTION": q1}, name=f"{resource}/runtimeRevisions/1"),
+        _engine_resource({"AGENT_POOL_SUBSCRIPTION": q2}, name=f"{resource}/runtimeRevisions/2"),
+    ]
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")  # the deploy warns that the pin keeps v1 serving
+        geng, ensured, retired = _deploy_with_fakes(
+            monkeypatch, tmp_path, engine_api, revisions
+        )
+
+    assert geng._subscription == q1  # the pinned revision's pair, NOT v2's
+    assert geng._topic == pool.topic_for_subscription(q1)
+    assert retired == []  # nothing retired while the pin holds
+    # The fresh pair was still provisioned (it is baked into the new revision's env and
+    # becomes live if that revision is promoted) — kept, not deleted.
+    assert len(ensured) == 1 and ensured[0][1] not in (q1, q2)
+
+
+def test_deploy_unpinned_retires_the_previous_revisions_pair(monkeypatch, tmp_path):
+    """No pin: the fresh pair goes live and the previous revision's pair is retired once
+    the pool is filled (the #38 cutover), resolved from the same serving-revision read."""
+    import warnings
+
+    resource = "projects/p/locations/l/reasoningEngines/9"
+    q2 = "projects/proj/subscriptions/ratk-w-gen00002-dispatch-sub"
+    engine_api = _engine_resource({"AGENT_POOL_SUBSCRIPTION": q2}, name=resource)
+    engine_api.display_name = "w"
+    revisions = [
+        _engine_resource({"AGENT_POOL_SUBSCRIPTION": q2}, name=f"{resource}/runtimeRevisions/2"),
+    ]
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        geng, ensured, retired = _deploy_with_fakes(
+            monkeypatch, tmp_path, engine_api, revisions
+        )
+
+    assert ensured == [(geng._topic, geng._subscription)]  # fresh pair is live
+    assert geng._subscription != q2
+    assert retired == [(pool.topic_for_subscription(q2), q2)]  # old pair retired
+
+
+def test_delete_pool_resources_sweeps_every_revisions_pair(monkeypatch):
+    """PR #39 review: deploys made while traffic was pinned leave their fresh pair idle,
+    so teardown must sweep the pairs of ALL revisions, not just the handle's (dedup'd)."""
+
+    resource = "projects/p/locations/l/reasoningEngines/9"
+    q1 = "projects/proj/subscriptions/ratk-w-gen00001-dispatch-sub"
+    q2 = "projects/proj/subscriptions/ratk-w-gen00002-dispatch-sub"
+    revisions = [
+        _engine_resource({"AGENT_POOL_SUBSCRIPTION": q1}, name=f"{resource}/runtimeRevisions/1"),
+        _engine_resource({"AGENT_POOL_SUBSCRIPTION": q2}, name=f"{resource}/runtimeRevisions/2"),
+        _engine_resource({}, name=f"{resource}/runtimeRevisions/3"),  # deployed without a pool
+    ]
+    client = _FakeClient(_engine_resource({}), revision_apis=revisions)
+    client.agent_engines.delete = lambda name, force: None
+
+    engine = backend.GeminiEngine(
+        resource=resource, spec=AgentSpec(name="w", model="m"), project="p", location="l",
+        warm=True, topic=pool.topic_for_subscription(q2), subscription=q2,  # handle == rev 2
+    )
+    monkeypatch.setattr(engine, "_client", lambda: client)
+    deleted = []
+    monkeypatch.setattr(
+        backend, "_delete_pool_pair", lambda topic, sub, creds: deleted.append((topic, sub))
+    )
+
+    engine.delete(delete_pool_resources=True)
+    assert sorted(deleted) == sorted([
+        (pool.topic_for_subscription(q1), q1),
+        (pool.topic_for_subscription(q2), q2),  # handle's own pair, deduplicated with rev 2's
+    ])
+
+
+def test_get_engine_pool_discovery_raises_on_read_errors():
+    """PR #39 review: a FAILED env read must raise (retryable), not silently fall back to
+    the legacy fixed names — those were never created for a generation-scoped engine, so
+    the fallback handle only failed at its first publish, with an untraceable NotFound."""
+    from types import SimpleNamespace as NS
+
+    import pytest
+
+    class AgentEngines:
+        def get(self, name):
+            raise TimeoutError("control plane unreachable")
+
+    client = NS(agent_engines=AgentEngines())
+    with pytest.raises(TimeoutError):
+        backend._discover_pool_paths(client, "r/reasoningEngines/1", "proj", "w")

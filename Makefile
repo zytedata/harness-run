@@ -6,7 +6,7 @@ VENV ?= .venv
 IMAGE ?= ratk-dev
 PACKAGES ?=
 
-.PHONY: test test-serial lint live-smoke live-revisions live-openrouter live-openrouter-remote live-attribution live-usage parity-build parity-shell parity-check
+.PHONY: test test-serial lint live-smoke live-revisions live-pool-cutover live-openrouter live-openrouter-remote live-attribution live-usage parity-build parity-shell parity-check
 
 # Parallel by default: the suite is dominated by a few deliberate poll-cadence tests, so
 # -n auto takes it from ~55s to ~40s and keeps scaling as tests are added. Use test-serial
@@ -29,6 +29,11 @@ live-smoke:
 # Two SEQUENTIAL builds — ~10 min; run it when you touch deploy/versioning.
 live-revisions:
 	$(VENV)/bin/python dev/live_revisions.py
+
+# Live check of the warm-pool redeploy cutover (issue #38): two SEQUENTIAL builds + two
+# pool fills — ~20 min, costs real money; run it when you touch the pool/dispatch plumbing.
+live-pool-cutover:
+	$(VENV)/bin/python dev/live_pool_cutover_probe.py
 
 # Live check of the OpenRouter models on both harnesses (local runtime, no cloud).
 # COSTS REAL MONEY and needs OPENROUTER_API_KEY — run it by hand, sparingly, never in CI.

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import os
 import re
+import uuid
 from typing import Any
 
 # A worker submitted with this sentinel prompt waits for a real assignment via dispatch.
@@ -46,13 +47,44 @@ def _safe(name: str) -> str:
     return slug or "agent"
 
 
-def pool_paths(project: str, name: str) -> tuple[str, str]:
-    """``(topic, subscription)`` resource paths for an engine's warm-pool dispatch."""
-    base = f"ratk-{_safe(name)}-dispatch"
+def new_generation() -> str:
+    """A fresh pool *generation* token, minted once per warm-pool deploy.
+
+    Scoping the dispatch topic/subscription names by generation is what cuts a redeploy
+    over atomically: workers cold-started under the previous revision keep pulling the
+    OLD generation's subscription (which the deploy then retires), so they can never
+    claim a turn published for the new revision (issue #38).
+    """
+    return uuid.uuid4().hex[:8]
+
+
+def pool_paths(project: str, name: str, generation: str | None = None) -> tuple[str, str]:
+    """``(topic, subscription)`` resource paths for an engine's warm-pool dispatch.
+
+    With ``generation`` (every deploy since the #38 fix) the pair is scoped to that
+    deploy: ``ratk-<slug>-<generation>-dispatch[-sub]``. Without it, the legacy fixed
+    name shared by all revisions — kept only as the discovery fallback for engines
+    deployed before generations existed.
+    """
+    slug = _safe(name) if generation is None else f"{_safe(name)}-{generation}"
+    base = f"ratk-{slug}-dispatch"
     return (
         f"projects/{project}/topics/{base}",
         f"projects/{project}/subscriptions/{base}-sub",
     )
+
+
+def topic_for_subscription(subscription: str) -> str:
+    """The dispatch topic path paired with ``subscription`` (inverse of :func:`pool_paths`).
+
+    Lets the control plane reconstruct the full pair from ``AGENT_POOL_SUBSCRIPTION``
+    alone — the one value baked into a deployed engine's env.
+    """
+    project = subscription.split("/")[1]
+    base = subscription.rsplit("/", 1)[-1]
+    if base.endswith("-sub"):
+        base = base[: -len("-sub")]
+    return f"projects/{project}/topics/{base}"
 
 
 def dispatch_payload(

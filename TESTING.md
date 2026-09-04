@@ -121,10 +121,11 @@ test), so it costs about the same wall-clock as the smoke test's parallel pair.
 [`dev/live_pool_cutover_probe.py`](dev/live_pool_cutover_probe.py) covers the **warm-pool
 redeploy cutover** (issue #38). It deploys one throwaway warm engine (`ratk-cutover-<you>`)
 twice — each deploy's system prompt carries a distinct revision marker — and asserts that
-the dispatch subscription is generation-scoped and changes across deploys, that the old
-pair is deleted and the old idle worker **exits within minutes** (instead of claiming
-post-redeploy turns for up to `pool_max_wait_s`), that `get_engine(warm_pool=True)`
-discovers the new subscription from the deployed env, and that a turn dispatched through
+the dispatch topic is generation-scoped and changes across deploys, that the old generation
+(its topic and per-worker subscriptions) is retired and the old idle worker **exits within
+minutes** (instead of claiming post-redeploy turns for up to `pool_max_wait_s`), that
+`get_engine(warm_pool=True)` discovers the new topic from the deployed env, and that a turn
+dispatched through
 that handle replies with the NEW deploy's marker — the exact regression #38 reported. Run
 it when you touch the pool/dispatch plumbing (`pool.py`, the warm paths in `backend.py`,
 `adk_agent._pool_worker`). ~20 min: two **sequential** builds plus two pool fills.

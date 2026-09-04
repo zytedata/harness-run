@@ -211,9 +211,10 @@ def test_worker_runs_the_merged_spec_and_echoes_it(tmp_path, monkeypatch):
     assert (spec.model, spec.system_prompt, spec.max_budget_usd) == ("m-turn", "SESSION", 1.0)
     assert spec.name == "w"  # deploy-only fields untouched
 
-    # The first surfaced event is the effective-spec echo — the durable ground-truth
-    # record of what actually ran, with the config pointers for provenance.
-    echo = events[0].custom_metadata
+    # After the turn_started marker, the first surfaced event is the effective-spec echo —
+    # the durable ground-truth record of what actually ran, with the config pointers.
+    assert events[0].custom_metadata["raw"]["event"] == "turn_started"
+    echo = events[1].custom_metadata
     assert echo["kind"] == "status" and echo["raw"]["event"] == "effective_spec"
     assert echo["raw"]["spec"]["model"] == "m-turn"
     assert echo["raw"]["session_config_gcs"] == s_uri

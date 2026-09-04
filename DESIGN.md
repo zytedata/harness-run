@@ -296,16 +296,23 @@ These are facts measured during the PoC. The library encodes them so consumers i
   Dispatch→result measured **~5.4 s** with pre-warm. See below.
 
 **Warm pool (the `DispatchTransport` + worker loop)**
-- A job submitted with a `__POOL_WAIT__` sentinel blocks pulling a shared Pub/Sub subscription
-  (competing-consumers = atomic claim). The dispatched message may carry a resume directive and is
-  processed as a normal turn.
+- A job submitted with a `__POOL_WAIT__` sentinel blocks pulling **its own** Pub/Sub subscription: a
+  random, filtered subscription the client created in `fill_pool` and named only in that worker's job
+  input (per-worker dispatch; `runtime/gemini/pool.py`). The control plane claims one idle worker off
+  the pool's roster (client-owned GCS objects under `pool/`, `roster.py`; atomic via a
+  generation-precondition delete) and publishes the turn addressed to that worker alone. The
+  dispatched message may carry a resume directive and is processed as a normal turn. Why per worker:
+  `roles/pubsub.subscriber` is consume-by-name only, so a shell in one worker cannot reach another
+  worker's channel, and a channel only ever carries the one turn its worker was addressed (README,
+  "The runtime identity is reachable by the agent"). Engines deployed before this (a shared
+  `AGENT_POOL_SUBSCRIPTION` in their env) are still driven the old competing-consumers way, with a warning.
 - The worker emits **heartbeats** while idle (the async executor kills silent jobs) and **pre-warms**
-  during the wait (provision skills + establish the GCS channel) so post-assignment setup is ~0.
-- On claim, the control plane refills the pool so a warm worker is ready for the next turn.
+  during the wait (the Logging/GCS channels) so post-assignment setup is small. Its first event on a
+  turn is `turn_started`; the client's pickup watchdog re-dispatches to another worker if it never comes.
+- On dispatch, the control plane refills the pool so a warm worker is ready for the next turn; a turn
+  that finds no idle worker spawns one for itself (cold latency, never a stranded turn).
 - An idle worker **expires** after `AGENT_POOL_MAX_WAIT_S` (deploy-configurable via
-  `pool_max_wait_s`; default a day) and is not replaced — refill is claim-driven only, so a
-  pool that drains to empty stays empty until `fill_pool()` (the post-dispatch refill worker
-  just claims the pending dispatch itself).
+  `pool_max_wait_s`; default a day) and is not replaced — refill is dispatch-driven only.
 
 **Checkpoint / resume**
 - Conversation: the Claude SDK `SessionStore` (append/load) + `resume=session_id`. Our `GcsSessionStore`
@@ -595,7 +602,8 @@ Each is a `typing.Protocol`; concrete adapters ship for prod (GCP) and dev (loca
   artifacts.
 - **`EventSink`** — `emit(event)` (write side, runtime) + `tail(session_id, since)` (live read side) +
   `read(session_id)` (one-shot history read). Adapters: `CloudLoggingSink`, `InMemorySink`.
-- **`DispatchTransport`** — `publish(message)` + `claim(timeout)` (competing-consumers pull). Adapters:
+- **`DispatchTransport`** — `publish(message, attributes)` + `claim(timeout)` (an addressed per-worker
+  pull; plain competing-consumers only for legacy shared-subscription pools). Adapters:
   `PubSubDispatch`, `InMemoryDispatch`.
 - **`SecretResolver`** — `resolve(name) -> value`, a *control-plane* helper for callers who keep secret
   values in env/Secret Manager and need to build the per-invocation `secrets` dict (the runtime itself

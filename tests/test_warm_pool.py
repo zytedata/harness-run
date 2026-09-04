@@ -14,6 +14,7 @@ from remote_agent_toolkit.events import AgentEvent, RunStatus, StopReason
 from remote_agent_toolkit.ports.dispatch import InMemoryDispatch
 from remote_agent_toolkit.ports.eventsink import InMemorySink
 from remote_agent_toolkit.runtime.gemini import adk_agent, backend, pool
+from remote_agent_toolkit.runtime.gemini import roster as roster_mod
 
 
 async def _await(run):
@@ -32,11 +33,37 @@ def test_pool_helpers(monkeypatch):
     gtopic, gsub = pool.pool_paths("proj", "Spider-Builder", generation="abc12345")
     assert gtopic == "projects/proj/topics/ratk-spider-builder-abc12345-dispatch"
     assert gsub == "projects/proj/subscriptions/ratk-spider-builder-abc12345-dispatch-sub"
+    assert pool.pool_topic("proj", "Spider-Builder", generation="abc12345") == gtopic
     for pair_sub, pair_topic in ((sub, topic), (gsub, gtopic)):
-        assert pool.topic_for_subscription(pair_sub) == pair_topic  # env value → full pair
+        assert pool.topic_for_subscription(pair_sub) == pair_topic  # legacy env value → pair
 
     gen1, gen2 = pool.new_generation(), pool.new_generation()
     assert gen1 != gen2 and gen1.isalnum()
+
+    # Per-worker dispatch: one random, unguessable subscription per worker under the
+    # generation's topic, filtered to messages addressed to that worker. The id is the
+    # capability (pubsub.subscriber can consume by name but not list), so it must be long
+    # and fresh every time.
+    wid = pool.new_worker_id()
+    assert len(wid) == 24 and wid != pool.new_worker_id()
+    wsub = pool.worker_subscription(gtopic, wid)
+    assert wsub == f"projects/proj/subscriptions/ratk-spider-builder-abc12345-w-{wid}"
+    assert wsub.startswith(pool.worker_subscription_prefix(gtopic))
+    assert pool.worker_id_from_subscription(wsub) == wid
+    assert pool.worker_id_from_subscription(gsub) is None  # a legacy shared sub has no worker
+    assert pool.worker_filter(wid) == f'attributes.worker = "{wid}"'
+    assert pool.worker_attributes(wid) == {"worker": wid}
+    assert pool.roster_prefix(gtopic) == "pool/ratk-spider-builder-abc12345/idle/"
+
+    # A worker learns its own subscription from its job input; a bare sentinel (an older
+    # client's fill_pool) is still recognised as a pool worker, with no channel.
+    assert pool.parse_pool_wait(pool.pool_wait_prompt(wsub)) == (True, wsub)
+    assert pool.parse_pool_wait(pool.POOL_WAIT_SENTINEL) == (True, None)
+    assert pool.parse_pool_wait("AGENT_SESSION=x\nhello") == (False, None)
+
+    # Pickup deadline: the rest of the boot window plus the grace; grace alone once booted.
+    assert pool.pickup_deadline_s(1000.0, now=1000.0) == pool.WORKER_BOOT_S + pool.PICKUP_GRACE_S
+    assert pool.pickup_deadline_s(0.0, now=10_000.0) == pool.PICKUP_GRACE_S
 
     assert pool.dispatch_payload("s1", "go", True) == {
         "session_id": "s1", "message": "go", "resume": True,
@@ -47,9 +74,6 @@ def test_pool_helpers(monkeypatch):
     assert with_secrets["secrets_gcs"] == "gs://bkt/invocation-secrets/s1-x.json"
     assert "secrets" not in with_secrets
 
-    monkeypatch.delenv("AGENT_POOL_SUBSCRIPTION", raising=False)
-    assert pool.worker_dispatch_from_env() is None  # not a pool worker without the env
-
     # Idle life: the default is a day (an expired worker is never replaced, so a short
     # default silently drained pools over any quiet gap); deploy(pool_max_wait_s=...)
     # overrides it via the env var build_env() bakes into the engine.
@@ -59,12 +83,13 @@ def test_pool_helpers(monkeypatch):
     assert pool.resolve_max_wait_s() == 7200.0
 
     # Readiness pool-id is consistent: derived from the name (control plane) == from the
-    # subscription (worker side), so both tail/emit the same Cloud Logging key. With a
-    # generation it is scoped to the deploy, so a fresh pool never counts a previous
-    # deploy's readiness markers as its own.
+    # topic (worker side, AGENT_POOL_TOPIC) == from a legacy shared subscription, so all
+    # tail/emit the same key. With a generation it is scoped to the deploy, so a fresh
+    # pool never counts a previous deploy's readiness markers as its own.
     assert pool.pool_log_id("Spider-Builder") == "ratk-spider-builder-pool"
-    assert pool.pool_log_id_from_subscription(sub) == pool.pool_log_id("Spider-Builder")
-    assert pool.pool_log_id_from_subscription(gsub) == "ratk-spider-builder-abc12345-pool"
+    assert pool.pool_log_id_from_topic(topic) == pool.pool_log_id("Spider-Builder")
+    assert pool.pool_log_id_from_topic(gtopic) == "ratk-spider-builder-abc12345-pool"
+    assert pool.pool_log_id_from_subscription(gsub) == pool.pool_log_id_from_topic(gtopic)
 
 
 def test_deploy_rejects_pool_max_wait_without_pool():
@@ -90,7 +115,9 @@ def test_deploy_rejects_invalid_pool_max_wait_values():
                            warm_pool=True, pool_max_wait_s=bad)
 
 
-def test_warm_session_dispatches_and_tails(monkeypatch):
+def test_legacy_warm_session_dispatches_to_the_shared_subscription(monkeypatch):
+    """An engine deployed before per-worker dispatch (a shared subscription in its env)
+    is still driven the old way: unaddressed publish, no roster, no pickup watchdog."""
     spec = AgentSpec(name="w", model="m")
     engine = backend.GeminiEngine(
         resource="r/reasoningEngines/1", spec=spec, project=None, location=None,
@@ -122,7 +149,7 @@ def test_warm_session_dispatches_and_tails(monkeypatch):
     assert session.status == RunStatus.IDLE and session.stop_reason == StopReason.END_TURN
 
 
-def test_fill_pool_names_query_job_method(monkeypatch):
+def test_legacy_fill_pool_names_query_job_method(monkeypatch):
     captured = []
 
     class FakeAE:
@@ -137,6 +164,8 @@ def test_fill_pool_names_query_job_method(monkeypatch):
         location="l",
         output_bucket="gs://out",
         warm=True,
+        topic="t",
+        subscription="s",  # legacy shared-subscription pool
     )
     monkeypatch.setattr(engine, "_agent_engines", lambda: FakeAE())
 
@@ -225,14 +254,23 @@ def test_pool_worker_claims_and_runs(monkeypatch):
     spec = AgentSpec(name="w", model="m")
     agent = adk_agent.build_agent(spec)
 
-    # A dispatch pre-seeded with one turn assignment (the worker should claim it), carrying
-    # the staged-secrets pointer that must flow through to the turn (values never ride here).
+    # A turn addressed to THIS worker (per-worker dispatch: the message carries the worker
+    # attribute and lands on its own channel only), carrying the staged-secrets pointer
+    # that must flow through to the turn (values never ride here).
+    subscription = "projects/p/subscriptions/ratk-w-gen00001-w-abc123abc123abc123abc123"
     disp = InMemoryDispatch()
     disp.publish({"session_id": "dispatched-sid", "message": "do it", "resume": False,
                   "secrets_gcs": "gs://bkt/invocation-secrets/dispatched-sid-x.json",
                   "session_config_gcs": "gs://bkt/session-config/dispatched-sid.json",
-                  "turn_config_gcs": "gs://bkt/turn-config/dispatched-sid-x.json"})
-    monkeypatch.setattr(pool, "worker_dispatch_from_env", lambda *a, **k: disp)
+                  "turn_config_gcs": "gs://bkt/turn-config/dispatched-sid-x.json"},
+                 attributes={"worker": "abc123abc123abc123abc123"})
+    opened = []
+
+    def fake_worker_dispatch(sub, credentials=None):
+        opened.append(sub)
+        return disp.for_worker(pool.worker_id_from_subscription(sub))
+
+    monkeypatch.setattr(pool, "worker_dispatch", fake_worker_dispatch)
 
     # _prewarm emits a readiness marker via a real CloudLoggingSink; off-GCP that stalls for
     # ~55s discovering ambient credentials. Fake the sink (same pattern as the warm-path test
@@ -245,29 +283,47 @@ def test_pool_worker_claims_and_runs(monkeypatch):
 
     async def fake_run_turn(spec_, session_id, prompt, resume_sid, secrets_uri=None,
                             invocation_id="", session_config_uri=None, turn_config_uri=None,
-                            gcs_token=None):
+                            gcs_token=None, worker=None):
         seen.update(session_id=session_id, prompt=prompt, resume_sid=resume_sid,
                     secrets_uri=secrets_uri, invocation_id=invocation_id,
                     session_config_uri=session_config_uri, turn_config_uri=turn_config_uri,
-                    gcs_token=gcs_token)
+                    gcs_token=gcs_token, worker=worker)
         yield "turn-event"
 
     monkeypatch.setattr(agent, "_run_turn", fake_run_turn)
 
     async def drive():
-        return [ev async for ev in agent._pool_worker(spec, "e-inv-77")]
+        return [ev async for ev in agent._pool_worker(spec, "e-inv-77", subscription)]
 
     events = asyncio.run(drive())
-    # Claimed immediately (no heartbeat), then handed the dispatched turn (+pointer) to _run_turn.
-    # invocation_id must flow through: the warm path missed it at first and every session
-    # append kept 400ing on live engines while the cold path was fixed.
+    # Pulled its OWN channel (the subscription from the job input), claimed immediately (no
+    # heartbeat), then handed the dispatched turn (+pointer) to _run_turn with its worker
+    # id. invocation_id must flow through: the warm path missed it at first and every
+    # session append kept 400ing on live engines while the cold path was fixed.
+    assert opened == [subscription]
     assert events == ["turn-event"]
     assert seen == {"session_id": "dispatched-sid", "prompt": "do it", "resume_sid": None,
                     "secrets_uri": "gs://bkt/invocation-secrets/dispatched-sid-x.json",
                     "session_config_uri": "gs://bkt/session-config/dispatched-sid.json",
                     "turn_config_uri": "gs://bkt/turn-config/dispatched-sid-x.json",
                     "invocation_id": "e-inv-77",
-                    "gcs_token": None}
+                    "gcs_token": None,
+                    "worker": "abc123abc123abc123abc123"}
+
+
+def test_pool_worker_without_a_subscription_directive_exits_loudly(monkeypatch):
+    """A bare sentinel (a fill_pool from a client older than per-worker dispatch) has no
+    channel to pull: report it and exit instead of idling on nothing for a day."""
+    spec = AgentSpec(name="w", model="m")
+    agent = adk_agent.build_agent(spec)
+
+    async def drive():
+        return [ev async for ev in agent._pool_worker(spec, "e-inv-99", None)]
+
+    events = asyncio.run(drive())
+    raws = [ev.custom_metadata["raw"] for ev in events]
+    assert [r["event"] for r in raws] == ["pool_error"]
+    assert "AGENT_POOL_SUBSCRIPTION" in events[0].content.parts[0].text
 
 
 def test_pool_worker_idle_expires_at_the_deadline(monkeypatch):
@@ -282,14 +338,15 @@ def test_pool_worker_idle_expires_at_the_deadline(monkeypatch):
         def claim(self, timeout):
             return None
 
-    monkeypatch.setattr(pool, "worker_dispatch_from_env", lambda *a, **k: EmptyDispatch())
+    monkeypatch.setattr(pool, "worker_dispatch", lambda *a, **k: EmptyDispatch())
     monkeypatch.setenv("AGENT_POOL_MAX_WAIT_S", "0.05")
     # Same fake sink as the claim test: _prewarm's readiness emit must not touch GCP.
     import remote_agent_toolkit.ports.eventsink as eventsink_mod
     monkeypatch.setattr(eventsink_mod, "CloudLoggingSink", lambda **kw: InMemorySink(**kw))
 
     async def drive():
-        return [ev async for ev in agent._pool_worker(spec, "e-inv-88")]
+        sub = "projects/p/subscriptions/ratk-w-gen00001-w-abc"
+        return [ev async for ev in agent._pool_worker(spec, "e-inv-88", sub)]
 
     events = asyncio.run(drive())
     raws = [ev.custom_metadata["raw"] for ev in events]
@@ -338,16 +395,26 @@ class _FakeClient:
         self.agent_engines = AgentEngines()
 
 
-def test_get_engine_discovers_generation_scoped_pair_from_env():
-    """The #38 cutover makes the dispatch pair per-deploy, so get_engine can no longer
-    derive it from the engine name: it must read AGENT_POOL_SUBSCRIPTION back from the
-    deployed env (the same value the workers themselves read at runtime)."""
+def test_get_engine_discovers_the_generation_scoped_pool_from_env():
+    """The #38 cutover makes the pool per-deploy, so get_engine can no longer derive it
+    from the engine name: it reads AGENT_POOL_TOPIC back from the deployed env (the same
+    value the workers themselves read at runtime), plus the workers' idle life. No
+    subscription: those are per worker (per-worker dispatch)."""
+    topic = "projects/proj/topics/ratk-w-abc12345-dispatch"
+    client = _FakeClient(_engine_resource({"AGENT_POOL_TOPIC": topic,
+                                           "AGENT_POOL_MAX_WAIT_S": "7200"}))
+    assert backend._discover_pool(client, "r/reasoningEngines/1", "proj", "w") == (
+        topic, None, 7200.0
+    )
+
+    # An engine deployed BEFORE per-worker dispatch baked the one shared subscription all
+    # its workers pull: discovered as the legacy address (the handle then dispatches the
+    # old way, and get_engine warns).
     sub = "projects/proj/subscriptions/ratk-w-abc12345-dispatch-sub"
     client = _FakeClient(_engine_resource({"AGENT_POOL_SUBSCRIPTION": sub}))
-
-    topic, found = backend._discover_pool_paths(client, "r/reasoningEngines/1", "proj", "w")
-    assert found == sub
-    assert topic == "projects/proj/topics/ratk-w-abc12345-dispatch"
+    assert backend._discover_pool(client, "r/reasoningEngines/1", "proj", "w") == (
+        topic, sub, None
+    )
 
 
 def test_get_engine_pool_discovery_prefers_the_pinned_revision():
@@ -367,7 +434,7 @@ def test_get_engine_pool_discovery_prefers_the_pinned_revision():
         ],
     )
 
-    topic, found = backend._discover_pool_paths(client, resource, "proj", "w")
+    topic, found, _ = backend._discover_pool(client, resource, "proj", "w")
     assert found == old_sub
     assert topic == "projects/proj/topics/ratk-w-old00000-dispatch"
 
@@ -376,25 +443,25 @@ def test_get_engine_pool_discovery_falls_back_to_legacy_names():
     """No AGENT_POOL_SUBSCRIPTION in the deployed env (an engine deployed without
     warm_pool) → the pre-#38 fixed names, so old addressing keeps working."""
     client = _FakeClient(_engine_resource({}))
-    assert backend._discover_pool_paths(client, "r/reasoningEngines/1", "proj", "w") == (
+    assert backend._discover_pool(client, "r/reasoningEngines/1", "proj", "w") == (
         "projects/proj/topics/ratk-w-dispatch",
         "projects/proj/subscriptions/ratk-w-dispatch-sub",
+        None,
     )
 
     import pytest
 
-    with pytest.raises(ValueError, match="dispatch subscription"):
-        backend._discover_pool_paths(client, "r/reasoningEngines/1", None, "w")
+    with pytest.raises(ValueError, match="dispatch topic"):
+        backend._discover_pool(client, "r/reasoningEngines/1", None, "w")
 
 
 def test_wait_until_warm_tails_the_generation_scoped_pool_id(monkeypatch):
     """The readiness marker key must be the one THIS pool's workers emit under — derived
-    from the generation-scoped subscription, not the bare engine name."""
+    from the generation-scoped topic, not the bare engine name."""
     engine = backend.GeminiEngine(
         resource="r/reasoningEngines/1", spec=AgentSpec(name="w", model="m"),
         project=None, location=None, output_bucket="gs://out", warm=True,
         topic="projects/p/topics/ratk-w-abc12345-dispatch",
-        subscription="projects/p/subscriptions/ratk-w-abc12345-dispatch-sub",
     )
     tailed = []
 
@@ -466,14 +533,15 @@ def _deploy_with_fakes(monkeypatch, tmp_path, engine_api, revision_apis):
         def __init__(self, **kw):
             self.kw = kw
 
-        def ensure(self):
-            ensured.append((self.kw["topic"], self.kw["subscription"]))
+        def ensure_topic(self):
+            ensured.append(self.kw["topic"])
 
     monkeypatch.setattr(dispatch_mod, "PubSubDispatch", FakeDispatch)
     monkeypatch.setattr(backend.GeminiEngine, "fill_pool", lambda self, n: None)
     retired = []
     monkeypatch.setattr(
-        backend, "_delete_pool_pair", lambda topic, sub, creds: retired.append((topic, sub))
+        backend, "_retire_pool",
+        lambda topic, legacy_sub, bucket, creds: retired.append((topic, legacy_sub)),
     )
 
     geng = backend.deploy(AgentSpec(name="w", model="m"), "proj", "loc", warm_pool=True)
@@ -507,17 +575,20 @@ def test_deploy_under_pin_dispatches_to_the_pinned_revisions_pair(monkeypatch, t
             monkeypatch, tmp_path, engine_api, revisions
         )
 
-    assert geng._subscription == q1  # the pinned revision's pair, NOT v2's
+    assert geng._subscription == q1  # the pinned revision's (legacy) pool, NOT v2's
     assert geng._topic == pool.topic_for_subscription(q1)
     assert retired == []  # nothing retired while the pin holds
-    # The fresh pair was still provisioned (it is baked into the new revision's env and
+    # The fresh topic was still provisioned (it is baked into the new revision's env and
     # becomes live if that revision is promoted) — kept, not deleted.
-    assert len(ensured) == 1 and ensured[0][1] not in (q1, q2)
+    assert len(ensured) == 1
+    assert ensured[0] not in (pool.topic_for_subscription(q1), pool.topic_for_subscription(q2))
 
 
-def test_deploy_unpinned_retires_the_previous_revisions_pair(monkeypatch, tmp_path):
-    """No pin: the fresh pair goes live and the previous revision's pair is retired once
-    the pool is filled (the #38 cutover), resolved from the same serving-revision read."""
+def test_deploy_unpinned_retires_the_previous_revisions_pool(monkeypatch, tmp_path):
+    """No pin: the fresh per-worker pool goes live and the previous revision's pool is
+    retired once the new pool is filled (the #38 cutover), resolved from the same
+    serving-revision read — whether the old pool was a legacy shared subscription or a
+    per-worker one."""
     import warnings
 
     resource = "projects/p/locations/l/reasoningEngines/9"
@@ -534,22 +605,39 @@ def test_deploy_unpinned_retires_the_previous_revisions_pair(monkeypatch, tmp_pa
             monkeypatch, tmp_path, engine_api, revisions
         )
 
-    assert ensured == [(geng._topic, geng._subscription)]  # fresh pair is live
-    assert geng._subscription != q2
-    assert retired == [(pool.topic_for_subscription(q2), q2)]  # old pair retired
+    assert ensured == [geng._topic]  # fresh topic is live
+    assert geng._subscription is None  # per-worker dispatch: no shared subscription
+    assert retired == [(pool.topic_for_subscription(q2), q2)]  # old legacy pair retired
+
+    # Previous revision already on per-worker dispatch: its topic is what gets retired
+    # (worker subscriptions + roster swept with it, in _retire_pool).
+    t2 = "projects/proj/topics/ratk-w-gen00002-dispatch"
+    engine_api = _engine_resource({"AGENT_POOL_TOPIC": t2}, name=resource)
+    engine_api.display_name = "w"
+    revisions = [_engine_resource({"AGENT_POOL_TOPIC": t2}, name=f"{resource}/runtimeRevisions/2")]
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        geng, ensured, retired = _deploy_with_fakes(
+            monkeypatch, tmp_path, engine_api, revisions
+        )
+    assert geng._topic != t2 and geng._subscription is None
+    assert retired == [(t2, None)]
 
 
-def test_delete_pool_resources_sweeps_every_revisions_pair(monkeypatch):
-    """PR #39 review: deploys made while traffic was pinned leave their fresh pair idle,
-    so teardown must sweep the pairs of ALL revisions, not just the handle's (dedup'd)."""
+def test_delete_pool_resources_sweeps_every_revisions_pool(monkeypatch):
+    """PR #39 review: deploys made while traffic was pinned leave their fresh pool idle,
+    so teardown must sweep the pools of ALL revisions, not just the handle's (dedup'd) —
+    legacy shared-subscription pools and per-worker ones alike."""
 
     resource = "projects/p/locations/l/reasoningEngines/9"
     q1 = "projects/proj/subscriptions/ratk-w-gen00001-dispatch-sub"
     q2 = "projects/proj/subscriptions/ratk-w-gen00002-dispatch-sub"
+    t3 = "projects/proj/topics/ratk-w-gen00003-dispatch"
     revisions = [
         _engine_resource({"AGENT_POOL_SUBSCRIPTION": q1}, name=f"{resource}/runtimeRevisions/1"),
         _engine_resource({"AGENT_POOL_SUBSCRIPTION": q2}, name=f"{resource}/runtimeRevisions/2"),
-        _engine_resource({}, name=f"{resource}/runtimeRevisions/3"),  # deployed without a pool
+        _engine_resource({"AGENT_POOL_TOPIC": t3}, name=f"{resource}/runtimeRevisions/3"),
+        _engine_resource({}, name=f"{resource}/runtimeRevisions/4"),  # deployed without a pool
     ]
     client = _FakeClient(_engine_resource({}), revision_apis=revisions)
     client.agent_engines.delete = lambda name, force: None
@@ -561,13 +649,15 @@ def test_delete_pool_resources_sweeps_every_revisions_pair(monkeypatch):
     monkeypatch.setattr(engine, "_client", lambda: client)
     deleted = []
     monkeypatch.setattr(
-        backend, "_delete_pool_pair", lambda topic, sub, creds: deleted.append((topic, sub))
+        backend, "_retire_pool",
+        lambda topic, legacy_sub, bucket, creds: deleted.append((topic, legacy_sub)),
     )
 
     engine.delete(delete_pool_resources=True)
     assert sorted(deleted) == sorted([
         (pool.topic_for_subscription(q1), q1),
-        (pool.topic_for_subscription(q2), q2),  # handle's own pair, deduplicated with rev 2's
+        (pool.topic_for_subscription(q2), q2),  # handle's own pool, deduplicated with rev 2's
+        (t3, None),
     ])
 
 
@@ -585,4 +675,340 @@ def test_get_engine_pool_discovery_raises_on_read_errors():
 
     client = NS(agent_engines=AgentEngines())
     with pytest.raises(TimeoutError):
-        backend._discover_pool_paths(client, "r/reasoningEngines/1", "proj", "w")
+        backend._discover_pool(client, "r/reasoningEngines/1", "proj", "w")
+
+
+# -- per-worker dispatch ---------------------------------------------------------------------
+
+
+def _per_worker_engine(monkeypatch):
+    """A per-worker warm engine over fakes: in-memory roster, recording dispatch, fake jobs."""
+    from types import SimpleNamespace as NS
+
+    topic = "projects/p/topics/ratk-w-gen00001-dispatch"
+    engine = backend.GeminiEngine(
+        resource="r/reasoningEngines/1", spec=AgentSpec(name="w", model="m"),
+        project="p", location="l", output_bucket="gs://out", warm=True, topic=topic,
+    )
+    store = roster_mod.InMemoryRosterStore()
+    monkeypatch.setattr(
+        engine, "_roster", lambda: roster_mod.PoolRoster("gs://out", topic, store=store)
+    )
+
+    class FakeDispatch:
+        def __init__(self):
+            self.published, self.created, self.deleted = [], [], []
+
+        def publish(self, message, attributes=None):
+            self.published.append((message, attributes))
+
+        def create_subscription(self, subscription, **kw):
+            self.created.append((subscription, kw))
+
+        def delete_subscription(self, subscription):
+            self.deleted.append(subscription)
+
+    dispatch = FakeDispatch()
+    monkeypatch.setattr(engine, "_dispatch", lambda: dispatch)
+
+    class FakeAE:
+        def __init__(self):
+            self.jobs, self.cancelled = [], []
+
+        def run_query_job(self, name, config):
+            self.jobs.append(config)
+            return NS(job_name=f"op-{len(self.jobs)}")
+
+        def cancel_query_job(self, name, config):
+            self.cancelled.append(config["operation_name"])
+
+        def check_query_job(self, name):
+            return NS(status="RUNNING")
+
+    ae = FakeAE()
+    monkeypatch.setattr(engine, "_agent_engines", lambda: ae)
+    return engine, dispatch, ae
+
+
+def _seeded_tail(monkeypatch, sid="warm-sid"):
+    """Patch the backend's stream tail with a sink pre-seeded with a finished turn."""
+    seed = InMemorySink(session_id=sid)
+    seed.emit(AgentEvent(kind="status", summary="turn started",
+                         raw={"event": "turn_started", "worker": "x", "warm": True}))
+    seed.emit(AgentEvent(kind="message", summary="working"))
+    seed.emit(AgentEvent(kind="result", summary="done", cost_usd=0.1,
+                         raw={"subtype": "success", "is_error": False, "num_turns": 3,
+                              "session_id": sid}))
+    monkeypatch.setattr(backend, "tail_stream", lambda uri, s, **kw: seed.tail(s))
+    return seed
+
+
+def test_fill_pool_gives_every_worker_its_own_channel_and_a_roster_entry(monkeypatch):
+    engine, dispatch, ae = _per_worker_engine(monkeypatch)
+    engine.fill_pool(2)
+
+    assert len(ae.jobs) == 2 and len(dispatch.created) == 2
+    for cfg, (subscription, kw) in zip(ae.jobs, dispatch.created):
+        payload = json.loads(cfg["query"])
+        assert payload["class_method"] == "async_stream_query"
+        # The worker learns its OWN subscription from its job input (never the shared env).
+        assert pool.parse_pool_wait(payload["input"]["message"]) == (True, subscription)
+        wid = pool.worker_id_from_subscription(subscription)
+        assert subscription == pool.worker_subscription(engine._topic, wid)
+        # Filtered to this worker's messages; TTL/retention backstops for a dead client.
+        assert kw == {"filter": pool.worker_filter(wid),
+                      "ttl_s": pool.WORKER_SUBSCRIPTION_TTL_S,
+                      "retention_s": pool.WORKER_SUBSCRIPTION_RETENTION_S}
+        # The job output lands under jobs/: the one prefix the runtime identity may write.
+        assert cfg["output_gcs_uri"] == f"gs://out/jobs/pool-{wid}.jsonl"
+    entries = engine._roster().entries()
+    assert [e.subscription for e in entries] == [s for s, _ in dispatch.created]
+    assert [e.job_name for e in entries] == ["op-1", "op-2"] == engine._pool_jobs
+    assert all(e.expires_at - e.submitted_at == pool.DEFAULT_MAX_WAIT_S for e in entries)
+
+
+def test_fill_pool_drops_the_channel_when_the_job_submit_fails(monkeypatch):
+    engine, dispatch, ae = _per_worker_engine(monkeypatch)
+
+    def boom(name, config):
+        raise RuntimeError("quota")
+
+    ae.run_query_job = boom
+    import pytest
+
+    with pytest.raises(RuntimeError, match="quota"):
+        engine.fill_pool(1)
+    assert [s for s, _ in dispatch.created] == dispatch.deleted  # no orphan subscription
+    assert engine._roster().entries() == []
+
+
+def test_warm_session_addresses_one_idle_worker_and_drops_its_channel(monkeypatch):
+    engine, dispatch, ae = _per_worker_engine(monkeypatch)
+    engine.fill_pool(2)
+    first, second = engine._roster().entries()
+    _seeded_tail(monkeypatch)
+
+    session = backend.GeminiSession(engine, "warm-sid")
+    result = asyncio.run(_await(session.run("go")))
+
+    # The turn went to the OLDEST idle worker, addressed by attribute (pointers + the run
+    # token, never values), and the pool was refilled by one.
+    assert dispatch.published == [(
+        {"session_id": "warm-sid", "message": "go", "resume": False,
+         "gcs_token": "fake-run-token"},
+        {"worker": first.worker},
+    )]
+    remaining = engine._roster().entries()
+    assert [e.worker for e in remaining][0] == second.worker and len(remaining) == 2
+    assert len(ae.jobs) == 3
+    # Its channel was dropped the moment the worker had the turn (nothing else can ever be
+    # published there), then again — idempotently — at completion; nothing was cancelled.
+    assert dispatch.deleted == [first.subscription, first.subscription]
+    assert ae.cancelled == []
+    assert result.text == "done" and result.num_turns == 3
+    assert session.status == RunStatus.IDLE and session.stop_reason == StopReason.END_TURN
+    assert session._worker is None
+
+
+def test_warm_session_spawns_a_worker_for_itself_on_an_empty_roster(monkeypatch):
+    """A drained pool no longer strands turns: the turn spawns its own (un-rostered)
+    worker and is addressed to it, and the usual refill re-warms the pool behind it."""
+    engine, dispatch, ae = _per_worker_engine(monkeypatch)
+    _seeded_tail(monkeypatch)
+
+    session = backend.GeminiSession(engine, "warm-sid")
+    result = asyncio.run(_await(session.run("go")))
+
+    assert len(ae.jobs) == 2  # one for this turn, one refill
+    (_, attrs), = dispatch.published
+    own, refill = (pool.worker_id_from_subscription(s) for s, _ in dispatch.created)
+    assert attrs == {"worker": own}
+    # Only the refill is on the roster: the turn's own worker must never be handed out.
+    assert [e.worker for e in engine._roster().entries()] == [refill]
+    assert result.text == "done"
+
+
+def test_warm_session_redispatches_when_the_worker_never_starts_the_turn(monkeypatch):
+    """Pickup watchdog: the addressed worker stays silent past its deadline → its channel
+    (with the undelivered turn) is dropped and its job cancelled, the same payload goes to
+    another worker, and the run completes as one Run with one result."""
+    engine, dispatch, ae = _per_worker_engine(monkeypatch)
+    engine.fill_pool(1)
+    (first,) = engine._roster().entries()
+    seed = _seeded_tail(monkeypatch)
+
+    async def silent_until_redispatched(uri, sid, **kw):
+        while len(dispatch.published) < 2:
+            await asyncio.sleep(0.005)
+        async for ev in seed.tail(sid):
+            yield ev
+
+    monkeypatch.setattr(backend, "tail_stream", silent_until_redispatched)
+    monkeypatch.setattr(backend, "pickup_deadline_s", lambda submitted_at, now=None: 0.05)
+
+    session = backend.GeminiSession(engine, "warm-sid")
+    result = asyncio.run(_await(session.run("go")))
+
+    workers = [attrs["worker"] for _, attrs in dispatch.published]
+    assert workers[0] == first.worker and len(workers) == 2 and workers[1] != first.worker
+    assert dispatch.published[0][0] == dispatch.published[1][0]  # same payload, same run
+    assert ae.cancelled == [first.job_name]  # the silent worker was stopped
+    assert dispatch.deleted[0] == first.subscription  # and its channel dropped first
+    assert first.job_name not in engine._pool_jobs
+    assert not result.is_error and result.text == "done"
+    assert session.status == RunStatus.IDLE
+
+
+def test_pickup_watched_tail_gives_up_after_max_redispatch():
+    async def silent():
+        await asyncio.sleep(10)
+        yield AgentEvent(kind="result", summary="never")
+
+    calls = []
+
+    def redispatch(attempt):
+        calls.append(attempt)
+        return 0.02
+
+    async def drive():
+        return [ev async for ev in backend._pickup_watched_tail(
+            silent, 0.02, redispatch, "sid",
+            on_abandon=lambda: calls.append("abandon"), max_redispatch=2,
+        )]
+
+    events = asyncio.run(drive())
+    assert calls == [1, 2, "abandon"]
+    assert [e.kind for e in events] == ["result"]
+    raw = events[0].raw
+    assert raw["event"] == "pool_pickup_timeout" and raw["is_error"] is True
+    assert raw["workers_tried"] == 3 and raw["session_id"] == "sid"
+
+
+def test_pickup_watched_tail_surfaces_a_failed_redispatch():
+    async def silent():
+        await asyncio.sleep(10)
+        yield AgentEvent(kind="result", summary="never")
+
+    def redispatch(attempt):
+        raise RuntimeError("pubsub down")
+
+    async def drive():
+        return [ev async for ev in backend._pickup_watched_tail(silent, 0.02, redispatch, "sid")]
+
+    events = asyncio.run(drive())
+    assert [e.kind for e in events] == ["result"]
+    assert events[0].raw["event"] == "pool_redispatch_failed"
+    assert "pubsub down" in events[0].summary
+
+
+def test_pickup_watched_tail_is_passthrough_once_the_turn_started():
+    async def tail():
+        yield AgentEvent(kind="status", summary="turn started", raw={"event": "turn_started"})
+        await asyncio.sleep(0.05)  # longer than the pickup deadline: must NOT re-dispatch
+        yield AgentEvent(kind="message", summary="working")
+        yield AgentEvent(kind="result", summary="done", raw={"subtype": "success"})
+        yield AgentEvent(kind="message", summary="after the result")  # never delivered
+
+    picked, redispatched = [], []
+
+    async def drive():
+        return [ev async for ev in backend._pickup_watched_tail(
+            tail, 0.01, lambda attempt: redispatched.append(attempt) or 0.01, "sid",
+            on_pickup=lambda: picked.append(1),
+        )]
+
+    events = asyncio.run(drive())
+    assert [e.kind for e in events] == ["status", "message", "result"]
+    assert picked == [1] and redispatched == []
+
+
+def _get_engine_with_fakes(monkeypatch, env: dict[str, str]):
+    """Run the real backend.get_engine() over a fake agentplatform client."""
+    import sys
+    import types as _types
+    from types import SimpleNamespace as NS
+
+    resource = "projects/proj/locations/l/reasoningEngines/1"
+    engine_api = _engine_resource(env, name=resource)
+    engine_api.display_name = "w"
+    client = _FakeClient(engine_api)
+    client.agent_engines.list = lambda: [NS(api_resource=engine_api)]
+    mod = _types.ModuleType("agentplatform")
+    mod.Client = lambda **kw: client
+    monkeypatch.setitem(sys.modules, "agentplatform", mod)
+    return backend.get_engine("w", project="proj", location="l", warm_pool=True)
+
+
+def test_get_engine_addresses_a_per_worker_pool_and_warns_on_a_legacy_one(monkeypatch):
+    import warnings
+
+    topic = "projects/proj/topics/ratk-w-gen00007-dispatch"
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")  # a per-worker pool is the fixed state: no warning
+        engine = _get_engine_with_fakes(
+            monkeypatch, {"AGENT_POOL_TOPIC": topic, "AGENT_POOL_MAX_WAIT_S": "3600"}
+        )
+    assert (engine._topic, engine._subscription, engine._pool_max_wait_s) == (topic, None, 3600.0)
+
+    import pytest
+
+    sub = "projects/proj/subscriptions/ratk-w-gen00006-dispatch-sub"
+    with pytest.warns(UserWarning, match="before per-worker dispatch"):
+        legacy = _get_engine_with_fakes(monkeypatch, {"AGENT_POOL_SUBSCRIPTION": sub})
+    assert (legacy._topic, legacy._subscription) == (pool.topic_for_subscription(sub), sub)
+    assert legacy._pool_max_wait_s == pool.DEFAULT_MAX_WAIT_S
+
+
+def test_retire_pool_sweeps_worker_channels_topic_and_roster(monkeypatch):
+    """Cutover/teardown of a per-worker pool: every worker subscription (from the roster
+    AND a prefix listing, in case one side is unavailable), then the topic, then the
+    roster — so idle workers of the old generation fail their next pull and exit."""
+    from remote_agent_toolkit.ports import dispatch as dispatch_mod
+
+    topic = "projects/p/topics/ratk-w-gen00001-dispatch"
+    store = roster_mod.InMemoryRosterStore()
+    roster = roster_mod.PoolRoster("gs://out", topic, store=store)
+    roster.add(roster_mod.WorkerEntry(
+        worker="aaa", subscription=pool.worker_subscription(topic, "aaa"), job_name="op1",
+        submitted_at=1.0, expires_at=2.0,
+    ))
+    monkeypatch.setattr(roster_mod, "PoolRoster", lambda *a, **k: roster)
+
+    class FakeDispatch:
+        deleted, topics = [], []
+
+        def __init__(self, **kw):
+            self.kw = kw
+
+        def list_subscriptions(self, prefix):
+            assert prefix == pool.worker_subscription_prefix(topic)
+            return [pool.worker_subscription(topic, "bbb")]  # a worker the roster lost track of
+
+        def delete_subscription(self, sub):
+            self.deleted.append(sub)
+
+        def delete_topic(self):
+            self.topics.append(self.kw["topic"])
+
+    monkeypatch.setattr(dispatch_mod, "PubSubDispatch", FakeDispatch)
+
+    backend._retire_pool(topic, None, "gs://out", None)
+    assert sorted(FakeDispatch.deleted) == sorted([
+        pool.worker_subscription(topic, "aaa"), pool.worker_subscription(topic, "bbb"),
+    ])
+    assert FakeDispatch.topics == [topic]
+    assert roster.entries() == []
+
+
+def test_engine_delete_cancels_rostered_workers_of_other_processes(monkeypatch):
+    """A reused per-worker engine: idle workers another process submitted are named in the
+    roster, so delete() cancels them up front instead of discovering them one blocked
+    delete at a time."""
+    engine, dispatch, ae = _per_worker_engine(monkeypatch)
+    engine._roster().add(roster_mod.WorkerEntry(
+        worker="zzz", subscription=pool.worker_subscription(engine._topic, "zzz"),
+        job_name="op-other", submitted_at=1.0, expires_at=1e12,
+    ))
+    ae.delete = lambda name, force: None
+    engine.delete()
+    assert ae.cancelled == ["op-other"]

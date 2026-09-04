@@ -148,10 +148,13 @@ def test_build_env_pool_max_wait() -> None:
     unreachable — callers resorted to monkeypatching build_env)."""
     import pytest
 
-    pool_kw = dict(warm_pool=True, pool_subscription="projects/p/subscriptions/s")
+    pool_kw = dict(warm_pool=True, pool_topic="projects/p/topics/ratk-w-gen-dispatch")
 
     env = deploy.build_env(_spec(), **pool_kw, pool_max_wait_s=7200)
-    assert env["AGENT_POOL_SUBSCRIPTION"] == "projects/p/subscriptions/s"
+    # The pool's TOPIC is baked; a worker's own subscription rides its job input instead
+    # (per-worker dispatch), so no subscription is ever in the shared env.
+    assert env["AGENT_POOL_TOPIC"] == "projects/p/topics/ratk-w-gen-dispatch"
+    assert "AGENT_POOL_SUBSCRIPTION" not in env
     assert env["AGENT_POOL_MAX_WAIT_S"] == "7200"
 
     # Unset -> absent from the env, so the worker-side default (pool.DEFAULT_MAX_WAIT_S)
@@ -239,7 +242,7 @@ def test_build_engine_config_pool_max_wait_passthrough() -> None:
         staging_bucket="gs://staging",
         extra_packages=[],
         warm_pool=True,
-        pool_subscription="projects/p/subscriptions/s",
+        pool_topic="projects/p/topics/ratk-w-gen-dispatch",
         pool_max_wait_s=3600,
     )
     assert cfg["env_vars"]["AGENT_POOL_MAX_WAIT_S"] == "3600"

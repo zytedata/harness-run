@@ -30,11 +30,22 @@ from typing import Any, AsyncIterator, TYPE_CHECKING
 from ...events import AgentEvent, RunResult, RunStatus, StopReason
 from .._run import DrivenRun
 from .pool import (
+    DEFAULT_MAX_WAIT_S,
     POOL_WAIT_SENTINEL,
+    WORKER_SUBSCRIPTION_RETENTION_S,
+    WORKER_SUBSCRIPTION_TTL_S,
     dispatch_payload,
     new_generation,
+    new_worker_id,
+    pickup_deadline_s,
     pool_paths,
+    pool_topic,
+    pool_wait_prompt,
     topic_for_subscription,
+    worker_attributes,
+    worker_filter,
+    worker_subscription,
+    worker_subscription_prefix,
 )
 from .stream import tail_stream
 
@@ -42,6 +53,7 @@ if TYPE_CHECKING:
     from ...config import SessionConfig, TurnConfig
     from ...spec import AgentSpec
     from ..base import Engine
+    from .roster import WorkerEntry
 
 _USER_ID = "ratk"
 
@@ -49,6 +61,10 @@ _USER_ID = "ratk"
 # this long after the job is seen terminal with still no terminal event (ingestion-lag grace).
 _WATCHDOG_QUIET_S = 60.0
 _WATCHDOG_GRACE_S = 120.0
+
+# Warm pickup watchdog: how many OTHER workers a turn is re-dispatched to when the one it
+# was addressed to never starts it (pool.pickup_deadline_s per attempt), before giving up.
+_MAX_REDISPATCH = 2
 
 logger = logging.getLogger(__name__)
 
@@ -172,6 +188,103 @@ async def _watched_tail(
         pump_task.cancel()
 
 
+async def _pickup_watched_tail(
+    tail_factory: Any,
+    deadline_s: float,
+    redispatch: Any,
+    session_id: str,
+    *,
+    on_pickup: Any = None,
+    on_abandon: Any = None,
+    max_redispatch: int = _MAX_REDISPATCH,
+) -> AsyncIterator[AgentEvent]:
+    """Yield the tail's events, re-dispatching the turn if its worker never starts it.
+
+    Per-worker dispatch addresses a turn to ONE pool worker. A worker that died at boot,
+    was killed by the platform, or idled out a moment before the roster said so would then
+    hold the turn forever: nothing else pulls its channel. So until the first event of the
+    turn arrives (the worker's ``turn_started``), this wrapper watches the clock:
+    ``deadline_s`` (``pool.pickup_deadline_s`` — the rest of the worker's boot window plus
+    a grace) elapsing calls ``redispatch(attempt)`` on a thread, which is expected to drop
+    the dead worker, address the same payload to another one and return the new deadline.
+    After ``max_redispatch`` silent workers the run ends with an explained error result.
+    From the first event on the wrapper is pure passthrough (``on_pickup`` runs once, on a
+    thread, best-effort — the client uses it to drop the worker's now-useless channel).
+    ``on_abandon`` runs when giving up, to drop the last worker tried.
+    """
+    queue: asyncio.Queue = asyncio.Queue()
+    done = object()
+
+    async def pump() -> None:
+        try:
+            async for ev in tail_factory():
+                await queue.put(ev)
+        finally:
+            await queue.put(done)
+
+    pump_task = asyncio.ensure_future(pump())
+    attempts = 0
+    try:
+        while True:
+            try:
+                item = await asyncio.wait_for(queue.get(), timeout=deadline_s)
+            except (TimeoutError, asyncio.TimeoutError):
+                if attempts >= max_redispatch:
+                    if on_abandon is not None:
+                        try:
+                            await asyncio.to_thread(on_abandon)
+                        except Exception:  # noqa: BLE001 — cleanup is best-effort
+                            pass
+                    yield AgentEvent(
+                        kind="result",
+                        summary=(
+                            f"no pool worker started the turn: {attempts + 1} worker(s) were "
+                            "addressed and none picked it up within its boot window — the "
+                            "pool may be unable to boot workers (quota, image, identity); "
+                            "see Cloud Logging for the workers' own errors"
+                        ),
+                        raw={"event": "pool_pickup_timeout", "is_error": True,
+                             "subtype": "error", "session_id": session_id,
+                             "workers_tried": attempts + 1},
+                    )
+                    return
+                attempts += 1
+                try:
+                    deadline_s = await asyncio.to_thread(redispatch, attempts)
+                except Exception as exc:  # noqa: BLE001 — surface, never hang
+                    yield AgentEvent(
+                        kind="result",
+                        summary=(
+                            "the pool worker addressed never started the turn and "
+                            f"re-dispatching it failed: {type(exc).__name__}: {str(exc)[:300]}"
+                        ),
+                        raw={"event": "pool_redispatch_failed", "is_error": True,
+                             "subtype": "error", "session_id": session_id},
+                    )
+                    return
+                continue
+            if item is done:
+                return
+            if on_pickup is not None:
+                try:
+                    await asyncio.to_thread(on_pickup)
+                except Exception:  # noqa: BLE001 — housekeeping must not kill a healthy run
+                    pass
+            yield item
+            if item.kind == "result":
+                return
+            break
+        while True:
+            item = await queue.get()
+            if item is done:
+                return
+            yield item
+            if item.kind == "result":
+                return
+    finally:
+        pump_task.cancel()
+
+
 def _run_blocking(make_coro, timeout: float) -> bool:
     """Run ``make_coro()`` to completion (≤ ``timeout``), from sync OR async context.
 
@@ -275,8 +388,9 @@ def deploy(
     """Deploy ``spec`` to Gemini Agent Runtime, minting a **new revision** (ops/CI action).
 
     Bakes the toolkit package + resolved skills, applies the §6 deploy contracts, and returns
-    a :class:`GeminiEngine`. With ``warm_pool=True`` it also ensures the dispatch topic/sub and
-    fills the pool with ``pool_size`` pre-warmed workers (each a job blocked on ``__POOL_WAIT__``).
+    a :class:`GeminiEngine`. With ``warm_pool=True`` it also ensures the dispatch topic and
+    fills the pool with ``pool_size`` pre-warmed workers (each a job blocked on ``__POOL_WAIT__``
+    on its own subscription — per-worker dispatch, ``pool.py``).
 
     **Engine identity is ``spec.name``** (the engine display name): if an engine of that name
     already exists, this *updates* it, and the platform mints a new **runtime revision** of it
@@ -291,31 +405,33 @@ def deploy(
     leaves the pin in place rather than silently promoting the fresh revision.
 
     Updating a warm pool cuts over atomically (issue #38): every deploy mints a fresh,
-    generation-scoped dispatch topic/subscription, so workers still blocked on the previous
-    revision's subscription can never claim a turn dispatched after this deploy — and once
-    the new pool is filled, the previous pair is deleted, making those idle workers fail
-    their next claim poll and exit within seconds instead of billing (and silently serving
-    stale-spec turns) for up to ``pool_max_wait_s``. A worker already mid-turn finishes
-    that turn on its own revision; a dispatch still queued unclaimed on the old pair at
-    that moment (a turn racing the redeploy) is dropped with it. Exception: when the
-    engine's traffic is pinned to a previous revision, the pair its workers pull is kept
-    and dispatched to, and nothing is retired (see :meth:`GeminiEngine.set_traffic`); the
-    fresh pair stays too (the new revision's baked env names it, so a later promotion
-    needs it) — pairs of revisions never promoted are swept by
-    ``delete(delete_pool_resources=True)``, which removes every revision's pair.
+    generation-scoped dispatch topic (each worker's own subscription hangs off it), so
+    workers still blocked on the previous generation's channels can never claim a turn
+    dispatched after this deploy — and once the new pool is filled, the previous
+    generation is retired (its worker subscriptions, topic and roster deleted), making
+    those idle workers fail their next claim poll and exit within seconds instead of
+    billing (and silently serving stale-spec turns) for up to ``pool_max_wait_s``. A
+    worker already mid-turn finishes that turn on its own revision; a dispatch still
+    queued undelivered on an old channel at that moment (a turn racing the redeploy) is
+    dropped with it. Exception: when the engine's traffic is pinned to a previous
+    revision, the pool its workers belong to is kept and dispatched to, and nothing is
+    retired (see :meth:`GeminiEngine.set_traffic`); the fresh topic stays too (the new
+    revision's baked env names it, so a later promotion needs it) — pools of revisions
+    never promoted are swept by ``delete(delete_pool_resources=True)``, which retires
+    every revision's pool.
 
-    **Warm workers idle-expire, and the pool does not self-recover.** An idle worker waits
-    ``pool_max_wait_s`` (default: a day) for an assignment, then exits — silently, and
-    WITHOUT replacement: the only automatic refill is the one worker submitted after each
-    dispatch, and against an *empty* pool that refill worker claims the very dispatch it was
-    meant to back-fill, so net pool size stays 0 and every turn pays the ~2.5 min cold boot
-    until :meth:`GeminiEngine.fill_pool` is called by hand. Idle workers bill while they
-    wait, so ``pool_max_wait_s`` is the idle-cost/latency dial: lower it for engines that
-    are dispatched to constantly (expiry never fires), keep or raise it for pools that must
-    stay warm across quiet gaps. Whatever you pass, the platform's **max job duration**
-    (7 days at the time of writing — a platform contract that can move; DESIGN.md §6) is
-    the effective ceiling: a worker that outlives it is killed like any job and, as above,
-    not replaced.
+    **Warm workers idle-expire.** An idle worker waits ``pool_max_wait_s`` (default: a
+    day) for an assignment, then exits — silently, and WITHOUT replacement: the only
+    automatic refill is the one worker submitted after each dispatch. A pool that drained
+    to empty does not strand turns: a turn that finds no idle worker spawns one for itself
+    and waits for its ~2.5 min boot (cold latency), and the refill after it starts warming
+    the pool again; :meth:`GeminiEngine.fill_pool` re-warms it ahead of time. Idle workers
+    bill while they wait, so ``pool_max_wait_s`` is the idle-cost/latency dial: lower it
+    for engines that are dispatched to constantly (expiry never fires), keep or raise it
+    for pools that must stay warm across quiet gaps. Whatever you pass, the platform's
+    **max job duration** (7 days at the time of writing — a platform contract that can
+    move; DESIGN.md §6) is the effective ceiling: a worker that outlives it is killed like
+    any job and, as above, not replaced.
 
     ``use_vertex`` (default) routes the model through Vertex, so the engine authenticates as its
     own GCP identity and **no LLM API key is ever in the agent's environment** (the recommended,
@@ -404,20 +520,20 @@ def deploy(
             stacklevel=2,
         )
 
-    # Warm pool: this deploy's workers pull a FRESH, generation-scoped dispatch
-    # subscription (baked into the engine env). Scoping the pair per deploy is the #38
-    # fix: workers of the previous revision keep pulling the old pair, so they can never
-    # claim (and run with a stale baked spec/skills) a turn dispatched after this deploy.
-    topic = subscription = None
+    # Warm pool: this deploy's workers belong to a FRESH, generation-scoped dispatch topic
+    # (baked into the engine env); each worker gets its own subscription on it at
+    # fill_pool (per-worker dispatch, pool.py). Scoping the generation per deploy is the
+    # #38 fix: workers of the previous revision keep pulling the old generation's channels,
+    # so they can never claim (and run with a stale baked spec/skills) a turn dispatched
+    # after this deploy.
+    topic = None
     if warm_pool:
         from ...ports.dispatch import PubSubDispatch
 
-        topic, subscription = pool_paths(project, spec.name, generation=new_generation())
-        # Ensure the topic/sub FIRST — fail fast on missing pub/sub perms BEFORE the (~4 min,
+        topic = pool_topic(project, spec.name, generation=new_generation())
+        # Ensure the topic FIRST — fail fast on missing pub/sub perms BEFORE the (~4 min,
         # billable) engine build, so a perms error never leaks a half-provisioned engine.
-        PubSubDispatch(
-            topic=topic, subscription=subscription, project=project, credentials=credentials
-        ).ensure()
+        PubSubDispatch(topic=topic, project=project, credentials=credentials).ensure_topic()
 
     stage_dir, extra_packages = stage_agent(spec)
     os.chdir(stage_dir)  # extra_packages are resolved relative to the cwd
@@ -432,7 +548,7 @@ def deploy(
         output_bucket=output_bucket,
         use_vertex=use_vertex,
         warm_pool=warm_pool,
-        pool_subscription=subscription,
+        pool_topic=topic,
         pool_max_wait_s=pool_max_wait_s,
         min_instances=min_instances,
         max_instances=max_instances,
@@ -443,19 +559,17 @@ def deploy(
     # Engine identity is the display name: update the existing engine (minting a revision)
     # rather than piling up look-alike engines. Only a first deploy creates one.
     existing = None if new_engine else _find_engine(client, spec.name)
-    # The dispatch pair live workers currently pull, read back from the deployed env of
-    # the SERVING revision — under a pin that is the pinned revision's pair, NOT the
+    # The pool live workers currently belong to, read back from the deployed env of the
+    # SERVING revision — under a pin that is the pinned revision's pool, NOT the
     # engine-level env, which reflects the latest revision: one that never served has no
-    # listeners on its pair, so dispatching there would strand turns unclaimed (PR #39
-    # review). Retired once the new pool is filled, so its idle workers exit promptly
-    # instead of idling out.
-    old_topic = old_subscription = None
+    # workers, so dispatching there would strand turns (PR #39 review). Retired once the
+    # new pool is filled, so its idle workers exit promptly instead of idling out.
+    old: tuple[str, str | None] | None = None  # (topic, legacy shared subscription)
     if warm_pool and existing:
         try:
-            old_subscription = _serving_pool_subscription(client, existing)
-            old_topic = topic_for_subscription(old_subscription) if old_subscription else None
+            old = _address_from_env(_serving_pool_env(client, existing))
         except Exception:  # noqa: BLE001 — cutover cleanup is best-effort, never blocks a deploy
-            old_topic = old_subscription = None
+            old = None
     config = gt.AgentEngineConfig(**config_kwargs)
     pinned = False
     if existing:
@@ -466,26 +580,27 @@ def deploy(
         pinned = bool(rev.traffic_targets(getattr(engine.api_resource, "traffic_config", None)))
     else:
         engine = client.agent_engines.create(agent=app, config=config)
-    if warm_pool and pinned and old_subscription and old_subscription != subscription:
+    subscription = None  # only set to address a LEGACY shared-subscription pool
+    if warm_pool and pinned and old and old[0] != topic:
         # Traffic stays pinned to a previous revision, so live workers — and any refill,
-        # which always cold-starts on the SERVING revision — pull the OLD pair. Dispatch
-        # there and retire nothing. The fresh pair is deliberately KEPT even though nothing
-        # pulls it yet: its names are baked into the new revision's env, so a later
-        # promotion (set_traffic) makes it live — deleting it here would permanently break
-        # that revision. Pairs of revisions never promoted thus accumulate under a pin;
-        # delete(delete_pool_resources=True) sweeps every revision's pair.
-        topic, subscription = old_topic, old_subscription
-        old_topic = old_subscription = None
-    elif warm_pool and pinned and not old_subscription:
+        # which always cold-starts on the SERVING revision — belong to the OLD pool.
+        # Dispatch there and retire nothing. The fresh topic is deliberately KEPT even
+        # though nothing pulls it yet: its name is baked into the new revision's env, so a
+        # later promotion (set_traffic) makes it live — deleting it here would permanently
+        # break that revision. Pools of revisions never promoted thus accumulate under a
+        # pin; delete(delete_pool_resources=True) sweeps every revision's pool.
+        topic, subscription = old
+        old = None
+    elif warm_pool and pinned and not old:
         import warnings
 
-        # The pin means live workers pull SOME previous pair, but we could not learn which
-        # (env read failed, or an engine deployed before the env carried it). The handle
-        # will dispatch to the fresh pair, which those workers do not pull — loud, so a
-        # turn sitting unclaimed afterwards is traceable to this deploy.
+        # The pin means live workers belong to SOME previous pool, but we could not learn
+        # which (env read failed, or an engine deployed before the env carried it). The
+        # handle will dispatch to the fresh pool, which those workers do not pull — loud,
+        # so a turn sitting unclaimed afterwards is traceable to this deploy.
         warnings.warn(
-            "traffic is pinned but the serving revision's dispatch subscription could not "
-            "be read; dispatching to this deploy's fresh pair, which the pinned revision's "
+            "traffic is pinned but the serving revision's dispatch topic could not be "
+            "read; dispatching to this deploy's fresh pool, which the pinned revision's "
             "workers do NOT pull — turns may sit unclaimed until traffic moves "
             "(set_traffic) or the pool is re-addressed via get_engine",
             stacklevel=2,
@@ -500,10 +615,11 @@ def deploy(
         warm=warm_pool,
         topic=topic,
         subscription=subscription,
+        pool_max_wait_s=pool_max_wait_s,
     )
     if warm_pool:
         try:
-            geng.fill_pool(pool_size)  # block pool_size workers on the dispatch sub
+            geng.fill_pool(pool_size)  # pool_size workers, each on its own subscription
         except Exception:
             # Don't leak the freshly-created engine if filling the pool fails — but only
             # ours: on the update path the engine predates this call (with its revision
@@ -514,12 +630,12 @@ def deploy(
                 except Exception:  # noqa: BLE001
                     pass
             raise
-        # Retire the previous revision's pair: deleting its subscription makes every idle
-        # worker still blocked on it fail the next claim poll and exit within seconds —
-        # instead of claiming post-redeploy turns and serving them with the old baked
-        # spec/skills for up to pool_max_wait_s (#38).
-        if old_subscription and old_subscription != subscription:
-            _delete_pool_pair(old_topic, old_subscription, credentials)
+        # Retire the previous generation: deleting its worker subscriptions makes every
+        # idle worker still blocked on one fail the next claim poll and exit within
+        # seconds — instead of claiming post-redeploy turns and serving them with the old
+        # baked spec/skills for up to pool_max_wait_s (#38).
+        if old and old[0] != topic:
+            _retire_pool(old[0], old[1], output_bucket, credentials)
     return geng
 
 
@@ -563,28 +679,51 @@ def _warn_if_traffic_pinned(api_resource: Any) -> None:
         )
 
 
-def _env_pool_subscription(api_resource: Any) -> str | None:
-    """``AGENT_POOL_SUBSCRIPTION`` from a deployed engine/revision resource, or ``None``.
+_POOL_ENV_VARS = ("AGENT_POOL_TOPIC", "AGENT_POOL_SUBSCRIPTION", "AGENT_POOL_MAX_WAIT_S")
 
-    The env baked at deploy is the ground truth for which subscription that code pulls —
-    it is exactly what a worker cold-started from that revision reads at runtime.
+
+def _pool_env(api_resource: Any) -> dict[str, str]:
+    """The pool-related env vars of a deployed engine/revision resource.
+
+    The env baked at deploy is the ground truth for which pool that code's workers belong
+    to — it is exactly what a worker cold-started from that revision reads at runtime.
     """
     deployment = getattr(getattr(api_resource, "spec", None), "deployment_spec", None)
+    env: dict[str, str] = {}
     for var in getattr(deployment, "env", None) or []:
-        if getattr(var, "name", None) == "AGENT_POOL_SUBSCRIPTION":
-            return getattr(var, "value", None) or None
+        name = getattr(var, "name", None)
+        value = getattr(var, "value", None)
+        if name in _POOL_ENV_VARS and value:
+            env[name] = value
+    return env
+
+
+def _address_from_env(env: dict[str, str]) -> tuple[str, str | None] | None:
+    """``(topic, legacy_shared_subscription)`` the pool env addresses; ``None`` for no pool.
+
+    A per-worker-dispatch engine bakes ``AGENT_POOL_TOPIC`` (worker subscriptions are per
+    worker, never in the env). An engine deployed before that baked the one shared
+    ``AGENT_POOL_SUBSCRIPTION`` all its workers pull, from which its topic derives; the
+    handle then dispatches the legacy way.
+    """
+    if env.get("AGENT_POOL_TOPIC"):
+        return env["AGENT_POOL_TOPIC"], None
+    if env.get("AGENT_POOL_SUBSCRIPTION"):
+        sub = env["AGENT_POOL_SUBSCRIPTION"]
+        return topic_for_subscription(sub), sub
     return None
 
 
-def _serving_pool_subscription(client: Any, resource: str) -> str | None:
-    """``AGENT_POOL_SUBSCRIPTION`` of the revision pool workers actually run on, or ``None``.
+def _serving_pool_env(client: Any, resource: str) -> dict[str, str]:
+    """The pool env of the revision pool workers actually run on.
 
-    Workers always cold-start on the SERVING revision, so with traffic pinned the pair
-    they pull is the pinned revision's. The engine-level env reflects the *latest*
-    revision instead — under a pin possibly one that never served, whose pair has no
-    listeners — so it is only the fallback (and the answer when traffic is unpinned or
-    split). ``None`` means the env was read but carries no subscription; a failed read
-    raises, and each caller decides how to degrade.
+    Workers always cold-start on the SERVING revision, so with traffic pinned the pool
+    they belong to is the pinned revision's. The engine-level env reflects the *latest*
+    revision instead — under a pin possibly one that never served, whose pool has no
+    workers — so it is only the fallback (and the answer when traffic is unpinned or
+    split). An env with no pool address means the code was deployed without a pool (or
+    before the env carried one); a failed read raises, and each caller decides how to
+    degrade.
     """
     from . import revisions as rev
 
@@ -594,42 +733,47 @@ def _serving_pool_subscription(client: Any, resource: str) -> str | None:
         pinned = rev.revision_resource(resource, targets[0][0])
         for revision in client.agent_engines.runtimes.revisions.list(name=resource):
             if getattr(revision.api_resource, "name", "") == pinned:
-                sub = _env_pool_subscription(revision.api_resource)
-                if sub:
-                    return sub
+                env = _pool_env(revision.api_resource)
+                if _address_from_env(env):
+                    return env
                 break
-    return _env_pool_subscription(api)
+    return _pool_env(api)
 
 
-def _discover_pool_paths(
+def _discover_pool(
     client: Any, resource: str, project: str | None, name: str
-) -> tuple[str, str]:
-    """The dispatch ``(topic, subscription)`` live pool workers actually pull (``get_engine``).
+) -> tuple[str, str | None, float | None]:
+    """``(topic, legacy_subscription, pool_max_wait_s)`` of the pool live workers pull.
 
-    The pair is generation-scoped (a fresh pair per deploy — the #38 cutover), so it cannot
-    be derived from the engine name: read ``AGENT_POOL_SUBSCRIPTION`` back from the deployed
-    env instead (:func:`_serving_pool_subscription`). The legacy fixed names are used only
-    when the env was READ successfully and simply has no subscription (an engine deployed
-    without ``warm_pool``, or from a toolkit older than the baked env var). A *failed* read
-    raises so the caller can retry: silently falling back on, say, a network timeout handed
-    out legacy names that were never created for a generation-scoped engine — a handle that
-    looks fine and only fails at its first publish, with a ``NotFound`` nothing ties back
-    to the read error (PR #39 review).
+    The pool is generation-scoped (a fresh topic per deploy — the #38 cutover), so it
+    cannot be derived from the engine name: read it back from the deployed env instead
+    (:func:`_serving_pool_env`). ``legacy_subscription`` is set only for an engine deployed
+    before per-worker dispatch (its workers share that one subscription); ``None`` means
+    per-worker dispatch. The legacy fixed names are used only when the env was READ
+    successfully and simply has no pool address (an engine deployed without ``warm_pool``,
+    or from a toolkit older than the baked env var). A *failed* read raises so the caller
+    can retry: silently falling back on, say, a network timeout handed out legacy names
+    that were never created for a generation-scoped engine — a handle that looks fine and
+    only fails at its first publish, with a ``NotFound`` nothing ties back to the read
+    error (PR #39 review).
     """
-    sub = _serving_pool_subscription(client, resource)
-    if sub:
-        return topic_for_subscription(sub), sub
+    env = _serving_pool_env(client, resource)
+    max_wait = float(env["AGENT_POOL_MAX_WAIT_S"]) if env.get("AGENT_POOL_MAX_WAIT_S") else None
+    address = _address_from_env(env)
+    if address:
+        return address[0], address[1], max_wait
     if not project:
         raise ValueError(
-            "warm_pool=True could not discover the engine's dispatch subscription from its "
+            "warm_pool=True could not discover the engine's dispatch topic from its "
             "deployed env, and without project= the legacy names cannot be derived either; "
             "pass project= (or redeploy the engine with warm_pool=True)."
         )
-    return pool_paths(project, name)
+    topic, sub = pool_paths(project, name)
+    return topic, sub, max_wait
 
 
 def _delete_pool_pair(topic: str | None, subscription: str | None, credentials: Any) -> None:
-    """Best-effort delete of a dispatch topic/subscription pair (cutover + teardown)."""
+    """Best-effort delete of a LEGACY dispatch topic/shared-subscription pair."""
     from google.cloud import pubsub_v1
 
     if subscription:
@@ -644,6 +788,45 @@ def _delete_pool_pair(topic: str | None, subscription: str | None, credentials: 
             pubsub_v1.PublisherClient(credentials=credentials).delete_topic(topic=topic)
         except Exception:  # noqa: BLE001 — best effort (NotFound / perms)
             pass
+
+
+def _retire_pool(
+    topic: str, legacy_subscription: str | None, output_bucket: str | None, credentials: Any
+) -> None:
+    """Best-effort teardown of one pool generation's dispatch resources (cutover + teardown).
+
+    A legacy pool is its topic plus the shared subscription. A per-worker pool is its
+    topic, every worker subscription under it — listed by name prefix, plus whatever the
+    roster still records in case listing is denied — and the roster itself. Deleting a
+    worker's subscription is what makes an idle worker exit: its next pull fails NotFound.
+    """
+    if legacy_subscription:
+        _delete_pool_pair(topic, legacy_subscription, credentials)
+        return
+    from ...ports.dispatch import PubSubDispatch
+    from .roster import PoolRoster
+
+    dispatch = PubSubDispatch(topic=topic, project=topic.split("/")[1], credentials=credentials)
+    subscriptions: set[str] = set()
+    if output_bucket:
+        try:
+            roster = PoolRoster(output_bucket, topic, credentials=credentials)
+            subscriptions.update(entry.subscription for entry in roster.clear())
+        except Exception:  # noqa: BLE001 — best effort
+            pass
+    try:
+        subscriptions.update(dispatch.list_subscriptions(worker_subscription_prefix(topic)))
+    except Exception:  # noqa: BLE001 — best effort (perms)
+        pass
+    for sub in sorted(subscriptions):
+        try:
+            dispatch.delete_subscription(sub)
+        except Exception:  # noqa: BLE001 — best effort
+            pass
+    try:
+        dispatch.delete_topic()
+    except Exception:  # noqa: BLE001 — best effort
+        pass
 
 
 def _resolve_version(client: Any, resource: str, version: str) -> str:
@@ -727,8 +910,19 @@ def get_engine(
     resource = _resolve_resource(client, name)
     pinned = None if version is None else _resolve_version(client, resource, str(version))
     topic = subscription = None
+    pool_max_wait_s = None
     if warm_pool:
-        topic, subscription = _discover_pool_paths(client, resource, project, name)
+        topic, subscription, pool_max_wait_s = _discover_pool(client, resource, project, name)
+        if subscription:
+            import warnings
+
+            warnings.warn(
+                f"engine {name!r} was deployed before per-worker dispatch: its warm pool "
+                "shares one subscription across workers, so a shell in one worker can "
+                "pull another run's turn (README, 'The runtime identity is reachable by "
+                "the agent'). Redeploy it from this toolkit revision.",
+                stacklevel=2,
+            )
     return GeminiEngine(
         resource=resource,
         spec=_fallback_spec(name),
@@ -742,6 +936,7 @@ def get_engine(
         version=pinned,
         spec_known=False,
         scoped_gcs=scoped_gcs,
+        pool_max_wait_s=pool_max_wait_s,
     )
 
 
@@ -787,6 +982,7 @@ class GeminiSession:
         self._gcs_token_stop: threading.Event | None = None  # stops the token refresher
         self._current_run: DrivenRun | None = None
         self._last_job: Any | None = None
+        self._worker: WorkerEntry | None = None  # the pool worker the running turn is addressed to
         self._staged_secrets_uri: str | None = None  # staged handoff object (cleanup on complete)
         self._session_config = config
         self._session_config_uri: str | None = None
@@ -1002,20 +1198,32 @@ class GeminiSession:
                 engine._output_bucket, sid, turn_config.to_dict()
             )
 
+        worker: WorkerEntry | None = None  # per-worker dispatch: the worker this turn went to
+        payload: dict | None = None
         if engine._warm:
             # Warm path: dispatch the turn to the pool (a warm worker adopts our session_id),
             # then refill so the next turn stays warm. No cold run_query_job. The payload
             # carries only pointers, never values: the secrets object, the session's
             # persisted config, and this turn's config — the worker overlays the configs
             # on its deploy-baked spec and runs the result.
-            engine._dispatch().publish(
-                dispatch_payload(
-                    sid, message, resume, secrets_uri,
-                    session_config_gcs=self._session_config_uri,
-                    turn_config_gcs=turn_config_uri,
-                    gcs_token=gcs_token,
-                )
+            payload = dispatch_payload(
+                sid, message, resume, secrets_uri,
+                session_config_gcs=self._session_config_uri,
+                turn_config_gcs=turn_config_uri,
+                gcs_token=gcs_token,
             )
+            if engine._subscription:
+                # Legacy shared-subscription pool (an engine deployed before per-worker
+                # dispatch): every idle worker competes for the one subscription.
+                engine._dispatch().publish(payload)
+            else:
+                # Per-worker dispatch: take one idle worker off the roster (or spawn one
+                # when the pool is empty — the turn then waits for its boot instead of
+                # stranding) and address the message to that worker alone: its filtered
+                # subscription is the only channel it can land on.
+                worker = engine._claim_worker()
+                self._worker = worker
+                engine._dispatch().publish(payload, attributes=worker_attributes(worker.worker))
             try:
                 engine.fill_pool(1)
             except Exception:  # noqa: BLE001 — refill is best-effort; the turn already dispatched
@@ -1074,13 +1282,23 @@ class GeminiSession:
                 start_after=watermark["key"] or None, watermark=watermark,
             )
 
-        # Cold runs hold the job's operation name, so the tail gets a watchdog: if the job
-        # terminates without ever writing a terminal event, the run ends with an explained
-        # error instead of hanging. Warm turns have no per-turn job handle (the turn runs in
-        # whichever pool worker claimed it) — plain tail, protected by the per-poll timeouts.
-        job_name = getattr(self._last_job, "job_name", None)
-        if job_name:
+        async def history_reader() -> list:
+            from .history import read_history
+
+            return await asyncio.wait_for(
+                asyncio.to_thread(
+                    read_history, engine._output_bucket, sid,
+                    project=engine._project, credentials=engine._credentials,
+                ),
+                timeout=60,
+            )
+
+        def job_probe(job_name_of: Any) -> Any:
             async def probe() -> str | None:
+                job_name = job_name_of()
+                if not job_name:
+                    return None
+
                 def _check() -> str | None:
                     result = engine._agent_engines().check_query_job(name=job_name)
                     return getattr(result, "status", None)
@@ -1090,19 +1308,65 @@ class GeminiSession:
                 except Exception:  # noqa: BLE001 — unreachable probe must not kill a healthy run
                     return None
 
-            async def history_reader() -> list:
-                from .history import read_history
+            return probe
 
-                return await asyncio.wait_for(
-                    asyncio.to_thread(
-                        read_history, engine._output_bucket, sid,
-                        project=engine._project, credentials=engine._credentials,
-                    ),
-                    timeout=60,
-                )
+        # Runs that know their job get a watchdog: if the job terminates without ever
+        # writing a terminal event, the run ends with an explained error instead of hanging.
+        # Cold runs hold the job's operation name directly; a per-worker warm turn knows
+        # its worker's job (the roster entry) and additionally gets the pickup watchdog,
+        # which re-dispatches the turn if that worker never starts it. A legacy warm turn
+        # has no per-turn job handle (whichever worker won the shared subscription runs
+        # it) — plain tail, protected by the per-poll timeouts.
+        job_name = getattr(self._last_job, "job_name", None)
+        if job_name:
+            def factory() -> AsyncIterator:
+                return _watched_tail(tail_source, job_probe(lambda: job_name), sid, history_reader)
+        elif worker is not None:
+            picked_up = {"done": False}
+
+            def current_job() -> str | None:
+                # The job watchdog stays inert until the worker has started the turn:
+                # before that a dead or slow worker is the pickup watchdog's call.
+                current = self._worker
+                return current.job_name if picked_up["done"] and current else None
+
+            def redispatch(attempt: int) -> float:
+                # The addressed worker never started the turn: drop its channel (and the
+                # undelivered message with it), stop its job, address another worker, and
+                # back-fill the pool for the worker just lost.
+                dead = self._worker
+                if dead is not None:
+                    engine._retire_worker(dead, cancel_job=True)
+                fresh = engine._claim_worker()
+                self._worker = fresh
+                engine._dispatch().publish(payload, attributes=worker_attributes(fresh.worker))
+                try:
+                    engine.fill_pool(1)
+                except Exception:  # noqa: BLE001 — refill is best-effort
+                    pass
+                return pickup_deadline_s(fresh.submitted_at)
+
+            def on_pickup() -> None:
+                picked_up["done"] = True
+                # The worker holds the turn; nothing is ever published to its channel
+                # again, so drop it now (a client crash leaves the TTL backstop).
+                current = self._worker
+                if current is not None:
+                    engine._retire_worker(current)
+
+            def on_abandon() -> None:
+                current = self._worker
+                if current is not None:
+                    engine._retire_worker(current, cancel_job=True)
+
+            first_deadline = pickup_deadline_s(worker.submitted_at)
 
             def factory() -> AsyncIterator:
-                return _watched_tail(tail_source, probe, sid, history_reader)
+                return _pickup_watched_tail(
+                    lambda: _watched_tail(tail_source, job_probe(current_job), sid, history_reader),
+                    first_deadline, redispatch, sid,
+                    on_pickup=on_pickup, on_abandon=on_abandon,
+                )
         else:
             factory = tail_source
 
@@ -1122,6 +1386,13 @@ class GeminiSession:
         self._stop_reason = stop_reason
         self._status = RunStatus.IDLE
         self._stop_gcs_token_refresh()  # the run is over: no more tokens for it
+        # Backstop for the worker's channel (normally dropped at pickup): idempotent.
+        worker, self._worker = self._worker, None
+        if worker is not None:
+            try:
+                self._engine._retire_worker(worker)
+            except Exception:  # noqa: BLE001 — the subscription TTL backs this up
+                pass
         # Backstop cleanup of the staged SECRETS object; the worker normally deletes it at
         # turn end, but a run that failed before the worker fetched would otherwise leave
         # it for the lifecycle rule. Config objects are deliberately NOT deleted — they are
@@ -1135,9 +1406,10 @@ class GeminiSession:
     async def interrupt(self) -> None:
         """Interrupt the in-flight run: stop tailing AND cancel the remote job.
 
-        Cancelling the ``run_query_job`` stops the agent (and its billing). The warm path
-        has no per-turn job handle (the turn runs in a pool worker), so there it only stops
-        tailing — the worker finishes its turn.
+        Cancelling the ``run_query_job`` stops the agent (and its billing). A per-worker
+        warm turn knows the job of the worker it was addressed to (dedicated to this turn),
+        so it is cancelled the same way. A legacy shared-subscription warm turn has no
+        per-turn job handle, so there this only stops tailing — the worker finishes its turn.
         """
         run = self._current_run
         if run is not None and run.task is not None and not run.task.done():
@@ -1146,7 +1418,8 @@ class GeminiSession:
                 await run.task
             except asyncio.CancelledError:
                 pass
-        job_name = getattr(self._last_job, "job_name", None)
+        worker = self._worker
+        job_name = getattr(self._last_job, "job_name", None) or (worker.job_name if worker else None)
         if job_name:
             engine = self._engine
             try:
@@ -1289,6 +1562,7 @@ class GeminiEngine:
         version: str | None = None,
         spec_known: bool = True,
         scoped_gcs: bool = True,
+        pool_max_wait_s: float | None = None,
     ) -> None:
         self._resource = resource
         self._scoped_gcs = scoped_gcs
@@ -1305,7 +1579,12 @@ class GeminiEngine:
         self._credentials = credentials
         self._warm = warm
         self._topic = topic
+        # Set only for a LEGACY pool (deployed before per-worker dispatch): the one shared
+        # subscription its workers compete for. None => per-worker dispatch (pool.py).
         self._subscription = subscription
+        # The workers' idle life (the deploy's pool_max_wait_s, read back from the env by
+        # get_engine): bounds how long a roster entry can be trusted (roster.py).
+        self._pool_max_wait_s = float(pool_max_wait_s) if pool_max_wait_s else DEFAULT_MAX_WAIT_S
         self._version = version  # pinned revision id; None => resolve the serving one lazily
         self._created = time.time()  # readiness-tail watermark (ignore stale pool markers)
         self._sessions: dict[str, GeminiSession] = {}
@@ -1334,33 +1613,148 @@ class GeminiEngine:
         """Submit ``n`` pre-warmed workers (each a job blocked on ``__POOL_WAIT__``).
 
         Use this to top a warm pool back up — e.g. after reusing an engine via
-        ``get_engine`` whose workers have idle-expired, or to grow the pool.
+        ``get_engine`` whose workers have idle-expired, or to grow the pool. Each worker
+        cold-boots (~2.5 min); ``wait_until_warm()`` blocks until one reports ready.
 
-        This is also the ONLY way to re-warm a pool that drained to empty: workers that
-        idle-expire (after the engine's ``pool_max_wait_s``, default a day) exit without
-        replacement, and the automatic one-worker refill after each dispatch cannot grow
-        an empty pool — that worker just claims the pending dispatch itself (see
-        :func:`deploy`). Each worker cold-boots (~2.5 min); ``wait_until_warm()`` blocks
-        until one reports ready.
+        Per-worker dispatch (``pool.py``): every worker gets its own filtered subscription
+        on the pool's topic and an entry in the pool's roster (``roster.py``), the shared
+        record every client process picks idle workers from. Workers that idle-expire
+        (after ``pool_max_wait_s``) exit without replacement, but an empty roster does not
+        strand a turn: the turn spawns a worker for itself and waits for its boot (cold
+        latency), and the refill after it starts warming the pool again — this method just
+        gets the pool warm ahead of the next turn.
         """
+        if self._subscription:
+            self._fill_legacy_pool(n)
+            return
+        for _ in range(n):
+            self._spawn_worker(rostered=True)
+
+    def _fill_legacy_pool(self, n: int) -> None:
+        """``fill_pool`` for an engine deployed before per-worker dispatch (shared sub)."""
         ae = self._agent_engines()
-        # Pool workers are query jobs too. The current Agent Runtime runner silently
-        # invokes nothing unless the class method is named explicitly.
         query = json.dumps({
             "class_method": "async_stream_query",
             "input": {"user_id": _USER_ID, "message": POOL_WAIT_SENTINEL},
         })
         bucket = self._output_bucket or f"gs://{self._project}-agent-output"
         for _ in range(n):
-            # run_query_job requires output_gcs_uri; a worker's job output is never read (we
-            # tail Cloud Logging), so a throwaway per-worker path is fine.
             cfg = {"query": query, "output_gcs_uri": f"{bucket}/pool/{uuid.uuid4().hex}.jsonl"}
             result = ae.run_query_job(name=self._resource, config=cfg)
-            # Track the worker's job so delete() can cancel it (a waiting worker is a
-            # long-running op that otherwise blocks engine deletion for up to its max-wait).
             job_name = getattr(result, "job_name", None)
             if job_name:
                 self._pool_jobs.append(job_name)
+
+    def _roster(self) -> Any:
+        """The pool's idle-worker roster (``roster.py``), in the output bucket."""
+        from .roster import PoolRoster
+
+        if not self._output_bucket or not self._topic:
+            raise ValueError(
+                "a warm pool's roster lives in the engine's output bucket, under its "
+                "dispatch topic; construct the engine with output_bucket/project set and "
+                "warm_pool=True."
+            )
+        return PoolRoster(self._output_bucket, self._topic, credentials=self._credentials)
+
+    def _spawn_worker(self, *, rostered: bool) -> WorkerEntry:
+        """Submit one pool worker on its own subscription; record it as idle if ``rostered``.
+
+        An un-rostered worker is spawned for a turn that found no idle worker: that turn
+        is addressed to it right away, so no other client may ever pick it.
+        """
+        from .roster import WorkerEntry
+
+        if not self._topic:
+            raise ValueError(
+                "this warm engine handle has no dispatch topic; re-address it via "
+                "get_engine(..., warm_pool=True) or redeploy with warm_pool=True."
+            )
+        worker_id = new_worker_id()
+        subscription = worker_subscription(self._topic, worker_id)
+        dispatch = self._dispatch()
+        # The filter is what makes the channel private: only a message the client
+        # addressed to THIS worker id is ever delivered on it. TTL/retention are the
+        # backstops for a client that dies before dropping the channel (pool.py).
+        dispatch.create_subscription(
+            subscription,
+            filter=worker_filter(worker_id),
+            ttl_s=WORKER_SUBSCRIPTION_TTL_S,
+            retention_s=WORKER_SUBSCRIPTION_RETENTION_S,
+        )
+        # Pool workers are query jobs too; the class method must be named explicitly
+        # (the runner silently invokes nothing otherwise). The job input carries the
+        # worker's own subscription — never the engine env, which is shared.
+        query = json.dumps({
+            "class_method": "async_stream_query",
+            "input": {"user_id": _USER_ID, "message": pool_wait_prompt(subscription)},
+        })
+        bucket = self._output_bucket or f"gs://{self._project}-agent-output"
+        # run_query_job requires output_gcs_uri; a worker's job output is never read. It
+        # goes under jobs/ because the platform writes it as the runtime identity, whose
+        # output-bucket binding covers exactly that prefix (README IAM table).
+        cfg = {"query": query, "output_gcs_uri": f"{bucket}/jobs/pool-{worker_id}.jsonl"}
+        submitted_at = time.time()
+        try:
+            result = self._agent_engines().run_query_job(name=self._resource, config=cfg)
+        except Exception:
+            try:
+                dispatch.delete_subscription(subscription)
+            except Exception:  # noqa: BLE001 — the TTL backs this up
+                pass
+            raise
+        job_name = getattr(result, "job_name", None)
+        if job_name:
+            # Track the worker's job so delete() can cancel it (a waiting worker is a
+            # long-running op that otherwise blocks engine deletion for up to its max-wait).
+            self._pool_jobs.append(job_name)
+        entry = WorkerEntry(
+            worker=worker_id, subscription=subscription, job_name=job_name,
+            submitted_at=submitted_at, expires_at=submitted_at + self._pool_max_wait_s,
+        )
+        if rostered:
+            try:
+                self._roster().add(entry)
+            except Exception:
+                # A worker nobody can find is a worker nobody dispatches to: stop it rather
+                # than let it bill idle for a day.
+                self._retire_worker(entry, cancel_job=True)
+                raise
+        return entry
+
+    def _claim_worker(self) -> WorkerEntry:
+        """One idle worker for a turn, taken off the roster (oldest first) — or a fresh one.
+
+        Expired entries (the worker idled out) are pruned and their channels dropped on
+        the way. An empty roster spawns a worker for this turn alone: the turn then waits
+        for its ~2.5 min boot — cold latency, never a stranded turn.
+        """
+        roster = self._roster()
+        try:
+            for stale in roster.prune_expired():
+                self._retire_worker(stale)
+        except Exception:  # noqa: BLE001 — pruning is housekeeping
+            pass
+        entry = roster.claim()
+        if entry is None:
+            entry = self._spawn_worker(rostered=False)
+        return entry
+
+    def _retire_worker(self, entry: WorkerEntry, *, cancel_job: bool = False) -> None:
+        """Drop a worker's channel (best-effort, idempotent); ``cancel_job`` also stops its job."""
+        try:
+            self._dispatch().delete_subscription(entry.subscription)
+        except Exception:  # noqa: BLE001 — the TTL backs this up
+            pass
+        if cancel_job and entry.job_name:
+            try:
+                self._agent_engines().cancel_query_job(
+                    name=self._resource, config={"operation_name": entry.job_name}
+                )
+            except Exception:  # noqa: BLE001 — already done / cancelled / unknown
+                pass
+            if entry.job_name in self._pool_jobs:
+                self._pool_jobs.remove(entry.job_name)
 
     def start_session(self, config: SessionConfig | None = None) -> GeminiSession:
         """Begin a new session; ``config`` binds its :class:`SessionConfig` for good.
@@ -1442,15 +1836,11 @@ class GeminiEngine:
         """
         if not self._warm:
             return True
-        from .pool import pool_log_id, pool_log_id_from_subscription
+        from .pool import pool_log_id, pool_log_id_from_topic
 
-        # Generation-scoped (derived from the subscription this pool pulls), so markers
-        # from a previous deploy's workers never count as THIS pool being warm.
-        pool_id = (
-            pool_log_id_from_subscription(self._subscription)
-            if self._subscription
-            else pool_log_id(self.name)
-        )
+        # Generation-scoped (derived from this pool's dispatch topic), so markers from a
+        # previous deploy's workers never count as THIS pool being warm.
+        pool_id = pool_log_id_from_topic(self._topic) if self._topic else pool_log_id(self.name)
         created = self._created
 
         async def _await() -> bool:
@@ -1473,28 +1863,39 @@ class GeminiEngine:
         error* and ``cancel_query_job`` them — the reliable way to find a reused engine's
         workers, since the engine's ``/operations`` collection lists only engine LROs, not
         query jobs. A cancelled worker takes a few minutes to actually stop, so deletion
-        retries up to ``timeout``. ``delete_pool_resources`` also removes the topic + sub.
+        retries up to ``timeout``. ``delete_pool_resources`` also retires the pool's
+        Pub/Sub resources (topic, worker subscriptions, and the roster).
         """
         import re
 
         ae = self._agent_engines()
-        # Collect every revision's dispatch pair BEFORE the engine — and with it the
-        # revision list — is gone: deploys made while traffic was pinned each left their
-        # fresh pair idle (see deploy()), so the handle's own pair is not necessarily the
-        # only one to clean up. Best-effort: the handle's own pair is swept regardless.
-        pool_pairs: dict[str | None, str | None] = {}
+        # Collect every revision's pool BEFORE the engine — and with it the revision list —
+        # is gone: deploys made while traffic was pinned each left their fresh pool idle
+        # (see deploy()), so the handle's own pool is not necessarily the only one to
+        # clean up. Best-effort: the handle's own pool is swept regardless.
+        pools: dict[str, str | None] = {}  # topic -> legacy shared subscription
         if delete_pool_resources:
-            if self._topic or self._subscription:
-                pool_pairs[self._subscription] = self._topic
+            if self._topic:
+                pools[self._topic] = self._subscription
             try:
                 revisions = self._client().agent_engines.runtimes.revisions.list(
                     name=self._resource
                 )
                 for revision in revisions:
-                    sub = _env_pool_subscription(revision.api_resource)
-                    if sub:
-                        pool_pairs.setdefault(sub, topic_for_subscription(sub))
+                    address = _address_from_env(_pool_env(revision.api_resource))
+                    if address:
+                        pools.setdefault(address[0], address[1])
             except Exception:  # noqa: BLE001 — sweep is best-effort
+                pass
+        # Idle workers other client processes submitted are jobs too: the roster names
+        # them, so cancel them up front as well (a reused engine's workers used to be
+        # findable only through the blocked-delete error below).
+        if self._topic and not self._subscription and self._output_bucket:
+            try:
+                for entry in self._roster().entries():
+                    if entry.job_name and entry.job_name not in self._pool_jobs:
+                        self._pool_jobs.append(entry.job_name)
+            except Exception:  # noqa: BLE001 — best effort
                 pass
         for job_name in self._pool_jobs:  # fast path: jobs this process submitted
             try:
@@ -1519,8 +1920,8 @@ class GeminiEngine:
                         pass
                 time.sleep(15)
 
-        for sub, topic in pool_pairs.items():
-            _delete_pool_pair(topic, sub, self._credentials)
+        for topic, legacy_subscription in pools.items():
+            _retire_pool(topic, legacy_subscription, self._output_bucket, self._credentials)
 
     def versions(self) -> list[str]:
         """This engine's runtime-revision ids, newest first (see :meth:`revisions`)."""

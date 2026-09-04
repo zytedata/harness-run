@@ -42,9 +42,7 @@ tag `vX.Y.Z`, push the commit and the tag.
   remove the service agent's `objectAdmin` on the bucket and its `roles/aiplatform.user`
   on the project (README, "Migration"). No date: the removal waits until no engine runs
   as the service agent. Mixed client/engine versions keep working on the runtime
-  identity, which is the unfixed state. In warm mode the shared dispatch subscription
-  still lets one worker's shell take another run's message (now carrying its token);
-  per-worker dispatch closes that and is part of this change set. New dev scripts:
+  identity, which is the unfixed state. New dev scripts:
   `dev/live_isolation_probe.py` (the finding) and `dev/live_scoped_gcs.py` (the fix:
   `RUNTIME_SA=<email>` for the custom runtime identity, unset for a bucket in another
   project).
@@ -52,6 +50,25 @@ tag `vX.Y.Z`, push the commit and the tag.
   `AgentEngineConfig.service_account`); omitted, the platform default applies as before. The
   account's Vertex role is a custom role with only `aiplatform.endpoints.predict` (README IAM
   table), never `roles/aiplatform.user`.
+- **Per-worker dispatch for warm pools.** Every warm worker of an engine used to pull one
+  shared Pub/Sub subscription as the same identity, so a shell in one worker could take
+  another run's turn — its pointers and, with run-scoped tokens, its token — and ack it so
+  that run never started. Now `fill_pool` gives each worker its own randomly named,
+  filtered subscription (named only in that worker's job input; `roles/pubsub.subscriber`
+  can consume by name but not list) and records it in the pool's roster (client-owned GCS
+  objects under `pool/`, `runtime/gemini/roster.py`); each turn claims one idle worker off
+  the roster atomically and is published addressed to that worker alone, whose channel the
+  client deletes as soon as the worker has started the turn. Along the way: a turn that
+  finds no idle worker spawns one for itself instead of stranding (an empty pool now
+  degrades to cold latency), a worker that never starts its turn is replaced by a
+  re-dispatch (pickup watchdog), `interrupt()` cancels a warm turn's worker job, `delete()`
+  cancels idle workers other processes submitted, and every turn now opens with a
+  `turn_started` status event carrying the worker id. The engine env bakes
+  `AGENT_POOL_TOPIC` (the deploy's topic) instead of `AGENT_POOL_SUBSCRIPTION`. **Update
+  note**: redeploy warm engines. `get_engine(warm_pool=True)` on an engine deployed before
+  this change warns and keeps driving its shared subscription. Never grant the runtime
+  identity anything under the output bucket's `pool/` prefix: the roster decides where
+  turns go.
 
 ### Backwards-incompatible
 

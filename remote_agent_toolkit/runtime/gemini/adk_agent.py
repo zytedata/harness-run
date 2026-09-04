@@ -201,7 +201,7 @@ def _prewarm(spec: Any) -> None:
     """
     from ...events import AgentEvent
     from ...ports.eventsink import CloudLoggingSink
-    from .pool import pool_log_id_from_subscription
+    from .pool import pool_log_id_from_topic
 
     if (spec.checkpoint or spec.transcript) and os.environ.get("AGENT_CHECKPOINT_GCS"):
         try:
@@ -211,7 +211,7 @@ def _prewarm(spec: Any) -> None:
         except Exception:  # noqa: BLE001
             pass
     try:
-        pool_id = pool_log_id_from_subscription(os.environ.get("AGENT_POOL_SUBSCRIPTION", ""))
+        pool_id = pool_log_id_from_topic(os.environ.get("AGENT_POOL_TOPIC", ""))
         ready = AgentEvent(kind="status", summary="pool worker ready", raw={"event": "pool_ready"})
         # GCS marker under events/<pool_id>/ — what wait_until_warm tails (quota-free);
         # the Cloud Logging emit stays for ops (and pre-stream clients).
@@ -290,7 +290,7 @@ class ToolkitAgent(BaseAgent):
 
     async def _run_async_impl(self, ctx: Any) -> AsyncGenerator[Any, None]:
         from ...spec import AgentSpec
-        from .pool import POOL_WAIT_SENTINEL
+        from .pool import parse_pool_wait
 
         spec = AgentSpec.from_dict(self.spec_data)
         prompt = _extract_prompt(ctx.user_content)
@@ -299,9 +299,11 @@ class ToolkitAgent(BaseAgent):
         invocation_id = ctx.invocation_id
 
         # Warm-pool worker: block for a dispatched turn, then process it (under the dispatched
-        # session_id). Cold start was paid at pool-fill time, so pickup is fast.
-        if prompt.strip() == POOL_WAIT_SENTINEL:
-            async for event in self._pool_worker(spec, invocation_id):
+        # session_id). Cold start was paid at pool-fill time, so pickup is fast. The job
+        # input names the worker's OWN dispatch subscription (per-worker dispatch, pool.py).
+        is_pool_worker, pool_subscription = parse_pool_wait(prompt)
+        if is_pool_worker:
+            async for event in self._pool_worker(spec, invocation_id, pool_subscription):
                 yield event
             return
 
@@ -332,7 +334,7 @@ class ToolkitAgent(BaseAgent):
         self, spec: Any, session_id: str, prompt: str, resume_sid: str | None,
         secrets_uri: str | None = None, invocation_id: str = "",
         session_config_uri: str | None = None, turn_config_uri: str | None = None,
-        gcs_token: str | None = None,
+        gcs_token: str | None = None, worker: str | None = None,
     ) -> AsyncGenerator[Any, None]:
         """Process one turn under ``session_id``: prep workspace, drive the harness, surface events.
 
@@ -356,6 +358,9 @@ class ToolkitAgent(BaseAgent):
         GCS access of this turn (configs, secrets, the mirror, checkpoints) authorizes with
         it instead of the runtime identity; when absent (a pre-token client) the turn runs
         on the runtime identity as before.
+
+        ``worker`` is the pool worker id when this is a warm turn (recorded on the
+        ``turn_started`` event: which worker ran the turn, and the client's pickup signal).
         """
         from ...harness import resolve_harness
         from ...harness.context import RunContext
@@ -493,6 +498,16 @@ class ToolkitAgent(BaseAgent):
         # redacted by the git layer; never put secrets in an event.
         saw_result = False
         try:
+            # First out, before anything slow (config fetch aside): the worker holds the
+            # turn. On the warm path this is what the client's pickup watchdog waits for
+            # (backend._pickup_watched_tail) before it would re-dispatch to another worker;
+            # the worker id is the durable record of which pool worker ran the turn.
+            yield surface(AgentEvent(
+                kind="status",
+                summary="turn started" + (f" on pool worker {worker}" if worker else ""),
+                raw={"event": "turn_started", "session_id": session_id, "worker": worker,
+                     "warm": worker is not None},
+            ))
             if configs_applied:
                 # The ground-truth record of what this turn runs: the merged effective
                 # spec (baked ← session config ← turn config), durable in the mirror.
@@ -560,30 +575,43 @@ class ToolkitAgent(BaseAgent):
 
             await asyncio.to_thread(delete_staged_secrets, secrets_uri)
 
-    async def _pool_worker(self, spec: Any, invocation_id: str = "") -> AsyncGenerator[Any, None]:
-        """Block pulling the dispatch subscription, then process the claimed turn.
+    async def _pool_worker(
+        self, spec: Any, invocation_id: str = "", subscription: str | None = None
+    ) -> AsyncGenerator[Any, None]:
+        """Block pulling this worker's own dispatch subscription, then process the turn.
 
         Heartbeats while idle (the async executor finalizes a job that yields no events), then
         runs the dispatched turn under the *dispatched* ``session_id`` so the waiting client
-        sees it on its own Cloud Logging tail.
+        sees it on its own event tail. ``subscription`` comes from the job input
+        (``pool.pool_wait_prompt``): it is this worker's own channel, on which only turns
+        the client addressed to this worker can ever arrive (per-worker dispatch).
         """
         import time
 
         from ...ports.eventsink import CloudLoggingSink
-        from .pool import pool_log_id_from_subscription, resolve_max_wait_s, worker_dispatch_from_env
+        from .pool import (
+            pool_log_id_from_topic,
+            resolve_max_wait_s,
+            worker_dispatch,
+            worker_id_from_subscription,
+        )
         from .translate import to_adk_event
 
-        pool_id = pool_log_id_from_subscription(os.environ.get("AGENT_POOL_SUBSCRIPTION", ""))
+        pool_id = pool_log_id_from_topic(os.environ.get("AGENT_POOL_TOPIC", ""))
 
-        dispatch = worker_dispatch_from_env()
-        if dispatch is None:
+        if not subscription:
             ev = AgentEvent(
                 kind="status",
-                summary="pool worker started without AGENT_POOL_SUBSCRIPTION; exiting",
+                summary=(
+                    "pool worker started without its AGENT_POOL_SUBSCRIPTION directive "
+                    "(a fill_pool from a client older than per-worker dispatch?); exiting"
+                ),
                 raw={"event": "pool_error"},
             )
             yield to_adk_event(ev, self.name, invocation_id)
             return
+        dispatch = worker_dispatch(subscription)
+        worker_id = worker_id_from_subscription(subscription)
 
         # Pre-warm during the idle wait (the dominant post-claim cost in-cloud is the first
         # GCS/Logging channel + auth). Emitting the readiness marker doubles as warming the
@@ -599,8 +627,9 @@ class ToolkitAgent(BaseAgent):
                 # timeout mainly bounds the heartbeat cadence, not pickup latency.
                 claimed = await asyncio.to_thread(dispatch.claim, 5.0)
             except Exception as exc:  # noqa: BLE001 — a missing grant must not crash silently
-                # e.g. the RE service agent lacking pubsub.subscriber on the dispatch sub.
-                # Surface it to Cloud Logging (the only async channel) instead of dying quietly.
+                # e.g. the runtime identity lacking pubsub.subscriber, or the client retired
+                # this worker's subscription (a redeploy cut the pool over: NotFound, the
+                # intended exit). Surface it to Cloud Logging instead of dying quietly.
                 err = AgentEvent(
                     kind="status", summary=f"pool claim failed: {str(exc)[:200]}",
                     raw={"event": "pool_error"},
@@ -641,7 +670,7 @@ class ToolkitAgent(BaseAgent):
             resume_sid=session_id if resume else None, secrets_uri=secrets_uri,
             invocation_id=invocation_id,
             session_config_uri=session_config_uri, turn_config_uri=turn_config_uri,
-            gcs_token=gcs_token,
+            gcs_token=gcs_token, worker=worker_id,
         ):
             yield event
 

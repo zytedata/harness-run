@@ -59,7 +59,7 @@ _BASE_REQUIREMENTS: tuple[str, ...] = (
     # 1.x is incompatible with ADK; pin to the verified-compatible range.
     "a2a-sdk>=0.3.4,<0.4",
     "google-cloud-storage",
-    # Warm-pool dispatch: pool workers pull turn assignments from a Pub/Sub subscription.
+    # Warm-pool dispatch: pool workers pull turn assignments from their Pub/Sub subscription.
     "google-cloud-pubsub",
     # Native per-step observability: structured Cloud Logging entries.
     "google-cloud-logging",
@@ -216,7 +216,7 @@ def build_env(
     use_vertex: bool = True,
     vertex_region: str = "global",
     warm_pool: bool = False,
-    pool_subscription: str | None = None,
+    pool_topic: str | None = None,
     pool_max_wait_s: float | None = None,
 ) -> dict:
     """Build the engine ``env_vars`` dict from ``spec`` (generalizes the PoC ``_env_vars``).
@@ -233,8 +233,9 @@ def build_env(
             skipped without it.
         use_vertex: Route the model through Vertex (the RE service agent's own identity, no API
             key in the agent env). Set ``False`` for API-key mode (key supplied per-invocation).
-        warm_pool / pool_subscription: when both set, the engine acts as a pool worker that
-            pulls turn assignments from ``pool_subscription``.
+        warm_pool / pool_topic: when both set, the engine's pool workers belong to the
+            pool dispatched through ``pool_topic`` (a worker's OWN subscription on it rides
+            its job input, not the env — per-worker dispatch, ``pool.py``).
         pool_max_wait_s: how long an idle pool worker waits for an assignment before it
             exits (default: ``pool.DEFAULT_MAX_WAIT_S``, a day). Baked into the engine env
             as ``AGENT_POOL_MAX_WAIT_S`` for the worker's wait loop to read; only
@@ -287,9 +288,11 @@ def build_env(
         env["ANTHROPIC_VERTEX_PROJECT_ID"] = project
         env["CLOUD_ML_REGION"] = vertex_region
 
-    # Warm-pool worker config: a pooled job pulls turn assignments from this subscription.
-    if warm_pool and pool_subscription:
-        env["AGENT_POOL_SUBSCRIPTION"] = pool_subscription
+    # Warm-pool worker config: the pool's dispatch topic (generation-scoped). A worker
+    # derives its readiness-marker key from it; its own subscription arrives in its job
+    # input. The topic is also what get_engine reads back to address the pool.
+    if warm_pool and pool_topic:
+        env["AGENT_POOL_TOPIC"] = pool_topic
         if pool_max_wait_s is not None:
             env["AGENT_POOL_MAX_WAIT_S"] = str(pool_max_wait_s)
 
@@ -408,7 +411,7 @@ def build_engine_config(
     use_vertex: bool = True,
     vertex_region: str = "global",
     warm_pool: bool = False,
-    pool_subscription: str | None = None,
+    pool_topic: str | None = None,
     pool_max_wait_s: float | None = None,
     min_instances: int = 0,
     max_instances: int = 1,
@@ -458,7 +461,7 @@ def build_engine_config(
             use_vertex=use_vertex,
             vertex_region=vertex_region,
             warm_pool=warm_pool,
-            pool_subscription=pool_subscription,
+            pool_topic=pool_topic,
             pool_max_wait_s=pool_max_wait_s,
         ),
         "min_instances": min_instances,

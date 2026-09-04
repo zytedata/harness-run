@@ -1,19 +1,24 @@
 """Live probe for the warm-pool redeploy cutover (issue #38 / PR #39).
 
 The #38 fix makes each ``deploy(warm_pool=True)`` mint a generation-scoped dispatch
-pair, retire the previous pair once the new pool is filled, and makes ``get_engine``
-discover the live pair from the deployed env. All of that is control-plane + worker
-behavior the offline suite can only fake; this probe checks it on real infrastructure:
+topic, retire the previous generation once the new pool is filled, and makes
+``get_engine`` discover the live topic from the deployed env. With per-worker dispatch
+every worker has its own subscription under that topic (``pool.py``). All of that is
+control-plane + worker behavior the offline suite can only fake; this probe checks it on
+real infrastructure:
 
-  * **deploy #1** creates a warm engine whose subscription carries a generation token,
-    and ``wait_until_warm`` sees the generation-scoped readiness marker.
-  * **deploy #2** (same name) mints a DIFFERENT pair, deletes the old one, and the old
-    idle worker exits within a couple of minutes (claim failure on the deleted
-    subscription) instead of lingering for ``pool_max_wait_s``.
-  * ``get_engine(warm_pool=True)`` discovers deploy #2's subscription from the env.
-  * a turn dispatched through that handle runs on the NEW revision — its system prompt
-    carries a per-deploy marker, and the reply must be the new deploy's marker (the
-    exact regression from #38: post-redeploy turns served with the old baked spec).
+  * **deploy #1** creates a warm engine whose topic carries a generation token, its one
+    worker has its own filtered subscription, the roster records it, and
+    ``wait_until_warm`` sees the generation-scoped readiness marker.
+  * **deploy #2** (same name) mints a DIFFERENT topic, deletes the old generation (topic,
+    worker subscriptions, roster), and the old idle worker exits within a couple of
+    minutes (claim failure on its deleted subscription) instead of lingering for
+    ``pool_max_wait_s``.
+  * ``get_engine(warm_pool=True)`` discovers deploy #2's topic from the env.
+  * a turn dispatched through that handle is addressed to one worker, runs on the NEW
+    revision — its system prompt carries a per-deploy marker, and the reply must be the
+    new deploy's marker (the exact regression from #38: post-redeploy turns served with
+    the old baked spec) — and the worker's subscription is gone afterwards.
 
 Configure via env (defaults are the shared my-project test setup):
   PROJECT, LOCATION, IMPERSONATE_SA (optional),
@@ -46,8 +51,8 @@ NAME = f"ratk-cutover-{SUFFIX}"
 
 TASK = "What is your revision marker? Reply with exactly the marker and nothing else."
 
-# The generation token new_generation() mints into the subscription name.
-_GENERATION_SUB = re.compile(r"-[0-9a-f]{8}-dispatch-sub$")
+# The generation token new_generation() mints into the topic name.
+_GENERATION_TOPIC = re.compile(r"-[0-9a-f]{8}-dispatch$")
 
 # How long the old idle worker gets to notice its subscription is gone and exit. The
 # claim long-poll is 5 s, so failure surfaces within seconds; the job needs a little
@@ -100,7 +105,7 @@ def _deploy(marker: str, credentials):
         _spec(marker), PROJECT, LOCATION, warm_pool=True, pool_size=1, credentials=credentials
     )
     print(f"  deployed in {time.time() - t0:.0f}s -> {engine.resource}", flush=True)
-    print(f"  dispatch subscription: {engine._subscription}", flush=True)
+    print(f"  dispatch topic: {engine._topic}", flush=True)
     return engine
 
 
@@ -114,6 +119,27 @@ def _subscription_exists(subscription: str, credentials) -> bool:
         return True
     except gax.NotFound:
         return False
+
+
+def _topic_exists(topic: str, credentials) -> bool:
+    from google.api_core import exceptions as gax
+    from google.cloud import pubsub_v1
+
+    kwargs = {"credentials": credentials} if credentials else {}
+    try:
+        pubsub_v1.PublisherClient(**kwargs).get_topic(topic=topic)
+        return True
+    except gax.NotFound:
+        return False
+
+
+def _worker_subscriptions(topic: str, credentials) -> list[str]:
+    from remote_agent_toolkit.ports.dispatch import PubSubDispatch
+    from remote_agent_toolkit.runtime.gemini.pool import worker_subscription_prefix
+
+    return PubSubDispatch(topic=topic, project=PROJECT, credentials=credentials).list_subscriptions(
+        worker_subscription_prefix(topic)
+    )
 
 
 def _await_worker_exit(engine, jobs: list[str], timeout: float) -> str | None:
@@ -152,9 +178,14 @@ async def main() -> int:
     engine = None
     try:
         engine = _deploy("REV1", credentials)
-        sub1, jobs1 = engine._subscription, list(engine._pool_jobs)
-        check("deploy #1 subscription is generation-scoped", bool(_GENERATION_SUB.search(sub1)),
-              sub1.rsplit("/", 1)[-1])
+        topic1, jobs1 = engine._topic, list(engine._pool_jobs)
+        check("deploy #1 topic is generation-scoped", bool(_GENERATION_TOPIC.search(topic1)),
+              topic1.rsplit("/", 1)[-1])
+        roster1 = engine._roster().entries()
+        subs1 = _worker_subscriptions(topic1, credentials)
+        check("deploy #1: one worker, its own subscription, rostered",
+              len(roster1) == 1 and subs1 == [roster1[0].subscription],
+              f"roster={[e.worker for e in roster1]} subs={[s.rsplit('/', 1)[-1] for s in subs1]}")
 
         t0 = time.time()
         warm = await asyncio.to_thread(engine.wait_until_warm)
@@ -162,10 +193,12 @@ async def main() -> int:
               f"after {time.time() - t0:.0f}s")
 
         engine = _deploy("REV2", credentials)
-        sub2 = engine._subscription
-        check("deploy #2 mints a different pair", bool(_GENERATION_SUB.search(sub2))
-              and sub2 != sub1, sub2.rsplit("/", 1)[-1])
-        check("the old subscription is deleted", not _subscription_exists(sub1, credentials))
+        topic2 = engine._topic
+        check("deploy #2 mints a different topic", bool(_GENERATION_TOPIC.search(topic2))
+              and topic2 != topic1, topic2.rsplit("/", 1)[-1])
+        check("the old generation is retired (topic + worker subscriptions gone)",
+              not _topic_exists(topic1, credentials)
+              and all(not _subscription_exists(s, credentials) for s in subs1))
 
         print(f"{time.strftime('%H:%M:%S')} waiting for the old idle worker to exit ...",
               flush=True)
@@ -182,15 +215,20 @@ async def main() -> int:
         looked_up = gemini.get_engine(
             NAME, project=PROJECT, location=LOCATION, warm_pool=True, credentials=credentials
         )
-        check("get_engine discovers deploy #2's subscription",
-              looked_up._subscription == sub2,
-              looked_up._subscription.rsplit("/", 1)[-1] if looked_up._subscription else "None")
+        check("get_engine discovers deploy #2's topic (per-worker dispatch, no shared sub)",
+              looked_up._topic == topic2 and looked_up._subscription is None,
+              looked_up._topic.rsplit("/", 1)[-1] if looked_up._topic else "None")
+        idle_before = [e.subscription for e in looked_up._roster().entries()]
 
         print(f"{time.strftime('%H:%M:%S')} running a turn through the looked-up handle ...",
               flush=True)
         text = await _run_a_turn(looked_up)
         check("the post-redeploy turn ran on the NEW revision",
               "REV2" in text and "REV1" not in text, f"reply={text[:80]!r}")
+        check("the turn's worker channel is gone; the refill worker is rostered",
+              len(idle_before) == 1 and not _subscription_exists(idle_before[0], credentials)
+              and len(looked_up._roster().entries()) == 1,
+              f"idle_before={[s.rsplit('/', 1)[-1] for s in idle_before]}")
     except Exception:
         print(f"PROBE FAILED:\n{traceback.format_exc()}", flush=True)
         _checks.append(("probe completed", False))

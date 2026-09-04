@@ -842,7 +842,7 @@ service agent held `objectAdmin` on it. So, **before the fix below**, any run co
 | Another run's live event stream (`events/<sid>/`, what the client tails and reads back as history) | **High** | Write a fake terminal `result` into another session's mirror: its client sees a finished run with invented output |
 | Vertex model calls as the service agent | **Medium** | Spend outside the run's `max_budget_usd`; no data exposure |
 | Cloud Logging writes (`logging.logWriter`) | **Low** | Noise and forged ops log lines; clients no longer tail Cloud Logging |
-| Warm pool: pull other runs' turn assignments (`pubsub.subscriber`) | **High, warm mode only** | A dispatched message carries the other run's pointers (and, with the fix, its run-scoped token); pull it, ack it, and the other run never starts |
+| Warm pool: pull other runs' turn assignments (`pubsub.subscriber`) | **Critical, warm mode only** | Every warm worker pulled one shared subscription as the same identity: a shell in one worker takes another run's dispatch message — its pointers and, with run-scoped tokens alone, its token — and acking it means that run never starts. Closed by per-worker dispatch (below) |
 
 **The fix: run-scoped GCS tokens.** The client mints one short-lived, downscoped token per turn
 (a [Credential Access Boundary](https://cloud.google.com/iam/docs/downscoping-short-lived-credentials):
@@ -912,18 +912,21 @@ with the account's token returned 403).
 **What stays reachable after the fix**, because the container has no second user and no firewall:
 the runtime identity's token itself, hence Vertex model spend outside the run budget, Cloud Logging
 writes, the run's own persisted job input (which carries its own run-scoped token: worth its own
-objects, which it already holds), and in warm mode the subscription pull. That pull is the one
-remaining way to reach another run's data: every warm worker of an engine pulls the same dispatch
-subscription as the same identity, so a shell in one worker can start a background puller and take
-another run's dispatch message, which carries that run's pointers and, with this fix, its run-scoped
-token; acking it means that run never starts. The fix for that is **per-worker dispatch**: one
-subscription per worker, created by the client in `fill_pool`, its name passed only in that worker's
-job input, and each turn dispatched to one idle worker the client picks. `roles/pubsub.subscriber`
-has no list or get permission, so a shell in worker X can only pull X's channel, and X is busy from
-the moment its turn was dispatched, so nothing else ever lands there. Background jobs get a fresh
-sandbox per job (verified 2026-09-03: three sessions on one engine, different `boot_id`s), so a
-background process left by one run cannot survive into the next. Per-worker dispatch is in progress
-on this branch; until it lands, run warm pools only with trusted agents.
+objects, which it already holds), and in warm mode the worker's own subscription pull. That pull
+used to be the one remaining way to reach another run's data: every warm worker of an engine pulled
+the same dispatch subscription as the same identity, so a shell in one worker could start a
+background puller and take another run's dispatch message, which carries that run's pointers and,
+with this fix, its run-scoped token; acking it meant that run never started. **Per-worker dispatch**
+closes it: `fill_pool` creates one subscription per worker, with a random name and a filter that only
+admits messages addressed to that worker, and passes the name only in that worker's job input; each
+turn is dispatched to one idle worker the client picks from the pool's roster (client-owned GCS
+objects under `pool/`, claimed with a generation-precondition delete) and addressed to it alone.
+`roles/pubsub.subscriber` has no list or get permission, so a shell in worker X can only pull X's
+channel, and X's channel only ever carried the one turn the client sent to X (the client deletes it as
+soon as the worker has started the turn). Background jobs get a fresh sandbox per job (verified
+2026-09-03: three sessions on one engine, different `boot_id`s), so a background process left by one
+run cannot survive into the next. A warm engine deployed before this change still runs the shared
+subscription (`get_engine(warm_pool=True)` warns about it); redeploy it.
 
 **Migration, with no fixed date.** An older worker still does its GCS work as the runtime identity, so
 nothing is taken from the default service agent while an engine that runs as it is still in use.
@@ -1109,7 +1112,8 @@ Two callers cannot address two revisions of one engine concurrently.
 
 A traffic pin survives later deploys — a fresh revision won't serve until you `set_traffic()` again, and
 `deploy` warns when it lands in that state. Warm pools cut over atomically on update: each deploy mints a
-fresh, deploy-scoped dispatch topic/subscription and deletes the previous pair once the new pool is filled,
+fresh, deploy-scoped dispatch topic and retires the previous generation (its worker subscriptions, topic
+and roster) once the new pool is filled,
 so workers still running the old revision can never claim a post-deploy turn — they fail their next claim
 poll and exit within seconds (a worker mid-turn finishes that turn on its own revision). With pinned
 traffic nothing is retired: the serving revision's pair stays the live one.
@@ -1259,7 +1263,7 @@ project (tighten to your policy):
 | `roles/storage.admin` (or objectAdmin on the buckets) | stage the deploy bundle; read job output; mint the per-turn run-scoped GCS tokens (a downscoped token can only carry rights its source already has) |
 | `roles/logging.viewer` | tail the per-step event stream from the client |
 | `roles/cloudbuild.builds.editor` | the deploy builds the engine image |
-| `roles/pubsub.editor` _(warm pool only)_ | create/retire the per-deploy dispatch topic/subscription + publish turns |
+| `roles/pubsub.editor` _(warm pool only)_ | create/retire the per-deploy dispatch topic and the per-worker subscriptions + publish turns |
 | `roles/iam.serviceAccountUser` **on the runtime service account** | deploy with `service_account=`: the deploy acts as that account ([Google's troubleshooting page](https://docs.cloud.google.com/gemini-enterprise-agent-platform/troubleshooting/agent-deployment): "You do not have permission to act as service_account" means this role is missing) |
 
 The principal that impersonates it needs `roles/iam.serviceAccountTokenCreator` **on this SA**.
@@ -1280,8 +1284,8 @@ runtime service account (verified live 2026-09-03 and 2026-09-04 with this set):
 | `roles/serviceusage.serviceUsageConsumer` | project | the platform's job runner downloads the job input with a quota project on the request; without it the job dies before any worker event |
 | `roles/telemetry.metricsWriter`, `roles/telemetry.tracesWriter` | project | span and metric export; without them every batch fails with 403 (the default service agent holds both in the shared project) |
 | `roles/storage.objectViewer` | the staging bucket | the platform pulls the deploy bundle |
-| `roles/storage.objectCreator` and `roles/storage.legacyObjectReader`, both conditioned on `objects/jobs/` (and `objects/events/ratk-` for warm pools) | the output/checkpoint bucket | the platform's job runner reads the job input by exact name and writes the job output there, and the pool readiness marker. Everything else in the bucket is done with the run-scoped token. Until the [migration](#the-runtime-identity-is-reachable-by-the-agent) completes the default service agent still holds `roles/storage.objectAdmin` there, which the agent's shell can use to read every run's staged objects |
-| `roles/pubsub.subscriber` | project _(warm pool)_ | warm-pool workers pull turns; project-level since the toolkit auto-creates a per-engine subscription |
+| `roles/storage.objectCreator` and `roles/storage.legacyObjectReader`, both conditioned on `objects/jobs/` (and `objects/events/ratk-` for warm pools) | the output/checkpoint bucket | the platform's job runner reads the job input by exact name and writes the job output there, and the pool readiness marker. Everything else in the bucket is done with the run-scoped token. Never grant it anything under `pool/`: that prefix holds the warm pool's idle-worker roster, which decides which worker a turn (and its run-scoped token) is sent to. Until the [migration](#the-runtime-identity-is-reachable-by-the-agent) completes the default service agent still holds `roles/storage.objectAdmin` there, which the agent's shell can use to read every run's staged objects |
+| `roles/pubsub.subscriber` | project _(warm pool)_ | each warm-pool worker pulls its own subscription; project-level since the toolkit creates one per worker. The role is consume-by-name only (no list, no get), which is what keeps one worker's channel unreachable from another worker's shell |
 
 No `secretmanager.secretAccessor` is needed for the runtime identity: **secrets are passed per-invocation, not
 resolved from Secret Manager by the engine** (see [Secrets & security](#secrets--security)). If a *caller*
@@ -1292,8 +1296,9 @@ keeps secret values in Secret Manager, that caller (the operator identity) reads
 - A staging bucket `gs://<project>-agent-staging` and an output bucket `gs://<project>-agent-output`,
   the latter with uniform bucket-level access on (the conditional bindings above need it).
 - **Claude model access** — see the note below; the deployed engine can't run without it.
-- _(warm pool)_ a Pub/Sub topic + subscription for turn dispatch — `gemini.deploy(warm_pool=True)` **creates
-  these for you** (given the operator SA's `pubsub.editor`); no manual setup needed.
+- _(warm pool)_ a Pub/Sub topic per deploy and a subscription per pool worker for turn dispatch —
+  `gemini.deploy(warm_pool=True)` / `fill_pool` **create these for you** (given the operator SA's
+  `pubsub.editor`); no manual setup needed.
 
 **Claude model access.** By default the toolkit routes Claude through **Vertex AI** (the engine authenticates
 as its own GCP identity — no API key to manage). For that to work:
@@ -1378,25 +1383,32 @@ expose it yet** — the run plane is built around the async + warm-pool paths, w
 interactive work. We can add sync later if a genuinely short-turn use case needs the lower start latency.
 
 **How `warm_pool=True` works.** `gemini.deploy(spec, warm_pool=True)` keeps a pool of pre-provisioned workers,
-each blocked on a Pub/Sub subscription (a competing-consumers *atomic claim*). A worker warms its logging +
+each blocked on **its own** Pub/Sub subscription (per-worker dispatch: a random, filtered subscription the
+client creates in `fill_pool` and names only in that worker's job input). A worker warms its logging +
 storage channels during its idle wait and reports ready — `engine.wait_until_warm()` blocks on that signal.
-A run is then dispatched to a free worker, so the turn goes nearly straight to the model. The first
-**observed** event lands **~4 s** after dispatch (measured: 3.8 s to first event, 10.9 s to the result of a
-one-tool Haiku turn, vs ~2.5 min cold) — the worker's claim pickup plus one ~0.5 s mirror flush and one
-tail poll; events then stream **~1–2 s** behind the agent for the rest of the turn. (Before the GCS event
-stream this number was ~10–20 s, dominated by Cloud Logging's ingestion lag.) On claim the pool refills, so
-the next turn is warm too. The dispatch topic/subscription pair is scoped to the deploy: a redeploy mints a
-fresh pair and retires the old one, so turns dispatched after it can only land on new-revision workers —
-stale idle workers exit promptly instead of serving turns with the previous revision's baked spec/skills.
+A run then takes one idle worker off the pool's roster (client-owned GCS objects under `pool/`, oldest
+worker first, claimed atomically so several client processes can share one pool) and publishes the turn
+addressed to that worker alone, so the turn goes nearly straight to the model. The first **observed** event
+landed **~4 s** after dispatch with the previous shared-subscription design (3.8 s to first event, 10.9 s to
+the result of a one-tool Haiku turn, vs ~2.5 min cold) — the worker's pickup plus one ~0.5 s mirror flush
+and one tail poll; per-worker dispatch adds a roster read and claim (two GCS calls) before the publish, to
+be re-measured with `dev/live_warm_latency_probe.py`. Events then stream **~1–2 s** behind the agent for the
+rest of the turn. (Before the GCS event stream this number was ~10–20 s, dominated by Cloud Logging's
+ingestion lag.) On dispatch the pool refills, so the next turn is warm too. If the addressed worker never
+starts the turn (it died at boot, or the platform killed it), the client re-dispatches to another worker
+once the worker's boot window plus a grace has passed, up to twice, then fails the run with an explained
+error. The dispatch topic is scoped to the deploy: a redeploy mints a fresh topic and retires the previous
+generation (its worker subscriptions, topic and roster), so turns dispatched after it can only land on
+new-revision workers — stale idle workers exit promptly instead of serving turns with the previous
+revision's baked spec/skills.
 
 > _Keeping the pool full:_ an idle worker waits `pool_max_wait_s` (a `deploy()` parameter; default a day)
-> for an assignment, then exits — **without replacement**. And a pool that has drained to empty does not
-> self-recover: the automatic one-worker refill after each dispatch just claims that pending dispatch
-> itself on an empty pool, so net pool size stays 0 and every turn goes cold (~2.5 min) until
-> `engine.fill_pool(n)` re-warms it by hand. Size `pool_max_wait_s` to your dispatch gaps — any quiet
-> stretch longer than it drains the pool. The platform's max **job** duration (7 days at the time of
-> writing — a platform limit that can change) caps the wait regardless: a worker that outlives it is
-> killed, also without replacement.
+> for an assignment, then exits — **without replacement**. A pool that has drained to empty does not strand
+> turns: a turn that finds no idle worker spawns one for itself and waits for its boot (~2.5 min, cold
+> latency), and the refill after it starts re-warming the pool; `engine.fill_pool(n)` re-warms it ahead of
+> time. Size `pool_max_wait_s` to your dispatch gaps — any quiet stretch longer than it drains the pool. The
+> platform's max **job** duration (7 days at the time of writing — a platform limit that can change) caps
+> the wait regardless: a worker that outlives it is killed, also without replacement.
 
 **Event streaming scales with your fleet.** The stream you consume with `async for ev in run` is the
 session's **GCS event mirror**, tailed live: the worker writes small batches as events happen and the

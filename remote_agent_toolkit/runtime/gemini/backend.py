@@ -26,6 +26,7 @@ import time
 import uuid
 from typing import Any, AsyncIterator, TYPE_CHECKING
 
+from ...control import ControlMessage, ControlUnavailable
 from ...events import AgentEvent, RunResult, RunStatus, StopReason
 from .._run import DrivenRun
 from .pool import (
@@ -552,28 +553,33 @@ def _warn_if_traffic_pinned(api_resource: Any) -> None:
         )
 
 
-def _env_pool_subscription(api_resource: Any) -> str | None:
-    """``AGENT_POOL_SUBSCRIPTION`` from a deployed engine/revision resource, or ``None``.
+def _env_value(api_resource: Any, name: str) -> str | None:
+    """One baked env var from a deployed engine/revision resource, or ``None``.
 
-    The env baked at deploy is the ground truth for which subscription that code pulls —
-    it is exactly what a worker cold-started from that revision reads at runtime.
+    The env baked at deploy is the ground truth for what that code does at runtime — it is
+    exactly what a worker cold-started from that revision reads.
     """
     deployment = getattr(getattr(api_resource, "spec", None), "deployment_spec", None)
     for var in getattr(deployment, "env", None) or []:
-        if getattr(var, "name", None) == "AGENT_POOL_SUBSCRIPTION":
+        if getattr(var, "name", None) == name:
             return getattr(var, "value", None) or None
     return None
 
 
-def _serving_pool_subscription(client: Any, resource: str) -> str | None:
-    """``AGENT_POOL_SUBSCRIPTION`` of the revision pool workers actually run on, or ``None``.
+def _env_pool_subscription(api_resource: Any) -> str | None:
+    """``AGENT_POOL_SUBSCRIPTION`` from a deployed engine/revision resource, or ``None``."""
+    return _env_value(api_resource, "AGENT_POOL_SUBSCRIPTION")
 
-    Workers always cold-start on the SERVING revision, so with traffic pinned the pair
-    they pull is the pinned revision's. The engine-level env reflects the *latest*
-    revision instead — under a pin possibly one that never served, whose pair has no
-    listeners — so it is only the fallback (and the answer when traffic is unpinned or
-    split). ``None`` means the env was read but carries no subscription; a failed read
-    raises, and each caller decides how to degrade.
+
+def _serving_env_value(client: Any, resource: str, name: str) -> str | None:
+    """``name`` from the env of the revision workers actually run on, or ``None``.
+
+    Workers always cold-start on the SERVING revision, so with traffic pinned the env
+    that matters is the pinned revision's. The engine-level env reflects the *latest*
+    revision instead — under a pin possibly one that never served — so it is only the
+    fallback (and the answer when traffic is unpinned or split). ``None`` means the env
+    was read but has no such variable; a failed read raises, and each caller decides how
+    to degrade.
     """
     from . import revisions as rev
 
@@ -583,11 +589,19 @@ def _serving_pool_subscription(client: Any, resource: str) -> str | None:
         pinned = rev.revision_resource(resource, targets[0][0])
         for revision in client.agent_engines.runtimes.revisions.list(name=resource):
             if getattr(revision.api_resource, "name", "") == pinned:
-                sub = _env_pool_subscription(revision.api_resource)
-                if sub:
-                    return sub
+                value = _env_value(revision.api_resource, name)
+                if value:
+                    return value
                 break
-    return _env_pool_subscription(api)
+    return _env_value(api, name)
+
+
+def _serving_pool_subscription(client: Any, resource: str) -> str | None:
+    """``AGENT_POOL_SUBSCRIPTION`` of the revision pool workers actually run on, or ``None``.
+
+    See :func:`_serving_env_value` for why the serving revision's env is read.
+    """
+    return _serving_env_value(client, resource, "AGENT_POOL_SUBSCRIPTION")
 
 
 def _discover_pool_paths(
@@ -778,6 +792,9 @@ class GeminiSession:
         # Last mirror object consumed by this session's stream tail; the NEXT turn's tail
         # starts strictly after it (the clock-free turn boundary — see stream.tail_stream).
         self._stream_watermark: dict = {"key": ""}
+        # Set when the running turn's worker announced it reads the control inbox
+        # (control_ready event); reset per turn. Decides how interrupt() stops the turn.
+        self._control_ready = False
 
     def run(
         self,
@@ -802,7 +819,16 @@ class GeminiSession:
 
         *hooks* are rejected here: the turn runs in a remote worker, and a hook is a live
         callable in this process (see :meth:`~remote_agent_toolkit.runtime.base.Session.run`).
+
+        Raises ``RuntimeError`` while a turn is running: a second turn dispatched under
+        the same session id would have two workers writing the session's stream,
+        checkpoint and transcript. Use :meth:`send` to talk to the running turn.
         """
+        if self.busy:
+            raise RuntimeError(
+                "this session is running a turn; run() cannot start another one. Use "
+                "send() to deliver a message into the running turn, or interrupt() first."
+            )
         return self._submit(
             message, resume=False, secrets=secrets, turn_config=config, hooks=hooks
         )
@@ -814,16 +840,85 @@ class GeminiSession:
         secrets: dict[str, str] | None = None,
         config: TurnConfig | None = None,
         hooks: Any | None = None,
+        interrupt: bool = False,
+        message_id: str | None = None,
     ) -> DrivenRun:
-        """Resume this session with ``message``. Pass ``secrets`` again (not persisted).
+        """Send ``message`` to this session.
 
-        ``config`` is a per-turn :class:`~remote_agent_toolkit.config.TurnConfig` (see
-        :meth:`run`). There is deliberately no session config here: the session's world
-        was bound at ``start_session`` and cannot change mid-conversation.
+        On an idle session this resumes the conversation as a new turn. Pass ``secrets``
+        again (not persisted). ``config`` is a per-turn
+        :class:`~remote_agent_toolkit.config.TurnConfig` (see :meth:`run`). There is
+        deliberately no session config here: the session's world was bound at
+        ``start_session`` and cannot change mid-conversation.
+
+        On a RUNNING session the message is written to the turn's control inbox
+        (``control/<sid>/`` under the output bucket, read by the worker every ~1.5 s) and
+        the same :class:`Run` is returned: with ``interrupt=False`` the model sees it at its
+        next step, with ``interrupt=True`` the model is interrupted first and continues from
+        the message, in the same worker and workspace. The ``user`` event on the stream,
+        carrying ``message_id``, acknowledges delivery. Works from any process that holds
+        the session id. Raises :class:`~remote_agent_toolkit.control.ControlUnavailable`
+        when the engine's serving revision was deployed before the inbox existed (nothing
+        is sent; no second turn is started). ``secrets`` / ``config`` / ``hooks`` cannot
+        change mid-turn and are rejected then.
         """
+        if self.busy:
+            return self._send_into_running_turn(
+                message, interrupt=interrupt, message_id=message_id,
+                secrets=secrets, config=config, hooks=hooks,
+            )
         return self._submit(
             message, resume=True, secrets=secrets, turn_config=config, hooks=hooks
         )
+
+    @property
+    def busy(self) -> bool:
+        """Whether a turn of this session is running (or started and not yet finished)."""
+        return self._current_run is not None and not self._current_run.done
+
+    def _control_uri(self) -> str:
+        from .control import control_uri
+
+        return control_uri(self._engine._output_bucket)
+
+    def _send_into_running_turn(
+        self,
+        message: str,
+        *,
+        interrupt: bool,
+        message_id: str | None,
+        secrets: dict[str, str] | None,
+        config: TurnConfig | None,
+        hooks: Any | None,
+    ) -> DrivenRun:
+        if secrets or config is not None or hooks:
+            raise ValueError(
+                "secrets, config and hooks are bound when a turn starts and cannot change "
+                "while it runs; send() into a running turn takes only the message (and "
+                "interrupt= / message_id=). Interrupt the session first to start a new turn."
+            )
+        assert self._current_run is not None
+        if not self._engine.supports_control():
+            raise ControlUnavailable(
+                "this session's turn runs on an engine revision whose workers do not read "
+                "the control inbox (AGENT_CONTROL_GCS is not in its deployed env, or it "
+                "could not be read); the message was not sent. Redeploy the engine with "
+                "this toolkit version, or wait for the turn to end and send() then."
+            )
+        from .control import send_control
+
+        msg = ControlMessage(
+            op="interrupt" if interrupt else "steer",
+            message=message,
+            **({"message_id": message_id} if message_id else {}),
+        )
+        send_control(self._control_uri(), self._session_id, msg)
+        return self._current_run
+
+    def _observe(self, event: AgentEvent) -> None:
+        """Watch the running turn's stream for the worker's control_ready marker."""
+        if event.kind == "status" and (event.raw or {}).get("event") == "control_ready":
+            self._control_ready = True
 
     def _stage_secrets(self, secrets: dict[str, str] | None) -> str | None:
         """Stage per-invocation secrets to a nonce-keyed GCS object; return its gs:// URI."""
@@ -1028,8 +1123,12 @@ class GeminiSession:
         else:
             factory = tail_source
 
-        run = DrivenRun(factory, sid, self._client_spec(turn_config), on_complete=self._on_complete)
+        run = DrivenRun(
+            factory, sid, self._client_spec(turn_config),
+            on_complete=self._on_complete, on_event=self._observe,
+        )
         self._current_run = run
+        self._control_ready = False
         self._status = RunStatus.RUNNING
         self._stop_reason = None
         try:
@@ -1053,20 +1152,60 @@ class GeminiSession:
             delete_staged_secrets(self._staged_secrets_uri)
             self._staged_secrets_uri = None
 
-    async def interrupt(self) -> None:
-        """Interrupt the in-flight run: stop tailing AND cancel the remote job.
+    async def interrupt(self, *, timeout: float = 120.0) -> None:
+        """Interrupt the running turn and leave the session idle and resumable.
 
-        Cancelling the ``run_query_job`` stops the agent (and its billing). The warm path
-        has no per-turn job handle (the turn runs in a pool worker), so there it only stops
-        tailing — the worker finishes its turn.
+        When the turn's worker has announced it reads the control inbox (``control_ready``
+        on the stream), a ``stop`` is written there: the worker interrupts the harness and
+        runs its normal end-of-turn path — workspace snapshot, transcript, a terminal
+        result with ``StopReason.INTERRUPTED`` that keeps the turn's accounting — and this
+        returns once that result arrives. A later :meth:`send` resumes from that
+        checkpoint. Works from any process that holds the session id. No-op when nothing
+        is running.
+
+        Fallback (the pre-existing behavior): when the worker has not announced the inbox
+        yet (a cold job still starting, or an engine deployed before the inbox existed), or
+        does not end the turn within ``timeout`` seconds, the tail is stopped and — on the
+        cold path — the ``run_query_job`` is cancelled. The run then ends as an error
+        result with no checkpoint, and ``RunResult.warning`` says so. The warm path has no
+        per-turn job handle, so there the fallback only stops tailing.
         """
         run = self._current_run
-        if run is not None and run.task is not None and not run.task.done():
-            run.task.cancel()
+        if run is None or run.done:
+            return
+        run.ensure_started()
+        assert run.task is not None
+        note = None
+        if self._control_ready:
+            from .control import delete_control, send_control
+
+            key = await asyncio.to_thread(
+                send_control, self._control_uri(), self._session_id, ControlMessage(op="stop")
+            )
             try:
-                await run.task
+                await asyncio.wait_for(asyncio.shield(run.task), timeout)
+                return
+            except asyncio.TimeoutError:
+                # The worker never ended the turn: take the stop back (a stale stop would
+                # end the session's NEXT turn at its start) and fall back to cancelling.
+                await asyncio.to_thread(delete_control, self._control_uri(), key)
+                note = (
+                    f"the worker did not end the turn within {timeout:g}s of the stop; "
+                    "the run was cancelled without a checkpoint"
+                )
             except asyncio.CancelledError:
-                pass
+                return
+        else:
+            note = (
+                "the turn's worker had not announced a control channel (job still starting, "
+                "or an engine deployed before the inbox existed); the run was cancelled "
+                "without a checkpoint"
+            )
+        run.cancel(note=note)
+        try:
+            await run.task
+        except asyncio.CancelledError:
+            pass
         job_name = getattr(self._last_job, "job_name", None)
         if job_name:
             engine = self._engine
@@ -1227,6 +1366,10 @@ class GeminiEngine:
         self._subscription = subscription
         self._version = version  # pinned revision id; None => resolve the serving one lazily
         self._created = time.time()  # readiness-tail watermark (ignore stale pool markers)
+        # Whether the serving revision's workers read the control inbox (control.py).
+        # Known for a handle this toolkit version deployed; read from the deployed env
+        # for a looked-up one, once.
+        self._control_supported: bool | None = True if spec_known else None
         self._sessions: dict[str, GeminiSession] = {}
         self._pool_jobs: list[str] = []  # tracked pool-worker job names (to cancel on delete)
 
@@ -1239,6 +1382,25 @@ class GeminiEngine:
 
     def _agent_engines(self) -> Any:
         return self._client().agent_engines
+
+    def supports_control(self) -> bool:
+        """Whether turns on this engine can be steered / interrupted through the inbox.
+
+        True when this toolkit version deployed the engine (its env bakes
+        ``AGENT_CONTROL_GCS``). For a ``get_engine`` handle the serving revision's env is
+        read once; an engine deployed before the inbox existed, or an env that could not
+        be read, answers ``False`` — ``Session.send()`` on a running turn then raises
+        :class:`~remote_agent_toolkit.control.ControlUnavailable` instead of writing a
+        message nobody reads.
+        """
+        if self._control_supported is None:
+            try:
+                self._control_supported = bool(
+                    _serving_env_value(self._client(), self._resource, "AGENT_CONTROL_GCS")
+                )
+            except Exception:  # noqa: BLE001 — unconfirmed is "no": never write into the void
+                return False
+        return self._control_supported
 
     def _dispatch(self) -> Any:
         """The control-plane ``DispatchTransport`` (publish + ensure) for the warm pool."""

@@ -623,6 +623,59 @@ anywhere (worker OOM, external cancel, engine deleted) ends the run within ~3 mi
 explaining the job state — instead of waiting out the 1 h tail cap. Warm turns run in a pool worker without
 a per-turn job handle, so they get the bounded polls only.
 
+## Talking to a running turn: steer, interrupt, stop
+
+The session API is turn-based, and an interactive loop like Claude Code's needs two more things while
+a turn is **running**: send a message into it, and cut it short without losing the session. Both work
+the same on `local` and `gemini`, and from any process that holds the session id
+(`engine.get_session(session_id)`):
+
+```python
+run = session.run("Build the spider")
+
+# The operator changes their mind while the agent works. Same Run, same worker, same workspace:
+session.send("Actually skip the images, only product fields")            # steer: the model sees it at its next step
+session.send("Stop that approach, use the sitemap instead", interrupt=True)  # interrupt, then continue from this message
+
+# Or just stop. The turn ends through its normal end-of-turn path (checkpoint, transcript, accounting):
+await session.interrupt()
+assert session.stop_reason == "interrupted"     # idle and resumable
+await session.send("OK, now do X")              # a normal turn, from the interrupted turn's checkpoint
+```
+
+- **`send()` on a running session** delivers the message into the running turn and returns the **same
+  `Run`**: its events keep flowing and its single `result` covers everything. With `interrupt=False`
+  the message is queued for the model's next step (both harnesses: Claude Code's mid-turn `query()`,
+  Codex's `turn/steer`). With `interrupt=True` the model is interrupted first and continues from the
+  message in the same harness session — no checkpoint round-trip, no second job. On an idle session
+  `send()` is the usual resume (`interrupt` is ignored).
+- **The `user` event is the acknowledgement.** Each delivered message appears on the stream, in the
+  mirror and in `history()` as an event of kind `user` (the text as `summary`; `raw["message_id"]`,
+  `raw["interrupt"]`), emitted when the harness hands it to the model. Pass your own
+  `message_id=` to match it up; the worker dedupes on it, so a retried send after re-attaching never
+  reaches the model twice. Until that event arrives the message is "waiting" — on `gemini` about
+  2 s (the worker polls its inbox every 1.5 s), plus whatever tool call the model is in the middle of.
+- **`interrupt()` is "interrupt and stop"**: the harness stops what the model is doing and the turn
+  ends with `StopReason.INTERRUPTED` — not an error; `cost_usd` / `usage` / `num_turns` are real, the
+  checkpoint includes the interrupted turn's workspace changes, and the next `send()` resumes from it.
+  Only when the worker cannot be reached (an engine deployed before this existed, or a cold job that
+  has not started yet) or does not stop within the timeout does it fall back to cancelling the run:
+  an error result whose `warning` says so, and no checkpoint.
+- **Guards.** `run()` on a running session raises: a second concurrent turn under one session id would
+  corrupt its checkpoint and transcript. `secrets` / `config` / `hooks` cannot change mid-turn and are
+  rejected on a running `send()`. A running turn on a `gemini` engine whose serving revision was
+  deployed before the control inbox existed raises `ControlUnavailable` (nothing is sent) — a typed
+  exception, so a caller can queue the message until the session is idle instead.
+- **Transport (`gemini`).** The client writes the message to `control/<sid>/` under the output bucket;
+  the worker polls that prefix while the harness runs, hands each message over in order and deletes
+  it, and records the id under `control-delivered/<sid>/`. The worker announces the inbox with a
+  `control_ready` status event at the start of the turn. Messages that arrive before a cold worker
+  starts wait in the inbox; a message that lands just after the turn ended is delivered at the start
+  of the session's next turn. On `local` the same channel is an in-process queue.
+
+The interactive system-prompt suffix (`checkpoint=True`) still tells the model to end its turn for a
+genuine decision; steering is additive — the way to talk to an agent that is *already* working.
+
 ## Structured output
 
 Set `output_schema` to a **pydantic model** (or a JSON-schema `dict`) and `result.structured_output` holds

@@ -219,23 +219,46 @@ def test_gemini_session_run_drives_from_sink(monkeypatch):
     assert captured["config"]["output_gcs_uri"] == "gs://out/jobs/sid-1.jsonl"
 
 
-def test_gemini_interrupt_cancels_remote_job(monkeypatch):
+def test_gemini_interrupt_cancels_remote_job_when_the_worker_has_no_control_channel(monkeypatch):
+    # The fallback: the worker never announced the control inbox (a cold job still
+    # starting, or an engine deployed before the inbox existed), so interrupt() cannot
+    # ask it to stop cleanly — it cancels the tail and the run_query_job, and the run's
+    # error result says why there is no checkpoint.
     import types
 
     spec = AgentSpec(name="g", model="m")
-    engine = backend.GeminiEngine(resource="r/reasoningEngines/1", spec=spec, project=None, location=None)
+    engine = backend.GeminiEngine(resource="r/reasoningEngines/1", spec=spec,
+                                  project=None, location=None, output_bucket="gs://out")
     cancelled = {}
 
     class FakeAE:
+        def run_query_job(self, name, config):
+            return types.SimpleNamespace(job_name="jobX")
+
         def cancel_query_job(self, name, config):
             cancelled["name"] = name
             cancelled["op"] = config["operation_name"]
 
     monkeypatch.setattr(engine, "_agent_engines", lambda: FakeAE())
+
+    async def silent_tail(*a, **kw):  # the worker never writes anything
+        await asyncio.Event().wait()
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(backend, "tail_stream", silent_tail)
+    monkeypatch.setattr(backend, "_watched_tail", lambda tail, *a, **kw: tail())
     session = backend.GeminiSession(engine, "sid")
-    session._last_job = types.SimpleNamespace(job_name="jobX")  # as run_query_job would set it
-    asyncio.run(session.interrupt())
+
+    async def go():
+        run = session.run("go")
+        await asyncio.sleep(0.01)
+        await session.interrupt()
+        return run
+
+    run = asyncio.run(go())
     assert cancelled == {"name": engine.resource, "op": "jobX"}
+    assert run.done and run.result.is_error and "without a checkpoint" in run.result.warning
+    assert session.stop_reason == StopReason.ERROR
 
 
 def test_gemini_session_send_prefixes_resume(monkeypatch):

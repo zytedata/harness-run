@@ -30,6 +30,9 @@ _SENTINEL = object()
 def stop_reason_for(result_raw: dict, checkpoint: bool) -> StopReason:
     """Map a result event's subtype/error onto a :class:`StopReason`."""
     subtype = str(result_raw.get("subtype") or "")
+    if subtype == "interrupted":
+        # The operator's interrupt() ended the turn through the normal end-of-turn path.
+        return StopReason.INTERRUPTED
     if "max_turn" in subtype:
         return StopReason.MAX_TURNS
     if "budget" in subtype:
@@ -82,11 +85,16 @@ class DrivenRun:
         session_id: str,
         spec: AgentSpec,
         on_complete: Callable[[RunResult, StopReason], None],
+        on_event: Callable[[AgentEvent], None] | None = None,
     ) -> None:
         self._agen_factory = agen_factory
         self._session_id = session_id
         self._spec = spec
         self._on_complete = on_complete
+        # Lets the owning session watch the stream (e.g. for the worker's control_ready
+        # marker) without consuming it; called before the event is queued.
+        self._on_event = on_event
+        self._cancel_note: str | None = None
         self._queue: asyncio.Queue = asyncio.Queue()
         self._task: asyncio.Task | None = None
         self._status = RunStatus.PENDING
@@ -106,6 +114,8 @@ class DrivenRun:
             async for event in self._agen_factory():
                 if event.kind == "result" and result_ev is None:
                     result_ev = event
+                if self._on_event is not None:
+                    self._on_event(event)
                 await self._queue.put(event)
         except asyncio.CancelledError:
             self._finalize(result_ev, error="interrupted")
@@ -141,13 +151,26 @@ class DrivenRun:
                 self._result.warning = f"harness exited abnormally after the result: {error[:500]}"
         elif error is not None:
             text = None if error == "interrupted" else f"run failed: {error}"
-            self._result = RunResult(text=text, is_error=True, session_id=self._session_id)
+            self._result = RunResult(
+                text=text, is_error=True, session_id=self._session_id,
+                warning=self._cancel_note if error == "interrupted" else None,
+            )
             self._stop_reason = StopReason.ERROR
         else:
             self._result = RunResult(text=None, is_error=True, session_id=self._session_id)
             self._stop_reason = StopReason.ERROR
         self._status = RunStatus.IDLE
         self._on_complete(self._result, self._stop_reason)
+
+    def cancel(self, note: str | None = None) -> None:
+        """Cancel the driver task (the fallback when the harness cannot be stopped cleanly).
+
+        The run ends as an error result with no text; ``note`` lands on
+        ``RunResult.warning`` so the result says why it ended this way.
+        """
+        self._cancel_note = note
+        if self._task is not None and not self._task.done():
+            self._task.cancel()
 
     # -- the three consumption modes ------------------------------------------
 

@@ -12,6 +12,7 @@ can only break in ways the earlier rungs can't see.
 | Model-provider check, remote | `make live-openrouter-remote` | the same models + remote visibility on Agent Runtime | ~8-15 min, ~$0.56 + build |
 | Model attribution | `make live-attribution` | did the turn run the model we asked for — both harnesses | ~10 s, ~$0.06 |
 | Usage accounting | `make live-usage` | usage/cost accounting drift — esp. the Codex subagent rollout recovery (non-public details) | ~5 min, well under $1 |
+| Turn control | `make live-interactive` | steer / interrupt+continue / stop / resume on both harnesses, against the real CLIs (their mid-turn behavior is what the harness loops encode) | ~2 min, a few cents |
 
 The two OpenRouter figures are measured (2026-08-22, all four models on both harnesses:
 26/26 local checks for $0.74, 128/128 remote checks for $0.56 of model spend plus the engine

@@ -276,6 +276,10 @@ def build_env(
         # batches as events happen and the client tails the listing (stream.py). Cloud
         # Logging is emit-only (ops/debug), never tailed.
         env["AGENT_EVENTS_GCS"] = f"{output_bucket}/events"
+        # The control inbox (control.py): the worker polls control/<sid>/ while a turn
+        # runs, so Session.send() can steer or interrupt it from any process. Its presence
+        # in a revision's env is how the client knows that revision's workers read it.
+        env["AGENT_CONTROL_GCS"] = f"{output_bucket}/control"
 
     # Checkpoint/resume mirrors each turn's conversation + workspace to GCS, and a
     # transcript-only spec mirrors the conversation alone. Either needs a bucket to write

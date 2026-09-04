@@ -147,7 +147,12 @@ Three planes over a set of pluggable ports:
 - **Session** is the run-plane object with the CMA-style lifecycle:
   `pending → running ↔ idle(stop_reason) → terminated`. `idle` + `stop_reason="needs_input"` is the
   interactive pause; `send()` resumes via checkpoint. A `Session` is addressable by id, so another process
-  can re-attach via `engine.get_session(id)` and poll `status` / fetch `result`.
+  can re-attach via `engine.get_session(id)` and poll `status` / fetch `result`. While a turn is
+  **running**, `send()` talks to it instead of starting a second turn — `interrupt=False` steers (the
+  model sees the message at its next step), `interrupt=True` interrupts first and continues from the
+  message — and `interrupt()` stops it: the turn ends through its normal end-of-turn path with
+  `stop_reason="interrupted"`, checkpoint taken, so the session is resumable (`control.py`; issue #44).
+  Every delivered message is a `user` event, the acknowledgement that the model has it.
 - **Run** is the handle returned by `session.run(msg)` — awaitable (→ `RunResult`), async-iterable
   (→ `AgentEvent`s), and pollable (`done` / `status` / `result`). For `gemini`, "stream" = tail the
   `EventSink`; "await" = wait for the terminal result event; "poll" = check the latest logged status.
@@ -258,8 +263,9 @@ ops action (`engine.set_traffic`), not a per-caller routing choice.
   when the `auth`-named per-invocation secret is supplied (host-aware token injection).
 - `Engine` — `start_session()`, `get_session(id)`, `list_sessions()`, `versions()`,
   `name`/`version`/`resource`.
-- `Session` — `run(msg, secrets=)`, `send(msg, secrets=)`, `interrupt()`, `status`, `stop_reason`,
-  `last_result`, `history()`, `fork()`.
+- `Session` — `run(msg, secrets=)`, `send(msg, secrets=, interrupt=, message_id=)` (idle: resume;
+  running: steer or interrupt-and-continue, same `Run`), `interrupt()` (interrupt and stop, resumable),
+  `status`, `stop_reason`, `last_result`, `history()`, `fork()`.
 - `Run` — `__await__` (→ `RunResult`), `__aiter__` (→ `AgentEvent`s), `done`, `status`, `result`.
 - `AgentEvent` — `kind`, `summary`, `raw`; cost/usage carried on the terminal event.
 - `RunResult` — `text`, `structured_output`, `is_error`, `num_turns`, `cost_usd` (`float | None`;
@@ -444,6 +450,34 @@ These are facts measured during the PoC. The library encodes them so consumers i
   minutes); external cancels/interrupts may need retries. The in-cloud **Bash tool default timeout is
   120 s** — long commands need an explicit timeout or backgrounding.
 
+**Turn control (steer / interrupt a running turn; `control.py`, `runtime/gemini/control.py`)**
+- A query job has no inbound channel other than cancel, and a pool worker stops pulling its
+  subscription once it has claimed a turn. The inbox is therefore a **GCS prefix** next to the other
+  handoff objects: the client writes `control/<sid>/<epoch_ms>-<seq>-<id>.json`
+  (`{"op": "steer"|"interrupt"|"stop", "message", "message_id"}`), the worker polls it every ~1.5 s
+  while the harness runs, hands each message over in key order and deletes it, and records the id at
+  `control-delivered/<sid>/<id>` so a retried send (a client that adopted the session) is dropped.
+  Same bucket and identity as the event mirror; identical cold and warm; ~2 s latency (chat speed);
+  works from any process holding the session id. The worker announces it with a `control_ready` event
+  and the client refuses (`ControlUnavailable`) to write for a revision whose env has no
+  `AGENT_CONTROL_GCS`. Pub/Sub (per-worker addressed subscriptions, sub-second) was the alternative;
+  the transport sits behind the `ControlChannel` protocol so it can replace the inbox later.
+- **What the harnesses do (verified live, 2026-09-04).** Claude Code: a `query()` on the streaming
+  client mid-turn is injected into the model's next call and the turn ends with one result; the CLI
+  never echoes it, so the harness emits the `user` event and proves delivery the way it tracks
+  background-task notifications (a `tool_result`/`init` boundary followed by model output), holding a
+  result that arrives with an unproven message open for a short settle window in case the CLI starts a
+  new invocation for it. `interrupt()` makes the CLI answer with an `error_during_execution` result —
+  the end of the turn for a stop (re-stamped `interrupted`, not an error) or a segment boundary before a
+  follow-up `query()`. Codex: `turn/steer` is native (the model sees it after its current step);
+  `interrupt()` yields `turn/completed status=interrupted`, after which a new `thread.turn()` on the same
+  thread continues the run.
+- **`interrupt()` is a stop, not a cancel.** The turn's normal end-of-turn path runs (snapshot,
+  transcript, terminal result with `StopReason.INTERRUPTED`, accounting kept), so the interrupted turn's
+  workspace changes are in the checkpoint the next `send()` restores. `cancel_query_job` remains the
+  fallback when the worker never announced the inbox or does not stop within the timeout; the result's
+  `warning` says so.
+
 **Persistence / job history (what survives a run, and where)**
 - **Mirrored events** — the worker buffers every surfaced `AgentEvent` and flushes one
   `events/<sid>/<epoch_ms>.jsonl` per turn to the output bucket. The canonical durable history: the only
@@ -531,7 +565,12 @@ Each is a `typing.Protocol`; concrete adapters ship for prod (GCP) and dev (loca
   `ClaudeCodeHarness` (default) and `CodexHarness`, selected by `spec.harness` via `resolve_harness`
   (the single seam both runtimes use). Shared policy — secret routing, agent-env layering, the
   interactive suffix, the inline workspace checkpoint — lives in `harness/_shared.py` so the bindings
-  can't drift where the spec doesn't distinguish them. A **conformance suite**
+  can't drift where the spec doesn't distinguish them. Both read `ctx.control` (a `ControlChannel`)
+  alongside their stream through `control.ControlledStream` and act on steer / interrupt / stop
+  messages the same way (§6 "Turn control").
+- **`ControlChannel`** — the harness side of turn control: `receive()` blocks for the next operator
+  message. Adapters: `LocalControlChannel` (in-process queue, `local`) and `GcsControlChannel` (the
+  worker polling the GCS inbox, `gemini`). A **conformance suite**
   (`run_harness_conformance`) pins what embedders read off `AgentEvent.raw` across every backend: an
   init status event and the terminal result's spend/turn count. `run_claude_code_harness_conformance`
   layers Claude Code's stricter promise on top — the init payload's session id — which Codex's init
@@ -663,6 +702,7 @@ remote-agent-toolkit/
 │   ├── __init__.py                # AgentSpec, SystemPrompt, SkillSource, McpServer, gemini, local
 │   ├── spec.py                    # AgentSpec + value types (serializable)
 │   ├── events.py                  # AgentEvent, RunResult, RunStatus, StopReason, Run handle
+│   ├── control.py                 # ControlMessage, ControlChannel, LocalControlChannel, ControlledStream
 │   ├── harness/
 │   │   ├── base.py                # Harness protocol (+ resolve_harness in __init__)
 │   │   ├── claude_code.py         # ClaudeCodeHarness (drives a ClaudeSDKClient stream; ADK-free)
@@ -682,6 +722,7 @@ remote-agent-toolkit/
 │   │       ├── adk_agent.py       # the deployed ADK BaseAgent wrapping the harness
 │   │       ├── translate.py       # AgentEvent → ADK Event
 │   │       ├── handoff.py         # GCS staging of per-invocation secrets (retry-safe cleanup)
+│   │       ├── control.py         # the GCS control inbox (client write, worker poll, dedupe)
 │   │       ├── history.py         # durable event mirror + history/list_sessions readers
 │   │       ├── tracing.py         # AgentEvent stream → Cloud Trace spans (TurnTracer)
 │   │       ├── resources.py       # worker CPU/RAM self-sampling (OOM forensics)

@@ -6,7 +6,7 @@ VENV ?= .venv
 IMAGE ?= ratk-dev
 PACKAGES ?=
 
-.PHONY: test test-serial lint live-smoke live-revisions live-pool-cutover live-openrouter live-openrouter-remote live-attribution live-usage parity-build parity-shell parity-check
+.PHONY: test test-serial lint live-smoke live-revisions live-pool-cutover live-openrouter live-openrouter-remote live-attribution live-usage live-interactive parity-build parity-shell parity-check
 
 # Parallel by default: the suite is dominated by a few deliberate poll-cadence tests, so
 # -n auto takes it from ~55s to ~40s and keeps scaling as tests are added. Use test-serial
@@ -61,6 +61,13 @@ live-attribution:
 SCENARIO ?= all
 live-usage:
 	$(VENV)/bin/python dev/live_usage_probe.py $(SCENARIO)
+
+# Turn control on the local runtime, both harnesses, against real models: steer into a
+# running turn, interrupt + continue, interrupt() to a resumable INTERRUPTED stop, resume.
+# A few cents (Haiku + a small Codex turn), ~2 min, needs ANTHROPIC_API_KEY + OPENAI_API_KEY.
+# COSTS REAL MONEY — by hand, never in CI. HARNESSES=codex (or claude-code) runs one.
+live-interactive:
+	$(VENV)/bin/python dev/live_interactive_probe.py
 
 # Build the parity image. Pass the agent's spec.packages so they install exactly as on the
 # engine, e.g.:  make parity-build PACKAGES="pandas==2.2.* httpx>=0.27"

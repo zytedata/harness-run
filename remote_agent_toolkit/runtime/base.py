@@ -58,7 +58,8 @@ class Session(Protocol):
 
     ``pending → running ↔ idle(stop_reason) → terminated`` (DESIGN.md §4). A session
     is addressable by ``session_id``, so another process can re-attach via
-    :meth:`Engine.get_session` and poll / continue it.
+    :meth:`Engine.get_session` and poll / continue it — and, while a turn is running,
+    :meth:`send` into it or :meth:`interrupt` it (see :mod:`remote_agent_toolkit.control`).
     """
 
     def run(
@@ -69,7 +70,7 @@ class Session(Protocol):
         config: TurnConfig | None = None,
         hooks: Any | None = None,
     ) -> Run:
-        """Start a run from ``message`` (kicks off a fresh turn).
+        """Start a run from ``message`` (kicks off a fresh turn). Raises while a turn runs.
 
         ``secrets`` is a per-invocation name → value map (the agent's own keys, any repo
         ``auth`` / GitHub MCP token). Values are never baked into the spec or logged.
@@ -88,19 +89,45 @@ class Session(Protocol):
         secrets: dict[str, str] | None = None,
         config: TurnConfig | None = None,
         hooks: Any | None = None,
+        interrupt: bool = False,
+        message_id: str | None = None,
     ) -> Run:
-        """Resume an idle session with ``message`` (e.g. answer a ``needs_input`` pause).
+        """Send ``message`` to the session: resume it when idle, talk to the turn when running.
 
-        Resumes via checkpoint on a warm worker (DESIGN.md §3.7). Pass ``secrets`` again — they
-        are not persisted across turns, so repo push auth is re-embedded on resume. ``config``
-        is a per-turn :class:`~remote_agent_toolkit.config.TurnConfig`; the SESSION config
-        cannot change here (bound at :meth:`Engine.start_session`, world snapshot-restored).
-        *hooks* are per-turn like ``secrets`` (see :meth:`run`).
+        **Idle** (e.g. after a ``needs_input`` pause): starts a new turn that resumes via
+        checkpoint on a warm worker (DESIGN.md §3.7). Pass ``secrets`` again — they are not
+        persisted across turns, so repo push auth is re-embedded on resume. ``config`` is a
+        per-turn :class:`~remote_agent_toolkit.config.TurnConfig`; the SESSION config cannot
+        change here (bound at :meth:`Engine.start_session`, world snapshot-restored). *hooks*
+        are per-turn like ``secrets`` (see :meth:`run`). ``interrupt`` is ignored.
+
+        **Running**: the message goes INTO the running turn and the SAME :class:`Run` is
+        returned — its events keep flowing and its single result covers everything.
+
+        * ``interrupt=False`` (steer): the model sees the message at its next step.
+        * ``interrupt=True``: the model is interrupted first, then continues from the message
+          in the same harness session and workspace (no checkpoint round-trip, no re-claim).
+
+        Delivery is acknowledged by a ``user`` event on the stream (and in ``history()``)
+        carrying ``message_id`` (the caller's id, or a generated one). ``secrets`` /
+        ``config`` / ``hooks`` cannot change mid-turn and raise ``ValueError`` then. A
+        running turn whose worker cannot receive messages (an engine revision deployed
+        before the control inbox existed) raises
+        :class:`~remote_agent_toolkit.control.ControlUnavailable`; a second concurrent turn
+        is never started.
         """
         ...
 
     async def interrupt(self) -> None:
-        """Interrupt the in-flight run, transitioning the session toward idle."""
+        """Interrupt the running turn and leave the session idle and resumable.
+
+        The harness stops what the model is doing and the turn ends through its normal
+        end-of-turn path: workspace snapshot, transcript, a terminal result with
+        ``StopReason.INTERRUPTED`` that keeps the turn's accounting (``cost_usd``, ``usage``,
+        ``num_turns``). A later :meth:`send` resumes from that state. No-op when nothing is
+        running. Only when the harness cannot be reached or does not stop in time does the
+        run fall back to a plain cancel — an error result whose ``warning`` says so.
+        """
         ...
 
     @property

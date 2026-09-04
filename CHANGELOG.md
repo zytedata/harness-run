@@ -49,7 +49,9 @@ tag `vX.Y.Z`, push the commit and the tag.
   `RUNTIME_SA=<email>` for the custom runtime identity, unset for a bucket in another
   project).
 - `gemini.deploy(..., service_account=)` sets the engine's runtime identity (forwarded to
-  `AgentEngineConfig.service_account`); omitted, the platform default applies as before.
+  `AgentEngineConfig.service_account`); omitted, the platform default applies as before. The
+  account's Vertex role is a custom role with only `aiplatform.endpoints.predict` (README IAM
+  table), never `roles/aiplatform.user`.
 
 ### Backwards-incompatible
 

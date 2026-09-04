@@ -245,7 +245,8 @@ the worker used the run-scoped token for everything), then runs the probe script
 still 200, every bucket list and read with it 403), and deletes the engine and the bucket. With
 `RUNTIME_SA=<email>` the engine is deployed with `service_account=` set to that account (create it
 first with the README's gcloud sketch) and the bucket lives in the engine project; the probe also
-checks the metadata server hands out that account. With `RUNTIME_SA` unset the engine runs as the
+checks the metadata server hands out that account, and prints the status of listing Vertex operations
+with its token (403 with the README's custom role). With `RUNTIME_SA` unset the engine runs as the
 default service agent and the bucket is created in `OUTPUT_PROJECT` (a project where that identity
 has no project role). `KEEP=1` leaves the engine and bucket for inspection. Run it for any change to
 `scoped_gcs.py`, `GcsBlobStore`, the handoff module, the directive/payload shape or the deploy

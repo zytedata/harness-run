@@ -95,13 +95,16 @@ st, body = get("https://storage.googleapis.com/storage/v1/b/%s/o?prefix=%s&field
 print("list own prefix status=%s" % st)
 st, body = get("https://storage.googleapis.com/storage/v1/b/%s/o/%s?alt=media" % (bucket, urllib.parse.quote("session-config/" + sid + ".json", safe="")), hdr)
 print("get session-config with runtime identity status=%s" % st)
+# every run's job id is visible through operations.list; the runtime identity should not have it
+st, body = get("https://__LOCATION__-aiplatform.googleapis.com/v1/projects/__PROJECT__/locations/__LOCATION__/operations?pageSize=1", hdr)
+print("list vertex operations with runtime identity status=%s" % st)
 PY
 echo "== done"
 '''
 
 
 def _probe_task(session_id: str) -> str:
-    script = PROBE.replace("__SID__", session_id).replace("__BUCKET__", BUCKET)
+    script = PROBE.replace("__SID__", session_id).replace("__BUCKET__", BUCKET).replace("__PROJECT__", PROJECT).replace("__LOCATION__", LOCATION)
     return (
         "You are the diagnostics step of remote-agent-toolkit's own live test suite "
         "(dev/live_scoped_gcs.py). This engine, this bucket and this GCP project belong to the "

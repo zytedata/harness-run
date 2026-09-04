@@ -881,7 +881,9 @@ identity that has no such project role:
   output bucket returned 403 on every prefix and listing the project's buckets returned 403, while the
   turn itself (staged secrets, checkpoint) completed on the run token. `dev/live_scoped_gcs.py` with
   `RUNTIME_SA=<email>` repeats that check end to end (passed 2026-09-03: bucket in the engine project,
-  every list and read 403 with the account's token, metadata server hands out the account). The bucket
+  every list and read 403 with the account's token, metadata server hands out the account; passed again
+  2026-09-04 with the account's Vertex role narrowed to a custom role holding only
+  `aiplatform.endpoints.predict`, and listing Vertex operations with its token returned 403). The bucket
   stays in the engine project; no cross-project move. One gotcha: the platform's job runner downloads the job input as the
   engine's identity with a quota project on the request, so the account needs
   `roles/serviceusage.serviceUsageConsumer` on the project. Without it the runner retried the download
@@ -902,10 +904,10 @@ default service agent held `roles/aiplatform.user`, a project binding nobody had
 includes `aiplatform.operations.list` (every run's job id, which is the name of its persisted input
 file), `reasoningEngines.query`, `.create`, `.update` and `.delete`. With it, a shell in one run can
 start jobs on any engine in the project, delete engines, and read other runs' persisted inputs by
-name. Remove it from the service agent. The custom runtime service account needs to reach Vertex for
-the model calls; the live check ran it with `roles/aiplatform.user`, which carries the same
-permissions, so the least role that still serves the model calls (a custom role around
-`aiplatform.endpoints.predict`) is still to be verified.
+name. Remove it from the service agent. The custom runtime service account needs to reach Vertex only
+for the model calls, so give it a custom role holding only `aiplatform.endpoints.predict` instead of
+`roles/aiplatform.user` (verified live 2026-09-04: the turn completed, and listing Vertex operations
+with the account's token returned 403).
 
 **What stays reachable after the fix**, because the container has no second user and no firewall:
 the runtime identity's token itself, hence Vertex model spend outside the run budget, Cloud Logging
@@ -1267,11 +1269,11 @@ Without `service_account=` the engine runs as the Google-managed **Agent Runtime
 `service-<PROJECT_NUMBER>@gcp-sa-aiplatform-re.iam.gserviceaccount.com`, whose managed project role
 reads every bucket in the project. **All runtime resource access authorizes against this identity, not
 the operator SA** — granting the operator SA a runtime role does nothing for the running job. Grant the
-runtime service account (verified live 2026-09-03 with this set):
+runtime service account (verified live 2026-09-03 and 2026-09-04 with this set):
 
 | Role | Scope | Why |
 |---|---|---|
-| `roles/aiplatform.user` | project | the harness calls the model through Vertex. It also carries `aiplatform.operations.list` and `reasoningEngines.*`; a narrower custom role around `aiplatform.endpoints.predict` is still to be verified |
+| a custom role with only `aiplatform.endpoints.predict` (`ratkRuntimePredict` in the sketch below) | project | the harness calls the model through Vertex. Do not use `roles/aiplatform.user` here: it also carries `aiplatform.operations.list` (every run's job id) and `reasoningEngines.*`, which the agent's shell would get back (verified 2026-09-04: the custom role is enough for the turn, and operations list returns 403) |
 | `roles/logging.logWriter` | project | the agent emits structured step logs |
 | `roles/serviceusage.serviceUsageConsumer` | project | the platform's job runner downloads the job input with a quota project on the request; without it the job dies before any worker event |
 | `roles/telemetry.metricsWriter`, `roles/telemetry.tracesWriter` | project | span and metric export; without them every batch fails with 403 (the default service agent holds both in the shared project) |
@@ -1323,8 +1325,11 @@ gcloud iam service-accounts create ratk-runtime --project $PROJECT
 for R in roles/aiplatform.user roles/storage.admin roles/logging.viewer roles/cloudbuild.builds.editor \
          roles/pubsub.editor; do  # pubsub.editor only needed for warm pools
   gcloud projects add-iam-policy-binding $PROJECT --member "serviceAccount:$OP" --role $R; done
-for R in roles/aiplatform.user roles/logging.logWriter roles/serviceusage.serviceUsageConsumer \
-         roles/telemetry.metricsWriter roles/telemetry.tracesWriter \
+# the runtime identity reaches Vertex only for model calls: a custom role, never roles/aiplatform.user
+gcloud iam roles create ratkRuntimePredict --project $PROJECT --stage GA \
+  --title "ratk runtime: model calls only" --permissions aiplatform.endpoints.predict
+for R in projects/$PROJECT/roles/ratkRuntimePredict roles/logging.logWriter \
+         roles/serviceusage.serviceUsageConsumer roles/telemetry.metricsWriter roles/telemetry.tracesWriter \
          roles/pubsub.subscriber; do  # pubsub.subscriber only needed for warm pools
   gcloud projects add-iam-policy-binding $PROJECT --member "serviceAccount:$RT" --role $R; done
 gcloud services enable telemetry.googleapis.com cloudtrace.googleapis.com --project $PROJECT  # tracing

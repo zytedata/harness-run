@@ -386,10 +386,11 @@ def test_run_turn_surfaces_workspace_prep_crash(monkeypatch):
         return [ev async for ev in agent._run_turn(spec, "42", "go", None)]
 
     events = asyncio.run(drive())
-    assert len(events) == 1  # no prep event was possible; the error is the only (terminal) one
-    assert events[0].custom_metadata["kind"] == "result"
-    assert events[0].custom_metadata["raw"]["is_error"] is True
-    assert "git clone failed" in events[0].error_message
+    # turn_started, then — no prep event was possible — the error is the terminal event.
+    assert [e.custom_metadata["kind"] for e in events] == ["status", "result"]
+    assert events[0].custom_metadata["raw"]["event"] == "turn_started"
+    assert events[1].custom_metadata["raw"]["is_error"] is True
+    assert "git clone failed" in events[1].error_message
 
 
 def _patched_local_handoff_store(tmp_path, monkeypatch):

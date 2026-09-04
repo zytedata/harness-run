@@ -296,16 +296,23 @@ These are facts measured during the PoC. The library encodes them so consumers i
   Dispatch→result measured **~5.4 s** with pre-warm. See below.
 
 **Warm pool (the `DispatchTransport` + worker loop)**
-- A job submitted with a `__POOL_WAIT__` sentinel blocks pulling a shared Pub/Sub subscription
-  (competing-consumers = atomic claim). The dispatched message may carry a resume directive and is
-  processed as a normal turn.
+- A job submitted with a `__POOL_WAIT__` sentinel blocks pulling **its own** Pub/Sub subscription: a
+  random, filtered subscription the client created in `fill_pool` and named only in that worker's job
+  input (per-worker dispatch; `runtime/gemini/pool.py`). The control plane claims one idle worker off
+  the pool's roster (client-owned GCS objects under `pool/`, `roster.py`; atomic via a
+  generation-precondition delete) and publishes the turn addressed to that worker alone. The
+  dispatched message may carry a resume directive and is processed as a normal turn. Why per worker:
+  `roles/pubsub.subscriber` is consume-by-name only, so a shell in one worker cannot reach another
+  worker's channel, and a channel only ever carries the one turn its worker was addressed (README,
+  "The runtime identity is reachable by the agent"). Engines deployed before this (a shared
+  `AGENT_POOL_SUBSCRIPTION` in their env) are still driven the old competing-consumers way, with a warning.
 - The worker emits **heartbeats** while idle (the async executor kills silent jobs) and **pre-warms**
-  during the wait (provision skills + establish the GCS channel) so post-assignment setup is ~0.
-- On claim, the control plane refills the pool so a warm worker is ready for the next turn.
+  during the wait (the Logging/GCS channels) so post-assignment setup is small. Its first event on a
+  turn is `turn_started`; the client's pickup watchdog re-dispatches to another worker if it never comes.
+- On dispatch, the control plane refills the pool so a warm worker is ready for the next turn; a turn
+  that finds no idle worker spawns one for itself (cold latency, never a stranded turn).
 - An idle worker **expires** after `AGENT_POOL_MAX_WAIT_S` (deploy-configurable via
-  `pool_max_wait_s`; default a day) and is not replaced — refill is claim-driven only, so a
-  pool that drains to empty stays empty until `fill_pool()` (the post-dispatch refill worker
-  just claims the pending dispatch itself).
+  `pool_max_wait_s`; default a day) and is not replaced — refill is dispatch-driven only.
 
 **Checkpoint / resume**
 - Conversation: the Claude SDK `SessionStore` (append/load) + `resume=session_id`. Our `GcsSessionStore`
@@ -514,12 +521,59 @@ These are facts measured during the PoC. The library encodes them so consumers i
   by `NUM_WORKERS=1` above; before that it scaled with the node's CPU count). Deploy memory-heavy agents with e.g. `{"cpu": "4", "memory": "16Gi"}`
   (memory max `32Gi`; cpu one of 1/2/4/6/8).
 
-**Identity / IAM (two identities — documented in the runbook)**
-- Deploy/operator = the **impersonated SA** (publish, read logs, submit jobs).
-- **Runtime identity = the RE service agent** `service-<n>@gcp-sa-aiplatform-re.iam.gserviceaccount.com` —
-  *all* runtime resource access (Secret Manager, GCS, Pub/Sub, Logging) authorizes against **it**, not the
-  operator SA. Granting the operator SA a role does nothing for the running job. The library ships a
-  permissions runbook listing every grant each port needs and on which identity.
+**Identity / IAM (two identities)**
+- Deploy/operator = the **impersonated SA** (publish, read logs, submit jobs, mint the run-scoped
+  tokens). *All* runtime resource access (GCS, Pub/Sub, Logging, Vertex) authorizes against the
+  **runtime identity**, not the operator SA. Granting the operator SA a role does nothing for the
+  running job. The README's "GCP setup & required permissions" lists every grant per identity.
+- **The runtime identity is reachable from the agent's shell** (found and verified live 2026-09-02,
+  `dev/live_isolation_probe.py`; PR #41). The worker container runs everything as one user (`appuser`,
+  PID 1 included, `/proc/1/environ` readable), and the harness authenticates to Vertex through the
+  metadata server, so a child shell gets the runtime identity's token with one HTTP call. There is no
+  second user and no firewall in the container, so nothing in the worker can hide the metadata server.
+  Before the fix the default identity (the Agent Runtime service agent, shared by every engine in the
+  project) held `objectAdmin` on the shared output bucket, so from any run a shell could: read every
+  other in-flight run's staged secrets (`invocation-secrets/`, plain JSON until its turn ends —
+  **critical**), read every run's transcripts, workspace snapshots, configs and persisted job inputs and
+  overwrite another run's checkpoint (**high**), write a fake terminal `result` into another session's
+  event mirror (**high**), spend on Vertex outside the run budget (**medium**), forge ops log lines
+  (**low**), and in warm mode pull the shared dispatch subscription and take another run's turn
+  (**critical**: the message carries the run's pointers and, with run-scoped tokens alone, its token).
+- **Fix 1: run-scoped GCS tokens** (`runtime/gemini/scoped_gcs.py`). The client mints one downscoped
+  token per turn (a Credential Access Boundary: this bucket, only the run's own prefixes — secrets,
+  configs, events mirror, checkpoints, artifacts), hands it over with the invocation (last directive line
+  cold, payload field warm), refreshes it while the run lives by overwriting one object under the run's
+  secrets prefix, and the worker does all GCS work with it via the `GcsBlobStore` process default. The
+  runtime identity then needs, on the output bucket, only conditional `objectCreator` +
+  `legacyObjectReader` on `jobs/` (the platform's job runner reads the job input by exact name and writes
+  the job output as the runtime identity) plus `objectCreator` on `events/ratk-` (pool readiness markers).
+- **Fix 2: per-worker dispatch** (warm pool bullets above; `pool.py`, `roster.py`). Never grant the
+  runtime identity anything under `pool/`: the roster there decides where a turn goes.
+- **Fix 3: a custom runtime service account** (`gemini.deploy(..., service_account=)`). The default
+  service agent's Google-managed project role `roles/aiplatform.reasoningEngineServiceAgent` carries
+  `storage.objects.get/list` on every bucket in the project, and a bucket binding cannot take a project
+  permission away (verified 2026-09-02). A custom account holds only what is granted (verified
+  2026-09-03/04: shared bucket 403 on every prefix, project bucket list 403, Vertex operations list 403,
+  the turn itself fine on the run token). Role set: a custom role with only `aiplatform.endpoints.predict`
+  (never `roles/aiplatform.user`, which carries `aiplatform.operations.list` = every run's job id, and
+  `reasoningEngines.*`), `logging.logWriter`, `serviceusage.serviceUsageConsumer` (the job runner
+  downloads the job input with a quota project on the request; without it the job dies before any
+  worker event, with the 403 only in Cloud Logging), `telemetry.metricsWriter` / `tracesWriter`,
+  `pubsub.subscriber` (warm pools; consume-by-name only, which is what makes per-worker subscription
+  names capabilities), `storage.objectViewer` on the staging bucket, the conditional output-bucket
+  bindings above. The deployer needs `iam.serviceAccountUser` on it. Alternatives set aside: an Agent
+  Identity (`identity_type=AGENT_IDENTITY`, per-engine SPIFFE principal; should work the same way, not
+  verified, and cannot hold legacy bucket roles), an output bucket in another project (works but leaves
+  the service agent's project-wide read in place and moves the bucket), an IAM deny policy (needs
+  `iam.denyAdmin`).
+- **What stays reachable** with the runtime identity's token: Vertex model spend outside the run
+  budget, Cloud Logging writes, the run's own persisted job input. Background jobs get a fresh sandbox
+  per job (verified 2026-09-03: concurrent sessions on one engine, different `boot_id`s), so a background
+  process left by one run cannot survive into another.
+- **Migration** has no fixed date: redeploy every engine from a revision with `scoped_gcs.py` and
+  `service_account=` set, upgrade clients alongside (mixed versions run on the runtime identity: unfixed
+  but working), then remove the service agent's `objectAdmin` on the bucket and `roles/aiplatform.user`
+  on the project, and re-run the isolation probe against a production engine (every list/read 403).
 
 ---
 
@@ -602,7 +656,8 @@ Each is a `typing.Protocol`; concrete adapters ship for prod (GCP) and dev (loca
   artifacts.
 - **`EventSink`** — `emit(event)` (write side, runtime) + `tail(session_id, since)` (live read side) +
   `read(session_id)` (one-shot history read). Adapters: `CloudLoggingSink`, `InMemorySink`.
-- **`DispatchTransport`** — `publish(message)` + `claim(timeout)` (competing-consumers pull). Adapters:
+- **`DispatchTransport`** — `publish(message, attributes)` + `claim(timeout)` (an addressed per-worker
+  pull; plain competing-consumers only for legacy shared-subscription pools). Adapters:
   `PubSubDispatch`, `InMemoryDispatch`.
 - **`SecretResolver`** — `resolve(name) -> value`, a *control-plane* helper for callers who keep secret
   values in env/Secret Manager and need to build the per-invocation `secrets` dict (the runtime itself

@@ -121,10 +121,11 @@ test), so it costs about the same wall-clock as the smoke test's parallel pair.
 [`dev/live_pool_cutover_probe.py`](dev/live_pool_cutover_probe.py) covers the **warm-pool
 redeploy cutover** (issue #38). It deploys one throwaway warm engine (`ratk-cutover-<you>`)
 twice — each deploy's system prompt carries a distinct revision marker — and asserts that
-the dispatch subscription is generation-scoped and changes across deploys, that the old
-pair is deleted and the old idle worker **exits within minutes** (instead of claiming
-post-redeploy turns for up to `pool_max_wait_s`), that `get_engine(warm_pool=True)`
-discovers the new subscription from the deployed env, and that a turn dispatched through
+the dispatch topic is generation-scoped and changes across deploys, that the old generation
+(its topic and per-worker subscriptions) is retired and the old idle worker **exits within
+minutes** (instead of claiming post-redeploy turns for up to `pool_max_wait_s`), that
+`get_engine(warm_pool=True)` discovers the new topic from the deployed env, and that a turn
+dispatched through
 that handle replies with the NEW deploy's marker — the exact regression #38 reported. Run
 it when you touch the pool/dispatch plumbing (`pool.py`, the warm paths in `backend.py`,
 `adk_agent._pool_worker`). ~20 min: two **sequential** builds plus two pool fills.
@@ -241,6 +242,29 @@ Checks run concurrently and cost a few cents. `SERIAL=1` gives ordered output. T
 check always runs, so it needs whatever Claude auth your shell already uses — an
 `ANTHROPIC_API_KEY` or a logged-in `claude` CLI. `CLAUDE_MODEL` and `OPENAI_MODEL` change the
 native models it checks alongside the OpenRouter ones.
+
+### The isolation probe and the run-scoped GCS check
+
+`dev/live_isolation_probe.py` deploys a throwaway cold engine, runs one Haiku turn whose task is a
+fixed read-only script, prints the script's output and deletes the engine. The script prints only
+statuses, counts, lengths and key names: the shell's user, whether the metadata server hands out the
+runtime identity's token, and what that token can list and read in the output bucket. It is the
+record of the 2026-09-02 finding (README "The runtime identity is reachable by the agent") and the
+check to repeat after the bucket-role migration, when every list must come back 403.
+
+`dev/live_scoped_gcs.py` proves the fix without touching the shared bucket: it creates a fresh
+bucket where the engine's runtime identity may only create objects under `jobs/` and read them by
+name, deploys a throwaway engine on it, runs a turn with a secret and checkpointing (must succeed:
+the worker used the run-scoped token for everything), then runs the probe script (metadata token
+still 200, every bucket list and read with it 403), and deletes the engine and the bucket. With
+`RUNTIME_SA=<email>` the engine is deployed with `service_account=` set to that account (create it
+first with the README's gcloud sketch) and the bucket lives in the engine project; the probe also
+checks the metadata server hands out that account, and prints the status of listing Vertex operations
+with its token (403 with the README's custom role). With `RUNTIME_SA` unset the engine runs as the
+default service agent and the bucket is created in `OUTPUT_PROJECT` (a project where that identity
+has no project role). `KEEP=1` leaves the engine and bucket for inspection. Run it for any change to
+`scoped_gcs.py`, `GcsBlobStore`, the handoff module, the directive/payload shape or the deploy
+config's identity fields.
 
 ### Writing a bespoke live probe
 

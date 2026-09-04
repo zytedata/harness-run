@@ -983,6 +983,7 @@ class GeminiSession:
         self._current_run: DrivenRun | None = None
         self._last_job: Any | None = None
         self._worker: WorkerEntry | None = None  # the pool worker the running turn is addressed to
+        self._worker_retired = False  # its channel already dropped (at pickup)
         self._staged_secrets_uri: str | None = None  # staged handoff object (cleanup on complete)
         self._session_config = config
         self._session_config_uri: str | None = None
@@ -1222,12 +1223,11 @@ class GeminiSession:
                 # stranding) and address the message to that worker alone: its filtered
                 # subscription is the only channel it can land on.
                 worker = engine._claim_worker()
-                self._worker = worker
+                self._worker, self._worker_retired = worker, False
                 engine._dispatch().publish(payload, attributes=worker_attributes(worker.worker))
-            try:
-                engine.fill_pool(1)
-            except Exception:  # noqa: BLE001 — refill is best-effort; the turn already dispatched
-                pass
+            # Refill off the critical path: creating the new worker's subscription takes
+            # seconds on Pub/Sub, and nothing about THIS turn waits for it. Best-effort.
+            engine._in_background(engine.fill_pool, 1, name="pool-refill")
         else:
             # Cold path: the prompt is the only reliable channel to the agent, so the
             # session id, secrets POINTER, config pointers, and resume marker ride leading
@@ -1338,21 +1338,21 @@ class GeminiSession:
                 if dead is not None:
                     engine._retire_worker(dead, cancel_job=True)
                 fresh = engine._claim_worker()
-                self._worker = fresh
+                self._worker, self._worker_retired = fresh, False
                 engine._dispatch().publish(payload, attributes=worker_attributes(fresh.worker))
-                try:
-                    engine.fill_pool(1)
-                except Exception:  # noqa: BLE001 — refill is best-effort
-                    pass
+                engine._in_background(engine.fill_pool, 1, name="pool-refill")
                 return pickup_deadline_s(fresh.submitted_at)
 
             def on_pickup() -> None:
                 picked_up["done"] = True
                 # The worker holds the turn; nothing is ever published to its channel
-                # again, so drop it now (a client crash leaves the TTL backstop).
+                # again, so drop it (a client crash leaves the TTL backstop). Off the
+                # critical path: a subscription delete takes seconds on Pub/Sub, and the
+                # turn's first event is waiting behind this callback.
                 current = self._worker
-                if current is not None:
-                    engine._retire_worker(current)
+                if current is not None and not self._worker_retired:
+                    self._worker_retired = True
+                    engine._in_background(engine._retire_worker, current, name="pool-channel-cleanup")
 
             def on_abandon() -> None:
                 current = self._worker
@@ -1386,13 +1386,14 @@ class GeminiSession:
         self._stop_reason = stop_reason
         self._status = RunStatus.IDLE
         self._stop_gcs_token_refresh()  # the run is over: no more tokens for it
-        # Backstop for the worker's channel (normally dropped at pickup): idempotent.
+        # Backstop for the worker's channel when the turn ended without a pickup (e.g. the
+        # synthetic pickup-timeout result); normally it was dropped at pickup already.
         worker, self._worker = self._worker, None
-        if worker is not None:
-            try:
-                self._engine._retire_worker(worker)
-            except Exception:  # noqa: BLE001 — the subscription TTL backs this up
-                pass
+        retired, self._worker_retired = self._worker_retired, False
+        if worker is not None and not retired:
+            self._engine._in_background(
+                self._engine._retire_worker, worker, name="pool-channel-cleanup"
+            )
         # Backstop cleanup of the staged SECRETS object; the worker normally deletes it at
         # turn end, but a run that failed before the worker fetched would otherwise leave
         # it for the lifecycle rule. Config objects are deliberately NOT deleted — they are
@@ -1589,6 +1590,9 @@ class GeminiEngine:
         self._created = time.time()  # readiness-tail watermark (ignore stale pool markers)
         self._sessions: dict[str, GeminiSession] = {}
         self._pool_jobs: list[str] = []  # tracked pool-worker job names (to cancel on delete)
+        self._dispatch_cached: Any = None  # one Pub/Sub client set per handle (auth once)
+        self._roster_cached: Any = None  # one GCS client per handle
+        self._background: list[threading.Thread] = []  # pool housekeeping threads
 
     def _client(self) -> Any:
         import agentplatform
@@ -1601,13 +1605,40 @@ class GeminiEngine:
         return self._client().agent_engines
 
     def _dispatch(self) -> Any:
-        """The control-plane ``DispatchTransport`` (publish + ensure) for the warm pool."""
-        from ...ports.dispatch import PubSubDispatch
+        """The control-plane ``DispatchTransport`` for the warm pool (one client set per handle)."""
+        if self._dispatch_cached is None:
+            from ...ports.dispatch import PubSubDispatch
 
-        return PubSubDispatch(
-            topic=self._topic, subscription=self._subscription,
-            project=self._project, credentials=self._credentials,
-        )
+            self._dispatch_cached = PubSubDispatch(
+                topic=self._topic, subscription=self._subscription,
+                project=self._project, credentials=self._credentials,
+            )
+        return self._dispatch_cached
+
+    def _in_background(self, fn: Any, *args: Any, name: str = "pool-housekeeping") -> None:
+        """Run pool housekeeping (refill, channel cleanup) off a turn's critical path.
+
+        Subscription admin calls take seconds each on Pub/Sub, and none of them has to
+        finish before a turn's events can flow. Non-daemon, so a short-lived process still
+        completes them before exiting: a refilled worker must reach the roster, or it idles
+        unreachable (and billing) for a day. Failures are logged, never raised.
+        """
+
+        def run() -> None:
+            try:
+                fn(*args)
+            except Exception:  # noqa: BLE001 — housekeeping never fails a run
+                logger.warning("%s failed", name, exc_info=True)
+
+        self._background = [t for t in self._background if t.is_alive()]
+        thread = threading.Thread(target=run, name=name, daemon=False)
+        thread.start()
+        self._background.append(thread)
+
+    def _join_background(self, timeout: float | None = None) -> None:
+        """Wait for outstanding pool housekeeping (tests; teardown)."""
+        for thread in list(self._background):
+            thread.join(timeout)
 
     def fill_pool(self, n: int) -> None:
         """Submit ``n`` pre-warmed workers (each a job blocked on ``__POOL_WAIT__``).
@@ -1647,15 +1678,19 @@ class GeminiEngine:
 
     def _roster(self) -> Any:
         """The pool's idle-worker roster (``roster.py``), in the output bucket."""
-        from .roster import PoolRoster
+        if self._roster_cached is None:
+            from .roster import PoolRoster
 
-        if not self._output_bucket or not self._topic:
-            raise ValueError(
-                "a warm pool's roster lives in the engine's output bucket, under its "
-                "dispatch topic; construct the engine with output_bucket/project set and "
-                "warm_pool=True."
+            if not self._output_bucket or not self._topic:
+                raise ValueError(
+                    "a warm pool's roster lives in the engine's output bucket, under its "
+                    "dispatch topic; construct the engine with output_bucket/project set and "
+                    "warm_pool=True."
+                )
+            self._roster_cached = PoolRoster(
+                self._output_bucket, self._topic, credentials=self._credentials
             )
-        return PoolRoster(self._output_bucket, self._topic, credentials=self._credentials)
+        return self._roster_cached
 
     def _spawn_worker(self, *, rostered: bool) -> WorkerEntry:
         """Submit one pool worker on its own subscription; record it as idle if ``rostered``.
@@ -1729,13 +1764,9 @@ class GeminiEngine:
         the way. An empty roster spawns a worker for this turn alone: the turn then waits
         for its ~2.5 min boot — cold latency, never a stranded turn.
         """
-        roster = self._roster()
-        try:
-            for stale in roster.prune_expired():
-                self._retire_worker(stale)
-        except Exception:  # noqa: BLE001 — pruning is housekeeping
-            pass
-        entry = roster.claim()
+        entry, expired = self._roster().claim()
+        for stale in expired:  # their channels: housekeeping, off the critical path
+            self._in_background(self._retire_worker, stale, name="pool-prune")
         if entry is None:
             entry = self._spawn_worker(rostered=False)
         return entry

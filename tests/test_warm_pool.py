@@ -139,6 +139,7 @@ def test_legacy_warm_session_dispatches_to_the_shared_subscription(monkeypatch):
 
     session = backend.GeminiSession(engine, "warm-sid")
     result = asyncio.run(_await(session.run("go")))
+    engine._join_background()  # the refill runs off the turn's critical path
 
     # The turn was dispatched to the pool (not cold-started) and the pool was refilled.
     # The payload carries the run-scoped GCS token (a fake here: conftest stubs minting).
@@ -790,6 +791,7 @@ def test_warm_session_addresses_one_idle_worker_and_drops_its_channel(monkeypatc
 
     session = backend.GeminiSession(engine, "warm-sid")
     result = asyncio.run(_await(session.run("go")))
+    engine._join_background()  # refill + channel cleanup run off the critical path
 
     # The turn went to the OLDEST idle worker, addressed by attribute (pointers + the run
     # token, never values), and the pool was refilled by one.
@@ -801,9 +803,9 @@ def test_warm_session_addresses_one_idle_worker_and_drops_its_channel(monkeypatc
     remaining = engine._roster().entries()
     assert [e.worker for e in remaining][0] == second.worker and len(remaining) == 2
     assert len(ae.jobs) == 3
-    # Its channel was dropped the moment the worker had the turn (nothing else can ever be
-    # published there), then again — idempotently — at completion; nothing was cancelled.
-    assert dispatch.deleted == [first.subscription, first.subscription]
+    # Its channel was dropped once the worker had the turn (nothing else can ever be
+    # published there) — once, not again at completion; nothing was cancelled.
+    assert dispatch.deleted == [first.subscription]
     assert ae.cancelled == []
     assert result.text == "done" and result.num_turns == 3
     assert session.status == RunStatus.IDLE and session.stop_reason == StopReason.END_TURN
@@ -818,6 +820,7 @@ def test_warm_session_spawns_a_worker_for_itself_on_an_empty_roster(monkeypatch)
 
     session = backend.GeminiSession(engine, "warm-sid")
     result = asyncio.run(_await(session.run("go")))
+    engine._join_background()
 
     assert len(ae.jobs) == 2  # one for this turn, one refill
     (_, attrs), = dispatch.published
@@ -848,6 +851,7 @@ def test_warm_session_redispatches_when_the_worker_never_starts_the_turn(monkeyp
 
     session = backend.GeminiSession(engine, "warm-sid")
     result = asyncio.run(_await(session.run("go")))
+    engine._join_background()
 
     workers = [attrs["worker"] for _, attrs in dispatch.published]
     assert workers[0] == first.worker and len(workers) == 2 and workers[1] != first.worker

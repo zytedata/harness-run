@@ -9,10 +9,13 @@ dispatches to it** (a delete with a generation precondition: of two clients raci
 same worker exactly one succeeds, the other moves on to the next entry).
 
 Entries are ordered by submission time and picked oldest first — the worker most likely
-to have finished its boot. Readiness is not tracked here on purpose: a worker that has
-not booted yet still receives its turn (the message waits on its subscription), and a
-worker that never boots is caught by the client's pickup watchdog, which re-dispatches.
-Entries past their idle expiry (the worker exited without a turn) are pruned on the way.
+to have finished its boot. The claim is on every warm turn's critical path, so it is one
+listing plus one delete: the entry rides the object's custom metadata (returned by the
+listing), and the object body is only a fallback. Readiness is not tracked here on
+purpose: a worker that has not booted yet still receives its turn (the message waits on
+its subscription), and a worker that never boots is caught by the client's pickup
+watchdog, which re-dispatches. Entries past their idle expiry (the worker exited without
+a turn) are pruned on the way.
 
 SECURITY: the roster decides where a turn — its pointers and run-scoped token — is sent,
 so it must be writable by the client identity only. The runtime identity's bucket
@@ -63,8 +66,12 @@ class WorkerEntry:
 class RosterStore(Protocol):
     """The generation-aware object operations the roster needs (a thin GCS subset)."""
 
-    def list(self, prefix: str) -> list[tuple[str, int]]:
-        """``(object_name, generation)`` for every object under ``prefix``."""
+    def list(self, prefix: str) -> list[tuple[str, int, str | None]]:
+        """``(object_name, generation, inline_entry)`` for every object under ``prefix``.
+
+        ``inline_entry`` is the entry JSON carried in the object's metadata (``None`` when
+        the object has none, e.g. written by an older client), so a claim needs no read.
+        """
         ...
 
     def get(self, name: str) -> bytes | None:
@@ -72,6 +79,7 @@ class RosterStore(Protocol):
         ...
 
     def put(self, name: str, data: bytes) -> None:
+        """Write ``data`` as the body AND as the ``entry`` metadata value."""
         ...
 
     def delete_if(self, name: str, generation: int) -> bool:
@@ -95,9 +103,12 @@ class GcsRosterStore:
             self._client = storage.Client(**kwargs)
         return self._client.bucket(self._bucket_name)
 
-    def list(self, prefix: str) -> list[tuple[str, int]]:
+    def list(self, prefix: str) -> list[tuple[str, int, str | None]]:
         bucket = self._bucket()
-        return [(b.name, int(b.generation)) for b in self._client.list_blobs(bucket, prefix=prefix)]
+        return [
+            (b.name, int(b.generation), (b.metadata or {}).get("entry"))
+            for b in self._client.list_blobs(bucket, prefix=prefix)
+        ]
 
     def get(self, name: str) -> bytes | None:
         from google.api_core.exceptions import NotFound
@@ -108,7 +119,9 @@ class GcsRosterStore:
             return None
 
     def put(self, name: str, data: bytes) -> None:
-        self._bucket().blob(name).upload_from_string(data, content_type="application/json")
+        blob = self._bucket().blob(name)
+        blob.metadata = {"entry": data.decode("utf-8")}
+        blob.upload_from_string(data, content_type="application/json")
 
     def delete_if(self, name: str, generation: int) -> bool:
         from google.api_core.exceptions import NotFound, PreconditionFailed
@@ -127,9 +140,10 @@ class InMemoryRosterStore:
         self._objects: dict[str, tuple[bytes, int]] = {}
         self._next_generation = 1
 
-    def list(self, prefix: str) -> list[tuple[str, int]]:
+    def list(self, prefix: str) -> list[tuple[str, int, str | None]]:
         return sorted(
-            (name, gen) for name, (_, gen) in self._objects.items() if name.startswith(prefix)
+            (name, gen, data.decode("utf-8"))
+            for name, (data, gen) in self._objects.items() if name.startswith(prefix)
         )
 
     def get(self, name: str) -> bytes | None:
@@ -171,13 +185,13 @@ class PoolRoster:
 
     def remove(self, worker_id: str) -> None:
         """Drop ``worker_id`` whatever its state (teardown; no precondition)."""
-        for name, generation in self._store.list(self._key(worker_id)):
+        for name, generation, _ in self._store.list(self._key(worker_id)):
             self._store.delete_if(name, generation)
 
     def _read(self) -> list[tuple[str, int, WorkerEntry]]:
         rows = []
-        for name, generation in self._store.list(self._prefix):
-            data = self._store.get(name)
+        for name, generation, inline in self._store.list(self._prefix):
+            data = inline.encode("utf-8") if inline else self._store.get(name)
             if data is None:
                 continue  # claimed by someone else between list and read
             try:
@@ -201,19 +215,25 @@ class PoolRoster:
                 pruned.append(entry)
         return pruned
 
-    def claim(self, now: float | None = None) -> WorkerEntry | None:
-        """Atomically take the oldest idle worker; ``None`` when the roster is empty.
+    def claim(self, now: float | None = None) -> tuple[WorkerEntry | None, list[WorkerEntry]]:
+        """Atomically take the oldest idle worker: ``(entry_or_None, expired_entries_pruned)``.
 
-        Skips expired entries (see :meth:`prune_expired`) and entries another client won
-        the race for (the precondition delete fails, we move on to the next).
+        One listing: expired entries met on the way (their worker idled out) are deleted
+        and returned so the caller can drop their channels; entries another client won the
+        race for (the precondition delete fails) are skipped. ``None`` means the roster had
+        no live worker.
         """
         now = time.time() if now is None else now
+        pruned: list[WorkerEntry] = []
+        claimed: WorkerEntry | None = None
         for name, generation, entry in self._read():
             if entry.expires_at <= now:
+                if self._store.delete_if(name, generation):
+                    pruned.append(entry)
                 continue
-            if self._store.delete_if(name, generation):
-                return entry
-        return None
+            if claimed is None and self._store.delete_if(name, generation):
+                claimed = entry
+        return claimed, pruned
 
     def clear(self) -> list[WorkerEntry]:
         """Remove every entry (the pool is being retired); return what was recorded."""

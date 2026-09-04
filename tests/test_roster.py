@@ -34,7 +34,7 @@ def test_roster_keys_live_under_the_pool_prefix_and_round_trip():
     roster.add(_entry(1, 10.0, 100.0))
     # SECURITY: pool/ is a prefix the runtime identity has no binding on (README IAM table),
     # so only the client can write here — the roster decides where a turn is sent.
-    assert [name for name, _ in store.list("")] == ["base/pool/ratk-w-gen00001/idle/w1.json"]
+    assert [name for name, _, _ in store.list("")] == ["base/pool/ratk-w-gen00001/idle/w1.json"]
     assert roster.entries() == [_entry(1, 10.0, 100.0)]
     roster.remove("w1")
     assert roster.entries() == []
@@ -46,10 +46,13 @@ def test_claim_is_oldest_first_and_skips_expired_entries():
     roster.add(_entry(1, 10.0, 15.0))  # oldest, but its worker idled out at t=15
     roster.add(_entry(3, 30.0, 300.0))
 
-    assert roster.claim(now=50.0).worker == "w2"  # oldest LIVE worker: most likely booted
-    assert roster.prune_expired(now=50.0) == [_entry(1, 10.0, 15.0)]
-    assert roster.claim(now=50.0).worker == "w3"
-    assert roster.claim(now=50.0) is None  # empty: the caller spawns a worker for the turn
+    # Oldest LIVE worker (most likely booted); the expired one met on the way is pruned in
+    # the same listing and handed back so its channel can be dropped.
+    claimed, pruned = roster.claim(now=50.0)
+    assert claimed.worker == "w2" and pruned == [_entry(1, 10.0, 15.0)]
+    assert roster.prune_expired(now=50.0) == []
+    assert roster.claim(now=50.0) == (_entry(3, 30.0, 300.0), [])
+    assert roster.claim(now=50.0) == (None, [])  # empty: the caller spawns a worker
     assert roster.entries() == []
 
 
@@ -58,16 +61,16 @@ def test_claim_is_atomic_across_clients():
     win, and the loser moves on to the next entry instead of double-dispatching."""
 
     class Racy(InMemoryRosterStore):
-        # Fires `hook` the first time w1 is read: client A claims in between client B's
-        # read of the roster and B's precondition delete.
+        # Fires `hook` right after client B's listing: client A claims w1 in between B's
+        # read of the roster and B's precondition delete (B holds a stale listing).
         hook = None
 
-        def get(self, name):
-            data = super().get(name)
-            if self.hook is not None and name.endswith("w1.json"):
+        def list(self, prefix):
+            rows = super().list(prefix)
+            if self.hook is not None:
                 hook, self.hook = self.hook, None
                 hook()
-            return data
+            return rows
 
     store = Racy()
     a = PoolRoster("gs://out", TOPIC, store=store)
@@ -76,11 +79,11 @@ def test_claim_is_atomic_across_clients():
     a.add(_entry(2, 20.0, 200.0))
 
     won: dict = {}
-    store.hook = lambda: won.setdefault("a", a.claim(now=50.0))
-    got_b = b.claim(now=50.0)
+    store.hook = lambda: won.setdefault("a", a.claim(now=50.0)[0])
+    got_b, _ = b.claim(now=50.0)
     assert won["a"].worker == "w1"
     assert got_b.worker == "w2"
-    assert b.claim(now=50.0) is None
+    assert b.claim(now=50.0) == (None, [])
 
 
 def test_clear_returns_what_was_recorded_and_corrupt_entries_are_ignored():
@@ -105,6 +108,7 @@ def test_gcs_store_maps_precondition_failures_to_a_lost_claim():
     class FakeBlob:
         def __init__(self, bucket, name):
             self.bucket, self.name = bucket, name
+            self.metadata = None
 
         def download_as_bytes(self):
             try:
@@ -114,7 +118,7 @@ def test_gcs_store_maps_precondition_failures_to_a_lost_claim():
 
         def upload_from_string(self, data, content_type=None):
             self.bucket.generation += 1
-            self.bucket.objects[self.name] = (data, self.bucket.generation)
+            self.bucket.objects[self.name] = (data, self.bucket.generation, self.metadata)
 
         def delete(self, if_generation_match=None):
             found = self.bucket.objects.get(self.name)
@@ -126,7 +130,7 @@ def test_gcs_store_maps_precondition_failures_to_a_lost_claim():
 
     class FakeBucket:
         def __init__(self):
-            self.objects: dict[str, tuple[bytes, int]] = {}
+            self.objects: dict[str, tuple[bytes, int, dict | None]] = {}
             self.generation = 100
 
         def blob(self, name):
@@ -142,15 +146,16 @@ def test_gcs_store_maps_precondition_failures_to_a_lost_claim():
         def list_blobs(self, bucket, prefix=""):
             from types import SimpleNamespace as NS
 
-            return [NS(name=n, generation=g) for n, (_, g) in bucket.objects.items()
-                    if n.startswith(prefix)]
+            return [NS(name=n, generation=g, metadata=m)
+                    for n, (_, g, m) in bucket.objects.items() if n.startswith(prefix)]
 
     bucket = FakeBucket()
     store = GcsRosterStore("out")
     store._client = FakeClient(bucket)  # skip the real storage.Client()
 
     store.put("pool/x/idle/w1.json", b"{}")
-    (name, generation), = store.list("pool/x/idle/")
+    (name, generation, inline), = store.list("pool/x/idle/")
+    assert inline == "{}"  # the entry rides the listing (object metadata): no read on claim
     assert store.get(name) == b"{}"
     assert store.delete_if(name, generation + 1) is False  # someone rewrote it: lost
     assert store.delete_if(name, generation) is True  # ours

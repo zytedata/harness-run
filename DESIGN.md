@@ -504,6 +504,12 @@ These are facts measured during the PoC. The library encodes them so consumers i
 - Only `/tmp` is writable → agent cwd under `/tmp/agent-jobs/<session-id>/workspace` (see the
   workspace-leaf contract below).
 - `IS_SANDBOX=1` to allow `bypassPermissions` under root.
+- `NUM_WORKERS=1`: the platform's serving harness (`/code/app`, uvicorn, in the container base image —
+  independent of the SDK version) defaults to `os.cpu_count() + 1` worker *processes*, sized to the
+  host node rather than the container's CPU limit (10–11 seen live), each importing the whole stack
+  privately via the spawn start method: ~300 MiB apiece, ~3 GiB of the default 4Gi before our code ran
+  (measured 2026-09-03). A query job serves one request per container, so one worker loses nothing and
+  brings the idle baseline to ~450 MiB (cold and warm verified) and startup CPU from minutes to seconds.
 - `min_instances=0` (the default): the toolkit is async-only, where every job provisions its own worker —
   a standing container serves only the unused sync path while billing continuously. (`>=1` would matter
   only for real long *sync* jobs; min=0 SIGTERM-recycles a sync container ~2.5 min.)
@@ -511,7 +517,8 @@ These are facts measured during the PoC. The library encodes them so consumers i
   `{"cpu": "4", "memory": "4Gi"}` — that 4Gi is shared by the harness CLI, the ADK app, subagents, and
   everything the agent's tools spawn, and memory-heavy turn work (dependency builds, whole-project
   imports) can OOM-kill the worker mid-turn (observed live 2026-07-28/29; the job runner then replays
-  the turn from scratch). Deploy memory-heavy agents with e.g. `{"cpu": "4", "memory": "16Gi"}`
+  the turn from scratch). Raise memory, not cpu, for headroom (the platform's own baseline is pinned
+  by `NUM_WORKERS=1` above; before that it scaled with the node's CPU count). Deploy memory-heavy agents with e.g. `{"cpu": "4", "memory": "16Gi"}`
   (memory max `32Gi`; cpu one of 1/2/4/6/8).
 
 **Identity / IAM (two identities — documented in the runbook)**

@@ -161,6 +161,14 @@ tag `vX.Y.Z`, push the commit and the tag.
 
 ### Changed
 
+- Engines are deployed with `NUM_WORKERS=1`. The platform's serving harness (uvicorn, in
+  the container base image) otherwise starts `os.cpu_count() + 1` worker processes —
+  10–11 on the nodes seen live, sized to the host rather than the container's CPU limit
+  — each importing the whole stack privately: ~300 MiB apiece, ~3 GiB of the default 4Gi
+  worker consumed before the agent ran, so the `memory pressure` warning fired on nearly
+  every turn and memory-heavy work OOM-killed easily. A query job serves one request per
+  container, so one worker loses nothing: the idle baseline drops to ~450 MiB (cold and
+  warm pools verified live) and job startup CPU from minutes to seconds. ([#42])
 - `google-cloud-aiplatform` is now pinned `<2`: 2.0 was released in late August 2026 and
   is not validated with the toolkit yet, and the previous `>=1.163` floor would resolve
   to it on a fresh install (engine builds were already held at `1.165.1` by
@@ -204,6 +212,7 @@ tag `vX.Y.Z`, push the commit and the tag.
 [#34]: https://github.com/zytedata/remote-agent-toolkit/pull/34
 [#36]: https://github.com/zytedata/remote-agent-toolkit/pull/36
 [#38]: https://github.com/zytedata/remote-agent-toolkit/issues/38
+[#42]: https://github.com/zytedata/remote-agent-toolkit/pull/42
 
 ## 0.2.0 — 2026-08-24
 

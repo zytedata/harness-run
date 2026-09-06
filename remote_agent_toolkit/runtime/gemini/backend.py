@@ -980,6 +980,7 @@ class GeminiSession:
         self._stop_reason: StopReason | None = None
         self._last_result: RunResult | None = None
         self._gcs_token_stop: threading.Event | None = None  # stops the token refresher
+        self._gcs_token_expiry: str | None = None
         self._current_run: DrivenRun | None = None
         self._last_job: Any | None = None
         self._worker: WorkerEntry | None = None  # the pool worker the running turn is addressed to
@@ -1065,6 +1066,11 @@ class GeminiSession:
         self._stop_gcs_token_refresh()
         stop = threading.Event()
         self._gcs_token_stop = stop
+        # Seed renewal state before a worker can need it, and carry the actual
+        # initial expiry through both transports. Never bind an expiring token as
+        # an immortal credential on the worker.
+        write_run_token(engine._output_bucket, sid, token, expiry, **engine._gcs_store_kwargs())
+        self._gcs_token_expiry = expiry.isoformat() if expiry else None
 
         def refresh_loop() -> None:
             while not stop.wait(REFRESH_EVERY_S):
@@ -1081,6 +1087,7 @@ class GeminiSession:
         return token
 
     def _stop_gcs_token_refresh(self) -> None:
+        self._gcs_token_expiry = None
         stop = self._gcs_token_stop
         if stop is not None:
             stop.set()
@@ -1217,6 +1224,7 @@ class GeminiSession:
                 session_config_gcs=self._session_config_uri,
                 turn_config_gcs=turn_config_uri,
                 gcs_token=gcs_token,
+                gcs_token_expiry=self._gcs_token_expiry,
             )
             if engine._subscription:
                 # Legacy shared-subscription pool (an engine deployed before per-worker
@@ -1252,6 +1260,10 @@ class GeminiSession:
                 # leaves this one as prompt text, still running the turn on the runtime
                 # identity; the leftover is a token worth this run's own objects only.
                 directives += f"AGENT_GCS_TOKEN={gcs_token}\n"
+                if self._gcs_token_expiry:
+                    # AFTER the token: older token-aware workers must still parse
+                    # the bearer and must not accidentally fall back to ADC.
+                    directives += f"AGENT_GCS_TOKEN_EXPIRY={self._gcs_token_expiry}\n"
             prompt = directives + message
             # Two platform-runner regressions of 2026-07-28 shape this payload (engines
             # created before still work the old way; this form works on both):

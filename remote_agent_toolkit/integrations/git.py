@@ -183,19 +183,21 @@ def scrub_repo_tokens(job_dir) -> int:
 
     Rewrites any ``https://<user>:<token>@host/...`` remote URL to ``https://host/...`` so a
     checkpoint snapshot never captures a token. Returns the number of config files changed.
-    Best-effort per file (an unreadable/unwritable config is skipped). Idempotent.
+    Raises on an unreadable/unwritable config: callers must not archive a workspace
+    whose credential scrub could not be completed. Idempotent on success. Error text
+    deliberately excludes config contents, paths and underlying exception messages.
     """
     changed = 0
     for cfg in Path(job_dir).glob("**/.git/config"):
         try:
             text = cfg.read_text()
-        except Exception:  # noqa: BLE001 — unreadable config; skip
-            continue
+        except (OSError, UnicodeError):
+            raise RuntimeError("Git credential scrub failed: config could not be read") from None
         scrubbed = _USERINFO_RE.sub(r"\1", text)
         if scrubbed != text:
             try:
                 cfg.write_text(scrubbed)
                 changed += 1
-            except Exception:  # noqa: BLE001 — unwritable config; skip
-                continue
+            except (OSError, UnicodeError):
+                raise RuntimeError("Git credential scrub failed: config could not be written") from None
     return changed

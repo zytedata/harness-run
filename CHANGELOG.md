@@ -54,6 +54,14 @@ for the tag with this file's section as the notes.
   validates the `relpath` it reads from it: a path outside `CODEX_HOME/sessions` (absolute,
   `..`, a symlink escape, a non-`.jsonl` name) is refused and the session starts fresh, where
   before the next worker wrote wherever the file said (the same check as #64).
+- **Codex checkpoint failures are visible before a turn finishes** (#64, follow-up to #72).
+  A missing rollout or failed conversation write emits `checkpoint_error`, even when
+  the workspace archive succeeded; checkpoint status precedes the terminal result so
+  clients that stop there receive it. On resume, unreadable metadata, malformed JSON or
+  thread IDs, and missing/unreadable rollouts raise explicit errors without echoing
+  storage credentials. Missing metadata and the unsafe-path fallback introduced by
+  #72 retain their existing fresh-conversation behavior. The run-token permissions and
+  destination validator are unchanged.
 
 ## 0.3.0 — 2026-09-07
 

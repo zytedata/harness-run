@@ -1136,17 +1136,21 @@ class GeminiSession:
         """
         if self._session_config_resolved:
             return
-        self._session_config_resolved = True
         engine = self._engine
         if not engine._output_bucket:
+            self._session_config_resolved = True
             return
         from ...config import SessionConfig
         from .handoff import load_session_config
 
         found = load_session_config(engine._output_bucket, self._session_id)
         if found is not None:
-            self._session_config_uri, config_dict = found
-            self._session_config = SessionConfig.from_dict(config_dict)
+            uri, config_dict = found
+            config = SessionConfig.from_dict(config_dict)
+            self._session_config_uri, self._session_config = uri, config
+        # A transient/denied/invalid read must remain retryable, never cached as
+        # successfully resolved to the deployed defaults.
+        self._session_config_resolved = True
 
     def _client_spec(self, turn_config: TurnConfig | None = None) -> AgentSpec:
         """The client-side effective spec: engine spec + session + turn overlays.

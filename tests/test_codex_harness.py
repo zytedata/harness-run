@@ -809,8 +809,9 @@ def test_codex_blanks_unrelated_ambient_model_credentials(tmp_path, monkeypatch)
     assert env["ANTHROPIC_API_KEY"] == ""
     assert env["ANTHROPIC_AUTH_TOKEN"] == ""
 
-    spec = _or_spec(env={"ANTHROPIC_API_KEY": "agent-owned"})
-    ctx = _ctx(tmp_path, spec, secrets={"OPENROUTER_API_KEY": "k"})
+    spec = _or_spec()
+    ctx = _ctx(tmp_path, spec, secrets={"OPENROUTER_API_KEY": "k",
+                                      "ANTHROPIC_API_KEY": "agent-owned"})
     assert CodexHarness().build_options(spec, ctx).codex_config.env["ANTHROPIC_API_KEY"] == (
         "agent-owned"
     )

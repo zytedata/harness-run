@@ -306,6 +306,7 @@ class ClaudeCodeHarness:
     def _mcp_servers(self, spec: AgentSpec, ctx: RunContext) -> dict:
         """Translate ``spec.mcp_servers`` into SDK MCP config, pulling tokens from secrets."""
         from ..integrations.github import github_mcp_config
+        from ._shared import mcp_header_secrets
 
         servers: dict[str, Any] = {}
         for srv in spec.mcp_servers:
@@ -318,8 +319,9 @@ class ClaudeCodeHarness:
                 # else: no token resolved — skip silently (never log the token).
             elif srv.kind == "remote":
                 cfg: dict[str, Any] = {"type": "http", "url": srv.url}
-                if srv.headers:
-                    cfg["headers"] = dict(srv.headers)
+                headers = {**(srv.headers or {}), **mcp_header_secrets(srv, ctx)}
+                if headers:
+                    cfg["headers"] = headers
                 servers[srv.name or "remote"] = cfg
             elif srv.kind == "stdio":
                 cfg = {"type": "stdio", "command": srv.command}

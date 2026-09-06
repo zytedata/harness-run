@@ -23,6 +23,16 @@ from typing import Any, Literal, Mapping
 DEFAULT_MAX_BUFFER_SIZE = 32 * 1024 * 1024
 
 
+def _assert_non_secret_env(env: Mapping[str, str] | None) -> None:
+    """Catch common credential fields, not arbitrary secrets hidden in free-form text."""
+    for name in env or {}:
+        upper = name.upper()
+        if upper in {"API_KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIALS"} or upper.endswith(
+            ("_API_KEY", "_TOKEN", "_SECRET", "_PASSWORD", "_CREDENTIALS")
+        ):
+            raise ValueError("credential-like env fields must use run(secrets=...), not durable config")
+
+
 @dataclass(frozen=True)
 class SystemPrompt:
     """Inherit the harness's built-in system prompt and (optionally) append to it.
@@ -117,7 +127,8 @@ class McpServer:
     Credentials are NOT carried here. A ``github`` server's token is resolved at runtime
     from the per-invocation ``secrets`` (conventional names ``GH_TOKEN`` / ``GITHUB_TOKEN``
     / ``GH_PAT``) and injected into the server's headers by the harness — never into the
-    agent's own environment. A ``remote`` server may carry static ``headers``.
+    agent's own environment. A ``remote`` server may carry non-secret static ``headers``;
+    use ``header_secrets={header: runtime_secret_name}`` for credentials.
     """
 
     kind: Literal["github", "remote", "stdio"]
@@ -126,6 +137,28 @@ class McpServer:
     headers: Mapping[str, str] | None = None
     command: str | None = None
     args: tuple[str, ...] | None = None
+    header_secrets: Mapping[str, str] | None = None
+
+    def __post_init__(self) -> None:
+        self._validate_headers()
+        if self.headers is not None:
+            object.__setattr__(self, "headers", dict(self.headers))
+        if self.header_secrets is not None:
+            object.__setattr__(self, "header_secrets", dict(self.header_secrets))
+
+    def _validate_headers(self) -> None:
+        static = {name.lower() for name in self.headers or {}}
+        sensitive = {"authorization", "proxy-authorization", "cookie", "x-api-key", "api-key",
+                     "x-auth-token"}
+        if static & sensitive:
+            raise ValueError("authentication headers must use header_secrets, not static values")
+        references = self.header_secrets or {}
+        if references and self.kind != "remote":
+            raise ValueError("header_secrets require a remote MCP server")
+        if static & {name.lower() for name in references}:
+            raise ValueError("static headers and header_secrets must not overlap")
+        if any(not isinstance(value, str) or not value for value in references.values()):
+            raise ValueError("header_secrets values must be non-empty runtime secret names")
 
     @classmethod
     def github(cls) -> McpServer:
@@ -138,13 +171,20 @@ class McpServer:
         name: str,
         url: str,
         headers: Mapping[str, str] | None = None,
+        *,
+        header_secrets: Mapping[str, str] | None = None,
     ) -> McpServer:
-        """A remote MCP server with optional static ``headers``."""
+        """Remote MCP with non-secret headers and header -> run-secret-name references.
+
+        A referenced secret is the complete header value (e.g. ``Bearer <token>``).
+        Missing references fail the run; ambient environment is not a fallback.
+        """
         return cls(
             kind="remote",
             name=name,
             url=url,
             headers=dict(headers) if headers is not None else None,
+            header_secrets=dict(header_secrets) if header_secrets is not None else None,
         )
 
     @classmethod
@@ -158,6 +198,7 @@ class McpServer:
         )
 
     def to_dict(self) -> dict[str, Any]:
+        self._validate_headers()
         d: dict[str, Any] = {"kind": self.kind}
         for f in ("name", "url", "command"):
             v = getattr(self, f)
@@ -165,6 +206,8 @@ class McpServer:
                 d[f] = v
         if self.headers is not None:
             d["headers"] = dict(self.headers)
+        if self.header_secrets is not None:
+            d["header_secrets"] = dict(self.header_secrets)
         if self.args is not None:
             d["args"] = list(self.args)
         return d
@@ -180,6 +223,7 @@ class McpServer:
             headers=dict(headers) if headers is not None else None,
             command=d.get("command"),
             args=tuple(args) if args is not None else None,
+            header_secrets=d.get("header_secrets"),
         )
 
 
@@ -364,6 +408,7 @@ class AgentSpec:
 
     def __post_init__(self) -> None:
         # Coerce list args to frozen-hashable tuples without breaking frozen-ness.
+        _assert_non_secret_env(self.env)
         object.__setattr__(self, "skills", tuple(self.skills))
         object.__setattr__(self, "repos", tuple(self.repos))
         object.__setattr__(self, "mcp_servers", tuple(self.mcp_servers))
@@ -419,6 +464,7 @@ class AgentSpec:
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to a plain, JSON/YAML-friendly dict."""
+        _assert_non_secret_env(self.env)
         d: dict[str, Any] = {
             "name": self.name,
             "model": self.model,

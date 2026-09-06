@@ -8,7 +8,7 @@ import pytest
 from remote_agent_toolkit import AgentSpec, TurnConfig
 from remote_agent_toolkit.events import AgentEvent
 from remote_agent_toolkit.runtime._run import DrivenRun
-from remote_agent_toolkit.runtime.gemini import backend, handoff
+from remote_agent_toolkit.runtime.gemini import backend, handoff, scoped_gcs
 
 
 def make_session(monkeypatch, *, warm=False):
@@ -152,3 +152,20 @@ def test_cleanup_errors_preserve_original_exception_without_logging_secret(monke
         session.run("dummy", secrets={"KEY": "AUDIT_FAKE"})
     assert caught.value is failure
     assert "AUDIT_FAKE_SECRET" not in caplog.text
+
+
+def test_initial_refresh_write_failure_is_rolled_back_before_thread_start(monkeypatch):
+    # Exercise the real mint/setup seam added by the token-expiry dependency.
+    session = make_session(monkeypatch)
+    deleted = []
+
+    def failed_write(*a, **kw):
+        raise TimeoutError("dummy initial token write failed")
+
+    monkeypatch.setattr(scoped_gcs, "write_run_token", failed_write)
+    monkeypatch.setattr(scoped_gcs, "delete_run_token", lambda *a, **kw: deleted.append(a))
+    monkeypatch.setattr(backend.threading, "Thread", lambda **kw: pytest.fail("unexpected thread"))
+    with pytest.raises(TimeoutError):
+        session.run("dummy")
+    assert session._gcs_token_stop is None
+    assert deleted == [("gs://audit-bucket", "audit")]

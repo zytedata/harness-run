@@ -219,6 +219,7 @@ def dispatch_payload(
     session_config_gcs: str | None = None,
     turn_config_gcs: str | None = None,
     gcs_token: str | None = None,
+    gcs_token_expiry: str | None = None,
 ) -> dict:
     """The turn payload published to the pool: the worker adopts ``session_id`` for the turn.
 
@@ -248,6 +249,8 @@ def dispatch_payload(
         # per-worker dispatch the message lands only on the channel of the one worker the
         # client picked for this turn; a shell in any other worker cannot pull it.
         payload["gcs_token"] = gcs_token
+        if gcs_token_expiry is not None:
+            payload["gcs_token_expiry"] = gcs_token_expiry
     return payload
 
 

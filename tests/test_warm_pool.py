@@ -284,7 +284,7 @@ def test_pool_worker_claims_and_runs(monkeypatch):
 
     async def fake_run_turn(spec_, session_id, prompt, resume_sid, secrets_uri=None,
                             invocation_id="", session_config_uri=None, turn_config_uri=None,
-                            gcs_token=None, worker=None):
+                            gcs_token=None, worker=None, gcs_token_expiry=None):
         seen.update(session_id=session_id, prompt=prompt, resume_sid=resume_sid,
                     secrets_uri=secrets_uri, invocation_id=invocation_id,
                     session_config_uri=session_config_uri, turn_config_uri=turn_config_uri,

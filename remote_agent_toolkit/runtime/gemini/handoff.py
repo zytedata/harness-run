@@ -224,14 +224,23 @@ def ensure_handoff_lifecycle(output_bucket: str, bucket_obj: Any | None = None) 
             bucket_obj = storage.Client().bucket(name)
             bucket_obj.reload()
         rules = list(bucket_obj.lifecycle_rules or [])
-        covered: set[str] = set()
+        # Conditions in a GCS lifecycle rule are conjunctive. A prefix with a
+        # decades-long age, a version/suffix filter, etc. is not our backstop.
+        # Keep all existing policy intact; append narrow known-effective rules.
+        covered: dict[str, int] = {}
         for existing in rules:
-            if existing.get("action", {}).get("type") == "Delete":
-                covered.update(existing.get("condition", {}).get("matchesPrefix") or [])
+            condition = existing.get("condition", {})
+            age = condition.get("age")
+            if (existing.get("action", {}).get("type") == "Delete"
+                    and type(age) is int and age >= 0
+                    and not (set(condition) - {"age", "matchesPrefix"})):
+                for prefix in condition.get("matchesPrefix") or []:
+                    covered[prefix] = min(age, covered.get(prefix, age))
         missing = [
             rule
             for rule in wanted
-            if not all(m in covered for m in rule["condition"]["matchesPrefix"])
+            if not all(covered.get(m, float("inf")) <= rule["condition"]["age"]
+                       for m in rule["condition"]["matchesPrefix"])
         ]
         if not missing:
             return True

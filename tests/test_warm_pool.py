@@ -525,7 +525,7 @@ def _deploy_with_fakes(monkeypatch, tmp_path, engine_api, revision_apis):
     monkeypatch.setattr(_deploy, "stage_agent", lambda spec: (str(tmp_path), []))
     monkeypatch.setattr(_deploy, "build_engine_config", lambda spec, **kw: {})
     monkeypatch.setattr(backend, "build_adk_app", lambda spec, **kw: object())
-    monkeypatch.setattr(handoff, "ensure_handoff_lifecycle", lambda bucket: True)
+    monkeypatch.setattr(handoff, "ensure_handoff_lifecycle", lambda bucket, **kw: True)
     monkeypatch.chdir(tmp_path)
 
     ensured = []

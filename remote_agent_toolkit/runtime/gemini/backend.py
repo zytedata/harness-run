@@ -510,7 +510,7 @@ def deploy(
     # storage.buckets.update — warn, never fail the deploy.
     from .handoff import ensure_handoff_lifecycle
 
-    if not ensure_handoff_lifecycle(output_bucket):
+    if not ensure_handoff_lifecycle(output_bucket, credentials=credentials):
         import warnings
 
         warnings.warn(
@@ -1072,7 +1072,8 @@ class GeminiSession:
                     fresh, fresh_expiry = mint_run_token(
                         engine._credentials, engine._output_bucket, sid
                     )
-                    write_run_token(engine._output_bucket, sid, fresh, fresh_expiry)
+                    write_run_token(engine._output_bucket, sid, fresh, fresh_expiry,
+                                    **engine._gcs_store_kwargs())
                 except Exception:  # noqa: BLE001 — the worker keeps its current token
                     logger.warning("run-scoped GCS token refresh failed for %s", sid, exc_info=True)
 
@@ -1089,7 +1090,8 @@ class GeminiSession:
                 from .scoped_gcs import delete_run_token
 
                 try:
-                    delete_run_token(engine._output_bucket, self._session_id)
+                    delete_run_token(engine._output_bucket, self._session_id,
+                                     **engine._gcs_store_kwargs())
                 except Exception:  # noqa: BLE001 — the 1-day lifecycle rule backs this up
                     pass
 
@@ -1105,7 +1107,8 @@ class GeminiSession:
             )
         from .handoff import stage_secrets
 
-        return stage_secrets(engine._output_bucket, self._session_id, secrets)
+        return stage_secrets(engine._output_bucket, self._session_id, secrets,
+                             **engine._gcs_store_kwargs())
 
     def _bind_config(self, config: SessionConfig | None) -> None:
         """Persist the session's config at its stable key (called once, at session open)."""
@@ -1124,7 +1127,8 @@ class GeminiSession:
 
         self._session_config = config
         self._session_config_uri = persist_session_config(
-            engine._output_bucket, self._session_id, config.to_dict()
+            engine._output_bucket, self._session_id, config.to_dict(),
+            **engine._gcs_store_kwargs(),
         )
         self._session_config_resolved = True
 
@@ -1143,7 +1147,8 @@ class GeminiSession:
         from ...config import SessionConfig
         from .handoff import load_session_config
 
-        found = load_session_config(engine._output_bucket, self._session_id)
+        found = load_session_config(engine._output_bucket, self._session_id,
+                                    **engine._gcs_store_kwargs())
         if found is not None:
             self._session_config_uri, config_dict = found
             self._session_config = SessionConfig.from_dict(config_dict)
@@ -1196,7 +1201,7 @@ class GeminiSession:
             from .handoff import stage_turn_config
 
             turn_config_uri = stage_turn_config(
-                engine._output_bucket, sid, turn_config.to_dict()
+                engine._output_bucket, sid, turn_config.to_dict(), **engine._gcs_store_kwargs()
             )
 
         worker: WorkerEntry | None = None  # per-worker dispatch: the worker this turn went to
@@ -1280,6 +1285,7 @@ class GeminiSession:
             return tail_stream(
                 events_uri, sid, since=since,
                 start_after=watermark["key"] or None, watermark=watermark,
+                **engine._gcs_store_kwargs(),
             )
 
         async def history_reader() -> list:
@@ -1401,7 +1407,8 @@ class GeminiSession:
         if self._staged_secrets_uri:
             from .handoff import delete_staged_secrets
 
-            delete_staged_secrets(self._staged_secrets_uri)
+            delete_staged_secrets(self._staged_secrets_uri,
+                                 **self._engine._gcs_store_kwargs(self._staged_secrets_uri))
             self._staged_secrets_uri = None
 
     async def interrupt(self) -> None:
@@ -1476,7 +1483,9 @@ class GeminiSession:
                 "AgentSpec(transcript=True)"
             )
         bucket, prefix = parse_gcs_uri(f"{engine._output_bucket}/checkpoints")
-        blobs = GcsBlobStore(bucket, (prefix + "/") if prefix else "")
+        blobs = GcsBlobStore(bucket, (prefix + "/") if prefix else "",
+                             **({"credentials": engine._credentials}
+                                if engine._credentials is not None else {}))
         # The worker keys the store by the SDK-canonical id, not the raw (numeric, on the
         # cold path) session id.
         return await BlobSessionStore(blobs).load_all(_claude_session_id(self._session_id))
@@ -1831,6 +1840,20 @@ class GeminiEngine:
             self, session_id, config_resolved=False
         )
 
+    def _gcs_store_kwargs(self, uri: str | None = None) -> dict:
+        """Inject this client's explicit identity without changing worker defaults.
+
+        Handoff/stream helpers already support a store. Their keys include the bucket
+        prefix, so the injected store deliberately has no prefix of its own.
+        """
+        from ...ports.blobstore import GcsBlobStore, parse_gcs_uri
+
+        uri = uri or self._output_bucket
+        if self._credentials is None or not uri:
+            return {}
+        bucket, _ = parse_gcs_uri(uri)
+        return {"store": GcsBlobStore(bucket, credentials=self._credentials)}
+
     def list_sessions(self) -> list[dict]:
         """Enumerate this engine's known past sessions, newest first.
 
@@ -1850,6 +1873,7 @@ class GeminiEngine:
             output_bucket=self._output_bucket,
             resource=self._resource,
             adk_sessions=adk_sessions,
+            **self._gcs_store_kwargs(),
         )
 
     def wait_until_warm(self, timeout: float = 600.0) -> bool:
@@ -1878,7 +1902,8 @@ class GeminiEngine:
             # A worker writes its readiness marker to the GCS mirror (events/<pool_id>/).
             # NB engines deployed before event streaming only ever logged it — for those
             # this times out (False, a soft signal: dispatch works regardless); redeploy.
-            markers = tail_stream(f"{self._output_bucket}/events", pool_id, since=created)
+            markers = tail_stream(f"{self._output_bucket}/events", pool_id, since=created,
+                                  **self._gcs_store_kwargs())
             async for _ in markers:
                 return True  # first marker since deploy => a worker is warm
             return False

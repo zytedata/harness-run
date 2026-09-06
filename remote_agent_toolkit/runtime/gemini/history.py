@@ -137,7 +137,7 @@ def read_history(
     """
     if output_bucket:
         bucket, prefix = parse_gcs_uri(output_bucket)
-        blobs = store if store is not None else GcsBlobStore(bucket)
+        blobs = store if store is not None else GcsBlobStore(bucket, credentials=credentials)
         base = f"{prefix + '/' if prefix else ''}"
 
         # 1. Mirrored per-turn files (lexical order == chronological).

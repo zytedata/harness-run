@@ -980,6 +980,9 @@ class GeminiSession:
         self._stop_reason: StopReason | None = None
         self._last_result: RunResult | None = None
         self._gcs_token_stop: threading.Event | None = None  # stops the token refresher
+        self._submission_lock = threading.Lock()
+        self._submission_may_have_dispatched = False
+        self._submission_uncertain = False
         self._current_run: DrivenRun | None = None
         self._last_job: Any | None = None
         self._worker: WorkerEntry | None = None  # the pool worker the running turn is addressed to
@@ -1175,6 +1178,60 @@ class GeminiSession:
         turn_config: TurnConfig | None = None,
         hooks: Any | None = None,
     ) -> DrivenRun:
+        # A failed acquisition must never clean another in-flight turn's lease.
+        # This is a local ownership guard, not a distributed session lock.
+        if not self._submission_lock.acquire(blocking=False):
+            raise RuntimeError("a submission is already in progress on this session handle")
+        try:
+            if self._submission_uncertain:
+                raise RuntimeError("previous submission acceptance is unknown; reconcile it first")
+            if self._current_run is not None and not self._current_run.done:
+                raise RuntimeError("a turn is already active on this session handle")
+            self._submission_may_have_dispatched = False
+            self._last_job = None
+            try:
+                return self._submit_impl(message, resume, secrets, turn_config, hooks)
+            except Exception:
+                if self._submission_may_have_dispatched:
+                    # A timeout can follow remote acceptance. Do not invalidate
+                    # credentials or retire a worker that may be executing.
+                    self._submission_uncertain = True
+                else:
+                    self._abort_submission()
+                raise
+        finally:
+            self._submission_lock.release()
+
+    def _abort_submission(self) -> None:
+        """Best-effort rollback only when no dispatch could have been accepted."""
+        try:
+            self._stop_gcs_token_refresh()
+        except Exception:  # noqa: BLE001 — preserve the original setup error
+            logger.warning("could not clean up failed submission token lease")
+        worker, self._worker = self._worker, None
+        self._worker_retired = False
+        if worker is not None:
+            try:
+                self._engine._retire_worker(worker, cancel_job=True)
+            except Exception:  # noqa: BLE001 — pool TTL remains the backstop
+                logger.warning("could not retire failed submission worker")
+        uri, self._staged_secrets_uri = self._staged_secrets_uri, None
+        if uri:
+            from .handoff import delete_staged_secrets
+
+            try:
+                delete_staged_secrets(uri, **self._engine._gcs_store_kwargs(uri))
+            except Exception:  # noqa: BLE001 — lifecycle remains the backstop
+                logger.warning("could not clean up failed submission secrets")
+
+    def _submit_impl(
+        self,
+        message: str,
+        resume: bool,
+        secrets: dict[str, str] | None = None,
+        turn_config: TurnConfig | None = None,
+        hooks: Any | None = None,
+    ) -> DrivenRun:
         engine = self._engine
         sid = self._session_id
         if hooks:
@@ -1203,6 +1260,8 @@ class GeminiSession:
             turn_config_uri = stage_turn_config(
                 engine._output_bucket, sid, turn_config.to_dict(), **engine._gcs_store_kwargs()
             )
+        # Resolve/validate the client overlay before crossing the dispatch boundary.
+        client_spec = self._client_spec(turn_config)
 
         worker: WorkerEntry | None = None  # per-worker dispatch: the worker this turn went to
         payload: dict | None = None
@@ -1221,7 +1280,9 @@ class GeminiSession:
             if engine._subscription:
                 # Legacy shared-subscription pool (an engine deployed before per-worker
                 # dispatch): every idle worker competes for the one subscription.
-                engine._dispatch().publish(payload)
+                dispatcher = engine._dispatch()
+                self._submission_may_have_dispatched = True
+                dispatcher.publish(payload)
             else:
                 # Per-worker dispatch: take one idle worker off the roster (or spawn one
                 # when the pool is empty — the turn then waits for its boot instead of
@@ -1229,7 +1290,10 @@ class GeminiSession:
                 # subscription is the only channel it can land on.
                 worker = engine._claim_worker()
                 self._worker, self._worker_retired = worker, False
-                engine._dispatch().publish(payload, attributes=worker_attributes(worker.worker))
+                dispatcher = engine._dispatch()
+                attributes = worker_attributes(worker.worker)
+                self._submission_may_have_dispatched = True
+                dispatcher.publish(payload, attributes=attributes)
             # Refill off the critical path: creating the new worker's subscription takes
             # seconds on Pub/Sub, and nothing about THIS turn waits for it. Best-effort.
             engine._in_background(engine.fill_pool, 1, name="pool-refill")
@@ -1270,7 +1334,9 @@ class GeminiSession:
             cfg: dict[str, Any] = {"query": json.dumps(payload)}
             if engine._output_bucket:
                 cfg["output_gcs_uri"] = f"{engine._output_bucket}/jobs/{sid}.jsonl"
-            self._last_job = engine._agent_engines().run_query_job(name=engine._resource, config=cfg)
+            api = engine._agent_engines()
+            self._submission_may_have_dispatched = True
+            self._last_job = api.run_query_job(name=engine._resource, config=cfg)
 
         # Live channel: the GCS event mirror (quota-free, no ingestion lag). Cloud Logging
         # is still WRITTEN by every worker — it's the ops/debug channel, never tailed.
@@ -1376,7 +1442,7 @@ class GeminiSession:
         else:
             factory = tail_source
 
-        run = DrivenRun(factory, sid, self._client_spec(turn_config), on_complete=self._on_complete)
+        run = DrivenRun(factory, sid, client_spec, on_complete=self._on_complete)
         self._current_run = run
         self._status = RunStatus.RUNNING
         self._stop_reason = None
@@ -1420,14 +1486,16 @@ class GeminiSession:
         per-turn job handle, so there this only stops tailing — the worker finishes its turn.
         """
         run = self._current_run
+        # Local completion clears self._worker. Keep the exact remote target
+        # before awaiting it, so warm cancellation cannot lose the job handle.
+        worker = self._worker
+        job_name = getattr(self._last_job, "job_name", None) or (worker.job_name if worker else None)
         if run is not None and run.task is not None and not run.task.done():
             run.task.cancel()
             try:
                 await run.task
             except asyncio.CancelledError:
                 pass
-        worker = self._worker
-        job_name = getattr(self._last_job, "job_name", None) or (worker.job_name if worker else None)
         if job_name:
             engine = self._engine
             try:

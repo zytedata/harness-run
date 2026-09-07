@@ -19,7 +19,7 @@ Release checklist: update this file (move the `Unreleased` section into a new
 version heading with the date), bump `version` in `pyproject.toml`, commit,
 tag `vX.Y.Z`, push the commit and the tag.
 
-## Unreleased
+## 0.3.0 — 2026-09-07
 
 ### Backwards-incompatible
 

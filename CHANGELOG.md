@@ -9,15 +9,20 @@ releases (0.X.Y) do not. Every incompatible change is listed under a
 **Backwards-incompatible** heading together with update notes describing how to
 migrate.
 
-Releases are git tags (`vX.Y.Z`) on `main`; install a specific release with
+Releases are git tags (`vX.Y.Z`) on `main`, and every tag is published to Zyte's
+internal PyPI (https://pypi.internal.example/simple/) by `.github/workflows/publish.yml`;
+install a specific release with
 
 ```
+uv pip install "remote-agent-toolkit==X.Y.Z" --extra-index-url "https://<user>:<password>@pypi.internal.example/simple/"
 uv pip install "remote-agent-toolkit @ git+https://github.com/zytedata/remote-agent-toolkit@vX.Y.Z"
 ```
 
 Release checklist: update this file (move the `Unreleased` section into a new
-version heading with the date), bump `version` in `pyproject.toml`, commit,
-tag `vX.Y.Z`, push the commit and the tag.
+version heading with the date), bump `version` in `pyproject.toml`, merge that
+commit to `main` (PR), tag the merge commit `vX.Y.Z` and push the tag (CI refuses
+a tag whose version differs from `pyproject.toml`), then create the GitHub Release
+for the tag with this file's section as the notes.
 
 ## 0.3.0 — 2026-09-07
 

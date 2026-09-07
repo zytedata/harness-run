@@ -1,0 +1,84 @@
+name: Publish to internal PyPI
+
+# Publishes the package to Zyte's internal PyPI, https://pypi.internal.example/simple/, so
+# that Scrapy Cloud builds and other consumers can `pip install remote-agent-toolkit`
+# instead of pulling this private git repo (which Scrapy Cloud builds cannot do).
+#
+# The index is a static site served from the S3 bucket `pkgrepo.internal.example`; the
+# `simple/` pages regenerate on the bucket side about a minute after an upload. There is
+# no upload API: publishing is `aws s3 sync dist/ s3://pkgrepo.internal.example/python/packages/`,
+# the same command every other zytedata repo uses. The AWS key pair in the repo secrets is a
+# personal developer key (the only kind IT hands out for this bucket); replace it when the
+# repo moves to a new owner or to public PyPI.
+#
+# What gets published:
+#   * a tag `vX.Y.Z`   -> version X.Y.Z, which must equal `version` in pyproject.toml
+#   * a push to `main` -> a dev build X.Y.Z.dev<run number>, where X.Y.Z is the pyproject
+#                         version. A dev build sorts BEFORE the release of the same version,
+#                         so `pip install remote-agent-toolkit` never picks one up by
+#                         accident; pin it exactly (==X.Y.Z.devN) to use it.
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false  # never cancel an upload half-way
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Resolve the version to publish
+        id: version
+        run: |
+          set -euo pipefail
+          declared=$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            tag="${GITHUB_REF_NAME#v}"
+            if [[ "$tag" != "$declared" ]]; then
+              echo "::error::tag $GITHUB_REF_NAME does not match pyproject version $declared; bump the version first (CHANGELOG.md, release checklist)"
+              exit 1
+            fi
+            version="$declared"
+          else
+            version="${declared}.dev${GITHUB_RUN_NUMBER}"
+            sed -i "s/^version = \"${declared}\"$/version = \"${version}\"/" pyproject.toml
+            grep -q "^version = \"${version}\"$" pyproject.toml
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "publishing remote-agent-toolkit $version"
+
+      - name: Build sdist and wheel
+        run: |
+          set -euo pipefail
+          uv build
+          uvx twine check dist/*
+          ls -l dist/
+
+      - name: Upload to the package bucket
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: us-east-1
+        run: |
+          set -euo pipefail
+          uvx --from awscli aws s3 sync dist/ s3://pkgrepo.internal.example/python/packages/
+          # Confirm both files are in the bucket before calling this a success.
+          for f in dist/*; do
+            uvx --from awscli aws s3 ls "s3://pkgrepo.internal.example/python/packages/$(basename "$f")" | grep -q "$(basename "$f")"
+          done
+          echo "published remote-agent-toolkit ${{ steps.version.outputs.version }}; the index lists it at https://pypi.internal.example/simple/remote-agent-toolkit/ within a few minutes"

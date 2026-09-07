@@ -651,6 +651,30 @@ def test_transcript_only_spec_does_not_resume_the_conversation(tmp_path, monkeyp
     assert seen["resume_sid"] is None
 
 
+def test_deploy_resolves_and_checks_the_runtime_service_account_before_side_effects(monkeypatch):
+    # service_account omitted → the project's ratk-runtime@, and its existence is checked
+    # BEFORE the pub/sub ensure, the staging upload and the billable build: a missing
+    # account stops the deploy right there with the fix in the message. The stub raises to
+    # prove the check runs first (nothing after it is reached).
+    from remote_agent_toolkit.runtime.gemini import _deploy
+
+    seen = {}
+
+    def _check(project, service_account, credentials=None):
+        seen.update(project=project, service_account=service_account)
+        raise _deploy.RuntimeServiceAccountMissing("missing (stub)")
+
+    monkeypatch.setattr(_deploy, "check_runtime_service_account_exists", _check)
+    with pytest.raises(_deploy.RuntimeServiceAccountMissing):
+        backend.deploy(AgentSpec(name="w", model="m"), project="p", location="l")
+    assert seen == {"project": "p", "service_account": "ratk-runtime@p.iam.gserviceaccount.com"}
+
+    with pytest.raises(_deploy.RuntimeServiceAccountMissing):
+        backend.deploy(AgentSpec(name="w", model="m"), project="p", location="l",
+                       service_account="own@p.iam.gserviceaccount.com")
+    assert seen["service_account"] == "own@p.iam.gserviceaccount.com"
+
+
 def test_deploy_rejects_the_local_only_workspace_argument():
     # A deployed engine has no host directory to run turns in, so the knob cannot mean
     # anything there — say so instead of dropping it, which is how someone graduating a

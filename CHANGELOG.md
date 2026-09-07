@@ -21,6 +21,21 @@ tag `vX.Y.Z`, push the commit and the tag.
 
 ## Unreleased
 
+### Backwards-incompatible
+
+- **`gemini.deploy` always runs the engine as a service account you own.** With
+  `service_account=` omitted (or `None`) the engine now runs as
+  `ratk-runtime@<project>.iam.gserviceaccount.com`, the account `ratk-gcp-setup` creates
+  with the README role set. There is no way to deploy as the platform default (the Agent
+  Runtime service agent, the identity behind the security finding below), and the deploy
+  checks the account exists before any side effect, failing with the fix
+  (`ratk-gcp-setup --project <id>`) when it does not. `ratk-gcp-setup --no-runtime-sa` is
+  gone for the same reason. **Update note**: run `ratk-gcp-setup --project <id>` once per
+  project (it only adds), then a plain redeploy from this revision moves each engine off
+  the default identity. Pass `service_account=` only for an account of your own (the README
+  role set plus what your agent needs). The deployer needs `roles/iam.serviceAccountUser`
+  on the account (project owners and editors already have it).
+
 ### Security
 
 - **The Agent Runtime service agent was reachable from the agent's shell, and with it
@@ -47,9 +62,9 @@ tag `vX.Y.Z`, push the commit and the tag.
   `RUNTIME_SA=<email>` for the custom runtime identity, unset for a bucket in another
   project).
 - `gemini.deploy(..., service_account=)` sets the engine's runtime identity (forwarded to
-  `AgentEngineConfig.service_account`); omitted, the platform default applies as before. The
-  account's Vertex role is a custom role with only `aiplatform.endpoints.predict` (README IAM
-  table), never `roles/aiplatform.user`.
+  `AgentEngineConfig.service_account`); omitted, the project's `ratk-runtime@` (see
+  Backwards-incompatible above). The account's Vertex role is a custom role with only
+  `aiplatform.endpoints.predict` (README IAM table), never `roles/aiplatform.user`.
 - **Per-worker dispatch for warm pools.** Every warm worker of an engine used to pull one
   shared Pub/Sub subscription as the same identity, so a shell in one worker could take
   another run's turn — its pointers and, with run-scoped tokens, its token — and ack it so

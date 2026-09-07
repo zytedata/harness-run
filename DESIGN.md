@@ -583,7 +583,9 @@ These are facts measured during the PoC. The library encodes them so consumers i
   the job output as the runtime identity) plus `objectCreator` on `events/ratk-` (pool readiness markers).
 - **Fix 2: per-worker dispatch** (warm pool bullets above; `pool.py`, `roster.py`). Never grant the
   runtime identity anything under `pool/`: the roster there decides where a turn goes.
-- **Fix 3: a custom runtime service account** (`gemini.deploy(..., service_account=)`). The default
+- **Fix 3: a custom runtime service account** (`gemini.deploy(..., service_account=)`; omitted, the deploy
+  runs the engine as `ratk-runtime@<project>`, checked to exist before the build, and there is no way to
+  deploy as the platform default). The default
   service agent's Google-managed project role `roles/aiplatform.reasoningEngineServiceAgent` carries
   `storage.objects.get/list` on every bucket in the project, and a bucket binding cannot take a project
   permission away (verified 2026-09-02). A custom account holds only what is granted (verified
@@ -604,8 +606,8 @@ These are facts measured during the PoC. The library encodes them so consumers i
   budget, Cloud Logging writes, the run's own persisted job input. Background jobs get a fresh sandbox
   per job (verified 2026-09-03: concurrent sessions on one engine, different `boot_id`s), so a background
   process left by one run cannot survive into another.
-- **Migration** has no fixed date: redeploy every engine from a revision with `scoped_gcs.py` and
-  `service_account=` set, upgrade clients alongside (mixed versions run on the runtime identity: unfixed
+- **Migration** has no fixed date: redeploy every engine from a revision with `scoped_gcs.py` (the
+  deploy names the runtime service account by default), upgrade clients alongside (mixed versions run on the runtime identity: unfixed
   but working), then remove the service agent's `objectAdmin` on the bucket and `roles/aiplatform.user`
   on the project, and re-run the isolation probe against a production engine (every list/read 403).
 

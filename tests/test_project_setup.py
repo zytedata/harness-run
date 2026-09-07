@@ -117,7 +117,6 @@ def test_settings_operator_email_and_bucket_overrides():
     cfg = ps.Settings(project="p")
     assert cfg.operator_email() == "agent-runtime@p.iam.gserviceaccount.com"
     assert cfg.runtime_email() == "ratk-runtime@p.iam.gserviceaccount.com"
-    assert ps.Settings(project="p", runtime_sa_id=None).runtime_email() is None
     assert ps.Settings(project="p", runtime_sa_id="rt@o.iam.gserviceaccount.com").runtime_email() == (
         "rt@o.iam.gserviceaccount.com"
     )
@@ -467,14 +466,13 @@ def test_existing_custom_role_is_extended_additively():
     assert by["runtime roles"].status == ps.BLOCKED
 
 
-def test_no_runtime_sa_skips_runtime_steps():
-    api = FakeGcp(enabled={"serviceusage.googleapis.com"})
-    cfg = ps.Settings(project=PROJECT, runtime_sa_id=None)
-    items = ps._apply_rounds(api, cfg, ps.audit(api, cfg))
-    steps = {i.step for i in items}
-    assert not any(s.startswith("runtime") or "runtime SA" in s for s in steps)
-    assert "default service agent" in steps  # still reported
-    assert RUNTIME.split(":", 1)[1] not in api.service_accounts
+def test_runtime_sa_default_matches_what_deploy_uses():
+    # One source for the name: the setup tool creates the account gemini.deploy runs
+    # engines as when service_account= is omitted. There is no opt-out flag.
+    from remote_agent_toolkit.runtime.gemini import _deploy
+
+    assert ps.Settings(project="p").runtime_email() == _deploy.default_runtime_service_account("p")
+    assert "--no-runtime-sa" not in ps.build_parser().format_help()
 
 
 def test_verify_deploys_as_the_runtime_sa(monkeypatch):

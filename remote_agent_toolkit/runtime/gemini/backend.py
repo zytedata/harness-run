@@ -450,13 +450,14 @@ def deploy(
     job runner can OOM-kill a worker mid-turn, losing the attempt's work and spend even
     though the retry (see the handoff docs) picks the turn up from scratch.
 
-    ``service_account`` sets the engine's runtime identity (a service account email you
-    created; the deployer needs ``roles/iam.serviceAccountUser`` on it). Omitted → the
-    platform default, the Agent Runtime service agent shared by every engine in the
-    project. That default holds a Google-managed project role that reads every bucket in
-    the project, and the agent's shell can use its token, so a custom service account with
-    only the bindings the worker needs is the recommended setup (README "The runtime
-    identity is reachable by the agent" lists the roles).
+    ``service_account`` is the engine's runtime identity, a service account email you own
+    (the deployer needs ``roles/iam.serviceAccountUser`` on it). Omitted → the project's
+    ``ratk-runtime@<project>.iam.gserviceaccount.com``, the account ``ratk-gcp-setup``
+    creates with the roles the worker needs (README "GCP setup & required permissions").
+    The engine is never deployed as the platform default, the Agent Runtime service agent:
+    it holds a Google-managed project role that reads every bucket in the project and the
+    agent's shell can use its token (README "The runtime identity is reachable by the
+    agent"). A missing account fails the deploy before any side effect, naming the fix.
     """
     # Fail fast BEFORE any side effect (pub/sub ensure, staging, the ~4 min billable build).
     if workspace is not None:
@@ -481,22 +482,31 @@ def deploy(
                 f"got {pool_max_wait_s!r}"
             )
 
+    from ._deploy import (
+        build_engine_config,
+        check_runtime_service_account_exists,
+        resolve_runtime_service_account,
+        stage_agent,
+        validate_resource_limits,
+        verify_deploy_env,
+    )
+
+    # The runtime identity. None → the project's ratk-runtime@; never the platform default.
+    service_account = resolve_runtime_service_account(project, service_account)
+
     import dataclasses
     import os
 
     import agentplatform
     from agentplatform import types as gt
 
-    from ._deploy import (
-        build_engine_config,
-        stage_agent,
-        validate_resource_limits,
-        verify_deploy_env,
-    )
-
     if resource_limits is not None:
         validate_resource_limits(resource_limits)
     verify_deploy_env()  # pickle-coupled venv pins must match constraints.txt
+    # The account must exist for the platform to run the engine as it. Checked here, after
+    # the local checks and before the pub/sub ensure, the staging upload and the ~4 min
+    # billable build: finding out afterwards is the failure this check removes.
+    check_runtime_service_account_exists(project, service_account, credentials=credentials)
     # A model override applies to the harness too: the deployed agent reads spec.model, so
     # bake the override into the spec (not just the env) before serializing it.
     if model:

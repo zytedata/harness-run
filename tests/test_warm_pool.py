@@ -522,6 +522,8 @@ def _deploy_with_fakes(monkeypatch, tmp_path, engine_api, revision_apis):
     monkeypatch.setitem(sys.modules, "agentplatform", mod)
 
     monkeypatch.setattr(_deploy, "verify_deploy_env", lambda: None)
+    # The runtime-SA existence check is one real IAM read; the fake control plane has none.
+    monkeypatch.setattr(_deploy, "check_runtime_service_account_exists", lambda *a, **kw: None)
     monkeypatch.setattr(_deploy, "stage_agent", lambda spec: (str(tmp_path), []))
     monkeypatch.setattr(_deploy, "build_engine_config", lambda spec, **kw: {})
     monkeypatch.setattr(backend, "build_adk_app", lambda spec, **kw: object())

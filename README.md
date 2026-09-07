@@ -44,11 +44,18 @@ pip install "remote-agent-toolkit[local] @ git+ssh://git@github.com/zytedata/rem
 
 Releases are git tags — pin one to shield yourself from in-development changes on `main`
 (see [`CHANGELOG.md`](CHANGELOG.md) for what's in each release and how to upgrade across
-breaking changes):
+breaking changes). Every release is also published to Zyte's internal PyPI, which is what
+Scrapy Cloud builds and other environments without access to this git repo should use:
 
 ```bash
+# From the internal PyPI (read credentials: the usual pkgrepo user, or ask IT support):
+pip install "remote-agent-toolkit==0.3.0" --extra-index-url "https://<user>:<password>@pypi.internal.example/simple/"
+# Straight from the git tag:
 pip install "git+ssh://git@github.com/zytedata/remote-agent-toolkit.git@v0.3.0"
 ```
+
+Every push to `main` also publishes a dev build there, `X.Y.Z.dev<n>`; it sorts before the
+release of the same version, so you only get one by pinning it exactly.
 
 Developing on the toolkit itself (early users are expected to contribute)? Clone it and `uv sync` — that
 installs the runtime deps plus the `dev` group (pytest, ruff, mypy, and the harness SDKs —

@@ -7,7 +7,9 @@ call time). The script is a list of items played back by ``receive_messages()``:
 * an SDK message            → yielded to the harness
 * an ``Exception`` instance → raised out of the stream
 * the string ``"hang"``     → blocks forever (lets the harness's timeout paths fire)
-* a callable                → invoked with the client (e.g. to poke ``options.stderr``)
+* a callable                → invoked with the client (e.g. to poke ``options.stderr``); an
+                              async callable is awaited, so a script can wait for the
+                              harness to act (``client.prompts`` growing, ``interrupted``)
 """
 
 from __future__ import annotations
@@ -82,7 +84,8 @@ def make_sdk_client(script):
     """Build a fake ``ClaudeSDKClient`` class playing back ``script``; returns the class.
 
     The class records its instances on ``.instances`` so tests can assert on the prompt
-    sent, the options received, and that ``disconnect()`` ran.
+    sent (``prompt`` is the first; ``prompts`` every ``query()`` in order — a steer is a
+    second one), the options received, and that ``disconnect()`` / ``interrupt()`` ran.
     """
 
     class FakeSDKClient:
@@ -91,23 +94,31 @@ def make_sdk_client(script):
         def __init__(self, options=None):
             self.options = options
             self.prompt = None
+            self.prompts: list = []
             self.disconnected = False
             self.interrupted = False
+            self.interrupts = 0
             type(self).instances.append(self)
 
         async def connect(self):
             pass
 
         async def query(self, prompt, session_id="default"):
-            self.prompt = prompt
+            if self.prompt is None:
+                self.prompt = prompt
+            self.prompts.append(prompt)
 
         async def receive_messages(self):
             for item in script:
                 if isinstance(item, Exception):
                     raise item
                 if callable(item):
-                    item(self)
-                    continue
+                    result = item(self)
+                    if asyncio.iscoroutine(result):
+                        result = await result
+                    if result is None:
+                        continue
+                    item = result
                 if item == "hang":
                     await asyncio.Event().wait()
                 yield item
@@ -117,5 +128,6 @@ def make_sdk_client(script):
 
         async def interrupt(self):
             self.interrupted = True
+            self.interrupts += 1
 
     return FakeSDKClient

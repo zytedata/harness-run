@@ -12,6 +12,8 @@ can only break in ways the earlier rungs can't see.
 | Model-provider check, remote | `make live-openrouter-remote` | the same models + remote visibility on Agent Runtime | ~8-15 min, ~$0.56 + build |
 | Model attribution | `make live-attribution` | did the turn run the model we asked for — both harnesses | ~10 s, ~$0.06 |
 | Usage accounting | `make live-usage` | usage/cost accounting drift — esp. the Codex subagent rollout recovery (non-public details) | ~5 min, well under $1 |
+| Turn control | `make live-interactive` | steer / interrupt+continue / stop / resume on both harnesses, against the real CLIs (their mid-turn behavior is what the harness loops encode) | ~2 min, a few cents |
+| Turn control, by hand | `make chat` | a local chat page ([`dev/chat.py`](dev/chat.py)) to steer, interrupt and stop a running turn yourself and watch the events; `HARNESS=codex` for Codex | whatever the model charges |
 
 The two OpenRouter figures are measured (2026-08-22, all four models on both harnesses:
 26/26 local checks for $0.74, 128/128 remote checks for $0.56 of model spend plus the engine
@@ -27,6 +29,23 @@ which is non-public and has no wire alternative (openai/codex#14642 closed as no
 Run it after bumping the pinned Codex CLI or `openai-codex` SDK, or when touching
 `harness/_usage.py` / the subagent recovery in `harness/codex.py`. `SCENARIO=codex-subagent`
 runs the core recovery check alone.
+
+`make live-interactive` also prints a latency table. Measured 2026-09-04 on the local
+runtime (Haiku 4.5 on claude-code, gpt-5.6-luna on codex, both PASS), from the
+`send()` / `interrupt()` call:
+
+| Step | claude-code | codex |
+|---|---|---|
+| steer: `user` ack (the model has the message) | < 0.1 s | < 0.1 s |
+| steer: the model's reply (`result`) | 8.7 s | 7.1 s |
+| interrupt + continue: `interrupt_requested` and `user` ack | < 0.1 s | < 0.1 s |
+| interrupt + continue: the model's reply (`result`) | 0.9 s | 0.8 s |
+| `interrupt()` returns (turn ended, checkpoint saved) | 0.8 s | < 0.1 s |
+
+The control channel adds nothing measurable on `local`; the time is the model's. A steer
+waits for the running tool call to finish (here a `sleep 8`), because the model reads the
+message at its next step. On `gemini` add the inbox poll (every 1.5 s) plus GCS latency;
+not measured live yet.
 
 ## 1. Offline tests (`make test`)
 

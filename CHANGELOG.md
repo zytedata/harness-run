@@ -141,6 +141,26 @@ tag `vX.Y.Z`, push the commit and the tag.
   depends on still fails — the model check itself is a 1-token live probe, reported
   before anything is applied).
 
+- Talking to a running turn ([#44]). `Session.send()` on a RUNNING session no longer
+  dispatches a second concurrent turn (two workers writing one session's stream,
+  checkpoint and transcript); it delivers the message INTO the running turn and returns
+  the same `Run`: `interrupt=False` steers (the model sees it at its next step — Claude
+  Code's mid-turn `query()`, Codex's `turn/steer`), `interrupt=True` interrupts the model
+  first and continues from the message in the same harness session and workspace. Each
+  delivered message is a `user` event on the stream / mirror / `history()`, carrying the
+  caller's `message_id=` — the acknowledgement that the model has it; the worker dedupes
+  on the id, so a retried send never reaches the model twice. On `gemini` the transport
+  is a GCS inbox (`control/<sid>/` under the output bucket, `AGENT_CONTROL_GCS` in the
+  engine env) the worker polls every ~1.5 s during the turn, cold and warm alike, from
+  any process that holds the session id; the worker announces it with a `control_ready`
+  status event. `run()` on a running session raises; `secrets` / `config` / `hooks` are
+  rejected on a running `send()`; a running turn on an engine revision deployed before
+  the inbox existed raises the new typed `ControlUnavailable` (exported at package
+  level) instead of writing into the void. `local` implements the same semantics over an
+  in-process queue, and `make live-interactive` checks the four transitions against real
+  models on both harnesses and prints how long a steer, an interrupt and a stop take
+  (TESTING.md has the numbers). `make chat` (`dev/chat.py`) is a local chat page for
+  trying turn control by hand; a dev tool like the live probes.
 - Both harnesses can run `openrouter/*` models with an `OPENROUTER_API_KEY`
   per-invocation secret. Kimi K3, GLM-5.3, and DeepSeek v4 Flash/Pro have known
   context sizes. Each OpenRouter response reports its selected upstream and exact
@@ -182,6 +202,25 @@ tag `vX.Y.Z`, push the commit and the tag.
 
 ### Changed
 
+- `Session.interrupt()` now means "interrupt and stop": the harness is asked to stop and
+  the turn ends through its normal end-of-turn path — workspace checkpoint, transcript,
+  a terminal result with the new `StopReason.INTERRUPTED` that keeps the turn's
+  accounting — so the session is idle and a later `send()` resumes it, workspace changes
+  of the interrupted turn included. Before, it cancelled the client-side tail (and the
+  cold job): the run ended `is_error=True` / `StopReason.ERROR` with no checkpoint, and
+  the next `send()` restored the previous turn's snapshot, so the interrupted turn's
+  files were lost while its conversation survived. **Update note**: code that treated an
+  interrupted session's `stop_reason == ERROR` as "stopped" should check for
+  `INTERRUPTED`; the old cancel remains only as the fallback when the worker cannot be
+  reached or does not stop in time, and the result's `warning` says so. On `gemini` the
+  new path needs an engine redeployed with this version (the worker polls the control
+  inbox); against an older revision `interrupt()` falls back as before. ([#44])
+- `AgentEvent.kind` has a new value, `"user"`: an operator message delivered into a
+  running turn (see Added). Consumers that switch exhaustively on `kind` should add it.
+- On Codex, a turn that Codex reports as `interrupted` now yields result subtype
+  `interrupted` with `is_error=False` (it was `is_error=True`); a turn interrupted by the
+  harness at `max_turns` / `max_budget_usd` still reports `error_max_turns` /
+  `error_budget_exceeded`.
 - Engines are deployed with `NUM_WORKERS=1`. The platform's serving harness (uvicorn, in
   the container base image) otherwise starts `os.cpu_count() + 1` worker processes —
   10–11 on the nodes seen live, sized to the host rather than the container's CPU limit
@@ -472,3 +511,4 @@ Initial release. What's in the box:
 [#15]: https://github.com/zytedata/remote-agent-toolkit/pull/15
 [#17]: https://github.com/zytedata/remote-agent-toolkit/pull/17
 [#18]: https://github.com/zytedata/remote-agent-toolkit/pull/18
+[#44]: https://github.com/zytedata/remote-agent-toolkit/issues/44

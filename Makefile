@@ -6,7 +6,7 @@ VENV ?= .venv
 IMAGE ?= ratk-dev
 PACKAGES ?=
 
-.PHONY: test test-serial lint live-smoke live-revisions live-pool-cutover live-openrouter live-openrouter-remote live-attribution live-usage parity-build parity-shell parity-check
+.PHONY: test test-serial lint live-smoke live-revisions live-pool-cutover live-openrouter live-openrouter-remote live-attribution live-usage live-interactive chat parity-build parity-shell parity-check
 
 # Parallel by default: the suite is dominated by a few deliberate poll-cadence tests, so
 # -n auto takes it from ~55s to ~40s and keeps scaling as tests are added. Use test-serial
@@ -61,6 +61,21 @@ live-attribution:
 SCENARIO ?= all
 live-usage:
 	$(VENV)/bin/python dev/live_usage_probe.py $(SCENARIO)
+
+# Turn control on the local runtime, both harnesses, against real models: steer into a
+# running turn, interrupt + continue, interrupt() to a resumable INTERRUPTED stop, resume.
+# A few cents (Haiku + a small Codex turn), ~2 min, needs ANTHROPIC_API_KEY + OPENAI_API_KEY.
+# COSTS REAL MONEY — by hand, never in CI. HARNESSES=codex (or claude-code) runs one.
+live-interactive:
+	$(VENV)/bin/python dev/live_interactive_probe.py
+
+# Local chat UI for trying turn control by hand (dev/chat.py): type while the agent works to
+# steer, "Interrupt & send", "Stop" and resume. Same status as the live probes: a dev tool,
+# COSTS REAL MONEY, needs the model keys plus fastapi + uvicorn in the venv, run it from an
+# unsandboxed shell. HARNESS=codex for Codex. Then open http://127.0.0.1:8765 .
+HARNESS ?= claude-code
+chat:
+	$(VENV)/bin/python dev/chat.py --harness $(HARNESS)
 
 # Build the parity image. Pass the agent's spec.packages so they install exactly as on the
 # engine, e.g.:  make parity-build PACKAGES="pandas==2.2.* httpx>=0.27"

@@ -555,7 +555,8 @@ def test_existing_foreign_bucket_is_reported_not_recreated():
     # existing rule kept, handoff rules appended
     rules = api.buckets[f"{PROJECT}-agent-output"]["lifecycle"]["rule"]
     assert rules[0]["condition"]["matchesPrefix"] == ["tmp/"]
-    assert len(rules) == 3
+    _, wanted = handoff_lifecycle_rules(cfg.buckets()[1])
+    assert len(rules) == 1 + len(wanted)  # counted from handoff.py, not pinned here
 
 
 def test_required_model_failure_is_manual_with_console_pointer():

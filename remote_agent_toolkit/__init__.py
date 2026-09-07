@@ -8,6 +8,7 @@ yaml) are imported lazily inside the function/method that needs them.
 from __future__ import annotations
 
 from .config import INHERIT, SessionConfig, TurnConfig
+from .control import ControlUnavailable
 from .events import AgentEvent, RunResult, RunStatus, StopReason
 from .runtime import gemini, local
 from .spec import (
@@ -30,6 +31,7 @@ __all__ = [
     "RepoSource",
     "McpServer",
     "AgentEvent",
+    "ControlUnavailable",
     "RunResult",
     "RunStatus",
     "StopReason",

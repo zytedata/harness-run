@@ -27,6 +27,8 @@ def test_run_object_prefixes_cover_every_gcs_surface_of_a_turn():
         f"checkpoints/sessions/{csid}/",
         f"checkpoints/workspace/{csid}.tar.gz",
         "artifacts/sid-1/",
+        "control/sid-1/",
+        "control-delivered/sid-1/",
     ]
     # A bucket URI with a prefix puts that prefix in front of every key.
     bucket, base, prefixes = scoped_gcs.run_object_prefixes("gs://out/team-a", "sid-1")

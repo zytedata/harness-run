@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from remote_agent_toolkit.runtime.gemini import _deploy as deploy
 from remote_agent_toolkit.spec import AgentSpec, SkillSource
 
@@ -197,6 +199,7 @@ def test_build_engine_config_shape() -> None:
         location="us-central1",
         staging_bucket="gs://staging",
         extra_packages=["remote_agent_toolkit"],
+        service_account="rt@proj.iam.gserviceaccount.com",
     )
 
     assert cfg["agent_framework"] == "google-adk"
@@ -214,7 +217,7 @@ def test_build_engine_config_resource_limits() -> None:
     omitted → absent from the config so the platform default (4 cpu / 4Gi) stays
     authoritative."""
     kw = dict(project="proj", location="us-central1", staging_bucket="gs://staging",
-              extra_packages=[])
+              extra_packages=[], service_account="rt@proj.iam.gserviceaccount.com")
     cfg = deploy.build_engine_config(_spec(), **kw)
     assert "resource_limits" not in cfg
 
@@ -224,17 +227,77 @@ def test_build_engine_config_resource_limits() -> None:
     assert cfg["resource_limits"] is not limits  # defensive copy
 
 
-def test_build_engine_config_service_account_passthrough() -> None:
-    """service_account (the engine's runtime identity): set → forwarded verbatim; omitted →
-    absent from the config so the platform default (the Agent Runtime service agent) applies."""
+def test_build_engine_config_always_names_the_runtime_service_account() -> None:
+    """The config never omits service_account: omitted means the platform default (the Agent
+    Runtime service agent, the identity behind the README security finding)."""
     kw = dict(project="proj", location="us-central1", staging_bucket="gs://staging",
               extra_packages=[])
-    cfg = deploy.build_engine_config(_spec(), **kw)
-    assert "service_account" not in cfg
-
     sa = "ratk-runtime@proj.iam.gserviceaccount.com"
     cfg = deploy.build_engine_config(_spec(), service_account=sa, **kw)
     assert cfg["service_account"] == sa
+
+    with pytest.raises(ValueError, match="never deployed as the platform default"):
+        deploy.build_engine_config(_spec(), service_account="", **kw)
+    with pytest.raises(TypeError):  # keyword-only and required
+        deploy.build_engine_config(_spec(), **kw)
+
+
+def test_resolve_runtime_service_account_defaults_to_the_projects_ratk_runtime() -> None:
+    """None → ratk-runtime@<project> (what ratk-gcp-setup creates); a given email passes
+    through; an empty string is a bug (the SDK would read it as "platform default")."""
+    assert deploy.default_runtime_service_account("proj") == (
+        "ratk-runtime@proj.iam.gserviceaccount.com"
+    )
+    assert deploy.resolve_runtime_service_account("proj", None) == (
+        "ratk-runtime@proj.iam.gserviceaccount.com"
+    )
+    own = "mine@proj.iam.gserviceaccount.com"
+    assert deploy.resolve_runtime_service_account("proj", own) == own
+    assert deploy.resolve_runtime_service_account("proj", f"  {own} ") == own
+    for bad in ("", "   "):
+        with pytest.raises(ValueError, match="service account email"):
+            deploy.resolve_runtime_service_account("proj", bad)
+
+
+def test_check_runtime_service_account_exists(monkeypatch) -> None:
+    """404 from the IAM API → RuntimeServiceAccountMissing naming ratk-gcp-setup; any other
+    failure only warns (the deploy then fails by itself if the account is unusable)."""
+    import warnings
+
+    class _Resp:
+        def __init__(self, status: int) -> None:
+            self.status_code = status
+
+    class _Session:
+        status = 200
+
+        def __init__(self, creds) -> None:
+            pass
+
+        def get(self, url, timeout):
+            assert url == (
+                "https://iam.googleapis.com/v1/projects/proj/serviceAccounts/"
+                "ratk-runtime@proj.iam.gserviceaccount.com"
+            )
+            return _Resp(_Session.status)
+
+    import google.auth.transport.requests as gatr
+
+    monkeypatch.setattr(gatr, "AuthorizedSession", _Session)
+    sa = "ratk-runtime@proj.iam.gserviceaccount.com"
+    creds = object()  # given credentials are used as-is, no ADC lookup
+
+    deploy.check_runtime_service_account_exists("proj", sa, credentials=creds)  # 200: silent
+
+    _Session.status = 404
+    with pytest.raises(deploy.RuntimeServiceAccountMissing, match="ratk-gcp-setup --project proj"):
+        deploy.check_runtime_service_account_exists("proj", sa, credentials=creds)
+
+    _Session.status = 403
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        deploy.check_runtime_service_account_exists("proj", sa, credentials=creds)
+    assert any("could not verify" in str(x.message) for x in w)
 
 
 def test_build_engine_config_pool_max_wait_passthrough() -> None:
@@ -244,6 +307,7 @@ def test_build_engine_config_pool_max_wait_passthrough() -> None:
         location="us-central1",
         staging_bucket="gs://staging",
         extra_packages=[],
+        service_account="rt@proj.iam.gserviceaccount.com",
         warm_pool=True,
         pool_topic="projects/p/topics/ratk-w-gen-dispatch",
         pool_max_wait_s=3600,

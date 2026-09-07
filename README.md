@@ -886,10 +886,12 @@ toolkit does the first two for you:
   another run's turn (its pointers and token). Idle workers are tracked in a client-owned roster under
   `pool/` in the output bucket. A warm engine deployed before this still runs one shared subscription
   (`get_engine(warm_pool=True)` warns); redeploy it.
-- **Run the engine as a service account you create**, with `gemini.deploy(..., service_account=...)`. The
-  default identity, the Google-managed Agent Runtime service agent, holds a project role that reads every
-  bucket in the project, and a bucket binding cannot take a project-level permission away. Give your
-  runtime service account only the roles in [GCP setup & required permissions](#gcp-setup--required-permissions):
+- **The engine runs as a service account you own.** `gemini.deploy` runs it as
+  `ratk-runtime@<project>.iam.gserviceaccount.com` (created by `ratk-gcp-setup`) unless `service_account=`
+  names another account you created; it never deploys as the platform default, and a missing account fails
+  the deploy before the build. The default identity, the Google-managed Agent Runtime service agent, holds a
+  project role that reads every bucket in the project, and a bucket binding cannot take a project-level
+  permission away. Give your runtime service account only the roles in [GCP setup & required permissions](#gcp-setup--required-permissions):
   a predict-only custom role instead of `roles/aiplatform.user` (which would hand the shell every run's
   job id and engine admin), no read or list right on the output bucket beyond the two conditional
   `jobs/` bindings, and nothing under `pool/`.
@@ -900,8 +902,8 @@ a fresh sandbox per job, so nothing a run leaves behind survives into the next o
 
 **Migrating an existing project.** Create the runtime service account and its bindings (`ratk-gcp-setup
 --project <id>`, or the gcloud sketch in the setup section), redeploy every engine (`gemini.list_engines`)
-from this revision with
-`service_account=` set, and upgrade clients at the same time. Mixed versions keep working on the runtime
+from this revision (the deploy runs it as the runtime service account by default), and upgrade clients at
+the same time. Mixed versions keep working on the runtime
 identity, which is the unfixed state, never a broken one. Once no engine still runs as the default service
 agent, remove its `objectAdmin` on the output bucket and `roles/aiplatform.user` on the project; an engine
 not redeployed by then stops finding its staged objects, which is the intended failure. Run
@@ -1232,7 +1234,9 @@ in their own project; the concrete values are the shared `my-project` setup we u
 > failing (the model check runs as a 1-token live probe in the first report, so a missing Model Garden
 > enablement surfaces before any money is spent). It creates the runtime service account
 > (`ratk-runtime@<project>.iam.gserviceaccount.com`, with the `ratkRuntimePredict` custom role and the
-> conditional bucket bindings below); pass its email as `service_account=` to every `gemini.deploy`.
+> conditional bucket bindings below); every `gemini.deploy` runs the engine as it unless `service_account=`
+> names another account you created. There is no way to deploy as the platform default, and a missing
+> account fails the deploy before the build.
 > It grants the default Agent Runtime service agent nothing, and reports grants that agent still holds
 > from the earlier identity model as a note to remove by hand (the tool never removes anything).
 > Two things stay manual: enabling Claude in Vertex Model Garden (the tool live-probes each model —
@@ -1266,10 +1270,11 @@ rotate keys you do hand out.
 **2. The runtime identity** — the identity the engine's workers run as, and the one the agent's shell
 can use (see [The runtime identity is reachable by the agent](#the-runtime-identity-is-reachable-by-the-agent)).
 `ratk-gcp-setup` creates it as `ratk-runtime@<project>.iam.gserviceaccount.com` (or create one yourself)
-and every `gemini.deploy` names it as `service_account="<its email>"`.
-Without `service_account=` the engine runs as the Google-managed **Agent Runtime service agent**,
+and `gemini.deploy` runs every engine as it unless `service_account=` names another account you created
+(`--runtime-sa` gives the setup tool another name; pass that one to every deploy). The toolkit never deploys
+as the Google-managed **Agent Runtime service agent**,
 `service-<PROJECT_NUMBER>@gcp-sa-aiplatform-re.iam.gserviceaccount.com`, whose managed project role
-reads every bucket in the project. **All runtime resource access authorizes against this identity, not
+reads every bucket in the project; only engines deployed before this revision still run as it. **All runtime resource access authorizes against this identity, not
 the operator SA** — granting the operator SA a runtime role does nothing for the running job. Grant the
 runtime service account (verified live 2026-09-03 and 2026-09-04 with this set):
 
@@ -1353,7 +1358,8 @@ gcloud iam service-accounts add-iam-policy-binding $OP --member "user:you@org.co
 ```
 
 Then authenticate impersonating the operator SA (`gcloud auth application-default login
---impersonate-service-account=$OP`) and pass `service_account=$RT` to every `gemini.deploy`.
+--impersonate-service-account=$OP`); `gemini.deploy` runs engines as `$RT` by default (pass
+`service_account=` only for another account of yours).
 
 ## Latency & cost (the `gemini` path)
 

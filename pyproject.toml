@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "remote-agent-toolkit"
-version = "0.2.0"
+version = "0.3.0"
 description = "Define and run remote/background coding agents (Claude Code, Codex) locally and on Gemini Agent Runtime."
 readme = "README.md"
 requires-python = ">=3.12,<3.14"

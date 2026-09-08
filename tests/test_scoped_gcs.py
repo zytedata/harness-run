@@ -220,3 +220,47 @@ def test_cold_submit_carries_the_token_as_the_last_directive(monkeypatch):
     session = backend.GeminiSession(engine, "sid-8")
     asyncio.run(go())
     assert "AGENT_GCS_TOKEN" not in captured["query"]
+
+
+def test_mint_run_token_sends_sts_a_boundary_that_lists_only_the_two_listed_prefixes(monkeypatch):
+    """Drives the real google-auth exchange against a captured transport: the boundary STS
+    receives must carry the objectListPrefix clause on exactly the control inbox and the
+    checkpoint transcript dir, resolved under the bucket prefix. Every extra list clause
+    costs ~500 chars of minted token, and STS caps the token including the caller's own."""
+    import urllib.parse
+
+    from google.auth.transport import requests as ga_requests
+
+    class FakeSource:
+        token = "src-token"
+        expiry = None
+
+        def refresh(self, request):
+            pass
+
+    class FakeResponse:
+        status = 200
+        data = b'{"access_token": "downscoped", "expires_in": 3600}'
+
+    bodies = []
+
+    def fake_request(url, method, headers, body):
+        bodies.append(body)
+        return FakeResponse()
+
+    monkeypatch.undo()  # conftest stubs mint_run_token for the whole suite; here it runs for real
+    monkeypatch.setattr(ga_requests, "Request", lambda: fake_request)
+
+    token, _expiry = scoped_gcs.mint_run_token(FakeSource(), "gs://out/team-a", "sid-1")
+
+    assert token == "downscoped"
+    form = urllib.parse.parse_qs(bodies[0].decode())
+    assert form["subject_token"] == ["src-token"]
+    rules = json.loads(urllib.parse.unquote(form["options"][0]))["accessBoundary"]["accessBoundaryRules"]
+    assert len(rules) == 9
+    listed = [
+        r["availabilityCondition"]["expression"].split('objects/')[1].split('"')[0]
+        for r in rules
+        if "objectListPrefix" in r["availabilityCondition"]["expression"]
+    ]
+    assert listed == [f"team-a/checkpoints/sessions/{_claude_session_id('sid-1')}/", "team-a/control/sid-1/"]

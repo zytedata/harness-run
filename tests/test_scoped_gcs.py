@@ -39,16 +39,24 @@ def test_run_object_prefixes_cover_every_gcs_surface_of_a_turn():
     assert not any(o.startswith(p) or p.startswith(o) for p in prefixes for o in other)
 
 
-def test_access_boundary_is_one_rule_per_prefix_with_get_and_list_conditions():
-    boundary = scoped_gcs.access_boundary("out", ["events/sid-1/", "turn-config/sid-1-"])
+def test_access_boundary_is_one_rule_per_prefix_and_lists_only_the_listed_ones():
+    prefixes = ["events/sid-1/", "turn-config/sid-1-", "control/sid-1/", "checkpoints/sessions/c1/"]
+    boundary = scoped_gcs.access_boundary("out", prefixes)
     rules = boundary.rules
-    assert len(rules) == 2
-    for rule, prefix in zip(rules, ["events/sid-1/", "turn-config/sid-1-"]):
+    assert len(rules) == 4
+    for rule, prefix in zip(rules, prefixes):
         assert rule.available_resource == "//storage.googleapis.com/projects/_/buckets/out"
         assert list(rule.available_permissions) == ["inRole:roles/storage.objectAdmin"]
         expr = rule.availability_condition.expression
         assert f'resource.name.startsWith("projects/_/buckets/out/objects/{prefix}")' in expr
-        assert f'"storage.googleapis.com/objectListPrefix", "").startsWith("{prefix}")' in expr
+        listed = prefix.startswith(("control/", "checkpoints/sessions/"))
+        assert (f'"storage.googleapis.com/objectListPrefix", "").startsWith("{prefix}")' in expr) is listed
+
+
+def test_access_boundary_list_clauses_are_relative_to_the_bucket_prefix():
+    boundary = scoped_gcs.access_boundary("out", ["pfx/control/sid-1/", "pfx/events/sid-1/"], "pfx/")
+    exprs = [r.availability_condition.expression for r in boundary.rules]
+    assert "objectListPrefix" in exprs[0] and "objectListPrefix" not in exprs[1]
 
 
 def test_token_key_sits_under_the_run_secrets_prefix():

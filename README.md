@@ -1259,7 +1259,7 @@ project (tighten to your policy):
 | Role | Why |
 |---|---|
 | `roles/aiplatform.user` | create/list engines, run query jobs, create sessions |
-| `roles/storage.admin` (or objectAdmin on the buckets) | stage the deploy bundle; read job output; mint the per-turn run-scoped GCS tokens (a downscoped token can only carry rights its source already has) |
+| `roles/storage.admin` on the two buckets (at minimum `objectAdmin` **plus** `legacyBucketReader` on the output bucket) | stage the deploy bundle; read job output; mint the per-turn run-scoped GCS tokens (a downscoped token can only carry rights its source already has). The bucket-level right is not optional: the Agent Engine SDK checks that the output bucket exists (`storage.buckets.get`) before every `run_query_job`, and `objectAdmin` alone fails it with "Permission denied to check existence of bucket" |
 | `roles/logging.viewer` | tail the per-step event stream from the client |
 | `roles/cloudbuild.builds.editor` | the deploy builds the engine image |
 | `roles/pubsub.editor` _(warm pool only)_ | create/retire the per-deploy dispatch topic and the per-worker subscriptions + publish turns |

@@ -41,6 +41,19 @@ for the tag with this file's section as the notes.
   not check at mint time (it minted for a nonexistent bucket during the investigation).
   Measured 2026-09-08 against `my-project-agent-output` with a user and a
   service-account caller.
+- **The Codex conversation checkpoint was outside the run token's prefixes.** The Codex
+  harness persists its thread under `checkpoints/codex-threads/<session>/` (restored on the
+  next turn), and `run_object_prefixes` did not list it, so with run-scoped tokens the
+  persist failed silently (checkpoint writes are best-effort) and every second turn of a
+  Codex session started without its conversation. The prefix is now in the boundary (a
+  tenth rule; minted from a service account at ~8.3k chars, verified). A new offline test
+  drives a two-turn Codex resume, the transcript store and the workspace snapshot through a
+  recording store and fails on any key the token could not reach, or any listed prefix
+  without a list clause, so the prefix list follows the writers from now on.
+  Because the run's own token can now write `codex-threads/<session>/meta.json`, the restore
+  validates the `relpath` it reads from it: a path outside `CODEX_HOME/sessions` (absolute,
+  `..`, a symlink escape, a non-`.jsonl` name) is refused and the session starts fresh, where
+  before the next worker wrote wherever the file said (the same check as #64).
 
 ## 0.3.0 — 2026-09-07
 

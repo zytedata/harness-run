@@ -301,7 +301,15 @@ class _RecordingBlobStore:
         self.listed.add(prefix)
         return self._inner.list(prefix)
 
-    def __getattr__(self, name):  # tree ops (put_tree/get_tree) and anything else
+    def put_tree(self, key, local_dir):  # the workspace snapshot writes with this
+        self.keys.add(key)
+        return self._inner.put_tree(key, local_dir)
+
+    def get_tree(self, key, local_dir):  # ... and restores with this
+        self.keys.add(key)
+        return self._inner.get_tree(key, local_dir)
+
+    def __getattr__(self, name):
         return getattr(self._inner, name)
 
 
@@ -398,3 +406,18 @@ def test_workspace_snapshot_and_restore_stay_inside_the_run_prefixes(tmp_path):
     outside = sorted(k for k in blobs.keys if not any(("checkpoints/" + k).startswith(p) for p in prefixes))
     assert outside == [], f"objects the run token cannot reach: {outside}"
     _assert_lists_are_allowed(blobs.listed, scoped_gcs.access_boundary(bucket, prefixes))
+
+
+def test_the_recording_store_sees_archive_writes_too(tmp_path):
+    """Guards the guard: a tar written outside the run prefixes must show up as a stray key
+    (the workspace snapshot is a put_tree, which a plain attribute pass-through would miss)."""
+    blobs = _RecordingBlobStore(tmp_path / "blobs")
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "f").write_text("x")
+    blobs.put_tree("elsewhere/escape.tar.gz", str(src))
+    blobs.get_tree("elsewhere/escape.tar.gz", str(tmp_path / "dst"))
+    sid = "5f2e3c1a-9b7d-4e6f-8a1b-2c3d4e5f6a7b"
+    _b, _base, prefixes = scoped_gcs.run_object_prefixes("gs://out", sid)
+    outside = [k for k in blobs.keys if not any(("checkpoints/" + k).startswith(p) for p in prefixes)]
+    assert outside == ["elsewhere/escape.tar.gz"]

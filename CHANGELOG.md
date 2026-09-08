@@ -50,6 +50,10 @@ for the tag with this file's section as the notes.
   drives a two-turn Codex resume, the transcript store and the workspace snapshot through a
   recording store and fails on any key the token could not reach, or any listed prefix
   without a list clause, so the prefix list follows the writers from now on.
+  Because the run's own token can now write `codex-threads/<session>/meta.json`, the restore
+  validates the `relpath` it reads from it: a path outside `CODEX_HOME/sessions` (absolute,
+  `..`, a symlink escape, a non-`.jsonl` name) is refused and the session starts fresh, where
+  before the next worker wrote wherever the file said (the same check as #64).
 
 ## 0.3.0 — 2026-09-07
 

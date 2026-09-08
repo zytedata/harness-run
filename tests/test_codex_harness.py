@@ -7,6 +7,7 @@ pydantic models (see ``codex_fakes``), so field names and enum values stay hones
 from __future__ import annotations
 
 import json
+import pathlib
 
 import pytest
 from codex_fakes import (
@@ -493,6 +494,64 @@ async def test_checkpoint_persists_thread_and_resume_restores(tmp_path, monkeypa
     restored = ctx2.job_dir / "codex_home" / meta["relpath"]
     assert restored.read_bytes() == b'{"line": 1}\n'
     assert any((e.raw or {}).get("event") == "thread_resumed" for e in events2)
+
+
+@pytest.mark.parametrize("relpath", [
+    "../escape.jsonl",
+    "sessions/../../escape.jsonl",
+    "/tmp/absolute-escape.jsonl",
+    "notsessions/2026/07/21/rollout-x-thr.jsonl",
+    "sessions/2026/07/21/rollout-x-thr.txt",
+    "sessions\\..\\escape.jsonl",
+    123,
+])
+async def test_resume_ignores_a_rollout_path_outside_codex_home_sessions(
+    tmp_path, monkeypatch, relpath
+):
+    """meta.json sits under the run's own token prefix, so the previous turn's agent could
+    have edited it: a relpath that escapes CODEX_HOME/sessions must not be written, and the
+    session starts fresh instead."""
+    from remote_agent_toolkit.checkpoint.session_store import BlobSessionStore
+    from remote_agent_toolkit.ports.blobstore import LocalBlobStore
+
+    blobs = LocalBlobStore(str(tmp_path / "blobs"))
+    blobs.put_bytes("codex-threads/sid/meta.json",
+                    json.dumps({"thread_id": "thr-evil", "relpath": relpath}).encode())
+    blobs.put_bytes("codex-threads/sid/rollout.jsonl", b"OWNED\n")
+    spec = AgentSpec(name="a", model="gpt-5.6-luna", harness="codex", checkpoint=True)
+    ctx = _ctx(tmp_path / "w2", spec, blobs=blobs, session_store=BlobSessionStore(blobs),
+               resume_sid="sid")
+    before = {p for p in tmp_path.rglob("*") if p.is_file()}
+    script = [turn_started(), agent_message("fresh"), token_usage(), turn_completed()]
+    events, client = await _events_of(script, tmp_path, monkeypatch, spec=spec, ctx=ctx)
+    assert client.thread_starts and not client.thread_resumes
+    assert not any((e.raw or {}).get("event") == "thread_resumed" for e in events)
+    written = {p for p in tmp_path.rglob("*") if p.is_file()} - before
+    assert not any(p.read_bytes() == b"OWNED\n" for p in written), written
+    assert not pathlib.Path("/tmp/absolute-escape.jsonl").exists()
+
+
+async def test_resume_ignores_a_symlinked_sessions_dir_that_escapes(tmp_path, monkeypatch):
+    """A symlink under CODEX_HOME/sessions pointing elsewhere must not be followed either."""
+    from remote_agent_toolkit.checkpoint.session_store import BlobSessionStore
+    from remote_agent_toolkit.ports.blobstore import LocalBlobStore
+
+    blobs = LocalBlobStore(str(tmp_path / "blobs"))
+    blobs.put_bytes("codex-threads/sid/meta.json", json.dumps(
+        {"thread_id": "thr-evil", "relpath": "sessions/link/rollout-x-thr-evil.jsonl"}).encode())
+    blobs.put_bytes("codex-threads/sid/rollout.jsonl", b"OWNED\n")
+    spec = AgentSpec(name="a", model="gpt-5.6-luna", harness="codex", checkpoint=True)
+    ctx = _ctx(tmp_path / "w2", spec, blobs=blobs, session_store=BlobSessionStore(blobs),
+               resume_sid="sid")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    sessions = ctx.job_dir / "codex_home" / "sessions"
+    sessions.mkdir(parents=True)
+    (sessions / "link").symlink_to(outside, target_is_directory=True)
+    script = [turn_started(), agent_message("fresh"), token_usage(), turn_completed()]
+    _events, client = await _events_of(script, tmp_path, monkeypatch, spec=spec, ctx=ctx)
+    assert client.thread_starts and not client.thread_resumes
+    assert list(outside.iterdir()) == []
 
 
 async def test_resume_without_persisted_thread_starts_fresh(tmp_path, monkeypatch):

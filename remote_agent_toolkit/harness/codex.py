@@ -111,6 +111,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -174,6 +175,31 @@ _CONTENT_CAP = 4000
 
 # Blob-key prefix for persisted Codex conversations (the rollout file + thread id).
 _THREADS_PREFIX = "codex-threads"
+
+logger = logging.getLogger(__name__)
+
+
+def _rollout_destination(codex_home: Path, relpath: object) -> Path | None:
+    """Where a persisted rollout may be written back, or ``None`` when ``relpath`` is unsafe.
+
+    ``relpath`` comes from the checkpoint's ``meta.json``, an object the run's own token can
+    write, so it is untrusted: it must be a relative ``sessions/...jsonl`` path with no ``..``,
+    and the resolved destination (symlinks followed) must stay under ``CODEX_HOME/sessions``.
+    """
+    if not isinstance(relpath, str) or "\\" in relpath:
+        return None
+    path = Path(relpath)
+    if (path.is_absolute() or ".." in path.parts or not path.parts
+            or path.parts[0] != "sessions" or path.suffix != ".jsonl"):
+        return None
+    sessions = (codex_home / "sessions").resolve()
+    try:
+        dest = (codex_home / path).resolve()
+    except OSError:
+        return None
+    if not dest.is_relative_to(sessions):
+        return None
+    return dest
 
 # Bookkeeping file (in CODEX_HOME, beside sessions/) recording each subagent thread's
 # already-billed cumulative totals, so a later turn in the same job dir bills deltas only.
@@ -887,7 +913,13 @@ class CodexHarness:
             body = ctx.blobs.get_bytes(f"{_THREADS_PREFIX}/{ctx.resume_sid}/rollout.jsonl")
         except Exception:  # noqa: BLE001 — no/unreadable persisted thread: start fresh
             return None
-        dest = codex_home / meta["relpath"]
+        dest = _rollout_destination(codex_home, meta.get("relpath"))
+        if dest is None:
+            # The run's own token can write this object, so the previous turn's agent could
+            # have edited it: never let ``relpath`` point outside CODEX_HOME/sessions.
+            logger.warning("persisted Codex thread for %s has an invalid rollout path; "
+                           "starting a fresh conversation", ctx.resume_sid)
+            return None
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_bytes(body)
         return meta["thread_id"]

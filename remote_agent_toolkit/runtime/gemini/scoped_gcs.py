@@ -63,6 +63,11 @@ def run_object_prefixes(output_bucket: str, session_id: str) -> tuple[str, str, 
     id (``session_store._claude_session_id``), so the mapping is done here too. The
     control inbox is here because the worker polls it with these credentials: without
     its prefix every list would 403 and ``send()`` / ``interrupt()`` would never arrive.
+
+    Every writer of run objects must appear here: ``tests/test_scoped_gcs.py`` drives the
+    checkpoint code (Codex thread persist + resume, transcript store, workspace snapshot)
+    through a recording store and fails on any key outside these prefixes. A prefix costs
+    token budget (see :func:`access_boundary`): 10 rules is the google-auth maximum.
     """
     bucket, prefix = parse_gcs_uri(output_bucket)
     base = f"{prefix}/" if prefix else ""
@@ -74,6 +79,7 @@ def run_object_prefixes(output_bucket: str, session_id: str) -> tuple[str, str, 
         f"{base}events/{session_id}/",                    # the live mirror / durable history
         f"{base}checkpoints/sessions/{csid}/",            # transcript batches
         f"{base}checkpoints/workspace/{csid}.tar.gz",     # workspace snapshot
+        f"{base}checkpoints/codex-threads/{csid}/",       # Codex conversation (harness/codex.py)
         f"{base}artifacts/{session_id}/",                 # produced files
         f"{base}control/{session_id}/",                   # the turn's control inbox (control.py)
         f"{base}control-delivered/{session_id}/",         # its delivered-message markers

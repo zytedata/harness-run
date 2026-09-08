@@ -39,16 +39,24 @@ def test_run_object_prefixes_cover_every_gcs_surface_of_a_turn():
     assert not any(o.startswith(p) or p.startswith(o) for p in prefixes for o in other)
 
 
-def test_access_boundary_is_one_rule_per_prefix_with_get_and_list_conditions():
-    boundary = scoped_gcs.access_boundary("out", ["events/sid-1/", "turn-config/sid-1-"])
+def test_access_boundary_is_one_rule_per_prefix_and_lists_only_the_listed_ones():
+    prefixes = ["events/sid-1/", "turn-config/sid-1-", "control/sid-1/", "checkpoints/sessions/c1/"]
+    boundary = scoped_gcs.access_boundary("out", prefixes)
     rules = boundary.rules
-    assert len(rules) == 2
-    for rule, prefix in zip(rules, ["events/sid-1/", "turn-config/sid-1-"]):
+    assert len(rules) == 4
+    for rule, prefix in zip(rules, prefixes):
         assert rule.available_resource == "//storage.googleapis.com/projects/_/buckets/out"
         assert list(rule.available_permissions) == ["inRole:roles/storage.objectAdmin"]
         expr = rule.availability_condition.expression
         assert f'resource.name.startsWith("projects/_/buckets/out/objects/{prefix}")' in expr
-        assert f'"storage.googleapis.com/objectListPrefix", "").startsWith("{prefix}")' in expr
+        listed = prefix.startswith(("control/", "checkpoints/sessions/"))
+        assert (f'"storage.googleapis.com/objectListPrefix", "").startsWith("{prefix}")' in expr) is listed
+
+
+def test_access_boundary_list_clauses_are_relative_to_the_bucket_prefix():
+    boundary = scoped_gcs.access_boundary("out", ["pfx/control/sid-1/", "pfx/events/sid-1/"], "pfx/")
+    exprs = [r.availability_condition.expression for r in boundary.rules]
+    assert "objectListPrefix" in exprs[0] and "objectListPrefix" not in exprs[1]
 
 
 def test_token_key_sits_under_the_run_secrets_prefix():
@@ -212,3 +220,47 @@ def test_cold_submit_carries_the_token_as_the_last_directive(monkeypatch):
     session = backend.GeminiSession(engine, "sid-8")
     asyncio.run(go())
     assert "AGENT_GCS_TOKEN" not in captured["query"]
+
+
+def test_mint_run_token_sends_sts_a_boundary_that_lists_only_the_two_listed_prefixes(monkeypatch):
+    """Drives the real google-auth exchange against a captured transport: the boundary STS
+    receives must carry the objectListPrefix clause on exactly the control inbox and the
+    checkpoint transcript dir, resolved under the bucket prefix. Every extra list clause
+    costs ~500 chars of minted token, and STS caps the token including the caller's own."""
+    import urllib.parse
+
+    from google.auth.transport import requests as ga_requests
+
+    class FakeSource:
+        token = "src-token"
+        expiry = None
+
+        def refresh(self, request):
+            pass
+
+    class FakeResponse:
+        status = 200
+        data = b'{"access_token": "downscoped", "expires_in": 3600}'
+
+    bodies = []
+
+    def fake_request(url, method, headers, body):
+        bodies.append(body)
+        return FakeResponse()
+
+    monkeypatch.undo()  # conftest stubs mint_run_token for the whole suite; here it runs for real
+    monkeypatch.setattr(ga_requests, "Request", lambda: fake_request)
+
+    token, _expiry = scoped_gcs.mint_run_token(FakeSource(), "gs://out/team-a", "sid-1")
+
+    assert token == "downscoped"
+    form = urllib.parse.parse_qs(bodies[0].decode())
+    assert form["subject_token"] == ["src-token"]
+    rules = json.loads(urllib.parse.unquote(form["options"][0]))["accessBoundary"]["accessBoundaryRules"]
+    assert len(rules) == 9
+    listed = [
+        r["availabilityCondition"]["expression"].split('objects/')[1].split('"')[0]
+        for r in rules
+        if "objectListPrefix" in r["availabilityCondition"]["expression"]
+    ]
+    assert listed == [f"team-a/checkpoints/sessions/{_claude_session_id('sid-1')}/", "team-a/control/sid-1/"]

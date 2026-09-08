@@ -81,22 +81,35 @@ def run_object_prefixes(output_bucket: str, session_id: str) -> tuple[str, str, 
     return bucket, base, prefixes
 
 
-def access_boundary(bucket: str, prefixes: list[str]) -> Any:
+# Prefixes the worker LISTS with the run token: the control inbox (control.py polls it) and
+# the checkpoint transcript directory (session_store.load enumerates batches on resume).
+# Every other object of a turn is read or written by exact name. Kept to the minimum on
+# purpose: STS caps the minted token at ~10.7k chars INCLUDING the caller's own token, and
+# a list clause adds ~500 chars per rule. Nine list clauses fit under a ~250-char user token
+# and overflow a ~1,100-char service-account token with "invalid_request" (measured
+# 2026-09-08, zapi-workflow-bot); two fit either with room to spare.
+_LISTED_PREFIXES = ("checkpoints/sessions/", "control/")
+
+
+def access_boundary(bucket: str, prefixes: list[str], base: str = "") -> Any:
     """A Credential Access Boundary allowing objectAdmin on ``bucket`` for ``prefixes`` only.
 
-    Each rule pairs an object-name condition (get/create/delete/exists on objects under the
-    prefix) with the list condition GCS evaluates for ``objects.list`` (the request's
-    ``prefix`` parameter must start with the allowed prefix).
+    Each rule carries an object-name condition (get/create/delete/exists on objects under
+    the prefix); only the prefixes in ``_LISTED_PREFIXES`` (relative to ``base``) also get
+    the list condition GCS evaluates for ``objects.list`` (the request's ``prefix``
+    parameter must start with the allowed prefix).
     """
     from google.auth import downscoped
 
     rules = []
     for p in prefixes:
         obj = f"projects/_/buckets/{bucket}/objects/{p}"
-        expression = (
-            f'resource.name.startsWith("{obj}") || '
-            f'api.getAttribute("storage.googleapis.com/objectListPrefix", "").startsWith("{p}")'
-        )
+        expression = f'resource.name.startsWith("{obj}")'
+        if p[len(base):].startswith(_LISTED_PREFIXES):
+            expression += (
+                ' || api.getAttribute("storage.googleapis.com/objectListPrefix", "")'
+                f'.startsWith("{p}")'
+            )
         rules.append(
             downscoped.AccessBoundaryRule(
                 available_resource=f"//storage.googleapis.com/projects/_/buckets/{bucket}",
@@ -124,10 +137,10 @@ def mint_run_token(
 
     if source_credentials is None:
         source_credentials, _ = google.auth.default(scopes=[_CLOUD_PLATFORM])
-    bucket, _base, prefixes = run_object_prefixes(output_bucket, session_id)
+    bucket, base, prefixes = run_object_prefixes(output_bucket, session_id)
     creds = downscoped.Credentials(
         source_credentials=source_credentials,
-        credential_access_boundary=access_boundary(bucket, prefixes),
+        credential_access_boundary=access_boundary(bucket, prefixes, base),
     )
     creds.refresh(Request())
     if not creds.token:

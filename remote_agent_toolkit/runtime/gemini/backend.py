@@ -1190,9 +1190,11 @@ class GeminiSession:
         except Exception as exc:  # noqa: BLE001 — re-raise with the fix spelled out
             raise RuntimeError(
                 "could not mint the run-scoped GCS token for this turn "
-                f"({type(exc).__name__}: {str(exc)[:200]}). The client identity needs "
-                "object access on the engine's output bucket (README, IAM). To drive a "
-                "pre-token engine during a migration pass scoped_gcs=False to get_engine()."
+                f"({type(exc).__name__}: {str(exc)[:200]}). STS rejected the exchange itself; "
+                "it does not check bucket IAM at mint time. A generic 'invalid_request' usually "
+                "means the minted token would exceed STS's size cap (the caller's own token "
+                "counts toward it; see scoped_gcs._LISTED_PREFIXES). To drive a pre-token "
+                "engine during a migration pass scoped_gcs=False to get_engine()."
             ) from exc
         self._stop_gcs_token_refresh()
         stop = threading.Event()

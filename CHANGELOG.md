@@ -24,6 +24,24 @@ commit to `main` (PR), tag the merge commit `vX.Y.Z` and push the tag (CI refuse
 a tag whose version differs from `pyproject.toml`), then create the GitHub Release
 for the tag with this file's section as the notes.
 
+## Unreleased
+
+### Fixed
+
+- **Run-scoped GCS tokens could not be minted by a service-account client** (`invalid_request:
+  Invalid arguments provided in the request.` from STS). STS caps the size of a downscoped
+  token, and the cap includes the caller's own base token: the boundary's nine rules, each
+  carrying an object-name AND an `objectListPrefix` list clause, minted to ~10.1k chars — under
+  the cap behind a ~250-char user token (every developer login), over it behind a ~1.1k-char
+  service-account token (every production caller). The list clause is now emitted only for
+  the two prefixes the worker actually lists with the run token (the control inbox and the
+  checkpoint transcript directory, `scoped_gcs._LISTED_PREFIXES`); the token drops to ~6.5k
+  chars. Client-side only: no engine redeploy, and a patched client works against engines
+  deployed from earlier revisions. The mint error no longer blames bucket IAM, which STS does
+  not check at mint time (it minted for a nonexistent bucket during the investigation).
+  Measured 2026-09-08 against `my-project-agent-output` with a user and a
+  service-account caller.
+
 ## 0.3.0 — 2026-09-07
 
 ### Backwards-incompatible

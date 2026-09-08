@@ -185,6 +185,9 @@ def _rollout_destination(codex_home: Path, relpath: object) -> Path | None:
     ``relpath`` comes from the checkpoint's ``meta.json``, an object the run's own token can
     write, so it is untrusted: it must be a relative ``sessions/...jsonl`` path with no ``..``,
     and the resolved destination (symlinks followed) must stay under ``CODEX_HOME/sessions``.
+    The allowed root is built from the resolved ``CODEX_HOME`` plus a literal ``sessions``,
+    never by resolving ``CODEX_HOME/sessions`` itself: if that directory were a symlink, a
+    destination inside its target would otherwise pass as "inside sessions".
     """
     if not isinstance(relpath, str) or "\\" in relpath:
         return None
@@ -192,8 +195,8 @@ def _rollout_destination(codex_home: Path, relpath: object) -> Path | None:
     if (path.is_absolute() or ".." in path.parts or not path.parts
             or path.parts[0] != "sessions" or path.suffix != ".jsonl"):
         return None
-    sessions = (codex_home / "sessions").resolve()
     try:
+        sessions = codex_home.resolve() / "sessions"
         dest = (codex_home / path).resolve()
     except OSError:
         return None

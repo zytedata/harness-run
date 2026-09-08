@@ -554,6 +554,31 @@ async def test_resume_ignores_a_symlinked_sessions_dir_that_escapes(tmp_path, mo
     assert list(outside.iterdir()) == []
 
 
+async def test_resume_ignores_a_sessions_dir_that_is_itself_a_symlink(tmp_path, monkeypatch):
+    """If CODEX_HOME/sessions itself points elsewhere, a well-formed relpath must still be
+    refused: the allowed root is CODEX_HOME (resolved) + literal ``sessions``, so resolving the
+    destination through the link lands outside it."""
+    from remote_agent_toolkit.checkpoint.session_store import BlobSessionStore
+    from remote_agent_toolkit.ports.blobstore import LocalBlobStore
+
+    blobs = LocalBlobStore(str(tmp_path / "blobs"))
+    blobs.put_bytes("codex-threads/sid/meta.json", json.dumps(
+        {"thread_id": "thr-evil", "relpath": "sessions/2026/07/21/rollout-x-thr-evil.jsonl"}).encode())
+    blobs.put_bytes("codex-threads/sid/rollout.jsonl", b"OWNED\n")
+    spec = AgentSpec(name="a", model="gpt-5.6-luna", harness="codex", checkpoint=True)
+    ctx = _ctx(tmp_path / "w2", spec, blobs=blobs, session_store=BlobSessionStore(blobs),
+               resume_sid="sid")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    codex_home = ctx.job_dir / "codex_home"
+    codex_home.mkdir(parents=True)
+    (codex_home / "sessions").symlink_to(outside, target_is_directory=True)
+    script = [turn_started(), agent_message("fresh"), token_usage(), turn_completed()]
+    _events, client = await _events_of(script, tmp_path, monkeypatch, spec=spec, ctx=ctx)
+    assert client.thread_starts and not client.thread_resumes
+    assert list(outside.rglob("*")) == []
+
+
 async def test_resume_without_persisted_thread_starts_fresh(tmp_path, monkeypatch):
     from remote_agent_toolkit.checkpoint.session_store import BlobSessionStore
     from remote_agent_toolkit.ports.blobstore import LocalBlobStore

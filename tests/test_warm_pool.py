@@ -735,7 +735,7 @@ def _per_worker_engine(monkeypatch):
     return engine, dispatch, ae
 
 
-def _seeded_tail(monkeypatch, sid="warm-sid"):
+def _seeded_tail(monkeypatch, dispatch, sid="warm-sid"):
     """Patch the backend's stream tail with a sink pre-seeded with a finished turn."""
     seed = InMemorySink(session_id=sid)
     seed.emit(AgentEvent(kind="status", summary="turn started",
@@ -744,8 +744,15 @@ def _seeded_tail(monkeypatch, sid="warm-sid"):
     seed.emit(AgentEvent(kind="result", summary="done", cost_usd=0.1,
                          raw={"subtype": "success", "is_error": False, "num_turns": 3,
                               "session_id": sid}))
-    monkeypatch.setattr(backend, "tail_stream", lambda uri, s, **kw: seed.tail(s))
-    return seed
+    async def tail(uri, s, **kw):
+        payload, attrs = dispatch.published[-1]
+        async for event in seed.tail(s):
+            event.raw = {**(event.raw or {}), "session_id": sid,
+                         "turn_id": payload["turn_id"], "worker": attrs["worker"]}
+            yield event
+
+    monkeypatch.setattr(backend, "tail_stream", tail)
+    return tail
 
 
 def test_fill_pool_gives_every_worker_its_own_channel_and_a_roster_entry(monkeypatch):
@@ -791,7 +798,7 @@ def test_warm_session_addresses_one_idle_worker_and_drops_its_channel(monkeypatc
     engine, dispatch, ae = _per_worker_engine(monkeypatch)
     engine.fill_pool(2)
     first, second = engine._roster().entries()
-    _seeded_tail(monkeypatch)
+    _seeded_tail(monkeypatch, dispatch)
 
     session = backend.GeminiSession(engine, "warm-sid")
     result = asyncio.run(_await(session.run("go")))
@@ -820,7 +827,7 @@ def test_warm_session_spawns_a_worker_for_itself_on_an_empty_roster(monkeypatch)
     """A drained pool no longer strands turns: the turn spawns its own (un-rostered)
     worker and is addressed to it, and the usual refill re-warms the pool behind it."""
     engine, dispatch, ae = _per_worker_engine(monkeypatch)
-    _seeded_tail(monkeypatch)
+    _seeded_tail(monkeypatch, dispatch)
 
     session = backend.GeminiSession(engine, "warm-sid")
     result = asyncio.run(_await(session.run("go")))
@@ -842,12 +849,12 @@ def test_warm_session_redispatches_when_the_worker_never_starts_the_turn(monkeyp
     engine, dispatch, ae = _per_worker_engine(monkeypatch)
     engine.fill_pool(1)
     (first,) = engine._roster().entries()
-    seed = _seeded_tail(monkeypatch)
+    seeded_tail = _seeded_tail(monkeypatch, dispatch)
 
     async def silent_until_redispatched(uri, sid, **kw):
         while len(dispatch.published) < 2:
             await asyncio.sleep(0.005)
-        async for ev in seed.tail(sid):
+        async for ev in seeded_tail(uri, sid, **kw):
             yield ev
 
     monkeypatch.setattr(backend, "tail_stream", silent_until_redispatched)

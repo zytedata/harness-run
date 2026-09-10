@@ -185,6 +185,39 @@ async def test_dead_current_job_cannot_recover_previous_success(storage, monkeyp
     assert result.is_error and "no terminal" in result.text
 
 
+async def test_redispatch_discards_events_buffered_during_retirement(storage, monkeypatch):
+    import time
+
+    engine, dispatch, ae = _per_worker_engine(monkeypatch)
+    publish = dispatch.publish
+    cancel = ae.cancel_query_job
+
+    def finish(payload, attributes=None):
+        publish(payload, attributes)
+        if len(dispatch.published) == 2:
+            tid, wid = payload["turn_id"], attributes["worker"]
+            write(storage, [event("status", "turn_started", tid, wid),
+                            event("result", "CURRENT", tid, wid)], turn_id=tid)
+
+    def retire(**kwargs):
+        payload, attrs = dispatch.published[0]
+        tid, wid = payload["turn_id"], attrs["worker"]
+        # The timed-out worker wakes while its cancellation RPC is still in progress.
+        # Its events pass the old filter and enter the pickup queue before replacement.
+        write(storage, [event("status", "turn_started", tid, wid),
+                        event("result", "ABANDONED", tid, wid)], turn_id=tid)
+        time.sleep(0.04)
+        cancel(**kwargs)
+
+    monkeypatch.setattr(dispatch, "publish", finish)
+    monkeypatch.setattr(ae, "cancel_query_job", retire)
+    monkeypatch.setattr(backend, "pickup_deadline_s", lambda *a, **kw: 0.03)
+    async with asyncio.timeout(2):
+        result = await backend.GeminiSession(engine, SID).run("go")
+    engine._join_background()
+    assert result.text == "CURRENT" and not result.is_error
+
+
 @pytest.mark.parametrize("config_error", [False, True])
 async def test_worker_identifies_every_event_including_early_errors(storage, monkeypatch, tmp_path, config_error):
     spec = AgentSpec(name="worker", model="m")

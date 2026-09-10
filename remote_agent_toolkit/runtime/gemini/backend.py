@@ -261,6 +261,14 @@ async def _pickup_watched_tail(
                 attempts += 1
                 try:
                     deadline_s = await asyncio.to_thread(redispatch, attempts)
+                    # Retirement can take seconds. The old worker may wake during it,
+                    # and its events can already be queued under the previous filter.
+                    # Restart the scoped tail after replacement; never drain that queue
+                    # as if it belonged to the newly addressed worker.
+                    pump_task.cancel()
+                    await asyncio.gather(pump_task, return_exceptions=True)
+                    queue = asyncio.Queue()
+                    pump_task = asyncio.ensure_future(pump())
                     deadline = time.monotonic() + deadline_s
                 except Exception as exc:  # noqa: BLE001 — surface, never hang
                     yield AgentEvent(

@@ -24,7 +24,7 @@ commit to `main` (PR), tag the merge commit `vX.Y.Z` and push the tag (CI refuse
 a tag whose version differs from `pyproject.toml`), then create the GitHub Release
 for the tag with this file's section as the notes.
 
-## Unreleased
+## 0.3.1 — 2026-09-08
 
 ### Fixed
 

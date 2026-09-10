@@ -51,7 +51,7 @@ Scrapy Cloud builds and other environments without access to this git repo shoul
 # From the internal PyPI (read credentials: the usual pkgrepo user, or ask IT support):
 pip install "remote-agent-toolkit==0.3.0" --extra-index-url "https://<user>:<password>@pypi.internal.example/simple/"
 # Straight from the git tag:
-pip install "git+ssh://git@github.com/zytedata/remote-agent-toolkit.git@v0.3.0"
+pip install "git+ssh://git@github.com/zytedata/remote-agent-toolkit.git@v0.3.1"
 ```
 
 Every push to `main` also publishes a dev build there, `X.Y.Z.dev<n>`; it sorts before the

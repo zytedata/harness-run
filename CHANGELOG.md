@@ -36,6 +36,15 @@ for the tag with this file's section as the notes.
   The `claude-code` harness ignores it with a `spec_warning` status event. Existing specs
   are unaffected. ([#83])
 
+### Changed
+
+- **`permission_mode="plan"` on the `codex` harness denies escalations**: the read-only
+  sandbox now pairs with `deny_all` instead of `auto_review`, matching
+  `codex exec --ask-for-approval never`. A `plan` run that asked to write or reach the
+  network could previously have that granted by Codex's auto-reviewer; now the request
+  is refused and the run stays read-only. Runs that need auto-reviewed escalations
+  should use `permission_mode="default"`. ([#83])
+
 [#83]: https://github.com/zytedata/remote-agent-toolkit/pull/83
 
 ## 0.3.1 — 2026-09-08

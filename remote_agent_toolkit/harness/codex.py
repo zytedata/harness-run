@@ -146,12 +146,14 @@ if TYPE_CHECKING:
 # the spec's vocabulary; this is the closest Codex semantics for each:
 # bypassPermissions (unattended default) = no sandbox, never ask; acceptEdits = write the
 # workspace freely but stay sandboxed; default = sandboxed with Codex's auto-reviewer
-# resolving escalations (headless runs must never block on a human); plan = read-only.
+# resolving escalations (headless runs must never block on a human); plan = read-only,
+# and nothing to approve: a read-only run has no escalation an auto-reviewer should be
+# able to grant.
 _PERMISSION_MAP = {
     "bypassPermissions": ("full_access", "deny_all"),
     "acceptEdits": ("workspace_write", "deny_all"),
     "default": ("workspace_write", "auto_review"),
-    "plan": ("read_only", "auto_review"),
+    "plan": ("read_only", "deny_all"),
 }
 
 # The env var name the github MCP bearer token rides (config references the NAME; the

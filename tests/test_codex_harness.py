@@ -163,6 +163,15 @@ def test_build_options_permission_and_prompt_mapping(tmp_path):
     assert "INTERACTIVE MODE" in dev  # suffix appended
     assert "base_instructions" not in opts.thread_args
 
+
+def test_plan_is_read_only_with_no_approvals(tmp_path):
+    from openai_codex import ApprovalMode, Sandbox
+
+    spec = AgentSpec(name="a", model="gpt-5.6-luna", harness="codex", permission_mode="plan")
+    opts = CodexHarness().build_options(spec, _ctx(tmp_path, spec))
+    assert opts.thread_args["sandbox"] is Sandbox.read_only
+    assert opts.thread_args["approval_mode"] is ApprovalMode.deny_all
+
     spec2 = AgentSpec(
         name="a", model="gpt-5.6-luna", harness="codex", system_prompt="Full replace."
     )

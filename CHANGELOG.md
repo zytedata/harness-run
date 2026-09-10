@@ -24,6 +24,25 @@ commit to `main` (PR), tag the merge commit `vX.Y.Z` and push the tag (CI refuse
 a tag whose version differs from `pyproject.toml`), then create the GitHub Release
 for the tag with this file's section as the notes.
 
+## Unreleased
+
+### Fixed
+
+- **Checkpoint status reaches consumers before the terminal result on both harnesses**
+  (#64). The snapshot still runs inline, including on interruption; a trailing status
+  is no longer lost when a consumer stops at the result or exposed to the next turn.
+  Codex reports conversation-save failures as `checkpoint_error` while preserving a
+  successfully saved `workspace_key` and the completed/interrupted turn's result.
+
+### Backwards-incompatible
+
+- **Codex resume fails explicitly for unreadable or corrupt existing checkpoints**
+  (#64). Denied metadata reads, malformed metadata/thread IDs, and missing/unreadable
+  rollouts no longer silently start a fresh conversation. Errors omit storage exception
+  text. **Update note:** handle the failed run and repair the checkpoint or deliberately
+  start a new session. Absent metadata and unsafe restore destinations retain their
+  existing fresh-conversation behavior. Checkpoint permissions are unchanged.
+
 ## 0.3.1 — 2026-09-08
 
 ### Fixed
@@ -54,14 +73,6 @@ for the tag with this file's section as the notes.
   validates the `relpath` it reads from it: a path outside `CODEX_HOME/sessions` (absolute,
   `..`, a symlink escape, a non-`.jsonl` name) is refused and the session starts fresh, where
   before the next worker wrote wherever the file said (the same check as #64).
-- **Codex checkpoint failures are visible before a turn finishes** (#64, follow-up to #72).
-  A missing rollout or failed conversation write emits `checkpoint_error`, even when
-  the workspace archive succeeded; checkpoint status precedes the terminal result so
-  clients that stop there receive it. On resume, unreadable metadata, malformed JSON or
-  thread IDs, and missing/unreadable rollouts raise explicit errors without echoing
-  storage credentials. Missing metadata and the unsafe-path fallback introduced by
-  #72 retain their existing fresh-conversation behavior. The run-token permissions and
-  destination validator are unchanged.
 
 ## 0.3.0 — 2026-09-07
 

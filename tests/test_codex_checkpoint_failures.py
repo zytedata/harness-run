@@ -1,4 +1,4 @@
-"""Checkpoint failure reporting left open by #72 (issue #53 / audit B03)."""
+"""Codex checkpoint save and resume failures remain visible to callers."""
 
 import json
 
@@ -50,6 +50,7 @@ async def test_conversation_save_failure_is_visible_before_the_result(
     assert event.raw["event"] == "checkpoint_error"
     assert event.raw["conversation_saved"] is False
     assert event.raw["workspace_saved"] is True
+    assert event.raw["workspace_key"] == "workspace/sid.tar.gz"
     assert ctx.blobs.exists("workspace/sid.tar.gz")
     result_index = next(i for i, e in enumerate(events) if e.kind == "result")
     assert events.index(event) < result_index  # clients may stop reading at the result
@@ -71,6 +72,7 @@ async def test_conversation_error_does_not_claim_a_failed_workspace_was_saved(
     event = next(e for e in events if (e.raw or {}).get("event") == "checkpoint_error")
     assert event.raw["conversation_saved"] is False
     assert event.raw["workspace_saved"] is False
+    assert "workspace_key" not in event.raw
     assert "DUMMY_STORAGE_CREDENTIAL" not in event.summary
 
 

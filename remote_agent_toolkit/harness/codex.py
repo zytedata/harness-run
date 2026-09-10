@@ -58,6 +58,14 @@ Spec translation (parity notes):
                          itself is persisted by copying the thread's rollout file to the
                          BlobStore and restoring it into ``CODEX_HOME`` before
                          ``thread_resume`` (Codex's own session store is a local file).
+                         Save failures emit ``checkpoint_error`` before the terminal
+                         result without failing completed work. A conversation failure
+                         preserves the workspace's key when its archive was saved, even
+                         on a stop before the first rollout exists. These are separate,
+                         non-atomic writes. Absent metadata permits a fresh start;
+                         unreadable or malformed metadata and missing/unreadable
+                         rollouts fail resume explicitly, without echoing storage errors.
+                         Unsafe restore destinations retain the warning/fresh-start policy.
 
 OpenRouter models
 -----------------
@@ -949,12 +957,13 @@ class CodexHarness:
                 conversation_error = True
         workspace_event = finalize_checkpoint(spec, ctx)
         if conversation_error:
+            workspace_key = (workspace_event.raw or {}).get("workspace_key") if workspace_event else None
             return AgentEvent(
                 kind="status", summary="checkpoint failed: Codex conversation was not saved",
                 raw={"event": "checkpoint_error", "session_id": ctx.session_id,
                      "conversation_saved": False,
-                     "workspace_saved": bool(workspace_event and
-                                             (workspace_event.raw or {}).get("workspace_key"))},
+                     "workspace_saved": bool(workspace_key),
+                     **({"workspace_key": workspace_key} if workspace_key else {})},
             )
         return workspace_event
 

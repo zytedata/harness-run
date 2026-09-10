@@ -52,3 +52,9 @@ money, so they run by hand, never in CI. See [`TESTING.md`](../TESTING.md) for w
 | [`live_interactive_probe.py`](live_interactive_probe.py) | `make live-interactive` | turn control on the local runtime, both harnesses: steer, interrupt + continue, stop, resume; prints a latency table |
 | [`chat.py`](chat.py) | `make chat` | a local chat page for trying turn control by hand: Send while the agent works = steer, Interrupt & send, Stop, resume; `HARNESS=codex` for Codex; needs `fastapi` + `uvicorn` in the venv |
 | [`openrouter_endpoints.py`](openrouter_endpoints.py) | — | lists a model's OpenRouter providers and their advertised features; free unless you pass `--probe` |
+
+## `sandbox_spike/` — the harness inside an Agent Sandbox custom container
+
+A separate image (`sandbox_spike/Dockerfile`: the toolkit + harness behind a tiny HTTP runner) and a
+live probe measuring an Agent Sandbox worker against the warm pool. Setup commands, results and the
+go/no-go table are in [`sandbox_spike/README.md`](sandbox_spike/README.md); the design is DESIGN.md §13.

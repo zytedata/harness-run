@@ -24,6 +24,20 @@ commit to `main` (PR), tag the merge commit `vX.Y.Z` and push the tag (CI refuse
 a tag whose version differs from `pyproject.toml`), then create the GitHub Release
 for the tag with this file's section as the notes.
 
+## Unreleased
+
+### Added
+
+- **`AgentSpec.codex_config`**: extra Codex `config.toml` settings, as a mapping of dotted
+  key to value (strings, booleans, numbers, lists), passed to the `codex` harness as
+  `--config` overrides after the harness's own so they win, e.g.
+  `{"sandbox_workspace_write.network_access": True, "web_search": "disabled"}`.
+  Round-trips through `to_dict`/YAML and is a knob on `SessionConfig` and `TurnConfig`.
+  The `claude-code` harness ignores it with a `spec_warning` status event. Existing specs
+  are unaffected. ([#83])
+
+[#83]: https://github.com/zytedata/remote-agent-toolkit/pull/83
+
 ## 0.3.1 — 2026-09-08
 
 ### Fixed

@@ -9,17 +9,68 @@ releases (0.X.Y) do not. Every incompatible change is listed under a
 **Backwards-incompatible** heading together with update notes describing how to
 migrate.
 
-Releases are git tags (`vX.Y.Z`) on `main`; install a specific release with
+Releases are git tags (`vX.Y.Z`) on `main`, and every tag is published to Zyte's
+internal PyPI (https://pypi.internal.example/simple/) by `.github/workflows/publish.yml`;
+install a specific release with
 
 ```
+uv pip install "remote-agent-toolkit==X.Y.Z" --extra-index-url "https://<user>:<password>@pypi.internal.example/simple/"
 uv pip install "remote-agent-toolkit @ git+https://github.com/zytedata/remote-agent-toolkit@vX.Y.Z"
 ```
 
 Release checklist: update this file (move the `Unreleased` section into a new
-version heading with the date), bump `version` in `pyproject.toml`, commit,
-tag `vX.Y.Z`, push the commit and the tag.
+version heading with the date), bump `version` in `pyproject.toml`, merge that
+commit to `main` (PR), tag the merge commit `vX.Y.Z` and push the tag (CI refuses
+a tag whose version differs from `pyproject.toml`), then create the GitHub Release
+for the tag with this file's section as the notes.
 
-## Unreleased
+## 0.3.1 — 2026-09-08
+
+### Fixed
+
+- **Run-scoped GCS tokens could not be minted by a service-account client** (`invalid_request:
+  Invalid arguments provided in the request.` from STS). STS caps the size of a downscoped
+  token, and the cap includes the caller's own base token: the boundary's nine rules, each
+  carrying an object-name AND an `objectListPrefix` list clause, minted to ~10.1k chars — under
+  the cap behind a ~250-char user token (every developer login), over it behind a ~1.1k-char
+  service-account token (every production caller). The list clause is now emitted only for
+  the two prefixes the worker actually lists with the run token (the control inbox and the
+  checkpoint transcript directory, `scoped_gcs._LISTED_PREFIXES`); the token drops to ~6.5k
+  chars. Client-side only: no engine redeploy, and a patched client works against engines
+  deployed from earlier revisions. The mint error no longer blames bucket IAM, which STS does
+  not check at mint time (it minted for a nonexistent bucket during the investigation).
+  Measured 2026-09-08 against `my-project-agent-output` with a user and a
+  service-account caller.
+- **The Codex conversation checkpoint was outside the run token's prefixes.** The Codex
+  harness persists its thread under `checkpoints/codex-threads/<session>/` (restored on the
+  next turn), and `run_object_prefixes` did not list it, so with run-scoped tokens the
+  persist failed silently (checkpoint writes are best-effort) and every second turn of a
+  Codex session started without its conversation. The prefix is now in the boundary (a
+  tenth rule; minted from a service account at ~8.3k chars, verified). A new offline test
+  drives a two-turn Codex resume, the transcript store and the workspace snapshot through a
+  recording store and fails on any key the token could not reach, or any listed prefix
+  without a list clause, so the prefix list follows the writers from now on.
+  Because the run's own token can now write `codex-threads/<session>/meta.json`, the restore
+  validates the `relpath` it reads from it: a path outside `CODEX_HOME/sessions` (absolute,
+  `..`, a symlink escape, a non-`.jsonl` name) is refused and the session starts fresh, where
+  before the next worker wrote wherever the file said (the same check as #64).
+
+## 0.3.0 — 2026-09-07
+
+### Backwards-incompatible
+
+- **`gemini.deploy` always runs the engine as a service account you own.** With
+  `service_account=` omitted (or `None`) the engine now runs as
+  `ratk-runtime@<project>.iam.gserviceaccount.com`, the account `ratk-gcp-setup` creates
+  with the README role set. There is no way to deploy as the platform default (the Agent
+  Runtime service agent, the identity behind the security finding below), and the deploy
+  checks the account exists before any side effect, failing with the fix
+  (`ratk-gcp-setup --project <id>`) when it does not. `ratk-gcp-setup --no-runtime-sa` is
+  gone for the same reason. **Update note**: run `ratk-gcp-setup --project <id>` once per
+  project (it only adds), then a plain redeploy from this revision moves each engine off
+  the default identity. Pass `service_account=` only for an account of your own (the README
+  role set plus what your agent needs). The deployer needs `roles/iam.serviceAccountUser`
+  on the account (project owners and editors already have it).
 
 ### Security
 
@@ -47,9 +98,9 @@ tag `vX.Y.Z`, push the commit and the tag.
   `RUNTIME_SA=<email>` for the custom runtime identity, unset for a bucket in another
   project).
 - `gemini.deploy(..., service_account=)` sets the engine's runtime identity (forwarded to
-  `AgentEngineConfig.service_account`); omitted, the platform default applies as before. The
-  account's Vertex role is a custom role with only `aiplatform.endpoints.predict` (README IAM
-  table), never `roles/aiplatform.user`.
+  `AgentEngineConfig.service_account`); omitted, the project's `ratk-runtime@` (see
+  Backwards-incompatible above). The account's Vertex role is a custom role with only
+  `aiplatform.endpoints.predict` (README IAM table), never `roles/aiplatform.user`.
 - **Per-worker dispatch for warm pools.** Every warm worker of an engine used to pull one
   shared Pub/Sub subscription as the same identity, so a shell in one worker could take
   another run's turn — its pointers and, with run-scoped tokens, its token — and ack it so
@@ -141,6 +192,26 @@ tag `vX.Y.Z`, push the commit and the tag.
   depends on still fails — the model check itself is a 1-token live probe, reported
   before anything is applied).
 
+- Talking to a running turn ([#44]). `Session.send()` on a RUNNING session no longer
+  dispatches a second concurrent turn (two workers writing one session's stream,
+  checkpoint and transcript); it delivers the message INTO the running turn and returns
+  the same `Run`: `interrupt=False` steers (the model sees it at its next step — Claude
+  Code's mid-turn `query()`, Codex's `turn/steer`), `interrupt=True` interrupts the model
+  first and continues from the message in the same harness session and workspace. Each
+  delivered message is a `user` event on the stream / mirror / `history()`, carrying the
+  caller's `message_id=` — the acknowledgement that the model has it; the worker dedupes
+  on the id, so a retried send never reaches the model twice. On `gemini` the transport
+  is a GCS inbox (`control/<sid>/` under the output bucket, `AGENT_CONTROL_GCS` in the
+  engine env) the worker polls every ~1.5 s during the turn, cold and warm alike, from
+  any process that holds the session id; the worker announces it with a `control_ready`
+  status event. `run()` on a running session raises; `secrets` / `config` / `hooks` are
+  rejected on a running `send()`; a running turn on an engine revision deployed before
+  the inbox existed raises the new typed `ControlUnavailable` (exported at package
+  level) instead of writing into the void. `local` implements the same semantics over an
+  in-process queue, and `make live-interactive` checks the four transitions against real
+  models on both harnesses and prints how long a steer, an interrupt and a stop take
+  (TESTING.md has the numbers). `make chat` (`dev/chat.py`) is a local chat page for
+  trying turn control by hand; a dev tool like the live probes.
 - Both harnesses can run `openrouter/*` models with an `OPENROUTER_API_KEY`
   per-invocation secret. Kimi K3, GLM-5.3, and DeepSeek v4 Flash/Pro have known
   context sizes. Each OpenRouter response reports its selected upstream and exact
@@ -182,6 +253,25 @@ tag `vX.Y.Z`, push the commit and the tag.
 
 ### Changed
 
+- `Session.interrupt()` now means "interrupt and stop": the harness is asked to stop and
+  the turn ends through its normal end-of-turn path — workspace checkpoint, transcript,
+  a terminal result with the new `StopReason.INTERRUPTED` that keeps the turn's
+  accounting — so the session is idle and a later `send()` resumes it, workspace changes
+  of the interrupted turn included. Before, it cancelled the client-side tail (and the
+  cold job): the run ended `is_error=True` / `StopReason.ERROR` with no checkpoint, and
+  the next `send()` restored the previous turn's snapshot, so the interrupted turn's
+  files were lost while its conversation survived. **Update note**: code that treated an
+  interrupted session's `stop_reason == ERROR` as "stopped" should check for
+  `INTERRUPTED`; the old cancel remains only as the fallback when the worker cannot be
+  reached or does not stop in time, and the result's `warning` says so. On `gemini` the
+  new path needs an engine redeployed with this version (the worker polls the control
+  inbox); against an older revision `interrupt()` falls back as before. ([#44])
+- `AgentEvent.kind` has a new value, `"user"`: an operator message delivered into a
+  running turn (see Added). Consumers that switch exhaustively on `kind` should add it.
+- On Codex, a turn that Codex reports as `interrupted` now yields result subtype
+  `interrupted` with `is_error=False` (it was `is_error=True`); a turn interrupted by the
+  harness at `max_turns` / `max_budget_usd` still reports `error_max_turns` /
+  `error_budget_exceeded`.
 - Engines are deployed with `NUM_WORKERS=1`. The platform's serving harness (uvicorn, in
   the container base image) otherwise starts `os.cpu_count() + 1` worker processes —
   10–11 on the nodes seen live, sized to the host rather than the container's CPU limit
@@ -472,3 +562,4 @@ Initial release. What's in the box:
 [#15]: https://github.com/zytedata/remote-agent-toolkit/pull/15
 [#17]: https://github.com/zytedata/remote-agent-toolkit/pull/17
 [#18]: https://github.com/zytedata/remote-agent-toolkit/pull/18
+[#44]: https://github.com/zytedata/remote-agent-toolkit/issues/44

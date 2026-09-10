@@ -53,11 +53,11 @@ from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from ._deploy import DEFAULT_RUNTIME_SA_ID  # engines run as it: deploy(service_account=) default
 from .handoff import handoff_lifecycle_rules
 
 DEFAULT_LOCATION = "us-central1"
 DEFAULT_OPERATOR_SA_ID = "agent-runtime"
-DEFAULT_RUNTIME_SA_ID = "ratk-runtime"  # the identity engines run as (deploy(service_account=))
 # The models checked in Vertex Model Garden. Each check costs a handful of input tokens
 # + 1 output token. `translate.py` defaults CLOUD_ML_REGION to `global`, so that's the
 # location whose enablement actually matters for deployed runs. The FIRST required model
@@ -151,8 +151,9 @@ class GcpError(RuntimeError):
 def runtime_agent_email(project_number: str | int) -> str:
     """The DEFAULT Agent Runtime service agent for a project (auto-created by Google).
 
-    Engines run as it only when deployed without ``service_account=``; this tool checks it
-    for leftover grants from the earlier identity model, and grants it nothing.
+    Only engines deployed before the toolkit named a runtime service account still run as
+    it; this tool checks it for leftover grants from that identity model, and grants it
+    nothing.
     """
     return f"service-{project_number}@gcp-sa-aiplatform-re.iam.gserviceaccount.com"
 
@@ -556,7 +557,7 @@ class Settings:
     project: str
     location: str = DEFAULT_LOCATION
     operator_sa_id: str | None = DEFAULT_OPERATOR_SA_ID  # None = don't manage an operator SA
-    runtime_sa_id: str | None = DEFAULT_RUNTIME_SA_ID  # None = engines run as the default agent
+    runtime_sa_id: str = DEFAULT_RUNTIME_SA_ID  # what deploy(service_account=) defaults to
     impersonators: tuple[str, ...] = ()  # IAM members granted tokenCreator on the operator SA
     staging_bucket: str | None = None  # gs:// URI; None = the backend.deploy default
     output_bucket: str | None = None
@@ -570,9 +571,11 @@ class Settings:
     def operator_email(self) -> str | None:
         return self._sa_email(self.operator_sa_id)
 
-    def runtime_email(self) -> str | None:
-        """The runtime service account's email — what ``gemini.deploy(service_account=)`` takes."""
-        return self._sa_email(self.runtime_sa_id)
+    def runtime_email(self) -> str:
+        """The runtime service account's email — what ``gemini.deploy`` runs engines as."""
+        email = self._sa_email(self.runtime_sa_id)
+        assert email is not None  # runtime_sa_id is never empty (there is no opt-out)
+        return email
 
     def _sa_email(self, sa_id: str | None) -> str | None:
         if not sa_id:
@@ -1118,9 +1121,10 @@ def audit(api: GcpApi, cfg: Settings) -> list[Item]:
                 "default service agent",
                 NOTE,
                 f"{runtime_agent_email(number)} still holds " + " and ".join(leftovers)
-                + " — from the earlier identity model, where engines ran as it. Once no "
-                "engine in this project runs without service_account=, remove them by hand "
-                "(this tool never removes grants); see README, \"Migration\"",
+                + " — from the earlier identity model, where engines ran as it. Once every "
+                "engine in this project has been redeployed (the deploy names the runtime "
+                "service account by default), remove them by hand (this tool never removes "
+                "grants); see README, \"Migration\"",
             )
         )
     else:
@@ -1318,18 +1322,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--runtime-sa",
         default=DEFAULT_RUNTIME_SA_ID,
         help=(
-            "runtime service account the engines run as (gemini.deploy(service_account=...)) "
-            "— an account id in the target project or a full email "
-            f"(default {DEFAULT_RUNTIME_SA_ID!r})"
-        ),
-    )
-    p.add_argument(
-        "--no-runtime-sa",
-        action="store_true",
-        help=(
-            "don't manage a runtime service account: engines then run as the default Agent "
-            "Runtime service agent, whose Google-managed role reads every bucket in the "
-            "project and which the agent's shell can use (README, security)"
+            "runtime service account the engines run as — an account id in the target project "
+            f"or a full email (default {DEFAULT_RUNTIME_SA_ID!r}, which is also what "
+            "gemini.deploy uses when service_account= is omitted; name another one here and "
+            "pass it to every deploy)"
         ),
     )
     p.add_argument(
@@ -1392,7 +1388,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         project=args.project,
         location=args.location,
         operator_sa_id=None if args.no_operator_sa else args.operator_sa,
-        runtime_sa_id=None if args.no_runtime_sa else args.runtime_sa,
+        runtime_sa_id=args.runtime_sa,
         impersonators=tuple(args.impersonator),
         staging_bucket=normalize_bucket_uri(args.staging_bucket) if args.staging_bucket else None,
         output_bucket=normalize_bucket_uri(args.output_bucket) if args.output_bucket else None,

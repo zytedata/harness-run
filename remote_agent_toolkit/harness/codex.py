@@ -111,11 +111,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, AsyncIterator, Iterator, TYPE_CHECKING
 
+from ..control import ControlledStream, ControlMessage
 from ..events import AgentEvent
 from ..spec import SystemPrompt
 from . import pricing
@@ -173,6 +175,34 @@ _CONTENT_CAP = 4000
 
 # Blob-key prefix for persisted Codex conversations (the rollout file + thread id).
 _THREADS_PREFIX = "codex-threads"
+
+logger = logging.getLogger(__name__)
+
+
+def _rollout_destination(codex_home: Path, relpath: object) -> Path | None:
+    """Where a persisted rollout may be written back, or ``None`` when ``relpath`` is unsafe.
+
+    ``relpath`` comes from the checkpoint's ``meta.json``, an object the run's own token can
+    write, so it is untrusted: it must be a relative ``sessions/...jsonl`` path with no ``..``,
+    and the resolved destination (symlinks followed) must stay under ``CODEX_HOME/sessions``.
+    The allowed root is built from the resolved ``CODEX_HOME`` plus a literal ``sessions``,
+    never by resolving ``CODEX_HOME/sessions`` itself: if that directory were a symlink, a
+    destination inside its target would otherwise pass as "inside sessions".
+    """
+    if not isinstance(relpath, str) or "\\" in relpath:
+        return None
+    path = Path(relpath)
+    if (path.is_absolute() or ".." in path.parts or not path.parts
+            or path.parts[0] != "sessions" or path.suffix != ".jsonl"):
+        return None
+    try:
+        sessions = codex_home.resolve() / "sessions"
+        dest = (codex_home / path).resolve()
+    except OSError:
+        return None
+    if not dest.is_relative_to(sessions):
+        return None
+    return dest
 
 # Bookkeeping file (in CODEX_HOME, beside sessions/) recording each subagent thread's
 # already-billed cumulative totals, so a later turn in the same job dir bills deltas only.
@@ -886,7 +916,13 @@ class CodexHarness:
             body = ctx.blobs.get_bytes(f"{_THREADS_PREFIX}/{ctx.resume_sid}/rollout.jsonl")
         except Exception:  # noqa: BLE001 — no/unreadable persisted thread: start fresh
             return None
-        dest = codex_home / meta["relpath"]
+        dest = _rollout_destination(codex_home, meta.get("relpath"))
+        if dest is None:
+            # The run's own token can write this object, so the previous turn's agent could
+            # have edited it: never let ``relpath`` point outside CODEX_HOME/sessions.
+            logger.warning("persisted Codex thread for %s has an invalid rollout path; "
+                           "starting a fresh conversation", ctx.resume_sid)
+            return None
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_bytes(body)
         return meta["thread_id"]
@@ -1008,7 +1044,9 @@ class CodexHarness:
             subtype, is_error = "error", True
             text = (turn.error.message if turn.error else None) or "(run errored)"
         elif status == "interrupted":
-            subtype, is_error = "interrupted", True
+            # The operator's stop (Session.interrupt()): the turn ended through the normal
+            # path with its accounting; a pause, not an error.
+            subtype, is_error = "interrupted", False
             text = translator.final_text or "(interrupted)"
         else:
             subtype, is_error = "success", False
@@ -1058,6 +1096,10 @@ class CodexHarness:
         ):
             yield event
 
+    # After ``handle.interrupt()``: how long to wait for the ``turn/completed`` that
+    # settles it (verified live: it arrives within milliseconds).
+    _INTERRUPT_SETTLE_S = 5.0
+
     async def _run(
         self, spec: AgentSpec, ctx: RunContext, proxy: Any | None
     ) -> AsyncIterator[AgentEvent]:
@@ -1068,6 +1110,16 @@ class CodexHarness:
         interrupts the turn when ``spec.max_turns`` / ``spec.max_budget_usd`` is hit —
         Codex enforces neither natively. Checkpoint (workspace + conversation rollout)
         finalizes inline at the terminal result event, as in the Claude binding.
+
+        Operator control (``ctx.control``) is read alongside the stream. A ``steer`` maps
+        onto Codex's native ``turn/steer`` (``handle.steer()``: the model sees the message
+        after its current step, the turn ends with one ``turn/completed`` — verified
+        live). An ``interrupt`` calls ``handle.interrupt()``; Codex answers with
+        ``turn/completed`` ``status=interrupted``, which ends the turn for a ``stop`` or,
+        when a message follows, is a segment boundary: the message starts a new turn on
+        the SAME thread (``thread.turn()``) and the run keeps streaming from that handle.
+        Accounting spans the turns of the run. Each delivered message is surfaced as a
+        ``user`` event.
         """
         AsyncCodex = _sdk().AsyncCodex
 
@@ -1091,203 +1143,295 @@ class CodexHarness:
         limit: str | None = None  # which cap tripped, if any
         thread_id = ""
 
-        async with AsyncCodex(config=options.codex_config) as codex:
-            for w in options.warnings:
-                yield AgentEvent(kind="status", summary=w, raw={"event": "spec_warning"})
-            if price is None and proxy is None:
-                yield AgentEvent(
-                    kind="status",
-                    summary=(
-                        f"no price data for model {spec.model!r} (LiteLLM dataset "
-                        "unreachable or model unknown): cost_usd will be unknown and "
-                        "max_budget_usd cannot be enforced"
-                    ),
-                    raw={"event": "cost_unknown", "model": spec.model},
-                )
-            if options.openrouter:
-                # OpenRouter auth is the provider's env_key (already in the app-server's
-                # env), so there is nothing to log in with — `codex login` would store
-                # OpenAI credentials this path never reads.
-                if not options.api_key:
-                    raise missing_openrouter_key_error("codex")
-            elif options.api_key and not (options.codex_home / "auth.json").exists():
-                await codex.login_api_key(options.api_key)
-            elif not options.api_key and not (options.codex_home / "auth.json").exists():
-                raise RuntimeError(
-                    "codex harness has no OpenAI credentials: pass OPENAI_API_KEY in the "
-                    "per-invocation secrets (or set it in the environment)"
-                )
+        # The select's pending reads (the stream's next item, the control channel's next
+        # message) are dropped however the turn ends.
+        select: ControlledStream | None = None
+        try:
+            async with AsyncCodex(config=options.codex_config) as codex:
+                for w in options.warnings:
+                    yield AgentEvent(kind="status", summary=w, raw={"event": "spec_warning"})
+                if price is None and proxy is None:
+                    yield AgentEvent(
+                        kind="status",
+                        summary=(
+                            f"no price data for model {spec.model!r} (LiteLLM dataset "
+                            "unreachable or model unknown): cost_usd will be unknown and "
+                            "max_budget_usd cannot be enforced"
+                        ),
+                        raw={"event": "cost_unknown", "model": spec.model},
+                    )
+                if options.openrouter:
+                    # OpenRouter auth is the provider's env_key (already in the app-server's
+                    # env), so there is nothing to log in with — `codex login` would store
+                    # OpenAI credentials this path never reads.
+                    if not options.api_key:
+                        raise missing_openrouter_key_error("codex")
+                elif options.api_key and not (options.codex_home / "auth.json").exists():
+                    await codex.login_api_key(options.api_key)
+                elif not options.api_key and not (options.codex_home / "auth.json").exists():
+                    raise RuntimeError(
+                        "codex harness has no OpenAI credentials: pass OPENAI_API_KEY in the "
+                        "per-invocation secrets (or set it in the environment)"
+                    )
 
-            restored_tid = (
-                self._restore_thread(ctx, options.codex_home)
-                if (ctx.resume_sid and ctx.blobs is not None)
-                else None
-            )
-            if restored_tid:
-                resume_args = {
-                    k: v
-                    for k, v in options.thread_args.items()
-                    if k != "base_instructions"  # thread_resume keeps the original prompt shape
-                }
-                thread = await codex.thread_resume(restored_tid, **resume_args)
-                yield AgentEvent(
-                    kind="status",
-                    summary=f"codex thread resumed ({restored_tid})",
-                    raw={
-                        "event": "thread_resumed",
-                        "thread_id": restored_tid,
-                        "session_id": ctx.session_id,
-                    },
+                restored_tid = (
+                    self._restore_thread(ctx, options.codex_home)
+                    if (ctx.resume_sid and ctx.blobs is not None)
+                    else None
                 )
-            else:
-                thread = await codex.thread_start(**options.thread_args)
-            thread_id = thread.id
+                if restored_tid:
+                    resume_args = {
+                        k: v
+                        for k, v in options.thread_args.items()
+                        if k != "base_instructions"  # thread_resume keeps the original prompt shape
+                    }
+                    thread = await codex.thread_resume(restored_tid, **resume_args)
+                    yield AgentEvent(
+                        kind="status",
+                        summary=f"codex thread resumed ({restored_tid})",
+                        raw={
+                            "event": "thread_resumed",
+                            "thread_id": restored_tid,
+                            "session_id": ctx.session_id,
+                        },
+                    )
+                else:
+                    thread = await codex.thread_start(**options.thread_args)
+                thread_id = thread.id
 
-            routing = await self._resolved_routing(thread)
-            if routing:
-                asked = _OPENROUTER_PROVIDER if options.openrouter else "openai"
-                got = routing.get("resolved_model_provider")
-                yield AgentEvent(
-                    kind="status",
-                    summary=(
-                        f"model routing: provider={got or 'unreported'} "
-                        f"model={routing.get('resolved_model') or options.thread_args.get('model')}"
-                    ),
-                    raw={
-                        "event": "model_routing",
-                        "asked_provider": asked,
-                        **routing,
-                        "matches_request": got == asked if got is not None else None,
-                    },
-                )
+                routing = await self._resolved_routing(thread)
+                if routing:
+                    asked = _OPENROUTER_PROVIDER if options.openrouter else "openai"
+                    got = routing.get("resolved_model_provider")
+                    yield AgentEvent(
+                        kind="status",
+                        summary=(
+                            f"model routing: provider={got or 'unreported'} "
+                            f"model={routing.get('resolved_model') or options.thread_args.get('model')}"
+                        ),
+                        raw={
+                            "event": "model_routing",
+                            "asked_provider": asked,
+                            **routing,
+                            "matches_request": got == asked if got is not None else None,
+                        },
+                    )
 
-            handle = await thread.turn(ctx.prompt, **options.run_args)
-            async for notification in handle.stream():
-                if proxy is not None:
-                    for event in proxy.drain_events():
-                        yield event
-                if notification.method == "thread/tokenUsage/updated":
-                    acct.observe(notification.payload.token_usage.last)
-                    if limit is None:
-                        cost = proxy.exact_cost_usd if proxy is not None else acct.cost_usd
-                        if acct.model_calls >= spec.max_turns:
-                            limit = "max_turns"
-                        elif cost is not None and cost >= spec.max_budget_usd:
-                            limit = "budget"
-                        if limit is not None:
-                            yield AgentEvent(
-                                kind="status",
-                                summary=(
-                                    f"{limit} cap hit "
-                                    f"(calls={acct.model_calls}, cost=${cost or 0.0:.4f}); "
-                                    "interrupting the turn"
-                                ),
-                                raw={"event": "limit_interrupt", "limit": limit},
-                            )
+                handle = await thread.turn(ctx.prompt, **options.run_args)
+                select = ControlledStream(handle.stream(), ctx.control)
+                interrupt_pending: ControlMessage | None = None
+                interrupt_deadline: float | None = None
+
+                async def continue_with(msg: ControlMessage) -> AgentEvent:
+                    """Start the operator's message as a new turn on the same thread."""
+                    nonlocal handle
+                    handle = await thread.turn(msg.message or "", **options.run_args)
+                    select.replace_stream(handle.stream())
+                    return msg.user_event()
+
+                while True:
+                    timeout = None
+                    if interrupt_pending is not None and interrupt_deadline is not None:
+                        timeout = max(0.0, interrupt_deadline - asyncio.get_running_loop().time())
+                    kind, item = await select.next(timeout)
+                    if kind == "end":
+                        break
+                    if kind == "timeout":
+                        # Codex answered the interrupt with no turn/completed within the
+                        # settle window (nothing was running).
+                        msg, interrupt_pending = interrupt_pending, None
+                        interrupt_deadline = None
+                        if msg.op == "interrupt":
+                            yield await continue_with(msg)
+                            continue
+                        from types import SimpleNamespace
+
+                        settled = SimpleNamespace(status="interrupted", duration_ms=None, error=None)
+                        fin = self._finalize(spec, ctx, options.codex_home, thread_id)
+                        yield self._result_event(
+                            turn=settled, translator=translator, acct=acct, ctx=ctx,
+                            thread_id=thread_id, limit=limit,
+                            exact_cost_usd=proxy.exact_cost_usd if proxy is not None else None,
+                        )
+                        if fin is not None:
+                            yield fin
+                        return
+                    if kind == "control":
+                        msg = item
+                        if msg.op == "steer":
                             try:
-                                await handle.interrupt()
-                            except Exception:  # noqa: BLE001 — stream end still bounds the run
-                                pass
-                    continue
-                if notification.method == "turn/completed":
-                    async for event in drain_proxy(proxy):
-                        yield event
-                    exact_cost = proxy.exact_cost_usd if proxy is not None else None
-                    if (
-                        limit is None
-                        and exact_cost is not None
-                        and exact_cost >= spec.max_budget_usd
-                    ):
-                        limit = "budget"
-                    if proxy is not None and price is None and exact_cost is None:
-                        # A model with no price and no proxy already reported this before
-                        # the turn started; only the OpenRouter case is news here.
-                        yield openrouter_cost_unknown(spec.model)
-                    if proxy is not None and proxy.budget_blocked:
-                        limit = "budget"
-                    subagent_usage, subagent_found = self._collect_subagent_usage(
-                        options.codex_home, thread_id
-                    )
-                    missing = sorted(set(translator.subagent_threads) - subagent_found)
-                    if missing:
-                        # A thread the wire announced but no rollout accounts for: the
-                        # recovery relies on non-public rollout details, so say loudly
-                        # that the numbers are undercounting rather than fail the turn.
-                        # With an exact OpenRouter charge only token usage is affected —
-                        # subagent requests ride the same proxy, so cost is complete.
-                        affected = (
-                            "usage (cost_usd is the provider's exact charge, which "
-                            "already includes subagent requests)"
-                            if exact_cost is not None
-                            else "usage/cost"
-                        )
+                                await handle.steer(msg.message or "")
+                            except Exception as exc:  # noqa: BLE001 — report, keep the turn alive
+                                yield AgentEvent(
+                                    kind="status",
+                                    summary=f"steer not accepted by codex: {str(exc)[:200]}",
+                                    raw={"event": "steer_failed", "message_id": msg.message_id},
+                                )
+                                continue
+                            yield msg.user_event()
+                            continue
                         yield AgentEvent(
                             kind="status",
                             summary=(
-                                "no rollout found for subagent thread(s) "
-                                f"{', '.join(missing)}; their tokens are NOT in this "
-                                f"result's {affected}"
+                                "interrupt requested by the operator"
+                                + ("; continuing with their message" if msg.op == "interrupt" else "")
                             ),
-                            raw={
-                                "event": "subagent_usage_missing",
-                                "threads": missing,
-                                "cost_included": exact_cost is not None,
-                            },
+                            raw={"event": "interrupt_requested", "op": msg.op,
+                                 "message_id": msg.message_id},
                         )
-                    subagent_prices: dict[str, pricing.ModelPrice | None] = {}
-                    if subagent_usage and exact_cost is None and acct.price is not None:
-                        subagent_prices, price_events = await self._subagent_prices(
-                            acct, subagent_usage
+                        try:
+                            await handle.interrupt()
+                        except Exception:  # noqa: BLE001 — the settle wait bounds it either way
+                            pass
+                        interrupt_pending = msg
+                        interrupt_deadline = (
+                            asyncio.get_running_loop().time() + self._INTERRUPT_SETTLE_S
                         )
-                        for event in price_events:
+                        continue
+                    notification = item
+                    if proxy is not None:
+                        for event in proxy.drain_events():
                             yield event
-                    if limit is None and exact_cost is None and subagent_usage:
-                        # Subagent spend only becomes visible here, after the mid-turn
-                        # checks; a turn it pushes over the cap must not report success.
-                        native_cost = self._native_cost_usd(
-                            acct, subagent_usage, subagent_prices
-                        )
-                        if native_cost is not None and native_cost >= spec.max_budget_usd:
+                    if notification.method == "thread/tokenUsage/updated":
+                        acct.observe(notification.payload.token_usage.last)
+                        if limit is None:
+                            cost = proxy.exact_cost_usd if proxy is not None else acct.cost_usd
+                            if acct.model_calls >= spec.max_turns:
+                                limit = "max_turns"
+                            elif cost is not None and cost >= spec.max_budget_usd:
+                                limit = "budget"
+                            if limit is not None:
+                                yield AgentEvent(
+                                    kind="status",
+                                    summary=(
+                                        f"{limit} cap hit "
+                                        f"(calls={acct.model_calls}, cost=${cost or 0.0:.4f}); "
+                                        "interrupting the turn"
+                                    ),
+                                    raw={"event": "limit_interrupt", "limit": limit},
+                                )
+                                try:
+                                    await handle.interrupt()
+                                except Exception:  # noqa: BLE001 — stream end still bounds the run
+                                    pass
+                        continue
+                    if notification.method == "turn/completed":
+                        if interrupt_pending is not None:
+                            msg, interrupt_pending = interrupt_pending, None
+                            interrupt_deadline = None
+                            if msg.op == "interrupt":
+                                # The interrupted turn is a segment boundary; the operator's
+                                # message continues the run as a new turn on the same thread.
+                                yield AgentEvent(
+                                    kind="status",
+                                    summary="turn interrupted; continuing with the operator's message",
+                                    raw={"event": "interrupted_segment",
+                                         "message_id": msg.message_id},
+                                )
+                                yield await continue_with(msg)
+                                continue
+                        async for event in drain_proxy(proxy):
+                            yield event
+                        exact_cost = proxy.exact_cost_usd if proxy is not None else None
+                        if (
+                            limit is None
+                            and exact_cost is not None
+                            and exact_cost >= spec.max_budget_usd
+                        ):
                             limit = "budget"
+                        if proxy is not None and price is None and exact_cost is None:
+                            # A model with no price and no proxy already reported this before
+                            # the turn started; only the OpenRouter case is news here.
+                            yield openrouter_cost_unknown(spec.model)
+                        if proxy is not None and proxy.budget_blocked:
+                            limit = "budget"
+                        subagent_usage, subagent_found = self._collect_subagent_usage(
+                            options.codex_home, thread_id
+                        )
+                        missing = sorted(set(translator.subagent_threads) - subagent_found)
+                        if missing:
+                            # A thread the wire announced but no rollout accounts for: the
+                            # recovery relies on non-public rollout details, so say loudly
+                            # that the numbers are undercounting rather than fail the turn.
+                            # With an exact OpenRouter charge only token usage is affected —
+                            # subagent requests ride the same proxy, so cost is complete.
+                            affected = (
+                                "usage (cost_usd is the provider's exact charge, which "
+                                "already includes subagent requests)"
+                                if exact_cost is not None
+                                else "usage/cost"
+                            )
                             yield AgentEvent(
                                 kind="status",
                                 summary=(
-                                    f"budget cap hit with subagent spend "
-                                    f"(cost=${native_cost:.4f}); the turn had already ended"
+                                    "no rollout found for subagent thread(s) "
+                                    f"{', '.join(missing)}; their tokens are NOT in this "
+                                    f"result's {affected}"
                                 ),
-                                raw={"event": "limit_exceeded", "limit": "budget"},
+                                raw={
+                                    "event": "subagent_usage_missing",
+                                    "threads": missing,
+                                    "cost_included": exact_cost is not None,
+                                },
                             )
-                    pending = sorted(
-                        tid
-                        for tid, sub_status in translator.subagent_threads.items()
-                        if sub_status in _SUBAGENT_NONTERMINAL_STATUSES
-                    )
-                    if pending:
-                        yield AgentEvent(
-                            kind="status",
-                            summary=(
-                                "subagent usage may be partial: thread(s) "
-                                f"{', '.join(pending)} last reported a non-terminal status"
-                            ),
-                            raw={"event": "subagent_usage_partial", "threads": pending},
+                        subagent_prices: dict[str, pricing.ModelPrice | None] = {}
+                        if subagent_usage and exact_cost is None and acct.price is not None:
+                            subagent_prices, price_events = await self._subagent_prices(
+                                acct, subagent_usage
+                            )
+                            for event in price_events:
+                                yield event
+                        if limit is None and exact_cost is None and subagent_usage:
+                            # Subagent spend only becomes visible here, after the mid-turn
+                            # checks; a turn it pushes over the cap must not report success.
+                            native_cost = self._native_cost_usd(
+                                acct, subagent_usage, subagent_prices
+                            )
+                            if native_cost is not None and native_cost >= spec.max_budget_usd:
+                                limit = "budget"
+                                yield AgentEvent(
+                                    kind="status",
+                                    summary=(
+                                        f"budget cap hit with subagent spend "
+                                        f"(cost=${native_cost:.4f}); the turn had already ended"
+                                    ),
+                                    raw={"event": "limit_exceeded", "limit": "budget"},
+                                )
+                        pending = sorted(
+                            tid
+                            for tid, sub_status in translator.subagent_threads.items()
+                            if sub_status in _SUBAGENT_NONTERMINAL_STATUSES
                         )
-                    fin = self._finalize(spec, ctx, options.codex_home, thread_id)
-                    yield self._result_event(
-                        turn=notification.payload.turn,
-                        translator=translator,
-                        acct=acct,
-                        ctx=ctx,
-                        thread_id=thread_id,
-                        limit=limit,
-                        exact_cost_usd=exact_cost,
-                        subagent_usage=subagent_usage,
-                        subagent_prices=subagent_prices,
-                    )
-                    if fin is not None:
-                        yield fin
-                    return
-                for event in translator.translate(notification):
-                    yield event
+                        if pending:
+                            yield AgentEvent(
+                                kind="status",
+                                summary=(
+                                    "subagent usage may be partial: thread(s) "
+                                    f"{', '.join(pending)} last reported a non-terminal status"
+                                ),
+                                raw={"event": "subagent_usage_partial", "threads": pending},
+                            )
+                        fin = self._finalize(spec, ctx, options.codex_home, thread_id)
+                        yield self._result_event(
+                            turn=notification.payload.turn,
+                            translator=translator,
+                            acct=acct,
+                            ctx=ctx,
+                            thread_id=thread_id,
+                            limit=limit,
+                            exact_cost_usd=exact_cost,
+                            subagent_usage=subagent_usage,
+                            subagent_prices=subagent_prices,
+                        )
+                        if fin is not None:
+                            yield fin
+                        return
+                    for event in translator.translate(notification):
+                        yield event
+
+        finally:
+            if select is not None:
+                await select.close()
 
         # Stream ended without turn/completed (transport death — TransportClosedError from
         # the SDK carries the CLI's stderr tail and propagates to the runtimes' error

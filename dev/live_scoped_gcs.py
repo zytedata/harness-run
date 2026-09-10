@@ -10,17 +10,13 @@ What it proves, on real infrastructure, without touching the shared output bucke
    is still reachable from the agent's shell (metadata token: 200) but can no longer
    list the bucket or read a staged secrets object (403).
 
-Two ways to keep the runtime identity out of the bucket, picked by ``RUNTIME_SA``:
-
-* ``RUNTIME_SA=<email>`` (the recommended setup): the engine is deployed with
-  ``service_account=RUNTIME_SA``, a service account you created with only the roles in the
-  README ("The runtime identity is reachable by the agent"). It has no Google-managed
-  project role, so the bucket can live in the engine project and bucket-level bindings are
-  enough. The probe also checks the metadata server hands out that account, and that its
-  token cannot list the bucket.
-* unset: the engine runs as the default Agent Runtime service agent, whose managed project
-  role reads every bucket in the engine project, so the bucket is created in
-  ``OUTPUT_PROJECT`` (a project where that identity has no project role).
+The engine is deployed with ``service_account=RUNTIME_SA``: a service account you created
+with only the roles in the README ("The runtime identity is reachable by the agent"),
+by default the project's ``ratk-runtime@`` (what ``gemini.deploy`` uses anyway). It has no
+Google-managed project role, so the bucket lives in the engine project and bucket-level
+bindings are enough. The probe also checks the metadata server hands out that account, and
+that its token cannot list the bucket. (The deploy can no longer target the default Agent
+Runtime service agent, so the earlier "bucket in another project" mode is gone.)
 
 Steps: create the bucket (uniform access) → bind the runtime identity to objectCreator +
 legacyObjectReader limited to ``jobs/`` → deploy a throwaway cold engine (in PROJECT) on
@@ -28,11 +24,10 @@ that bucket → run the two turns → delete the engine → delete the bucket an
 Everything is deleted in ``finally``. The service account itself is yours to create and
 delete (see the README's gcloud sketch).
 
-Env: PROJECT (default my-project), RUNTIME_SA (default unset), OUTPUT_PROJECT
-(default: PROJECT with RUNTIME_SA, else other-project), LOCATION (us-central1), SUFFIX
-(username), KEEP=1 to keep the engine and bucket for inspection.
-Run:  RUNTIME_SA=ratk-runtime-probe@my-project.iam.gserviceaccount.com \
-      .venv/bin/python dev/live_scoped_gcs.py
+Env: PROJECT (default my-project), RUNTIME_SA (default ratk-runtime@PROJECT),
+OUTPUT_PROJECT (default PROJECT), LOCATION (us-central1), SUFFIX (username), KEEP=1 to keep
+the engine and bucket for inspection.
+Run:  .venv/bin/python dev/live_scoped_gcs.py
 Cost: one ~4 min build + cents of Haiku.
 """
 from __future__ import annotations
@@ -48,19 +43,18 @@ import traceback
 
 from remote_agent_toolkit import AgentSpec, gemini
 from remote_agent_toolkit.ports.blobstore import GcsBlobStore
+from remote_agent_toolkit.runtime.gemini._deploy import default_runtime_service_account
 
 PROJECT = os.environ.get("PROJECT", "my-project")
 LOCATION = os.environ.get("LOCATION", "us-central1")
-# The engine's runtime identity. Set: a service account you created, deployed with
-# ``service_account=``; it holds only what you grant. Unset: the default Agent Runtime
-# service agent, which holds the Google-managed ``roles/aiplatform.reasoningEngineServiceAgent``
-# on the ENGINE project, and that role carries storage.objects.get/list on every bucket
-# there, so a bucket in the engine project stays readable to it whatever the bucket's own
-# bindings say (verified 2026-09-02).
-RUNTIME_SA = os.environ.get("RUNTIME_SA") or None
-# The bucket's project: the engine project with a custom runtime identity, otherwise a
-# project where the default service agent has no project role.
-OUTPUT_PROJECT = os.environ.get("OUTPUT_PROJECT") or (PROJECT if RUNTIME_SA else "other-project")
+# The engine's runtime identity: a service account you created, deployed with
+# ``service_account=``; it holds only what you grant. Default: the project's ratk-runtime@,
+# which gemini.deploy uses when the argument is omitted. (The default Agent Runtime service
+# agent holds the Google-managed ``roles/aiplatform.reasoningEngineServiceAgent`` on the
+# engine project, which reads every bucket there whatever the bucket's own bindings say,
+# verified 2026-09-02; the toolkit no longer deploys as it.)
+RUNTIME_SA = os.environ.get("RUNTIME_SA") or default_runtime_service_account(PROJECT)
+OUTPUT_PROJECT = os.environ.get("OUTPUT_PROJECT") or PROJECT
 SUFFIX = re.sub(r"[^a-z0-9-]", "-", (os.environ.get("SUFFIX") or getpass.getuser()).lower())
 NAME = f"ratk-scoped-gcs-{SUFFIX}"
 BUCKET = f"{PROJECT}-agent-output-scoped-{SUFFIX}"
@@ -154,11 +148,8 @@ def _make_bucket() -> None:
 
 
 def _runtime_identity(client) -> str:
-    """The engine's runtime identity: RUNTIME_SA, else the project's Agent Runtime service agent."""
-    if RUNTIME_SA:
-        return RUNTIME_SA
-    number = client.get_service_account_email().split("@")[0].split("-")[-1]
-    return f"service-{number}@gcp-sa-aiplatform-re.iam.gserviceaccount.com"
+    """The engine's runtime identity (RUNTIME_SA; the deploy runs the engine as it)."""
+    return RUNTIME_SA
 
 
 def _delete_bucket() -> None:
@@ -228,9 +219,8 @@ async def main() -> int:
         print("\n===== PROBE OUTPUT =====\n" + (r2.text or ""), flush=True)
         text = r2.text or ""
         ok = ok and (not r2.is_error) and "token_status=200" in text
-        if RUNTIME_SA:
-            # The metadata server must hand out the custom account, not the default agent.
-            ok = ok and f"email={RUNTIME_SA}" in text
+        # The metadata server must hand out the runtime service account, not the default agent.
+        ok = ok and f"email={RUNTIME_SA}" in text
         ok = ok and all(f"list prefix={p} status=403" in text
                         for p in ("invocation-secrets/", "session-config/", "events/", "checkpoints/", "jobs/"))
         ok = ok and "get session-config with runtime identity status=403" in text

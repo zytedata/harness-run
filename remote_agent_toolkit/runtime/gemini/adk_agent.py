@@ -459,6 +459,14 @@ class ToolkitAgent(BaseAgent):
 
         secrets, secrets_warning = _fetch_secrets(secrets_uri)
         blobs, session_store = _checkpoint_ports(spec)
+        # The operator's control inbox (control.py), keyed by the RAW session id — the id
+        # the client holds and writes under. Read by the harness while the turn runs.
+        control_uri = os.environ.get("AGENT_CONTROL_GCS")
+        control = None
+        if control_uri:
+            from .control import GcsControlChannel
+
+            control = GcsControlChannel(control_uri, session_id)
         rc = RunContext(
             spec=spec,
             prompt=prompt,
@@ -473,6 +481,7 @@ class ToolkitAgent(BaseAgent):
             session_store=session_store,
             blobs=blobs,
             interactive=spec.checkpoint if spec.interactive is None else spec.interactive,
+            control=control,
         )
 
         # Every surfaced event also streams into the session-keyed GCS mirror as it happens
@@ -544,6 +553,16 @@ class ToolkitAgent(BaseAgent):
                 ))
             if secrets_warning is not None:  # value-free: staged secrets were unavailable
                 yield surface(secrets_warning)
+            if control is not None:
+                # Tells the client this turn's worker reads the inbox: send() may steer or
+                # interrupt it, and interrupt() waits for the worker instead of cancelling
+                # the job. Emitted before the (possibly slow) workspace prep — inbox objects
+                # are durable, so a message written now waits for the harness to start.
+                yield surface(AgentEvent(
+                    kind="status",
+                    summary="control channel ready (steer / interrupt accepted)",
+                    raw={"event": "control_ready", "inbox": f"{control_uri}/{session_id}/"},
+                ))
             prep = await asyncio.to_thread(_prepare_workspace, rc, prefer_baked_skills)
             prep["scoped_gcs"] = scoped_gcs  # durable record: GCS access ran on the run token
             yield surface(AgentEvent(kind="status", summary=prep["summary"], raw=prep))

@@ -23,6 +23,7 @@ import uuid
 from pathlib import Path
 from typing import Any, AsyncIterator, TYPE_CHECKING
 
+from ..control import ControlMessage, LocalControlChannel
 from ..events import AgentEvent, RunResult, RunStatus, StopReason
 from ._run import DrivenRun
 
@@ -112,6 +113,8 @@ class LocalSession:
         self._stop_reason: StopReason | None = None
         self._last_result: RunResult | None = None
         self._current_run: DrivenRun | None = None
+        # The running turn's control channel (steer / interrupt / stop); one per turn.
+        self._control: LocalControlChannel | None = None
 
     # -- session-config persistence (cross-process re-attach, same workdir) -----
 
@@ -157,7 +160,16 @@ class LocalSession:
         :class:`~remote_agent_toolkit.config.TurnConfig` overlay (invocation knobs only).
         *hooks* are Claude Agent SDK hook callbacks for this turn
         (``{HookEvent: [HookMatcher, ...]}``); see :meth:`~remote_agent_toolkit.runtime.base.Session.run`.
+
+        Raises ``RuntimeError`` while a turn is running: a second concurrent turn under
+        the same session id would corrupt its checkpoint and transcript. Use :meth:`send`
+        to talk to the running turn.
         """
+        if self.busy:
+            raise RuntimeError(
+                "this session is running a turn; run() cannot start another one. Use "
+                "send() to deliver a message into the running turn, or interrupt() first."
+            )
         return self._start(
             message, resume_sid=None, secrets=secrets, turn_config=config, hooks=hooks
         )
@@ -169,15 +181,30 @@ class LocalSession:
         secrets: dict[str, str] | None = None,
         config: TurnConfig | None = None,
         hooks: Any | None = None,
+        interrupt: bool = False,
+        message_id: str | None = None,
     ) -> DrivenRun:
-        """Resume this session with ``message`` (continues the conversation).
+        """Send ``message`` to this session.
 
-        Conversation + workspace continuity requires ``spec.checkpoint=True``; without it
-        this runs a fresh turn with no memory of the prior one. Pass ``secrets`` again (they
-        are not persisted across turns) so repo push auth is re-embedded on resume, and
-        *hooks* again for the same reason. ``config`` is a per-turn :class:`~remote_agent_toolkit.config.TurnConfig`; the
-        SESSION config cannot change here (bound at ``start_session``).
+        On an idle session this resumes the conversation as a new turn. Conversation +
+        workspace continuity requires ``spec.checkpoint=True``; without it this runs a fresh
+        turn with no memory of the prior one. Pass ``secrets`` again (they are not persisted
+        across turns) so repo push auth is re-embedded on resume, and *hooks* again for the
+        same reason. ``config`` is a per-turn :class:`~remote_agent_toolkit.config.TurnConfig`;
+        the SESSION config cannot change here (bound at ``start_session``).
+
+        On a RUNNING session the message goes INTO the running turn and the same
+        :class:`Run` is returned (see :meth:`~remote_agent_toolkit.runtime.base.Session.send`):
+        with ``interrupt=False`` the model sees it at its next step; with ``interrupt=True``
+        the model is interrupted first and continues from the message. ``message_id`` is
+        stamped on the ``user`` event that acknowledges delivery. ``secrets`` / ``config`` /
+        ``hooks`` cannot change mid-turn and are rejected then.
         """
+        if self.busy:
+            return self._send_into_running_turn(
+                message, interrupt=interrupt, message_id=message_id,
+                secrets=secrets, config=config, hooks=hooks,
+            )
         return self._start(
             message,
             resume_sid=self._session_id,
@@ -185,6 +212,36 @@ class LocalSession:
             turn_config=config,
             hooks=hooks,
         )
+
+    @property
+    def busy(self) -> bool:
+        """Whether a turn of this session is running (or started and not yet finished)."""
+        return self._current_run is not None and not self._current_run.done
+
+    def _send_into_running_turn(
+        self,
+        message: str,
+        *,
+        interrupt: bool,
+        message_id: str | None,
+        secrets: dict[str, str] | None,
+        config: TurnConfig | None,
+        hooks: Any | None,
+    ) -> DrivenRun:
+        if secrets or config is not None or hooks:
+            raise ValueError(
+                "secrets, config and hooks are bound when a turn starts and cannot change "
+                "while it runs; send() into a running turn takes only the message (and "
+                "interrupt= / message_id=). Interrupt the session first to start a new turn."
+            )
+        assert self._current_run is not None and self._control is not None
+        msg = ControlMessage(
+            op="interrupt" if interrupt else "steer",
+            message=message,
+            **({"message_id": message_id} if message_id else {}),
+        )
+        self._control.send(msg)
+        return self._current_run
 
     def _start(
         self,
@@ -219,7 +276,9 @@ class LocalSession:
             interactive=spec.checkpoint if spec.interactive is None else spec.interactive,
             hooks=hooks,
             workspace_dir=self._engine._workspace,
+            control=LocalControlChannel(),
         )
+        self._control = ctx.control
         engine = self._engine
 
         async def factory() -> AsyncIterator[AgentEvent]:
@@ -246,15 +305,42 @@ class LocalSession:
         self._stop_reason = stop_reason
         self._status = RunStatus.IDLE
 
-    async def interrupt(self) -> None:
-        """Interrupt the in-flight run (cancels the driver task)."""
+    async def interrupt(self, *, timeout: float = 60.0) -> None:
+        """Interrupt the running turn and leave the session idle and resumable.
+
+        The harness is asked to stop (``stop`` on the turn's control channel) and runs its
+        normal end-of-turn path: workspace snapshot, transcript, a terminal result with
+        ``StopReason.INTERRUPTED`` that keeps the turn's accounting. A later :meth:`send`
+        resumes from that checkpoint. No-op when nothing is running.
+
+        If the harness has not ended the turn within ``timeout`` seconds the driver task is
+        cancelled instead (the pre-existing behavior): the run then ends as an error result
+        with no checkpoint, and ``RunResult.warning`` says so.
+        """
         run = self._current_run
-        if run is not None and run.task is not None and not run.task.done():
-            run.task.cancel()
+        if run is None or run.done:
+            return
+        run.ensure_started()
+        assert run.task is not None
+        if self._control is not None:
+            self._control.send(ControlMessage(op="stop"))
             try:
-                await run.task
-            except asyncio.CancelledError:
+                await asyncio.wait_for(asyncio.shield(run.task), timeout)
+                return
+            except asyncio.TimeoutError:
                 pass
+            except asyncio.CancelledError:
+                return
+        run.cancel(
+            note=(
+                f"the harness did not end the turn within {timeout:g}s of the interrupt; "
+                "the run was cancelled without a checkpoint"
+            )
+        )
+        try:
+            await run.task
+        except asyncio.CancelledError:
+            pass
 
     @property
     def status(self) -> RunStatus:

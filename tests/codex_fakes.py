@@ -10,6 +10,7 @@ yielded), anything else is yielded as-is.
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from typing import Any
 
@@ -181,24 +182,35 @@ def codex_error(message: str, will_retry: bool = True) -> SimpleNamespace:
     )
 
 
-def make_async_codex(script: list, resolved: dict | None = _DEFAULT_RESOLVED) -> type:
+def make_async_codex(
+    script: list,
+    resolved: dict | None = _DEFAULT_RESOLVED,
+    follow_up_scripts: list[list] = (),
+) -> type:
     """A fake ``AsyncCodex`` class whose turn stream plays ``script``.
 
     Records every instance on ``instances``; each instance records ``login_keys``,
-    ``thread_starts`` / ``thread_resumes`` (kwargs), ``turns`` (prompt, kwargs) and
-    ``interrupted``. The thread id is ``"thr-fake"``.
+    ``thread_starts`` / ``thread_resumes`` (kwargs), ``turns`` (prompt, kwargs),
+    ``steers`` (the steer inputs) and ``interrupted``. The thread id is ``"thr-fake"``.
+    A callable script entry is invoked with the client (awaited if it returns a
+    coroutine) and its result, if any, is yielded. Each further ``thread.turn()`` on the
+    thread (the harness continuing after an interrupt) plays the next entry of
+    ``follow_up_scripts``.
     """
 
     class FakeHandle:
-        def __init__(self, client: FakeAsyncCodex) -> None:
+        def __init__(self, client: FakeAsyncCodex, turn_script: list) -> None:
             self._client = client
+            self._script = turn_script
 
         async def stream(self):
-            for entry in script:
+            for entry in self._script:
                 if isinstance(entry, Exception):
                     raise entry
                 if callable(entry):
                     result = entry(self._client)
+                    if asyncio.iscoroutine(result):
+                        result = await result
                     if result is not None:
                         yield result
                     continue
@@ -207,6 +219,9 @@ def make_async_codex(script: list, resolved: dict | None = _DEFAULT_RESOLVED) ->
         async def interrupt(self) -> None:
             self._client.interrupted = True
 
+        async def steer(self, input):
+            self._client.steers.append(input)
+
     class FakeThread:
         def __init__(self, client: FakeAsyncCodex, thread_id: str = _TID) -> None:
             self._client = client
@@ -214,7 +229,9 @@ def make_async_codex(script: list, resolved: dict | None = _DEFAULT_RESOLVED) ->
 
         async def turn(self, prompt, **kwargs):
             self._client.turns.append((prompt, kwargs))
-            return FakeHandle(self._client)
+            n = len(self._client.turns) - 1
+            turn_script = script if n == 0 else list(follow_up_scripts)[n - 1]
+            return FakeHandle(self._client, turn_script)
 
         async def read(self, **_kw):
             """The app-server's record of this thread — routing attribution.
@@ -242,6 +259,7 @@ def make_async_codex(script: list, resolved: dict | None = _DEFAULT_RESOLVED) ->
             self.thread_starts: list[dict] = []
             self.thread_resumes: list[tuple[str, dict]] = []
             self.turns: list[tuple[Any, dict]] = []
+            self.steers: list = []
             self.interrupted = False
             self.closed = False
             FakeAsyncCodex.instances.append(self)

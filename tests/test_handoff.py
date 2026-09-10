@@ -106,22 +106,34 @@ def test_handoff_lifecycle_rules_scope_to_prefix():
                 "matchesPrefix": ["out/session-config/", "out/turn-config/"],
             },
         },
+        {
+            # The control inbox (deleted on delivery by the worker) + delivered markers.
+            "action": {"type": "Delete"},
+            "condition": {
+                "age": 30,
+                "matchesPrefix": ["out/control/", "out/control-delivered/"],
+            },
+        },
     ]
     _, bare = handoff.handoff_lifecycle_rules("gs://bkt")
     assert bare[0]["condition"]["matchesPrefix"] == ["invocation-secrets/"]
     assert bare[1]["condition"]["matchesPrefix"] == ["session-config/", "turn-config/"]
+    assert bare[2]["condition"]["matchesPrefix"] == ["control/", "control-delivered/"]
 
 
 def test_ensure_lifecycle_appends_only_missing_rules():
     # A bucket configured by an older revision has a secrets-only delete rule; ensure()
-    # must notice the uncovered config prefixes and append only the config rule (the
-    # existing secrets coverage is respected, not duplicated).
+    # must notice the uncovered config and control prefixes and append only those rules
+    # (the existing secrets coverage is respected, not duplicated).
     old = {"action": {"type": "Delete"},
            "condition": {"age": 1, "matchesPrefix": ["invocation-secrets/"]}}
     bucket = _FakeBucket([old])
     assert handoff.ensure_handoff_lifecycle("gs://bkt", bucket_obj=bucket) is True
-    assert bucket.patched == 1 and len(bucket.lifecycle_rules) == 2
+    assert bucket.patched == 1 and len(bucket.lifecycle_rules) == 3
     assert bucket.lifecycle_rules[1]["condition"]["age"] == handoff.CONFIG_LIFECYCLE_DAYS
+    assert bucket.lifecycle_rules[2]["condition"]["matchesPrefix"] == [
+        "control/", "control-delivered/",
+    ]
 
 
 class _FakeBucket:
@@ -151,7 +163,7 @@ def test_ensure_handoff_lifecycle_preserves_foreign_rules_and_never_raises():
     foreign = {"action": {"type": "Delete"}, "condition": {"age": 30, "matchesPrefix": ["logs/"]}}
     bucket = _FakeBucket([foreign])
     assert handoff.ensure_handoff_lifecycle("gs://bkt", bucket_obj=bucket) is True
-    assert foreign in bucket.lifecycle_rules and len(bucket.lifecycle_rules) == 3
+    assert foreign in bucket.lifecycle_rules and len(bucket.lifecycle_rules) == 4
 
     class Exploding:
         @property

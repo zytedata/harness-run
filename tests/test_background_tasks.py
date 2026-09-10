@@ -233,14 +233,16 @@ def test_active_reinvocation_is_not_subject_to_notification_grace(tmp_path, monk
     # for each stream read so the state boundary is deterministic without sleeping.
     import remote_agent_toolkit.harness.claude_code as harness_mod
 
-    original_wait_for = harness_mod.asyncio.wait_for
+    # Stream reads go through ControlledStream.next(timeout) (the stream and the operator's
+    # control channel are read together); record the timeout each read was given.
+    original_next = harness_mod.ControlledStream.next
     timeouts = []
 
-    async def recording_wait_for(awaitable, timeout):
+    async def recording_next(self, timeout):
         timeouts.append(timeout)
-        return await original_wait_for(awaitable, timeout)
+        return await original_next(self, timeout)
 
-    monkeypatch.setattr(harness_mod.asyncio, "wait_for", recording_wait_for)
+    monkeypatch.setattr(harness_mod.ControlledStream, "next", recording_next)
 
     script = [
         init_msg(),

@@ -19,9 +19,14 @@ def make_session(monkeypatch, *, warm=False):
     return backend.GeminiSession(engine, "audit")
 
 
-def test_warm_interrupt_preserves_job_before_local_completion(monkeypatch):
+@pytest.mark.parametrize("control_ready", [False, True])
+def test_warm_interrupt_preserves_job_before_local_completion(monkeypatch, control_ready):
     session = make_session(monkeypatch, warm=True)
     cancelled = []
+    deleted_controls = []
+    from remote_agent_toolkit.runtime.gemini import control
+    monkeypatch.setattr(control, "send_control", lambda *a, **kw: "stop-key")
+    monkeypatch.setattr(control, "delete_control", lambda uri, key: deleted_controls.append(key))
     monkeypatch.setattr(session._engine, "_agent_engines", lambda: SimpleNamespace(
         cancel_query_job=lambda **kw: cancelled.append(kw)))
 
@@ -38,11 +43,13 @@ def test_warm_interrupt_preserves_job_before_local_completion(monkeypatch):
         session._current_run = run
         run.ensure_started()
         await asyncio.wait_for(started.wait(), timeout=2)
-        await asyncio.wait_for(session.interrupt(), timeout=2)
+        session._control_ready = control_ready
+        await asyncio.wait_for(session.interrupt(timeout=0.01), timeout=2)
         assert run.done and session._worker is None
 
     asyncio.run(exercise())
     assert cancelled == [{"name": "dummy", "config": {"operation_name": "audit-worker-job"}}]
+    assert deleted_controls == (["stop-key"] if control_ready else [])
 
 
 @pytest.mark.parametrize("phase", ["mint", "config", "turn-config", "claim"])
@@ -129,7 +136,7 @@ def test_active_run_is_not_cleaned_by_a_second_submission(monkeypatch):
     session._current_run = SimpleNamespace(done=False)
     session._staged_secrets_uri = "gs://audit-bucket/first-turn-secret"
     monkeypatch.setattr(session, "_stage_secrets", lambda secrets: pytest.fail("second staging"))
-    with pytest.raises(RuntimeError, match="already active"):
+    with pytest.raises(RuntimeError, match="running a turn"):
         session.run("second")
     assert session._staged_secrets_uri == "gs://audit-bucket/first-turn-secret"
 

@@ -219,23 +219,46 @@ def test_gemini_session_run_drives_from_sink(monkeypatch):
     assert captured["config"]["output_gcs_uri"] == "gs://out/jobs/sid-1.jsonl"
 
 
-def test_gemini_interrupt_cancels_remote_job(monkeypatch):
+def test_gemini_interrupt_cancels_remote_job_when_the_worker_has_no_control_channel(monkeypatch):
+    # The fallback: the worker never announced the control inbox (a cold job still
+    # starting, or an engine deployed before the inbox existed), so interrupt() cannot
+    # ask it to stop cleanly — it cancels the tail and the run_query_job, and the run's
+    # error result says why there is no checkpoint.
     import types
 
     spec = AgentSpec(name="g", model="m")
-    engine = backend.GeminiEngine(resource="r/reasoningEngines/1", spec=spec, project=None, location=None)
+    engine = backend.GeminiEngine(resource="r/reasoningEngines/1", spec=spec,
+                                  project=None, location=None, output_bucket="gs://out")
     cancelled = {}
 
     class FakeAE:
+        def run_query_job(self, name, config):
+            return types.SimpleNamespace(job_name="jobX")
+
         def cancel_query_job(self, name, config):
             cancelled["name"] = name
             cancelled["op"] = config["operation_name"]
 
     monkeypatch.setattr(engine, "_agent_engines", lambda: FakeAE())
+
+    async def silent_tail(*a, **kw):  # the worker never writes anything
+        await asyncio.Event().wait()
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(backend, "tail_stream", silent_tail)
+    monkeypatch.setattr(backend, "_watched_tail", lambda tail, *a, **kw: tail())
     session = backend.GeminiSession(engine, "sid")
-    session._last_job = types.SimpleNamespace(job_name="jobX")  # as run_query_job would set it
-    asyncio.run(session.interrupt())
+
+    async def go():
+        run = session.run("go")
+        await asyncio.sleep(0.01)
+        await session.interrupt()
+        return run
+
+    run = asyncio.run(go())
     assert cancelled == {"name": engine.resource, "op": "jobX"}
+    assert run.done and run.result.is_error and "without a checkpoint" in run.result.warning
+    assert session.stop_reason == StopReason.ERROR
 
 
 def test_gemini_session_send_prefixes_resume(monkeypatch):
@@ -626,6 +649,30 @@ def test_transcript_only_spec_does_not_resume_the_conversation(tmp_path, monkeyp
     asyncio.run(_drain(agent._run_turn(spec, "sid-t", "go", "sid-t")))
     assert seen["session_store"] is not None  # the transcript is still mirrored
     assert seen["resume_sid"] is None
+
+
+def test_deploy_resolves_and_checks_the_runtime_service_account_before_side_effects(monkeypatch):
+    # service_account omitted → the project's ratk-runtime@, and its existence is checked
+    # BEFORE the pub/sub ensure, the staging upload and the billable build: a missing
+    # account stops the deploy right there with the fix in the message. The stub raises to
+    # prove the check runs first (nothing after it is reached).
+    from remote_agent_toolkit.runtime.gemini import _deploy
+
+    seen = {}
+
+    def _check(project, service_account, credentials=None):
+        seen.update(project=project, service_account=service_account)
+        raise _deploy.RuntimeServiceAccountMissing("missing (stub)")
+
+    monkeypatch.setattr(_deploy, "check_runtime_service_account_exists", _check)
+    with pytest.raises(_deploy.RuntimeServiceAccountMissing):
+        backend.deploy(AgentSpec(name="w", model="m"), project="p", location="l")
+    assert seen == {"project": "p", "service_account": "ratk-runtime@p.iam.gserviceaccount.com"}
+
+    with pytest.raises(_deploy.RuntimeServiceAccountMissing):
+        backend.deploy(AgentSpec(name="w", model="m"), project="p", location="l",
+                       service_account="own@p.iam.gserviceaccount.com")
+    assert seen["service_account"] == "own@p.iam.gserviceaccount.com"
 
 
 def test_deploy_rejects_the_local_only_workspace_argument():

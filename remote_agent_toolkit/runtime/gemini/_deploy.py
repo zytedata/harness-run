@@ -33,7 +33,7 @@ import math
 import shutil
 import tempfile
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from ...spec import AgentSpec
@@ -277,6 +277,10 @@ def build_env(
         # batches as events happen and the client tails the listing (stream.py). Cloud
         # Logging is emit-only (ops/debug), never tailed.
         env["AGENT_EVENTS_GCS"] = f"{output_bucket}/events"
+        # The control inbox (control.py): the worker polls control/<sid>/ while a turn
+        # runs, so Session.send() can steer or interrupt it from any process. Its presence
+        # in a revision's env is how the client knows that revision's workers read it.
+        env["AGENT_CONTROL_GCS"] = f"{output_bucket}/control"
 
     # Checkpoint/resume mirrors each turn's conversation + workspace to GCS, and a
     # transcript-only spec mirrors the conversation alone. Either needs a bucket to write
@@ -407,6 +411,87 @@ def validate_resource_limits(resource_limits: dict[str, str]) -> None:
         raise ValueError(f"resource_limits memory must be '1Gi'..'32Gi'; got {memory!r}")
 
 
+# The identity engines run as (``AgentEngineConfig.service_account``). A deploy ALWAYS names
+# one: the platform default, the Google-managed Agent Runtime service agent, holds a project
+# role that reads every bucket in the project and the agent's shell can use its token
+# (README "The runtime identity is reachable by the agent"), so the toolkit never deploys
+# as it. ``ratk-gcp-setup`` creates the default account below with the README role set.
+DEFAULT_RUNTIME_SA_ID = "ratk-runtime"
+
+
+def default_runtime_service_account(project: str) -> str:
+    """The runtime service account ``deploy`` uses when ``service_account=`` is omitted."""
+    return f"{DEFAULT_RUNTIME_SA_ID}@{project}.iam.gserviceaccount.com"
+
+
+def resolve_runtime_service_account(project: str, service_account: str | None) -> str:
+    """``service_account`` as given, or the project's default runtime account when ``None``.
+
+    An empty string is rejected: passed through, the SDK would read it as "platform
+    default", which is exactly the identity the toolkit refuses to deploy as.
+    """
+    if service_account is None:
+        return default_runtime_service_account(project)
+    if not isinstance(service_account, str) or not service_account.strip():
+        raise ValueError(
+            "service_account must be a service account email, or None for the project's "
+            f"default ({DEFAULT_RUNTIME_SA_ID}@<project>.iam.gserviceaccount.com); "
+            f"got {service_account!r}"
+        )
+    return service_account.strip()
+
+
+class RuntimeServiceAccountMissing(ValueError):
+    """The service account the engine should run as does not exist in the project."""
+
+
+def check_runtime_service_account_exists(
+    project: str, service_account: str, credentials: Any | None = None
+) -> None:
+    """Fail BEFORE any billable side effect when the runtime service account is missing.
+
+    One ``GET iam.googleapis.com/v1/projects/{project}/serviceAccounts/{email}`` with the
+    deployer's credentials (``credentials`` or ADC). A 404 raises
+    :class:`RuntimeServiceAccountMissing` naming the fix (``ratk-gcp-setup``). Any other
+    outcome (no ``iam.serviceAccounts.get``, a network error) only warns: if the account
+    is really unusable the deploy fails on its own with the platform's "permission to act
+    as service_account" error, and a flaky IAM read must never block a deploy.
+    """
+    import warnings
+
+    url = f"https://iam.googleapis.com/v1/projects/{project}/serviceAccounts/{service_account}"
+    try:
+        import google.auth
+        from google.auth.transport.requests import AuthorizedSession
+
+        creds = credentials
+        if creds is None:
+            creds, _ = google.auth.default(
+                scopes=["https://www.googleapis.com/auth/cloud-platform"]
+            )
+        status = AuthorizedSession(creds).get(url, timeout=30).status_code
+    except Exception as exc:  # noqa: BLE001 — a failed CHECK must not block the deploy
+        warnings.warn(
+            f"could not verify that runtime service account {service_account} exists: {exc}",
+            stacklevel=2,
+        )
+        return
+    if status == 404:
+        raise RuntimeServiceAccountMissing(
+            f"runtime service account {service_account} does not exist in project "
+            f"{project!r}. Run `ratk-gcp-setup --project {project}` to create it with the "
+            'roles the worker needs (README "GCP setup & required permissions"), or pass '
+            "service_account= with an account you created."
+        )
+    if status >= 400:
+        warnings.warn(
+            f"could not verify that runtime service account {service_account} exists "
+            f"(HTTP {status} from the IAM API); the deploy goes on and fails by itself if "
+            "the account is unusable",
+            stacklevel=2,
+        )
+
+
 def build_engine_config(
     spec: AgentSpec,
     *,
@@ -424,7 +509,7 @@ def build_engine_config(
     min_instances: int = 0,
     max_instances: int = 1,
     resource_limits: dict[str, str] | None = None,
-    service_account: str | None = None,
+    service_account: str,
 ) -> dict:
     """Build the kwargs dict for ``agentplatform.types.AgentEngineConfig(**kwargs)``.
 
@@ -440,17 +525,21 @@ def build_engine_config(
     mid-turn; raise it (up to ``"32Gi"``) for such agents. The kwarg is omitted from the
     config when None so the platform default stays authoritative.
 
-    ``service_account`` is the engine's runtime identity (the email of a service account
-    you created). Omitted → the platform default, the Agent Runtime service agent shared
-    by every engine in the project, whose Google-managed project role reads every bucket
-    in the project (README "The runtime identity is reachable by the agent"). A custom
-    service account holds only what you grant it, so bucket-level bindings are enough.
+    ``service_account`` is the engine's runtime identity and is required: the backend
+    resolves it first (:func:`resolve_runtime_service_account`, ``None`` → the project's
+    ``ratk-runtime@``). The config never omits it, because omitted means the platform
+    default, the Agent Runtime service agent whose Google-managed project role reads every
+    bucket in the project (README "The runtime identity is reachable by the agent").
     """
     if resource_limits is not None:
         validate_resource_limits(resource_limits)
     extra: dict = {"resource_limits": dict(resource_limits)} if resource_limits else {}
-    if service_account:
-        extra["service_account"] = service_account
+    if not service_account:
+        raise ValueError(
+            "service_account is required (resolve it with resolve_runtime_service_account); "
+            "an engine is never deployed as the platform default identity"
+        )
+    extra["service_account"] = service_account
     return {
         **extra,
         "display_name": spec.name,

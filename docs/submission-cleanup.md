@@ -26,3 +26,10 @@ subscription workers still lack a per-turn cancellation target.
 
 The regression tests use fake dispatch/storage, dummy values, and local waiting
 tasks only. They do not create or cancel real jobs.
+
+The current turn-control API first requests a graceful stop when the worker has
+announced its control inbox. Successful graceful stops preserve the checkpoint and
+do not cancel the remote job. If that wait times out (or the inbox is unavailable),
+we capture the current worker job before local cancellation clears it. The cleanup
+regression covers both fallback paths; setup validation still happens before dispatch
+and the run retains its control-readiness observer.

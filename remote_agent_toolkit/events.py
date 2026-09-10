@@ -31,6 +31,10 @@ class StopReason(str, Enum):
     END_TURN = "end_turn"
     MAX_TURNS = "max_turns"
     BUDGET_EXCEEDED = "budget_exceeded"
+    # The operator stopped the turn with ``Session.interrupt()``. The turn ended through
+    # the normal end-of-turn path (checkpoint taken, accounting kept), so the session is
+    # idle and a later ``send()`` resumes it. Not an error.
+    INTERRUPTED = "interrupted"
     ERROR = "error"
 
 
@@ -40,9 +44,16 @@ class AgentEvent:
 
     ``cost_usd`` and ``usage`` are populated only on the terminal ``"result"`` event.
     ``raw`` carries the original harness/SDK payload for callers that need detail.
+
+    A ``"user"`` event is an operator message delivered INTO a running turn
+    (``Session.send()`` while the session is running): ``summary`` is the message text and
+    ``raw`` carries ``event: user_message``, the caller's ``message_id`` and whether it
+    came with an ``interrupt``. It is emitted when the harness hands the message to the
+    model, so it doubles as the acknowledgement that the model has it. The turn's opening
+    prompt is not echoed this way.
     """
 
-    kind: Literal["thinking", "tool_use", "tool_result", "message", "status", "result"]
+    kind: Literal["thinking", "tool_use", "tool_result", "message", "user", "status", "result"]
     summary: str
     raw: dict | None = None
     cost_usd: float | None = None

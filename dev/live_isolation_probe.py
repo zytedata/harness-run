@@ -6,6 +6,13 @@ bucket, no object content is read except the run's OWN staged secrets object, wh
 a made-up canary value; the script prints only key NAMES, HTTP statuses, counts and
 lengths. No token, no secret value, no object name is printed.
 
+The deploy runs the engine as the project's ``ratk-runtime@`` service account (there is no
+way to deploy as the default Agent Runtime service agent any more), so on a project set up
+with ``ratk-gcp-setup`` this probe shows the FIXED state: the shell still gets a token
+(step 3: 200) but step 4 and step 5 must return 403. Use it as the post-migration check
+(README "Migrating an existing project"). The original finding (2026-09-02) was recorded
+with the default identity, which this checkout can no longer reproduce.
+
 What the script checks, in order:
   1. uid / user of the agent's shell
   2. environment variable NAMES (values only for *GCS* / *BUCKET* vars: bucket paths)

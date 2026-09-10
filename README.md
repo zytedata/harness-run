@@ -44,11 +44,18 @@ pip install "remote-agent-toolkit[local] @ git+ssh://git@github.com/zytedata/rem
 
 Releases are git tags — pin one to shield yourself from in-development changes on `main`
 (see [`CHANGELOG.md`](CHANGELOG.md) for what's in each release and how to upgrade across
-breaking changes):
+breaking changes). Every release is also published to Zyte's internal PyPI, which is what
+Scrapy Cloud builds and other environments without access to this git repo should use:
 
 ```bash
-pip install "git+ssh://git@github.com/zytedata/remote-agent-toolkit.git@v0.2.0"
+# From the internal PyPI (read credentials: the usual pkgrepo user, or ask IT support):
+pip install "remote-agent-toolkit==0.3.0" --extra-index-url "https://<user>:<password>@pypi.internal.example/simple/"
+# Straight from the git tag:
+pip install "git+ssh://git@github.com/zytedata/remote-agent-toolkit.git@v0.3.1"
 ```
+
+Every push to `main` also publishes a dev build there, `X.Y.Z.dev<n>`; it sorts before the
+release of the same version, so you only get one by pinning it exactly.
 
 Developing on the toolkit itself (early users are expected to contribute)? Clone it and `uv sync` — that
 installs the runtime deps plus the `dev` group (pytest, ruff, mypy, and the harness SDKs —
@@ -623,6 +630,59 @@ anywhere (worker OOM, external cancel, engine deleted) ends the run within ~3 mi
 explaining the job state — instead of waiting out the 1 h tail cap. Warm turns run in a pool worker without
 a per-turn job handle, so they get the bounded polls only.
 
+## Talking to a running turn: steer, interrupt, stop
+
+The session API is turn-based, and an interactive loop like Claude Code's needs two more things while
+a turn is **running**: send a message into it, and cut it short without losing the session. Both work
+the same on `local` and `gemini`, and from any process that holds the session id
+(`engine.get_session(session_id)`):
+
+```python
+run = session.run("Build the spider")
+
+# The operator changes their mind while the agent works. Same Run, same worker, same workspace:
+session.send("Actually skip the images, only product fields")            # steer: the model sees it at its next step
+session.send("Stop that approach, use the sitemap instead", interrupt=True)  # interrupt, then continue from this message
+
+# Or just stop. The turn ends through its normal end-of-turn path (checkpoint, transcript, accounting):
+await session.interrupt()
+assert session.stop_reason == "interrupted"     # idle and resumable
+await session.send("OK, now do X")              # a normal turn, from the interrupted turn's checkpoint
+```
+
+- **`send()` on a running session** delivers the message into the running turn and returns the **same
+  `Run`**: its events keep flowing and its single `result` covers everything. With `interrupt=False`
+  the message is queued for the model's next step (both harnesses: Claude Code's mid-turn `query()`,
+  Codex's `turn/steer`). With `interrupt=True` the model is interrupted first and continues from the
+  message in the same harness session — no checkpoint round-trip, no second job. On an idle session
+  `send()` is the usual resume (`interrupt` is ignored).
+- **The `user` event is the acknowledgement.** Each delivered message appears on the stream, in the
+  mirror and in `history()` as an event of kind `user` (the text as `summary`; `raw["message_id"]`,
+  `raw["interrupt"]`), emitted when the harness hands it to the model. Pass your own
+  `message_id=` to match it up; the worker dedupes on it, so a retried send after re-attaching never
+  reaches the model twice. Until that event arrives the message is "waiting" — on `gemini` about
+  2 s (the worker polls its inbox every 1.5 s), plus whatever tool call the model is in the middle of.
+- **`interrupt()` is "interrupt and stop"**: the harness stops what the model is doing and the turn
+  ends with `StopReason.INTERRUPTED` — not an error; `cost_usd` / `usage` / `num_turns` are real, the
+  checkpoint includes the interrupted turn's workspace changes, and the next `send()` resumes from it.
+  Only when the worker cannot be reached (an engine deployed before this existed, or a cold job that
+  has not started yet) or does not stop within the timeout does it fall back to cancelling the run:
+  an error result whose `warning` says so, and no checkpoint.
+- **Guards.** `run()` on a running session raises: a second concurrent turn under one session id would
+  corrupt its checkpoint and transcript. `secrets` / `config` / `hooks` cannot change mid-turn and are
+  rejected on a running `send()`. A running turn on a `gemini` engine whose serving revision was
+  deployed before the control inbox existed raises `ControlUnavailable` (nothing is sent) — a typed
+  exception, so a caller can queue the message until the session is idle instead.
+- **Transport (`gemini`).** The client writes the message to `control/<sid>/` under the output bucket;
+  the worker polls that prefix while the harness runs, hands each message over in order and deletes
+  it, and records the id under `control-delivered/<sid>/`. The worker announces the inbox with a
+  `control_ready` status event at the start of the turn. Messages that arrive before a cold worker
+  starts wait in the inbox; a message that lands just after the turn ended is delivered at the start
+  of the session's next turn. On `local` the same channel is an in-process queue.
+
+The interactive system-prompt suffix (`checkpoint=True`) still tells the model to end its turn for a
+genuine decision; steering is additive — the way to talk to an agent that is *already* working.
+
 ## Structured output
 
 Set `output_schema` to a **pydantic model** (or a JSON-schema `dict`) and `result.structured_output` holds
@@ -833,10 +893,12 @@ toolkit does the first two for you:
   another run's turn (its pointers and token). Idle workers are tracked in a client-owned roster under
   `pool/` in the output bucket. A warm engine deployed before this still runs one shared subscription
   (`get_engine(warm_pool=True)` warns); redeploy it.
-- **Run the engine as a service account you create**, with `gemini.deploy(..., service_account=...)`. The
-  default identity, the Google-managed Agent Runtime service agent, holds a project role that reads every
-  bucket in the project, and a bucket binding cannot take a project-level permission away. Give your
-  runtime service account only the roles in [GCP setup & required permissions](#gcp-setup--required-permissions):
+- **The engine runs as a service account you own.** `gemini.deploy` runs it as
+  `ratk-runtime@<project>.iam.gserviceaccount.com` (created by `ratk-gcp-setup`) unless `service_account=`
+  names another account you created; it never deploys as the platform default, and a missing account fails
+  the deploy before the build. The default identity, the Google-managed Agent Runtime service agent, holds a
+  project role that reads every bucket in the project, and a bucket binding cannot take a project-level
+  permission away. Give your runtime service account only the roles in [GCP setup & required permissions](#gcp-setup--required-permissions):
   a predict-only custom role instead of `roles/aiplatform.user` (which would hand the shell every run's
   job id and engine admin), no read or list right on the output bucket beyond the two conditional
   `jobs/` bindings, and nothing under `pool/`.
@@ -847,8 +909,8 @@ a fresh sandbox per job, so nothing a run leaves behind survives into the next o
 
 **Migrating an existing project.** Create the runtime service account and its bindings (`ratk-gcp-setup
 --project <id>`, or the gcloud sketch in the setup section), redeploy every engine (`gemini.list_engines`)
-from this revision with
-`service_account=` set, and upgrade clients at the same time. Mixed versions keep working on the runtime
+from this revision (the deploy runs it as the runtime service account by default), and upgrade clients at
+the same time. Mixed versions keep working on the runtime
 identity, which is the unfixed state, never a broken one. Once no engine still runs as the default service
 agent, remove its `objectAdmin` on the output bucket and `roles/aiplatform.user` on the project; an engine
 not redeployed by then stops finding its staged objects, which is the intended failure. Run
@@ -1179,7 +1241,9 @@ in their own project; the concrete values are the shared `my-project` setup we u
 > failing (the model check runs as a 1-token live probe in the first report, so a missing Model Garden
 > enablement surfaces before any money is spent). It creates the runtime service account
 > (`ratk-runtime@<project>.iam.gserviceaccount.com`, with the `ratkRuntimePredict` custom role and the
-> conditional bucket bindings below); pass its email as `service_account=` to every `gemini.deploy`.
+> conditional bucket bindings below); every `gemini.deploy` runs the engine as it unless `service_account=`
+> names another account you created. There is no way to deploy as the platform default, and a missing
+> account fails the deploy before the build.
 > It grants the default Agent Runtime service agent nothing, and reports grants that agent still holds
 > from the earlier identity model as a note to remove by hand (the tool never removes anything).
 > Two things stay manual: enabling Claude in Vertex Model Garden (the tool live-probes each model —
@@ -1195,7 +1259,7 @@ project (tighten to your policy):
 | Role | Why |
 |---|---|
 | `roles/aiplatform.user` | create/list engines, run query jobs, create sessions |
-| `roles/storage.admin` (or objectAdmin on the buckets) | stage the deploy bundle; read job output; mint the per-turn run-scoped GCS tokens (a downscoped token can only carry rights its source already has) |
+| `roles/storage.admin` on the two buckets (at minimum `objectAdmin` **plus** `legacyBucketReader` on the output bucket) | stage the deploy bundle; read job output; mint the per-turn run-scoped GCS tokens (a downscoped token can only carry rights its source already has). The bucket-level right is not optional: the Agent Engine SDK checks that the output bucket exists (`storage.buckets.get`) before every `run_query_job`, and `objectAdmin` alone fails it with "Permission denied to check existence of bucket" |
 | `roles/logging.viewer` | tail the per-step event stream from the client |
 | `roles/cloudbuild.builds.editor` | the deploy builds the engine image |
 | `roles/pubsub.editor` _(warm pool only)_ | create/retire the per-deploy dispatch topic and the per-worker subscriptions + publish turns |
@@ -1213,10 +1277,11 @@ rotate keys you do hand out.
 **2. The runtime identity** — the identity the engine's workers run as, and the one the agent's shell
 can use (see [The runtime identity is reachable by the agent](#the-runtime-identity-is-reachable-by-the-agent)).
 `ratk-gcp-setup` creates it as `ratk-runtime@<project>.iam.gserviceaccount.com` (or create one yourself)
-and every `gemini.deploy` names it as `service_account="<its email>"`.
-Without `service_account=` the engine runs as the Google-managed **Agent Runtime service agent**,
+and `gemini.deploy` runs every engine as it unless `service_account=` names another account you created
+(`--runtime-sa` gives the setup tool another name; pass that one to every deploy). The toolkit never deploys
+as the Google-managed **Agent Runtime service agent**,
 `service-<PROJECT_NUMBER>@gcp-sa-aiplatform-re.iam.gserviceaccount.com`, whose managed project role
-reads every bucket in the project. **All runtime resource access authorizes against this identity, not
+reads every bucket in the project; only engines deployed before this revision still run as it. **All runtime resource access authorizes against this identity, not
 the operator SA** — granting the operator SA a runtime role does nothing for the running job. Grant the
 runtime service account (verified live 2026-09-03 and 2026-09-04 with this set):
 
@@ -1300,7 +1365,8 @@ gcloud iam service-accounts add-iam-policy-binding $OP --member "user:you@org.co
 ```
 
 Then authenticate impersonating the operator SA (`gcloud auth application-default login
---impersonate-service-account=$OP`) and pass `service_account=$RT` to every `gemini.deploy`.
+--impersonate-service-account=$OP`); `gemini.deploy` runs engines as `$RT` by default (pass
+`service_account=` only for another account of yours).
 
 ## Latency & cost (the `gemini` path)
 

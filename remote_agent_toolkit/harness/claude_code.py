@@ -45,6 +45,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, AsyncIterator, Sequence, TYPE_CHECKING
 
+from ..control import ControlledStream, ControlMessage
 from ..events import AgentEvent
 from ..spec import SystemPrompt
 from ..structured import parse_structured_output
@@ -239,6 +240,46 @@ class _TaskTracker:
         return None
 
 
+class _SteerTracker:
+    """Tracks operator messages sent into the running turn (``client.query()`` mid-turn).
+
+    The CLI queues such a message and injects it into the NEXT model call it assembles; it
+    never echoes it on the stream. So the run loop cannot see the moment the model gets it
+    and uses the same delivery proof as :class:`_TaskTracker`: a boundary where the next
+    call is assembled — a ``tool_result``, or an ``init`` (a new invocation) — followed by
+    model output means that call carried the message. Until then the message is "waiting",
+    and a ``result`` arriving in that state is a segment boundary rather than the end of
+    the turn: the CLI may be about to start a new invocation for the queued message
+    (verified live: a message that arrives after the turn ended starts one immediately,
+    with a fresh ``init``).
+
+    An ``init`` stages rather than clears: the turn's opening ``init`` can already be in
+    the pipe when the message is written, so reading it proves nothing by itself. The same
+    small window exists for a boundary emitted just before the write and read just after
+    it; the settle wait in the run loop covers the case where no proof arrives at all.
+    """
+
+    def __init__(self) -> None:
+        self._undelivered = 0
+        self._staged = 0
+
+    def sent(self) -> None:
+        self._undelivered += 1
+
+    def observe(self, event: AgentEvent) -> None:
+        if event.kind == "tool_result" or (event.raw or {}).get("subtype") == "init":
+            self._staged += self._undelivered
+            self._undelivered = 0
+        elif event.kind in {"message", "thinking", "tool_use"}:
+            self._staged = 0
+
+    def clear(self) -> None:
+        self._undelivered = self._staged = 0
+
+    def waiting(self) -> bool:
+        return bool(self._undelivered or self._staged)
+
+
 class _StreamPhase(Enum):
     """Whether the CLI is running the model or is between model invocations."""
 
@@ -271,6 +312,18 @@ class ClaudeCodeHarness:
     # How many demoted (segment-boundary) result texts ride the final result event as
     # structured-output recovery candidates (``raw["segment_summaries"]``, newest first).
     _SEGMENT_FALLBACK_MAX = 3
+
+    # After a result arrives with an operator message still waiting (see _SteerTracker):
+    # how long to wait for the CLI to start a new invocation for it. Verified live: when the
+    # message missed the turn the CLI starts that invocation within milliseconds, so a
+    # short window decides it; a message consumed inside the turn just costs this delay at
+    # the end.
+    _STEER_SETTLE_S = 3.0
+
+    # After ``client.interrupt()``: how long to wait for the CLI's settle result (verified
+    # live: it arrives within milliseconds while the model is running; nothing comes when
+    # the model was already idle, e.g. waiting on background tasks).
+    _INTERRUPT_SETTLE_S = 5.0
 
     # -- option building -------------------------------------------------------
 
@@ -533,6 +586,15 @@ class ClaudeCodeHarness:
         (``raw["segment_summaries"]``, newest first), so ``build_result`` can recover
         the structured output when the model's reply to a stale task notification
         displaced it from the turn's final message.
+
+        Operator control (``ctx.control``, see :mod:`remote_agent_toolkit.control`) is
+        read alongside the stream. A ``steer`` is handed to the CLI with ``client.query()``
+        — the CLI injects it into the model's next call (verified live: the turn continues
+        and ends with one result). An ``interrupt`` calls ``client.interrupt()``; the CLI
+        answers with an ``error_during_execution`` result, which is the end of the turn for
+        a ``stop`` (re-stamped ``interrupted``, not an error) or a segment boundary when a
+        message follows (``client.query()`` again on the same client — verified live). Each
+        delivered message is surfaced as a ``user`` event.
         """
         ClaudeSDKClient = _sdk().ClaudeSDKClient
 
@@ -620,22 +682,91 @@ class ClaudeCodeHarness:
                 yield fin
 
         client = ClaudeSDKClient(options=options)
+        select: ControlledStream | None = None
+        # Operator messages delivered into the turn (ctx.control), and the interrupt whose
+        # settle result the loop is waiting for.
+        steers = _SteerTracker()
+        steer_deadline: float | None = None  # a result was demoted awaiting proof of delivery
+        interrupt_pending: ControlMessage | None = None
+        interrupt_deadline: float | None = None
+        last_text = ""  # the model's last message: the text an interrupted result reports
+
+        def mark_interrupted(event: AgentEvent, settle: bool) -> AgentEvent:
+            """Stamp the result an operator stop ends on: not an error, a pause.
+
+            ``settle`` is the CLI's answer to our interrupt (no text of its own: the
+            model's last message stands in); otherwise ``event`` is a real turn-end result
+            the stop landed after, whose own text is kept.
+            """
+            raw = event.raw if event.raw is not None else {}
+            raw["cli_reported_subtype"] = raw.get("subtype")
+            raw["subtype"] = "interrupted"
+            raw["is_error"] = False
+            event.raw = raw
+            if settle:
+                event.summary = last_text or "(interrupted)"
+            return event
+
+        def synthetic_interrupted() -> AgentEvent:
+            """The stop settled with no CLI result at all (nothing was running)."""
+            return AgentEvent(
+                kind="result",
+                summary=last_text or "(interrupted)",
+                raw={"subtype": "interrupted", "is_error": False, "num_turns": 0,
+                     "session_id": ctx.session_id, "interrupt_settled": False},
+            )
+
+        async def deliver(msg: ControlMessage) -> AgentEvent:
+            """Hand an operator message to the CLI; the returned ``user`` event is the ack."""
+            nonlocal phase
+            await client.query(msg.message or "")
+            steers.sent()
+            phase = _StreamPhase.ACTIVE  # a query starts (or continues) a model invocation
+            return msg.user_event()
+
         try:
             await client.connect()
             await client.query(ctx.prompt)
-            stream = client.receive_messages()
+            select = ControlledStream(client.receive_messages(), ctx.control)
             while True:
-                if not demoted or phase is _StreamPhase.ACTIVE:
+                now = asyncio.get_running_loop().time()
+                why: str | None = None
+                if interrupt_pending is not None and interrupt_deadline is not None:
+                    timeout, why = max(0.0, interrupt_deadline - now), "interrupt"
+                elif steer_deadline is not None:
+                    timeout, why = max(0.0, steer_deadline - now), "steer"
+                elif not demoted or phase is _StreamPhase.ACTIVE:
                     timeout = None  # model working; a foreground tool call may run long
                 elif tracker.waiting() == "pending" and wait_deadline is not None:
-                    timeout = max(1.0, wait_deadline - asyncio.get_running_loop().time())
+                    timeout, why = max(1.0, wait_deadline - now), "tasks"
                 else:  # terminal notification observed; re-invocation due momentarily
-                    timeout = self._UNDELIVERED_GRACE_S
-                try:
-                    message = await asyncio.wait_for(anext(stream), timeout)
-                except StopAsyncIteration:
+                    timeout, why = self._UNDELIVERED_GRACE_S, "tasks"
+                kind, item = await select.next(timeout)
+                if kind == "end":
                     break
-                except asyncio.TimeoutError:
+                if kind == "timeout":
+                    if why == "interrupt":
+                        # No settle result: the model was not running when interrupted.
+                        msg, interrupt_pending = interrupt_pending, None
+                        interrupt_deadline = None
+                        if msg.op == "stop":
+                            final = (
+                                mark_interrupted(demoted[-1], settle=False)
+                                if demoted else synthetic_interrupted()
+                            )
+                            async for final_event in finish(final):
+                                yield final_event
+                            return
+                        yield await deliver(msg)
+                        continue
+                    if why == "steer":
+                        # No new invocation followed the demoted result: the message was
+                        # consumed inside the turn, and that result is the turn's end.
+                        steer_deadline = None
+                        steers.clear()
+                        async for final_event in finish(demoted[-1]):
+                            yield final_event
+                        return
                     reason = tracker.waiting()
                     if reason == "pending":
                         summary = (
@@ -658,22 +789,101 @@ class ClaudeCodeHarness:
                         },
                     )
                     break
+                if kind == "control":
+                    msg = item
+                    if msg.op == "steer":
+                        yield await deliver(msg)
+                        continue
+                    # interrupt (then continue with the message) or stop.
+                    yield AgentEvent(
+                        kind="status",
+                        summary=(
+                            "interrupt requested by the operator"
+                            + ("; continuing with their message" if msg.op == "interrupt" else "")
+                        ),
+                        raw={"event": "interrupt_requested", "op": msg.op,
+                             "message_id": msg.message_id},
+                    )
+                    if phase is _StreamPhase.BETWEEN_INVOCATIONS and demoted:
+                        # The model is not running (the turn is waiting on background
+                        # tasks or on a queued message): there is nothing for the CLI to
+                        # interrupt and it would answer nothing. Act now instead of
+                        # waiting out the settle window — the last result is the turn's
+                        # end for a stop, and a message simply starts the next invocation.
+                        if msg.op == "stop":
+                            final = mark_interrupted(demoted[-1], settle=False)
+                            async for final_event in finish(final):
+                                yield final_event
+                            return
+                        steer_deadline = None
+                        yield await deliver(msg)
+                        continue
+                    # The model is running: interrupt the CLI and wait for its settle
+                    # result, which decides what happens next.
+                    try:
+                        await client.interrupt()
+                    except Exception:  # noqa: BLE001 — the settle wait bounds it either way
+                        pass
+                    interrupt_pending = msg
+                    interrupt_deadline = (
+                        asyncio.get_running_loop().time() + self._INTERRUPT_SETTLE_S
+                    )
+                    continue
+                message = item
                 if proxy is not None:
                     for proxy_event in proxy.drain_events():
                         yield proxy_event
                 for event in translator.translate(message):
                     tracker.observe(event)
+                    steers.observe(event)
+                    if event.kind == "message":
+                        last_text = event.summary
                     if (event.raw or {}).get("subtype") == "init":
                         # The notification grace ends as soon as the CLI starts the next
                         # invocation. Keep the demoted result only as a crash fallback; it
                         # must not impose a per-message timeout on an actively working model.
+                        # It also ends the steer settle wait: the CLI started the invocation
+                        # that carries the queued operator message (delivery proof follows
+                        # with that invocation's first output — see _SteerTracker).
                         phase = _StreamPhase.ACTIVE
                         wait_deadline = None
+                        steer_deadline = None
                     if event.kind != "result":
                         yield event
                         continue
                     turns_total += int((event.raw or {}).get("num_turns") or 0)
+                    if interrupt_pending is not None:
+                        # The CLI's answer to our interrupt (error_during_execution): the
+                        # turn's end for a stop, a segment boundary when a message follows.
+                        msg, interrupt_pending = interrupt_pending, None
+                        interrupt_deadline = None
+                        if msg.op == "stop":
+                            async for final_event in finish(mark_interrupted(event, settle=True)):
+                                yield final_event
+                            return
+                        demoted.append(event)
+                        yield AgentEvent(
+                            kind="status",
+                            summary="turn interrupted; continuing with the operator's message",
+                            raw={"event": "interrupted_segment", "message_id": msg.message_id},
+                        )
+                        yield await deliver(msg)
+                        continue
                     reason = None if (event.raw or {}).get("is_error") else tracker.waiting()
+                    if reason is None and steers.waiting():
+                        # An operator message was sent and nothing proves the model saw
+                        # it: if it missed the turn, the CLI starts a new invocation for
+                        # it right after this result. Hold the turn open briefly.
+                        demoted.append(event)
+                        phase = _StreamPhase.BETWEEN_INVOCATIONS
+                        steer_deadline = asyncio.get_running_loop().time() + self._STEER_SETTLE_S
+                        yield AgentEvent(
+                            kind="status",
+                            summary="turn ended with an operator message still queued; "
+                            "waiting briefly for the model to take it",
+                            raw={"event": "awaiting_steer"},
+                        )
+                        continue
                     if reason is None:
                         async for final_event in finish(event):
                             yield final_event
@@ -748,6 +958,8 @@ class ClaudeCodeHarness:
                 f"{exc} [claude stderr tail: {tail[-500:]}] (full log: {stderr_log.path})"
             ) from exc
         finally:
+            if select is not None:
+                await select.close()
             try:
                 await client.disconnect()
             except Exception:  # noqa: BLE001 — teardown must not mask the run's outcome

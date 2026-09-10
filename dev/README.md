@@ -49,4 +49,6 @@ money, so they run by hand, never in CI. See [`TESTING.md`](../TESTING.md) for w
 | [`live_openrouter_remote_probe.py`](live_openrouter_remote_probe.py) | `make live-openrouter-remote` | the same models on Agent Runtime, plus the remote-only visibility surface |
 | [`live_model_attribution.py`](live_model_attribution.py) | `make live-attribution` | did the turn run the model we asked for, from evidence the CLI and provider return |
 | [`live_usage_probe.py`](live_usage_probe.py) | `make live-usage` | usage/cost accounting on both harnesses — incl. the Codex subagent rollout recovery, which rides non-public rollout details; `SCENARIO=<name>` for one scenario |
+| [`live_interactive_probe.py`](live_interactive_probe.py) | `make live-interactive` | turn control on the local runtime, both harnesses: steer, interrupt + continue, stop, resume; prints a latency table |
+| [`chat.py`](chat.py) | `make chat` | a local chat page for trying turn control by hand: Send while the agent works = steer, Interrupt & send, Stop, resume; `HARNESS=codex` for Codex; needs `fastapi` + `uvicorn` in the venv |
 | [`openrouter_endpoints.py`](openrouter_endpoints.py) | — | lists a model's OpenRouter providers and their advertised features; free unless you pass `--probe` |

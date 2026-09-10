@@ -60,7 +60,14 @@ def run_object_prefixes(output_bucket: str, session_id: str) -> tuple[str, str, 
     ``output_bucket`` is the engine's ``gs://bucket[/prefix]``. The list is the whole GCS
     surface of a turn (handoff objects, the events mirror, checkpoints, artifacts); the
     checkpoint keys use the Claude session id the worker derives from the toolkit session
-    id (``session_store._claude_session_id``), so the mapping is done here too.
+    id (``session_store._claude_session_id``), so the mapping is done here too. The
+    control inbox is here because the worker polls it with these credentials: without
+    its prefix every list would 403 and ``send()`` / ``interrupt()`` would never arrive.
+
+    Every writer of run objects must appear here: ``tests/test_scoped_gcs.py`` drives the
+    checkpoint code (Codex thread persist + resume, transcript store, workspace snapshot)
+    through a recording store and fails on any key outside these prefixes. A prefix costs
+    token budget (see :func:`access_boundary`): 10 rules is the google-auth maximum.
     """
     bucket, prefix = parse_gcs_uri(output_bucket)
     base = f"{prefix}/" if prefix else ""
@@ -72,30 +79,46 @@ def run_object_prefixes(output_bucket: str, session_id: str) -> tuple[str, str, 
         f"{base}events/{session_id}/",                    # the live mirror / durable history
         f"{base}checkpoints/sessions/{csid}/",            # transcript batches
         f"{base}checkpoints/workspace/{csid}.tar.gz",     # workspace snapshot
+        f"{base}checkpoints/codex-threads/{csid}/",       # Codex conversation (harness/codex.py)
         f"{base}artifacts/{session_id}/",                 # produced files
+        f"{base}control/{session_id}/",                   # the turn's control inbox (control.py)
+        f"{base}control-delivered/{session_id}/",         # its delivered-message markers
     ]
     return bucket, base, prefixes
 
 
-def access_boundary(bucket: str, prefixes: list[str]) -> Any:
+# Prefixes the worker LISTS with the run token: the control inbox (control.py polls it) and
+# the checkpoint transcript directory (session_store.load enumerates batches on resume).
+# Every other object of a turn is read or written by exact name. Kept to the minimum on
+# purpose: STS caps the minted token at ~10.7k chars INCLUDING the caller's own token, and
+# a list clause adds ~500 chars per rule. Nine list clauses fit under a ~250-char user token
+# and overflow a ~1,100-char service-account token with "invalid_request" (measured
+# 2026-09-08, zapi-workflow-bot); two fit either with room to spare.
+_LISTED_PREFIXES = ("checkpoints/sessions/", "control/")
+
+
+def access_boundary(bucket: str, prefixes: list[str], base: str = "") -> Any:
     """A Credential Access Boundary allowing objectAdmin on ``bucket`` for ``prefixes`` only.
 
-    Each rule pairs an object-name condition (get/create/delete/exists on objects under the
-    prefix) with the list condition GCS evaluates for ``objects.list`` (the request's
-    ``prefix`` parameter must start with the allowed prefix).
+    Each rule carries an object-name condition (get/create/delete/exists on objects under
+    the prefix); only the prefixes in ``_LISTED_PREFIXES`` (relative to ``base``) also get
+    the list condition GCS evaluates for ``objects.list`` (the request's ``prefix``
+    parameter must start with the allowed prefix).
     """
     from google.auth import downscoped
 
     rules = []
     for p in prefixes:
         obj = f"projects/_/buckets/{bucket}/objects/{p}"
-        # CEL accepts JSON string escapes. Names are data, never expression syntax:
-        # both object access and listing must quote caller-controlled prefix content.
-        expression = (
-            f'resource.name.startsWith({json.dumps(obj, ensure_ascii=False)}) || '
-            'api.getAttribute("storage.googleapis.com/objectListPrefix", "")'
-            f'.startsWith({json.dumps(p, ensure_ascii=False)})'
-        )
+        # CEL accepts JSON string escapes. Keep caller-controlled names inside
+        # literals without restoring list clauses for exact-name-only objects:
+        # those extra clauses overflow STS tokens for service-account callers.
+        expression = f'resource.name.startsWith({json.dumps(obj, ensure_ascii=False)})'
+        if p[len(base):].startswith(_LISTED_PREFIXES):
+            expression += (
+                ' || api.getAttribute("storage.googleapis.com/objectListPrefix", "")'
+                f'.startsWith({json.dumps(p, ensure_ascii=False)})'
+            )
         rules.append(
             downscoped.AccessBoundaryRule(
                 available_resource=f"//storage.googleapis.com/projects/_/buckets/{bucket}",
@@ -123,10 +146,10 @@ def mint_run_token(
 
     if source_credentials is None:
         source_credentials, _ = google.auth.default(scopes=[_CLOUD_PLATFORM])
-    bucket, _base, prefixes = run_object_prefixes(output_bucket, session_id)
+    bucket, base, prefixes = run_object_prefixes(output_bucket, session_id)
     creds = downscoped.Credentials(
         source_credentials=source_credentials,
-        credential_access_boundary=access_boundary(bucket, prefixes),
+        credential_access_boundary=access_boundary(bucket, prefixes, base),
     )
     creds.refresh(Request())
     if not creds.token:

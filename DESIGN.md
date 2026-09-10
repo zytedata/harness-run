@@ -657,7 +657,8 @@ Each is a `typing.Protocol`; concrete adapters ship for prod (GCP) and dev (loca
   the harness copies it to the BlobStore keyed by OUR session id at the terminal result and restores
   it before `thread_resume` on any worker. No Codex equivalent of Claude Code's background-task
   re-invocation exists (`spec.background_task_timeout` is inert); `allowed_tools`/`disallowed_tools`
-  have no mapping and are ignored with a status warning.
+  have no mapping and are ignored with a status warning. `spec.codex_config` carries any other
+  `config.toml` setting as `--config` overrides, appended after the harness's own so they win.
 - **`openrouter/` models go through a per-run localhost proxy** (`harness/_openrouter_proxy.py`), on
   **both** bindings, Claude Code and Codex. Two things force this. The CLIs cannot send OpenRouter's
   `provider` request field, and they cannot report what OpenRouter charged. The proxy puts the

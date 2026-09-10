@@ -179,6 +179,9 @@ What to know when running Codex:
   warning), and Codex has no background-task re-invocation, so `background_task_timeout` is inert.
   `permission_mode` maps onto Codex's sandbox+approval pairs (`bypassPermissions` → full access,
   never ask; `default` → workspace-write with Codex's auto-reviewer).
+- **Any other Codex setting**: `spec.codex_config` takes `config.toml` keys the spec has no field for,
+  e.g. `{"sandbox_workspace_write.network_access": True, "web_search": "disabled"}`, passed as
+  `--config` overrides after the harness's own so they win. Settable per session and per turn.
 - **OpenRouter models** reach the same surface — see below.
 
 ### OpenRouter models (either harness)
@@ -747,6 +750,9 @@ Beyond skills, several `AgentSpec` fields shape what the agent can do and the en
 - **`mcp_servers`** — `McpServer.github()`, `.remote(name, url, headers=...)`, `.stdio(name, command, args=...)`.
   A `github()` server's token is supplied per-invocation under a conventional name (`GH_TOKEN` /
   `GITHUB_TOKEN` / `GH_PAT`) and injected into its headers, not the agent's env.
+- **`codex_config`** — extra Codex `config.toml` settings as a `{dotted.key: value}` mapping (strings,
+  booleans, numbers, lists), for the `codex` harness only; `claude-code` ignores it with a status
+  warning. See [Codex](#codex).
 
 Credentials (the agent's own API keys, repo push tokens, MCP tokens) are **not** spec fields — they are
 passed at call time to `run`/`send`. See [Secrets & security](#secrets--security).

@@ -49,6 +49,8 @@ Spec translation (parity notes):
                          it is mapped to ``xhigh`` with a status warning.
 * ``allowed_tools`` / ``disallowed_tools`` → no Codex equivalent; ignored with a status
                          warning.
+* ``codex_config``     → ``--config key=value`` overrides, appended after the harness's
+                         own, so they win.
 * ``max_buffer_size``  → inert: it caps one NDJSON message on the Claude Agent SDK's own
                          stdout transport, and the Codex app-server SDK frames its stream
                          itself with no equivalent knob.
@@ -697,6 +699,7 @@ class CodexHarness:
                 else []
             ),
             *mcp_overrides,
+            *(f"{k}={json.dumps(v)}" for k, v in (spec.codex_config or {}).items()),
         ]
         env = runtime_env(spec, ctx)
         # The app-server inherits this process's environment before applying ``env``.

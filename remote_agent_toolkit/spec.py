@@ -307,6 +307,12 @@ class AgentSpec:
             pin ``openrouter_provider`` expresses. Use it to allow several providers, to
             keep fallbacks on, or to exclude providers. Requires an ``openrouter/`` model,
             and cannot be combined with ``openrouter_provider``.
+        codex_config: Extra Codex ``config.toml`` settings for the ``codex`` harness, as
+            a mapping of dotted key to value, e.g.
+            ``{"sandbox_workspace_write.network_access": True, "web_search": "disabled"}``.
+            Values are strings, booleans, numbers or lists of those. They are applied
+            after the harness's own settings, so they win over them. The
+            ``claude-code`` harness ignores it with a status warning.
         background_task_timeout: Seconds to keep a turn open waiting for the agent's
             still-running background tasks after the model ends its turn (event-driven
             waiting: the harness holds the stream open and the CLI re-invokes the model
@@ -361,6 +367,7 @@ class AgentSpec:
     harnesses: tuple[str, ...] = ()
     openrouter_provider: str | None = None
     openrouter_routing: Mapping[str, Any] | None = None
+    codex_config: Mapping[str, Any] | None = None
 
     def __post_init__(self) -> None:
         # Coerce list args to frozen-hashable tuples without breaking frozen-ness.
@@ -409,6 +416,17 @@ class AgentSpec:
             if not self.model.startswith("openrouter/"):
                 raise ValueError("openrouter_routing requires an openrouter/ model")
             object.__setattr__(self, "openrouter_routing", dict(self.openrouter_routing))
+        if self.codex_config is not None:
+            if not isinstance(self.codex_config, Mapping):
+                raise ValueError("codex_config must be a mapping of dotted key to value")
+            for key, value in self.codex_config.items():
+                if not isinstance(key, str) or not key:
+                    raise ValueError(f"codex_config key {key!r} must be a non-empty string")
+                if isinstance(value, Mapping):
+                    raise ValueError(
+                        f"codex_config[{key!r}] is a mapping; flatten it into dotted keys"
+                    )
+            object.__setattr__(self, "codex_config", dict(self.codex_config))
 
     @property
     def baked_harnesses(self) -> tuple[str, ...]:
@@ -457,6 +475,8 @@ class AgentSpec:
             d["openrouter_provider"] = self.openrouter_provider
         if self.openrouter_routing is not None:
             d["openrouter_routing"] = dict(self.openrouter_routing)
+        if self.codex_config is not None:
+            d["codex_config"] = dict(self.codex_config)
         return d
 
     @classmethod
@@ -501,6 +521,7 @@ class AgentSpec:
             openrouter_routing=(
                 dict(d["openrouter_routing"]) if d.get("openrouter_routing") is not None else None
             ),
+            codex_config=dict(d["codex_config"]) if d.get("codex_config") is not None else None,
         )
 
     def to_yaml(self) -> str:

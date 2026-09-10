@@ -724,6 +724,12 @@ class ClaudeCodeHarness:
             phase = _StreamPhase.ACTIVE  # a query starts (or continues) a model invocation
             return msg.user_event()
 
+        if spec.codex_config:
+            yield AgentEvent(
+                kind="status",
+                summary="codex_config is Codex-specific and has no claude-code equivalent; ignored",
+                raw={"event": "spec_warning"},
+            )
         try:
             await client.connect()
             await client.query(ctx.prompt)

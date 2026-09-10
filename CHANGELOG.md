@@ -24,6 +24,16 @@ commit to `main` (PR), tag the merge commit `vX.Y.Z` and push the tag (CI refuse
 a tag whose version differs from `pyproject.toml`), then create the GitHub Release
 for the tag with this file's section as the notes.
 
+## Unreleased
+
+### Fixed
+
+- **Claude resume no longer ends on a stopped background task's empty result.** A fresh
+  CLI may emit an old task notification and a zero-turn success before handling the
+  queued user prompt. The harness waits for that prompt without sending it twice, and
+  reports an explicit error if the CLI times out, exits, or crashes without answering.
+  Normal results, usage and errors keep their existing behavior.
+
 ## 0.3.1 — 2026-09-08
 
 ### Fixed

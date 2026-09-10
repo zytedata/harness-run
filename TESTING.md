@@ -42,6 +42,13 @@ runtime (Haiku 4.5 on claude-code, gpt-5.6-luna on codex, both PASS), from the
 | interrupt + continue: the model's reply (`result`) | 0.9 s | 0.8 s |
 | `interrupt()` returns (turn ended, checkpoint saved) | 0.8 s | < 0.1 s |
 
+`python dev/live_resume_probe.py` additionally forces a Bash background task, stops only
+after `awaiting_tasks` reports it pending, and verifies that the next prompt is answered
+from the saved workspace. This catches a resumed CLI's stale notification and empty
+zero-turn result, which an ordinary foreground-command stop does not exercise. It is
+a paid manual test (Haiku, a few cents). `ENGINE=<throwaway resource>` targets a warm
+Gemini engine; the caller must arrange its deployment and teardown.
+
 The control channel adds nothing measurable on `local`; the time is the model's. A steer
 waits for the running tool call to finish (here a `sleep 8`), because the model reads the
 message at its next step. On `gemini` add the inbox poll (every 1.5 s) plus GCS latency;

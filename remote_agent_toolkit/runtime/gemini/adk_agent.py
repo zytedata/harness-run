@@ -34,6 +34,7 @@ _SESSION_CONFIG_DIRECTIVE = re.compile(
 )
 _TURN_CONFIG_DIRECTIVE = re.compile(r"^\s*AGENT_TURN_CONFIG_GCS=(\S+)[ \t]*\r?\n", re.IGNORECASE)
 _GCS_TOKEN_DIRECTIVE = re.compile(r"^\s*AGENT_GCS_TOKEN=(\S+)[ \t]*\r?\n", re.IGNORECASE)
+_TURN_ID_DIRECTIVE = re.compile(r"^AGENT_TURN_ID=([a-f0-9]{32})\r?\n")
 _AGENT_DESCRIPTION = "A remote-agent-toolkit agent: a Claude Code session driven by the toolkit harness."
 
 
@@ -314,6 +315,10 @@ class ToolkitAgent(BaseAgent):
         session_config_uri, turn_config_uri, prompt = _split_config_directives(prompt)
         resume_sid, prompt = _split_resume_directive(prompt)
         gcs_token, prompt = _split_gcs_token_directive(prompt)
+        turn_match = _TURN_ID_DIRECTIVE.match(prompt)
+        turn_id = turn_match.group(1) if turn_match else None
+        if turn_match:
+            prompt = prompt[turn_match.end():]
         # The toolkit session id is the stable token: it tags the Cloud Logging stream the
         # client tails, and pins the Claude session id for checkpoint keying. It rides the
         # AGENT_SESSION directive (cold jobs run under a throwaway auto-created ADK
@@ -326,7 +331,7 @@ class ToolkitAgent(BaseAgent):
         async for event in self._run_turn(
             spec, session_id, prompt, resume_sid, secrets_uri, invocation_id,
             session_config_uri=session_config_uri, turn_config_uri=turn_config_uri,
-            gcs_token=gcs_token,
+            gcs_token=gcs_token, turn_id=turn_id,
         ):
             yield event
 
@@ -335,6 +340,7 @@ class ToolkitAgent(BaseAgent):
         secrets_uri: str | None = None, invocation_id: str = "",
         session_config_uri: str | None = None, turn_config_uri: str | None = None,
         gcs_token: str | None = None, worker: str | None = None,
+        turn_id: str | None = None,
     ) -> AsyncGenerator[Any, None]:
         """Process one turn under ``session_id``: prep workspace, drive the harness, surface events.
 
@@ -374,23 +380,29 @@ class ToolkitAgent(BaseAgent):
         sink = CloudLoggingSink(session_id=session_id)
         claude_sid = _claude_session_id(session_id)
 
+        def identify(event: AgentEvent) -> AgentEvent:
+            # This identity covers every event, including early config errors and
+            # sampler events. A harness's own session id is a different namespace.
+            event.raw = {**(event.raw or {}), "turn_id": turn_id, "worker": worker}
+            return event
+
         def _terminal_error(summary: str) -> AgentEvent:
             """Emit a terminal error result to every channel (pre-MirrorStream failures)."""
             from .history import mirror_line, write_turn_mirror
 
-            ev = AgentEvent(
+            ev = identify(AgentEvent(
                 kind="result",
                 summary=summary,
                 raw={"event": "config_error", "is_error": True, "subtype": "error",
                      "session_id": session_id},
-            )
+            ))
             sink.emit(ev)
             events_uri = os.environ.get("AGENT_EVENTS_GCS")
             if events_uri:
                 import time as _time
 
                 write_turn_mirror(events_uri, session_id, [mirror_line(ev)],
-                                  now_ms=int(_time.time() * 1000))
+                                  now_ms=int(_time.time() * 1000), turn_id=turn_id)
             return ev
 
         # Resolve the effective spec BEFORE anything derives from ``spec`` (checkpoint
@@ -473,7 +485,7 @@ class ToolkitAgent(BaseAgent):
         from .stream import MirrorStream
 
         events_uri = os.environ.get("AGENT_EVENTS_GCS")
-        stream = MirrorStream(events_uri, session_id) if events_uri else None
+        stream = MirrorStream(events_uri, session_id, turn_id=turn_id) if events_uri else None
         # Cloud Trace spans rebuilt from the same stream (the console's Traces tab).
         # Best-effort by construction.
         tracer = TurnTracer(agent_name=self.name, model=spec.model, session_id=session_id)
@@ -485,12 +497,19 @@ class ToolkitAgent(BaseAgent):
         # is stamped with the observed peak in surface() below.
         from .resources import start_sampler
 
+        def sample_event(event: AgentEvent) -> None:
+            identify(event)
+            sink.emit(event)
+            if stream is not None:
+                stream.append(event)
+
         sampler = start_sampler(
             session_id,
-            on_event=lambda ev: (sink.emit(ev), stream.append(ev) if stream else None),
+            on_event=sample_event,
         )
 
         def surface(event: AgentEvent) -> Any:
+            identify(event)
             if event.kind == "result" and sampler is not None:
                 event.raw = event.raw or {}
                 sampler.enrich_result(event.raw)
@@ -689,7 +708,7 @@ class ToolkitAgent(BaseAgent):
             resume_sid=session_id if resume else None, secrets_uri=secrets_uri,
             invocation_id=invocation_id,
             session_config_uri=session_config_uri, turn_config_uri=turn_config_uri,
-            gcs_token=gcs_token, worker=worker_id,
+            gcs_token=gcs_token, worker=worker_id, turn_id=claimed.get("turn_id"),
         ):
             yield event
 

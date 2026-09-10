@@ -110,6 +110,9 @@ run-time system prompt's marker (the worker ran the session's config, not the de
 spec), the turn-config turn must return `structured_output` parsed via a per-turn
 `output_schema` **and** still carry the marker (the session config persists across turns),
 and both turns must stream the worker's `effective_spec` echo with the config pointers.
+The engine checkpoints each turn; the second config turn immediately reattaches by
+session ID, without a watermark or an artificial delay. Each stream must contain one
+terminal result and exactly one nonempty turn ID, distinct from the preceding turn.
 Typical numbers: deploy ~3.5–4 min (the two run in parallel), cold turn ~3 min end-to-end,
 warm ~1 min, a few cents of model spend. Exit code is non-zero on any FAIL, so you can gate
 on it.

@@ -197,6 +197,7 @@ async def _pickup_watched_tail(
     *,
     on_pickup: Any = None,
     on_abandon: Any = None,
+    is_pickup: Any = None,
     max_redispatch: int = _MAX_REDISPATCH,
 ) -> AsyncIterator[AgentEvent]:
     """Yield the tail's events, re-dispatching the turn if its worker never starts it.
@@ -209,7 +210,11 @@ async def _pickup_watched_tail(
     a grace) elapsing calls ``redispatch(attempt)`` on a thread, which is expected to drop
     the dead worker, address the same payload to another one and return the new deadline.
     After ``max_redispatch`` silent workers the run ends with an explained error result.
-    From the first event on the wrapper is pure passthrough (``on_pickup`` runs once, on a
+    Only a matching ``turn_started`` acknowledges pickup (``is_pickup`` checks the
+    addressed worker and turn). Unrelated events cannot reset the absolute deadline or
+    delete the subscription. A correlated terminal error before startup can still end
+    the run without claiming pickup. After pickup the wrapper is pure passthrough
+    (``on_pickup`` runs once, on a
     thread, best-effort — the client uses it to drop the worker's now-useless channel).
     ``on_abandon`` runs when giving up, to drop the last worker tried.
     """
@@ -225,10 +230,14 @@ async def _pickup_watched_tail(
 
     pump_task = asyncio.ensure_future(pump())
     attempts = 0
+    deadline = time.monotonic() + deadline_s
+    if is_pickup is None:
+        def is_pickup(event: AgentEvent) -> bool:
+            return (event.raw or {}).get("event") == "turn_started"
     try:
         while True:
             try:
-                item = await asyncio.wait_for(queue.get(), timeout=deadline_s)
+                item = await asyncio.wait_for(queue.get(), timeout=max(0, deadline - time.monotonic()))
             except (TimeoutError, asyncio.TimeoutError):
                 if attempts >= max_redispatch:
                     if on_abandon is not None:
@@ -252,6 +261,7 @@ async def _pickup_watched_tail(
                 attempts += 1
                 try:
                     deadline_s = await asyncio.to_thread(redispatch, attempts)
+                    deadline = time.monotonic() + deadline_s
                 except Exception as exc:  # noqa: BLE001 — surface, never hang
                     yield AgentEvent(
                         kind="result",
@@ -266,6 +276,11 @@ async def _pickup_watched_tail(
                 continue
             if item is done:
                 return
+            if not is_pickup(item):
+                if item.kind == "result":
+                    yield item
+                    return
+                continue
             if on_pickup is not None:
                 try:
                     await asyncio.to_thread(on_pickup)
@@ -627,6 +642,7 @@ def deploy(
         topic=topic,
         subscription=subscription,
         pool_max_wait_s=pool_max_wait_s,
+        turn_event_ids=(not pinned or _supports_turn_event_ids(client, engine.api_resource.name)),
     )
     if warm_pool:
         try:
@@ -727,6 +743,24 @@ def _serving_env_value(client: Any, resource: str, name: str) -> str | None:
                     return value
                 break
     return _env_value(api, name)
+
+
+def _supports_turn_event_ids(client: Any, resource: str) -> bool:
+    """Require the protocol on every serving revision, never infer it from a newer one."""
+    from . import revisions as rev
+
+    api = client.agent_engines.get(name=resource).api_resource
+    targets = rev.traffic_targets(getattr(api, "traffic_config", None))
+    if not targets:
+        return _env_value(api, "AGENT_EVENT_TURN_IDS") == "1"
+    revisions = {
+        row.api_resource.name: row.api_resource
+        for row in client.agent_engines.runtimes.revisions.list(name=resource)
+    }
+    return all(
+        _env_value(revisions.get(rev.revision_resource(resource, version)), "AGENT_EVENT_TURN_IDS")
+        == "1" for version, _ in targets
+    )
 
 
 
@@ -927,8 +961,8 @@ def get_engine(
     """Look up a deployed engine by ``name`` (the app-code hot path; never deploys).
 
     ``scoped_gcs`` (default on) mints a run-scoped GCS token per turn so the worker never
-    touches the bucket with the runtime identity (``scoped_gcs.py``). Turn it off only to
-    drive an engine deployed from a pre-token toolkit revision during a migration.
+    touches the bucket with the runtime identity (``scoped_gcs.py``). Disabling it uses
+    the worker's ambient identity; it does not bypass the turn-event protocol check.
 
     Pure ADDRESSING: the handle identifies which engine turns run against; it carries no
     execution configuration. Runs execute the engine's deploy-baked spec, overlaid with
@@ -988,6 +1022,7 @@ def get_engine(
         spec_known=False,
         scoped_gcs=scoped_gcs,
         pool_max_wait_s=pool_max_wait_s,
+        turn_event_ids=_supports_turn_event_ids(client, resource),
     )
 
 
@@ -1041,9 +1076,6 @@ class GeminiSession:
         # False for a re-attached session: the opener's persisted config (if any) is
         # loaded from GCS on first use — see _resolve_session_config.
         self._session_config_resolved = config_resolved
-        # Last mirror object consumed by this session's stream tail; the NEXT turn's tail
-        # starts strictly after it (the clock-free turn boundary — see stream.tail_stream).
-        self._stream_watermark: dict = {"key": ""}
         # Set when the running turn's worker announced it reads the control inbox
         # (control_ready event); reset per turn. Decides how interrupt() stops the turn.
         self._control_ready = False
@@ -1318,9 +1350,12 @@ class GeminiSession:
                 "running a turn requires the engine's output bucket (events stream through "
                 "it); construct the engine with output_bucket/project set."
             )
-        # Clock floor for a re-attached session's first turn (small slack for clock skew);
-        # subsequent turns use the exact key watermark instead (see tail_source below).
-        since = time.time() - 5
+        if not engine._turn_event_ids:
+            raise RuntimeError(
+                "this serving engine revision does not identify events by turn; redeploy "
+                "it from the updated toolkit before submitting turns with this client"
+            )
+        turn_id = uuid.uuid4().hex
         secrets_uri = self._stage_secrets(secrets)
         self._staged_secrets_uri = secrets_uri  # cleaned up on completion (worker deletes at turn end)
         gcs_token = self._mint_gcs_token()  # run-scoped GCS token (scoped_gcs.py), or None
@@ -1346,6 +1381,7 @@ class GeminiSession:
                 session_config_gcs=self._session_config_uri,
                 turn_config_gcs=turn_config_uri,
                 gcs_token=gcs_token,
+                turn_id=turn_id,
             )
             if engine._subscription:
                 # Legacy shared-subscription pool (an engine deployed before per-worker
@@ -1377,10 +1413,10 @@ class GeminiSession:
             if resume:
                 directives += f"AGENT_RESUME={sid}\n"
             if gcs_token:
-                # LAST on purpose: a pre-token worker strips the earlier lines in order and
-                # leaves this one as prompt text, still running the turn on the runtime
-                # identity; the leftover is a token worth this run's own objects only.
+                # Transport directives are stripped in this order by _run_async_impl.
+                # The serving revision's protocol is checked before dispatch.
                 directives += f"AGENT_GCS_TOKEN={gcs_token}\n"
+            directives += f"AGENT_TURN_ID={turn_id}\n"
             prompt = directives + message
             # Two platform-runner regressions of 2026-07-28 shape this payload (engines
             # created before still work the old way; this form works on both):
@@ -1406,14 +1442,16 @@ class GeminiSession:
         # Engines deployed before streaming wrote the mirror only at end-of-turn: their
         # events all arrive with the terminal result — redeploy them for live streaming.
         events_uri = f"{engine._output_bucket}/events"
-        watermark = self._stream_watermark
+        def accepts(event: AgentEvent) -> bool:
+            raw = event.raw or {}
+            current = self._worker
+            return raw.get("turn_id") == turn_id and (
+                worker is None or (current is not None and raw.get("worker") == current.worker)
+            )
 
         def tail_source() -> AsyncIterator:
-            # start_after (the previous turn's last consumed object) is the reliable
-            # turn boundary; the `since` clock floor covers re-attached sessions only.
             return tail_stream(
-                events_uri, sid, since=since,
-                start_after=watermark["key"] or None, watermark=watermark,
+                events_uri, sid, turn_id=turn_id, accept_event=accepts,
             )
 
         async def history_reader() -> list:
@@ -1423,6 +1461,8 @@ class GeminiSession:
                 asyncio.to_thread(
                     read_history, engine._output_bucket, sid,
                     project=engine._project, credentials=engine._credentials,
+                    turn_id=turn_id,
+                    worker=self._worker.worker if self._worker is not None else None,
                 ),
                 timeout=60,
             )
@@ -1500,6 +1540,9 @@ class GeminiSession:
                     lambda: _watched_tail(tail_source, job_probe(current_job), sid, history_reader),
                     first_deadline, redispatch, sid,
                     on_pickup=on_pickup, on_abandon=on_abandon,
+                    is_pickup=lambda event: accepts(event)
+                    and (event.raw or {}).get("event") == "turn_started"
+                    and (event.raw or {}).get("session_id") == sid,
                 )
         else:
             factory = tail_source
@@ -1745,8 +1788,10 @@ class GeminiEngine:
         spec_known: bool = True,
         scoped_gcs: bool = True,
         pool_max_wait_s: float | None = None,
+        turn_event_ids: bool = True,
     ) -> None:
         self._resource = resource
+        self._turn_event_ids = turn_event_ids
         self._scoped_gcs = scoped_gcs
         # The deploy handle carries the real deployed spec; a get_engine handle carries a
         # minimal fallback (addressing only), flagged by ``spec_known=False`` so nothing

@@ -144,7 +144,7 @@ def test_legacy_warm_session_dispatches_to_the_shared_subscription(monkeypatch):
     # The turn was dispatched to the pool (not cold-started) and the pool was refilled.
     # The payload carries the run-scoped GCS token (a fake here: conftest stubs minting).
     assert published == [{"session_id": "warm-sid", "message": "go", "resume": False,
-                          "gcs_token": "fake-run-token"}]
+                          "gcs_token": "fake-run-token", "turn_id": published[0]["turn_id"]}]
     assert refilled == [1]
     assert result.text == "done" and result.num_turns == 3
     assert session.status == RunStatus.IDLE and session.stop_reason == StopReason.END_TURN
@@ -263,7 +263,8 @@ def test_pool_worker_claims_and_runs(monkeypatch):
     disp.publish({"session_id": "dispatched-sid", "message": "do it", "resume": False,
                   "secrets_gcs": "gs://bkt/invocation-secrets/dispatched-sid-x.json",
                   "session_config_gcs": "gs://bkt/session-config/dispatched-sid.json",
-                  "turn_config_gcs": "gs://bkt/turn-config/dispatched-sid-x.json"},
+                  "turn_config_gcs": "gs://bkt/turn-config/dispatched-sid-x.json",
+                  "turn_id": "a" * 32},
                  attributes={"worker": "abc123abc123abc123abc123"})
     opened = []
 
@@ -284,11 +285,11 @@ def test_pool_worker_claims_and_runs(monkeypatch):
 
     async def fake_run_turn(spec_, session_id, prompt, resume_sid, secrets_uri=None,
                             invocation_id="", session_config_uri=None, turn_config_uri=None,
-                            gcs_token=None, worker=None):
+                            gcs_token=None, worker=None, turn_id=None):
         seen.update(session_id=session_id, prompt=prompt, resume_sid=resume_sid,
                     secrets_uri=secrets_uri, invocation_id=invocation_id,
                     session_config_uri=session_config_uri, turn_config_uri=turn_config_uri,
-                    gcs_token=gcs_token, worker=worker)
+                    gcs_token=gcs_token, worker=worker, turn_id=turn_id)
         yield "turn-event"
 
     monkeypatch.setattr(agent, "_run_turn", fake_run_turn)
@@ -309,6 +310,7 @@ def test_pool_worker_claims_and_runs(monkeypatch):
                     "turn_config_uri": "gs://bkt/turn-config/dispatched-sid-x.json",
                     "invocation_id": "e-inv-77",
                     "gcs_token": None,
+                    "turn_id": "a" * 32,
                     "worker": "abc123abc123abc123abc123"}
 
 
@@ -799,7 +801,7 @@ def test_warm_session_addresses_one_idle_worker_and_drops_its_channel(monkeypatc
     # token, never values), and the pool was refilled by one.
     assert dispatch.published == [(
         {"session_id": "warm-sid", "message": "go", "resume": False,
-         "gcs_token": "fake-run-token"},
+         "gcs_token": "fake-run-token", "turn_id": dispatch.published[0][0]["turn_id"]},
         {"worker": first.worker},
     )]
     remaining = engine._roster().entries()

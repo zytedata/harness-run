@@ -91,7 +91,8 @@ def _credentials():
 
 def _spec(name: str) -> AgentSpec:
     # Haiku + tight caps: the point is the round-trip, not the model's work.
-    return AgentSpec(name=name, model="claude-haiku-4-5", max_turns=8, max_budget_usd=1.0)
+    return AgentSpec(name=name, model="claude-haiku-4-5", checkpoint=True,
+                     max_turns=8, max_budget_usd=1.0)
 
 
 def _deploy(name: str, warm: bool, credentials):
@@ -108,11 +109,17 @@ async def _drive(label: str, run):
     """Stream a run to completion; return (result, echo_events)."""
     t0 = time.time()
     echoes = []
+    turn_ids = set()
+    results = 0
     async for ev in run:
+        turn_ids.add((ev.raw or {}).get("turn_id"))
+        results += ev.kind == "result"
         if (ev.raw or {}).get("event") == "effective_spec":
             echoes.append(ev.raw)
         summary = " ".join((ev.summary or "").split())[:90]
         print(f"[{label}] {time.strftime('%H:%M:%S')} {ev.kind:11} {summary}", flush=True)
+    assert len(turn_ids) == 1 and None not in turn_ids, (label, turn_ids)
+    assert results == 1, (label, results)
     r = run.result
     text = " ".join((r.text or "").split())
     print(
@@ -165,11 +172,16 @@ async def _exercise_configs(mode: str, name: str, credentials, verdicts) -> None
 
     label = f"{mode}-turn-config"
     try:
+        # Applications commonly reattach on every HTTP message. Reattach immediately:
+        # no process-local watermark and no delay to hide the previous turn's events.
+        first_turn_id = echoes[0]["turn_id"]
+        session = engine.get_session(session.session_id)
         r, echoes = await _drive(label, session.send(
             JSON_TASK,
             config=TurnConfig(output_schema=ANSWER_SCHEMA, reasoning_effort="low"),
         ))
         ok = (not r.is_error) and bool(r.num_turns)
+        ok = ok and bool(echoes) and echoes[0]["turn_id"] != first_turn_id
         # The per-turn overlay reached the worker (JSON steering) and the client (parse).
         ok = ok and r.structured_output == {"answer": 42}
         # The SESSION config persists across turns. The schema steers the final message to

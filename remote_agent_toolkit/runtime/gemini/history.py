@@ -23,6 +23,7 @@ with the engine's ADK sessions. All GCP imports are lazy; ``store`` params take 
 from __future__ import annotations
 
 import json
+import uuid
 from typing import Any
 
 from ...events import AgentEvent
@@ -59,7 +60,8 @@ def event_from_mirror(d: dict) -> AgentEvent:
 
 
 def write_turn_mirror(
-    events_uri: str, session_id: str, events: list[dict], *, now_ms: int, store: Any | None = None
+    events_uri: str, session_id: str, events: list[dict], *, now_ms: int, store: Any | None = None,
+    turn_id: str | None = None,
 ) -> None:
     """Write one turn's mirrored events file; best-effort (a mirror failure never fails a run).
 
@@ -71,7 +73,8 @@ def write_turn_mirror(
     try:
         bucket, prefix = parse_gcs_uri(events_uri)
         blobs = store if store is not None else GcsBlobStore(bucket)
-        key = f"{prefix + '/' if prefix else ''}{session_id}/{now_ms:015d}.jsonl"
+        suffix = f"-{turn_id}-{uuid.uuid4().hex[:12]}-0000" if turn_id else ""
+        key = f"{prefix + '/' if prefix else ''}{session_id}/{now_ms:015d}{suffix}.jsonl"
         data = "\n".join(json.dumps(line) for line in events).encode("utf-8")
         blobs.put_bytes(key, data)
     except Exception:  # noqa: BLE001 — mirroring is best-effort by design
@@ -128,13 +131,31 @@ def read_history(
     project: str | None = None,
     credentials: Any | None = None,
     store: Any | None = None,
+    turn_id: str | None = None,
+    worker: str | None = None,
 ) -> list[AgentEvent]:
     """All persisted events for ``session_id``, oldest first (empty if nothing is found).
 
     Tries the mirror (all turns), then the platform job output (last cold job), then Cloud
     Logging (retention-bounded). Layers are alternatives, not merged — the first hit is the
     most complete record available.
+
+    ``turn_id`` restricts watchdog recovery across EVERY layer, including job output and
+    logging fallbacks. ``worker`` additionally excludes an abandoned dispatch attempt.
+    An incomplete mirror may fall through to a terminal record in another layer; absent
+    a matching result it remains partial, never replaced by an earlier turn's success.
     """
+    def select(events: list[AgentEvent]) -> list[AgentEvent]:
+        if turn_id is None:
+            return events
+        return [e for e in events if (e.raw or {}).get("turn_id") == turn_id
+                and (worker is None or (e.raw or {}).get("worker") == worker)]
+
+    partial: list[AgentEvent] = []
+
+    def complete(events: list[AgentEvent]) -> bool:
+        return bool(events) and (turn_id is None or any(e.kind == "result" for e in events))
+
     if output_bucket:
         bucket, prefix = parse_gcs_uri(output_bucket)
         blobs = store if store is not None else GcsBlobStore(bucket)
@@ -143,16 +164,21 @@ def read_history(
         # 1. Mirrored per-turn files (lexical order == chronological).
         events: list[AgentEvent] = []
         for key in blobs.list(f"{base}{_EVENTS_PREFIX}/{session_id}/"):
+            if turn_id and f"-{turn_id}-" not in key.rsplit("/", 1)[-1]:
+                continue
             events.extend(_parse_jsonl(blobs.get_bytes(key), event_from_mirror))
-        if events:
+        events = select(events)
+        if complete(events):
             return events
+        partial = events
 
         # 2. Platform job output (cold path; the last job under this session).
         try:
             data = blobs.get_bytes(f"{base}{_JOBS_PREFIX}/{session_id}.jsonl")
-            events = _parse_jsonl(data, event_from_adk_line)
-            if events:
+            events = select(_parse_jsonl(data, event_from_adk_line))
+            if complete(events):
                 return events
+            partial = partial or events
         except KeyError:
             pass
 
@@ -161,9 +187,10 @@ def read_history(
 
     sink = CloudLoggingSink(project=project, credentials=credentials)
     try:
-        return sink.read(session_id)
+        events = select(sink.read(session_id))
+        return events if complete(events) else (partial or events)
     except Exception:  # noqa: BLE001 — no logging access / no entries → empty history
-        return []
+        return partial
 
 
 def list_sessions(

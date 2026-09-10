@@ -24,6 +24,24 @@ commit to `main` (PR), tag the merge commit `vX.Y.Z` and push the tag (CI refuse
 a tag whose version differs from `pyproject.toml`), then create the GitHub Release
 for the tag with this file's section as the notes.
 
+## Unreleased
+
+### Fixed
+
+- **Gemini events are scoped to the submitted turn and addressed worker.** A previous
+  turn's trailing checkpoint cannot retire a booting worker's subscription. Pickup
+  requires the matching `turn_started` and unrelated events cannot extend its deadline.
+  Live tails and all history-recovery fallbacks reject earlier turns and abandoned
+  workers, including after reattachment. Early config errors carry the same identity.
+  `Session.history()` still returns the complete session.
+
+### Backwards-incompatible
+
+- **The Gemini client requires turn IDs in the serving workers' event protocol.**
+  Unsupported revisions fail before staging secrets or dispatching work. **Update note:**
+  redeploy engines with this toolkit first, then update clients. Older clients can still
+  drive upgraded workers. Pinned/split traffic must serve upgraded revisions throughout.
+
 ## 0.3.1 — 2026-09-08
 
 ### Fixed

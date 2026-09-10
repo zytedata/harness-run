@@ -219,6 +219,7 @@ def dispatch_payload(
     session_config_gcs: str | None = None,
     turn_config_gcs: str | None = None,
     gcs_token: str | None = None,
+    turn_id: str | None = None,
 ) -> dict:
     """The turn payload published to the pool: the worker adopts ``session_id`` for the turn.
 
@@ -235,6 +236,8 @@ def dispatch_payload(
     why client and engine must deploy from the same toolkit revision.
     """
     payload = {"session_id": session_id, "message": message, "resume": bool(resume)}
+    if turn_id:
+        payload["turn_id"] = turn_id
     if secrets_gcs:
         payload["secrets_gcs"] = secrets_gcs
     if session_config_gcs:

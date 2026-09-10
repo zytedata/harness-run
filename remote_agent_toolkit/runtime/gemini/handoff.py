@@ -18,6 +18,9 @@ plane writes a GCS object and the payload carries only its *pointer*. Three obje
   cannot substitute a different config. Reaped by a 30-day lifecycle rule.
 * **Per-turn configs** (``turn-config/<sid>-<nonce>.json``): the ``TurnConfig`` overlay
   of one turn. Same non-secret, keep-for-debugging treatment as the session config.
+* **The control inbox** (``control/<sid>/...`` and ``control-delivered/<sid>/...``, see
+  ``control.py``): operator messages into a running turn, deleted by the worker on
+  delivery, and the per-message delivered markers. Aged out with the configs.
 
 A worker that is pointed at a config object and cannot read it FAILS the turn (terminal
 error result): silently substituting the baked spec would be exactly the
@@ -48,6 +51,9 @@ _SESSION_CONFIG_PREFIX = "session-config"
 
 # Staged per-turn configs (one per turn, kept for post-mortem debugging).
 _TURN_CONFIG_PREFIX = "turn-config"
+
+# The control inbox + delivered markers (control.py); listed here for the lifecycle rule.
+_CONTROL_PREFIXES = ("control", "control-delivered")
 
 # Secrets are reaped by the bucket lifecycle rule after this many days (backstop 3;
 # GCS lifecycle granularity is whole days, so 1 is the tightest possible).
@@ -177,11 +183,15 @@ def delete_staged_secrets(uri: str, store: Any | None = None) -> None:
 def handoff_lifecycle_rules(output_bucket: str) -> tuple[str, list[dict]]:
     """The (bucket name, GCS lifecycle rules) that reap handoff objects.
 
-    Two rules with different clocks: staged secrets after :data:`LIFECYCLE_DAYS` (they
-    are values; the rule is the last-resort reaper behind the worker/client deletes),
-    configs after :data:`CONFIG_LIFECYCLE_DAYS` (kept for post-mortem debugging). Each
-    rule matches only its prefixes under ``output_bucket``'s own prefix, so it can never
-    touch job outputs, checkpoints, or artifacts in the same bucket.
+    Three rules: staged secrets after :data:`LIFECYCLE_DAYS` (they are values; the rule
+    is the last-resort reaper behind the worker/client deletes), configs after
+    :data:`CONFIG_LIFECYCLE_DAYS` (kept for post-mortem debugging), and the control inbox
+    objects + delivered markers after :data:`CONFIG_LIFECYCLE_DAYS` too (the worker
+    deletes inbox objects on delivery; the markers only need to outlive a session's
+    retries). A separate rule for the control prefixes, so a bucket configured by an
+    older revision gets exactly the missing coverage appended. Each rule matches only its
+    prefixes under ``output_bucket``'s own prefix, so it can never touch job outputs,
+    checkpoints, or artifacts in the same bucket.
     """
     bucket, prefix = parse_gcs_uri(output_bucket)
     base = f"{prefix + '/' if prefix else ''}"
@@ -201,6 +211,13 @@ def handoff_lifecycle_rules(output_bucket: str) -> tuple[str, list[dict]]:
                     f"{base}{_SESSION_CONFIG_PREFIX}/",
                     f"{base}{_TURN_CONFIG_PREFIX}/",
                 ],
+            },
+        },
+        {
+            "action": {"type": "Delete"},
+            "condition": {
+                "age": CONFIG_LIFECYCLE_DAYS,
+                "matchesPrefix": [f"{base}{p}/" for p in _CONTROL_PREFIXES],
             },
         },
     ]

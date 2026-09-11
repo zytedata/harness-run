@@ -33,6 +33,20 @@ for the tag with this file's section as the notes.
   queued user prompt. The harness waits for that prompt without sending it twice, and
   reports an explicit error if the CLI times out, exits, or crashes without answering.
   Normal results, usage and errors keep their existing behavior.
+- **Checkpoint status reaches consumers before the terminal result on both harnesses**
+  (#64). The snapshot still runs inline, including on interruption; a trailing status
+  is no longer lost when a consumer stops at the result or exposed to the next turn.
+  Codex reports conversation-save failures as `checkpoint_error` while preserving a
+  successfully saved `workspace_key` and the completed/interrupted turn's result.
+
+### Backwards-incompatible
+
+- **Codex resume fails explicitly for unreadable or corrupt existing checkpoints**
+  (#64). Denied metadata reads, malformed metadata/thread IDs, and missing/unreadable
+  rollouts no longer silently start a fresh conversation. Errors omit storage exception
+  text. **Update note:** handle the failed run and repair the checkpoint or deliberately
+  start a new session. Absent metadata and unsafe restore destinations retain their
+  existing fresh-conversation behavior. Checkpoint permissions are unchanged.
 
 ## 0.3.1 — 2026-09-08
 

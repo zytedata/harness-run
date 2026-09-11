@@ -281,7 +281,8 @@ def test_claude_stop_ends_the_turn_as_interrupted_with_a_checkpoint(tmp_path, mo
     assert result.raw["cli_reported_subtype"] == "error_during_execution"
     assert result.summary == "I am writing the parser"
     assert result.raw["num_turns"] == 3 and result.cost_usd == 0.42  # accounting kept
-    assert events[-1].raw["event"] == "checkpoint_saved"  # after the result, as always
+    assert events[-2].raw["event"] == "checkpoint_saved"
+    assert events[-1] is result  # consumers stop at the result
     assert blobs.exists("workspace/sid.tar.gz")
     assert client.prompts == ["build it"]  # nothing was sent after the stop
     run_result, stop = build_result(result, "sid", spec)

@@ -581,9 +581,9 @@ class ClaudeCodeHarness:
         a terminal state (proven live; the SDK's one-shot ``query()`` instead tears the
         CLI down at the first result, firing those advertised notifications into the
         void). Interim results are demoted to ``awaiting_tasks`` status events; the turn
-        ends at a result with no pending work, where the checkpoint finalizes inline
-        (before the trailing checkpoint status event, so the snapshot happens while a
-        non-draining executor is still pulling). ``spec.background_task_timeout`` bounds
+        ends at a result with no pending work. The checkpoint finalizes inline and its
+        status precedes the result, so even an executor that stops pulling at the result
+        observes it. ``spec.background_task_timeout`` bounds
         the wait; on expiry the last produced result stands.
 
         A deliverable a demoted result carried is not lost to the demotion: the final
@@ -669,15 +669,14 @@ class ClaudeCodeHarness:
             return proxy.exact_cost_usd if proxy is not None else None
 
         async def finish(result_event: AgentEvent) -> AsyncIterator[AgentEvent]:
-            """End the turn: the proxy's last events, the terminal result, the checkpoint.
+            """End the turn: proxy events, checkpoint status, then the terminal result.
 
             Reached from three places — a clean result, a crash while waiting on background
             tasks, and a stream that ended without either.
 
-            ``_finalize`` is CALLED first and YIELDED last. It has to run while the executor
-            is still pulling events, because in-cloud the executor stops pulling after the
-            terminal result (see ``_run``'s docstring). Its event still comes after the
-            result, so the result is the last thing a caller reads before the checkpoint.
+            Both saving and reporting the checkpoint must happen before the result:
+            in-cloud executors and stream consumers may stop pulling at that result.
+            A trailing status can also be mistaken for the next turn's first event.
             """
             nonlocal finalized
             fin = self._finalize(spec, ctx)
@@ -686,6 +685,8 @@ class ClaudeCodeHarness:
                 yield event
             if is_openrouter and proxy_cost_usd() is None:
                 yield openrouter_cost_unknown(spec.model)
+            if fin is not None:
+                yield fin
             yield self._final_result(
                 result_event,
                 turns_total,
@@ -695,8 +696,6 @@ class ClaudeCodeHarness:
                 spec.max_budget_usd if is_openrouter else None,
                 proxy.budget_blocked if proxy is not None else False,
             )
-            if fin is not None:
-                yield fin
 
         client = ClaudeSDKClient(options=options)
         select: ControlledStream | None = None

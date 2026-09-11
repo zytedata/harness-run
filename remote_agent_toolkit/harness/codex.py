@@ -57,6 +57,14 @@ Spec translation (parity notes):
                          itself is persisted by copying the thread's rollout file to the
                          BlobStore and restoring it into ``CODEX_HOME`` before
                          ``thread_resume`` (Codex's own session store is a local file).
+                         Save failures emit ``checkpoint_error`` before the terminal
+                         result without failing completed work. A conversation failure
+                         preserves the workspace's key when its archive was saved, even
+                         on a stop before the first rollout exists. These are separate,
+                         non-atomic writes. Absent metadata permits a fresh start;
+                         unreadable or malformed metadata and missing/unreadable
+                         rollouts fail resume explicitly, without echoing storage errors.
+                         Unsafe restore destinations retain the warning/fresh-start policy.
 
 OpenRouter models
 -----------------
@@ -905,7 +913,7 @@ class CodexHarness:
         """
         path = self._rollout_path(codex_home, thread_id)
         if path is None:
-            return
+            raise RuntimeError("Codex checkpoint rollout was not found")
         rel = path.relative_to(codex_home)
         meta = {"thread_id": thread_id, "relpath": str(rel)}
         ctx.blobs.put_bytes(
@@ -916,12 +924,18 @@ class CodexHarness:
     def _restore_thread(self, ctx: RunContext, codex_home: Path) -> str | None:
         """Materialize a persisted conversation into ``CODEX_HOME``; return the thread id."""
         try:
-            meta = json.loads(
-                ctx.blobs.get_bytes(f"{_THREADS_PREFIX}/{ctx.resume_sid}/meta.json").decode()
-            )
-            body = ctx.blobs.get_bytes(f"{_THREADS_PREFIX}/{ctx.resume_sid}/rollout.jsonl")
-        except Exception:  # noqa: BLE001 — no/unreadable persisted thread: start fresh
+            raw = ctx.blobs.get_bytes(f"{_THREADS_PREFIX}/{ctx.resume_sid}/meta.json")
+        except KeyError:  # a known absent checkpoint may legitimately start fresh
             return None
+        except Exception:  # noqa: BLE001 — never echo credential-bearing storage errors
+            raise RuntimeError("Codex checkpoint metadata could not be read") from None
+        try:
+            meta = json.loads(raw.decode())
+            if (not isinstance(meta, dict) or not isinstance(meta.get("thread_id"), str)
+                    or not meta["thread_id"]):
+                raise ValueError("invalid thread metadata")
+        except (ValueError, TypeError):
+            raise RuntimeError("Codex checkpoint metadata is invalid") from None
         dest = _rollout_destination(codex_home, meta.get("relpath"))
         if dest is None:
             # The run's own token can write this object, so the previous turn's agent could
@@ -929,6 +943,10 @@ class CodexHarness:
             logger.warning("persisted Codex thread for %s has an invalid rollout path; "
                            "starting a fresh conversation", ctx.resume_sid)
             return None
+        try:
+            body = ctx.blobs.get_bytes(f"{_THREADS_PREFIX}/{ctx.resume_sid}/rollout.jsonl")
+        except Exception:  # noqa: BLE001 — an existing checkpoint must not lose its history silently
+            raise RuntimeError("Codex checkpoint rollout could not be read") from None
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_bytes(body)
         return meta["thread_id"]
@@ -937,12 +955,23 @@ class CodexHarness:
         self, spec: AgentSpec, ctx: RunContext, codex_home: Path, thread_id: str | None
     ) -> AgentEvent | None:
         """Inline checkpoint: workspace snapshot (shared) + the Codex conversation."""
+        conversation_error = False
         if thread_id and spec.checkpoint and ctx.blobs is not None:
             try:
                 self._persist_thread(ctx, codex_home, thread_id)
             except Exception:  # noqa: BLE001 — checkpoint is best-effort
-                pass
-        return finalize_checkpoint(spec, ctx)
+                conversation_error = True
+        workspace_event = finalize_checkpoint(spec, ctx)
+        if conversation_error:
+            workspace_key = (workspace_event.raw or {}).get("workspace_key") if workspace_event else None
+            return AgentEvent(
+                kind="status", summary="checkpoint failed: Codex conversation was not saved",
+                raw={"event": "checkpoint_error", "session_id": ctx.session_id,
+                     "conversation_saved": False,
+                     "workspace_saved": bool(workspace_key),
+                     **({"workspace_key": workspace_key} if workspace_key else {})},
+            )
+        return workspace_event
 
     # -- run loop ---------------------------------------------------------------
 
@@ -1254,13 +1283,13 @@ class CodexHarness:
 
                         settled = SimpleNamespace(status="interrupted", duration_ms=None, error=None)
                         fin = self._finalize(spec, ctx, options.codex_home, thread_id)
+                        if fin is not None:
+                            yield fin
                         yield self._result_event(
                             turn=settled, translator=translator, acct=acct, ctx=ctx,
                             thread_id=thread_id, limit=limit,
                             exact_cost_usd=proxy.exact_cost_usd if proxy is not None else None,
                         )
-                        if fin is not None:
-                            yield fin
                         return
                     if kind == "control":
                         msg = item
@@ -1418,6 +1447,8 @@ class CodexHarness:
                                 raw={"event": "subagent_usage_partial", "threads": pending},
                             )
                         fin = self._finalize(spec, ctx, options.codex_home, thread_id)
+                        if fin is not None:
+                            yield fin
                         yield self._result_event(
                             turn=notification.payload.turn,
                             translator=translator,
@@ -1429,8 +1460,6 @@ class CodexHarness:
                             subagent_usage=subagent_usage,
                             subagent_prices=subagent_prices,
                         )
-                        if fin is not None:
-                            yield fin
                         return
                     for event in translator.translate(notification):
                         yield event

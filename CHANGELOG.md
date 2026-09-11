@@ -28,11 +28,34 @@ for the tag with this file's section as the notes.
 
 ### Fixed
 
+- **Resuming a session on another worker failed when the workspace held a virtualenv** (#74).
+  Every `.venv` has `bin/python` as a symlink to an absolute path, and the restore extracted
+  the snapshot with `tarfile`'s `data` filter, which refuses such a link — after writing every
+  member before it. The runtime swallowed the error, treated the workspace as fresh and ran
+  `provision_repos`, whose `git clone` then failed on the half-restored directory ("destination
+  path ... already exists and is not an empty directory"), ending the turn as `harness_error`.
+  Restore now keeps the `data` filter's protections (member paths stay inside the workspace, a
+  member that would write *through* a symlink is still refused, ownership and mode bits are
+  stripped) but recreates symlinks whatever they point at, which is safe because a symlink is
+  only followed at use, never at extraction. Any other member the filter refuses (a FIFO, a
+  device node, a hard link outside the tree) is skipped and reported instead of aborting the
+  restore. `restore()` removes a directory it created or found empty if the extraction fails,
+  so the fresh-workspace fallback never stages into leftovers; the failure is logged with its
+  traceback; and `workspace_ready` gains `restore_error` (the summarized exception, `None` when
+  nothing went wrong) and `skipped` (member names left out), so a caller can tell a fresh start
+  from a resume whose snapshot could not be restored.
 - **Claude resume no longer ends on a stopped background task's empty result.** A fresh
   CLI may emit an old task notification and a zero-turn success before handling the
   queued user prompt. The harness waits for that prompt without sending it twice, and
   reports an explicit error if the CLI times out, exits, or crashes without answering.
   Normal results, usage and errors keep their existing behavior.
+
+### Changed
+
+- `remote_agent_toolkit.checkpoint.restore()` returns a `RestoreResult` (truthy iff a snapshot
+  existed; `.found`, `.skipped`) instead of a bare `bool`, and `BlobStore.get_tree()` returns the
+  list of skipped member names instead of `None`. Truthiness checks keep working; `is True`
+  comparisons do not.
 
 ## 0.3.1 — 2026-09-08
 

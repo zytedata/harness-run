@@ -453,14 +453,13 @@ class LocalEngine:
         untarring a snapshot over it would roll its files back to whatever this session last
         saw. Sync (runs off the event loop).
         """
-        restored = False
-        if is_resume and ctx.workspace_dir is None and ctx.blobs is not None and ctx.resume_sid:
-            from ..checkpoint.workspace import restore
+        from ..checkpoint.workspace import RestoreResult, try_restore, workspace_ready_event
 
-            try:
-                restored = restore(ctx.blobs, ctx.resume_sid, str(ctx.workspace))
-            except Exception:  # noqa: BLE001 — fall back to a fresh workspace
-                restored = False
+        restored, restore_error = RestoreResult(found=False), None
+        if is_resume and ctx.workspace_dir is None and ctx.blobs is not None and ctx.resume_sid:
+            # A failed restore leaves no half-extracted files behind (restore cleans up), so
+            # the fresh path below can clone into the directory.
+            restored, restore_error = try_restore(ctx.blobs, ctx.resume_sid, str(ctx.workspace))
         names: list[str] = []
         repos: list[str] = []
         if restored:
@@ -481,16 +480,7 @@ class LocalEngine:
                 from ..integrations.git import provision_repos
 
                 repos = provision_repos(ctx.workspace, ctx.spec.repos, ctx.secrets)
-        return {
-            "event": "workspace_ready",
-            "restored": restored,
-            "skills": names,
-            "repos": repos,
-            "summary": (
-                f"workspace ready (restored={restored}, skills staged={len(names)}, "
-                f"repos cloned={len(repos)})"
-            ),
-        }
+        return workspace_ready_event(restored, restore_error, names, repos)
 
     # -- Engine protocol -------------------------------------------------------
 

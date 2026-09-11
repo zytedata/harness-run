@@ -326,6 +326,13 @@ These are facts measured during the PoC. The library encodes them so consumers i
   default cwd-keyed local store is fatal for serverless.
 - Workspace: tar the agent workspace to GCS; restore on resume. Pin the Claude session id up front via
   `options.session_id` (the cloud binary doesn't surface it on messages otherwise).
+  The restore extracts with `tarfile`'s `data` filter relaxed for symlinks only (`blobstore.extract_tree`):
+  a snapshot always carries `.venv/bin/python -> /usr/local/bin/python3`, which `data` refuses (it aborted
+  every cross-worker resume of a coding run, #74), while a symlink is only followed at use — member paths
+  still cannot leave the workspace, not even through a restored symlink. Other refused members (FIFOs,
+  device nodes, hard links outside) are skipped and listed in `workspace_ready.skipped`. A restore that
+  fails removes the directory it created, so the fresh-workspace fallback never clones into leftovers,
+  and reports why in `workspace_ready.restore_error`.
 - **The agent cwd is a leaf literally named `workspace`** (`.../jobs/<session-id>/workspace/`), on every
   backend. An anonymous `jobs/<uuid>` cwd — typically under `/tmp` — reads as a disposable temp location,
   and weaker models act on that hint: observed with claude-haiku-4.5, whose *first* command was `cd /tmp`;

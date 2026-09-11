@@ -14,10 +14,13 @@ extra capability that need demands, so it lives on the port.
 from __future__ import annotations
 
 import io
+import logging
 import os
 import tarfile
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
+
+logger = logging.getLogger(__name__)
 
 
 @runtime_checkable
@@ -36,8 +39,12 @@ class BlobStore(Protocol):
         """Archive directory ``local_dir`` and store it under ``key`` (e.g. workspace tar)."""
         ...
 
-    def get_tree(self, key: str, local_dir: str) -> None:
-        """Restore the tree stored at ``key`` into ``local_dir``."""
+    def get_tree(self, key: str, local_dir: str) -> list[str]:
+        """Restore the tree stored at ``key`` into ``local_dir``.
+
+        Returns the archive member names that were NOT restored because extracting them
+        would be unsafe (see :func:`extract_tree`); ``[]`` for a complete restore.
+        """
         ...
 
     def exists(self, key: str) -> bool:
@@ -94,6 +101,52 @@ def set_default_gcs_credentials(credentials: Any | None) -> None:
 
 def default_gcs_credentials() -> Any | None:
     return _default_credentials
+
+
+def _restore_member(member: tarfile.TarInfo, dest_path: str) -> tarfile.TarInfo:
+    """The ``data`` filter, except that a symlink may point anywhere.
+
+    ``tarfile``'s ``data`` filter refuses a symlink whose target is absolute or outside the
+    destination. A workspace snapshot is full of those by construction — every virtualenv
+    has ``.venv/bin/python -> /usr/local/bin/python3`` — and a symlink's target is only
+    followed at use, never at extraction, so recreating it writes nothing outside the
+    destination. Its *name* is still checked (``tar_filter`` keeps the path containment
+    and mode stripping), ownership is dropped as ``data`` does, and a later member whose
+    path runs *through* the symlink is still refused: the filters resolve member paths
+    with ``realpath`` against what is already on disk. Hard links and everything else keep
+    the full ``data`` treatment.
+    """
+    try:
+        return tarfile.data_filter(member, dest_path)
+    except (tarfile.AbsoluteLinkError, tarfile.LinkOutsideDestinationError):
+        if not member.issym():
+            raise
+    return tarfile.tar_filter(member, dest_path).replace(
+        uid=None, gid=None, uname=None, gname=None, deep=False
+    )
+
+
+def extract_tree(tar: tarfile.TarFile, local_dir: str) -> list[str]:
+    """Extract a tree archive into ``local_dir``; return the member names skipped as unsafe.
+
+    Members are filtered with :func:`_restore_member`. One the filter refuses (a path that
+    escapes the destination, a device node or FIFO, a hard link pointing outside) is
+    skipped and logged instead of aborting the whole extraction: a snapshot that restores
+    all but a stray special file is worth far more than the fresh workspace the caller
+    would otherwise fall back to, and the caller sees the names.
+    """
+    skipped: list[str] = []
+
+    def restore_filter(member: tarfile.TarInfo, dest_path: str) -> tarfile.TarInfo | None:
+        try:
+            return _restore_member(member, dest_path)
+        except tarfile.FilterError as exc:
+            logger.warning("restore: skipping unsafe archive member %r: %s", member.name, exc)
+            skipped.append(member.name)
+            return None
+
+    tar.extractall(local_dir, filter=restore_filter)
+    return skipped
 
 
 class GcsBlobStore:
@@ -155,11 +208,11 @@ class GcsBlobStore:
             buf, content_type="application/gzip"
         )
 
-    def get_tree(self, key: str, local_dir: str) -> None:
+    def get_tree(self, key: str, local_dir: str) -> list[str]:
         data = self.get_bytes(key)
         Path(local_dir).mkdir(parents=True, exist_ok=True)
         with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tar:
-            tar.extractall(local_dir, filter="data")
+            return extract_tree(tar, local_dir)
 
     def exists(self, key: str) -> bool:
         return self._get_bucket().blob(self._object_name(key)).exists()
@@ -210,13 +263,13 @@ class LocalBlobStore:
             # arcname="." stores the dir *contents* so restore needs no extra nesting.
             tar.add(local_dir, arcname=".")
 
-    def get_tree(self, key: str, local_dir: str) -> None:
+    def get_tree(self, key: str, local_dir: str) -> list[str]:
         path = _normalize_key(self.root, key)
         if not path.exists():
             raise KeyError(key)
         Path(local_dir).mkdir(parents=True, exist_ok=True)
         with tarfile.open(str(path), mode="r:gz") as tar:
-            tar.extractall(local_dir, filter="data")
+            return extract_tree(tar, local_dir)
 
     def exists(self, key: str) -> bool:
         return _normalize_key(self.root, key).exists()

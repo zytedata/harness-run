@@ -34,6 +34,9 @@ _SESSION_CONFIG_DIRECTIVE = re.compile(
 )
 _TURN_CONFIG_DIRECTIVE = re.compile(r"^\s*AGENT_TURN_CONFIG_GCS=(\S+)[ \t]*\r?\n", re.IGNORECASE)
 _GCS_TOKEN_DIRECTIVE = re.compile(r"^\s*AGENT_GCS_TOKEN=(\S+)[ \t]*\r?\n", re.IGNORECASE)
+_GCS_TOKEN_EXPIRY_DIRECTIVE = re.compile(
+    r"^\s*AGENT_GCS_TOKEN_EXPIRY=(\S+)[ \t]*\r?\n", re.IGNORECASE
+)
 _AGENT_DESCRIPTION = "A remote-agent-toolkit agent: a Claude Code session driven by the toolkit harness."
 
 
@@ -113,7 +116,15 @@ def _split_gcs_token_directive(prompt: str) -> tuple[str | None, str]:
     return None, prompt
 
 
-def _use_run_gcs_token(gcs_token: str | None, session_id: str) -> bool:
+def _split_gcs_token_expiry_directive(prompt: str) -> tuple[str | None, str]:
+    """Consume the non-secret expiry following the bearer; old clients omit it."""
+    match = _GCS_TOKEN_EXPIRY_DIRECTIVE.match(prompt)
+    return (match.group(1), prompt[match.end():]) if match else (None, prompt)
+
+
+def _use_run_gcs_token(
+    gcs_token: str | None, session_id: str, *, expiry: str | None = None
+) -> bool:
     """Point every GcsBlobStore of this turn at the run's scoped token (or back to ADC).
 
     Returns whether a token is in force. Called first thing in a turn, before any config,
@@ -124,10 +135,15 @@ def _use_run_gcs_token(gcs_token: str | None, session_id: str) -> bool:
     if not gcs_token:
         set_default_gcs_credentials(None)
         return False
-    from .scoped_gcs import output_bucket_from_env, worker_credentials
+    from .scoped_gcs import _parse_expiry, output_bucket_from_env, worker_credentials
+
+    parsed_expiry = _parse_expiry(expiry)
+    if expiry is not None and parsed_expiry is None:
+        raise ValueError("invalid run-scoped GCS token expiry")
 
     creds = worker_credentials(
-        gcs_token, output_bucket_from_env(os.environ.get("AGENT_EVENTS_GCS")), session_id
+        gcs_token, output_bucket_from_env(os.environ.get("AGENT_EVENTS_GCS")), session_id,
+        expiry=parsed_expiry,
     )
     set_default_gcs_credentials(creds)
     return True
@@ -303,6 +319,7 @@ class ToolkitAgent(BaseAgent):
         session_config_uri, turn_config_uri, prompt = _split_config_directives(prompt)
         resume_sid, prompt = _split_resume_directive(prompt)
         gcs_token, prompt = _split_gcs_token_directive(prompt)
+        gcs_token_expiry, prompt = _split_gcs_token_expiry_directive(prompt)
         # The toolkit session id is the stable token: it tags the Cloud Logging stream the
         # client tails, and pins the Claude session id for checkpoint keying. It rides the
         # AGENT_SESSION directive (cold jobs run under a throwaway auto-created ADK
@@ -316,6 +333,7 @@ class ToolkitAgent(BaseAgent):
             spec, session_id, prompt, resume_sid, secrets_uri, invocation_id,
             session_config_uri=session_config_uri, turn_config_uri=turn_config_uri,
             gcs_token=gcs_token,
+            gcs_token_expiry=gcs_token_expiry,
         ):
             yield event
 
@@ -324,6 +342,7 @@ class ToolkitAgent(BaseAgent):
         secrets_uri: str | None = None, invocation_id: str = "",
         session_config_uri: str | None = None, turn_config_uri: str | None = None,
         gcs_token: str | None = None, worker: str | None = None,
+        gcs_token_expiry: str | None = None,
     ) -> AsyncGenerator[Any, None]:
         """Process one turn under ``session_id``: prep workspace, drive the harness, surface events.
 
@@ -357,7 +376,7 @@ class ToolkitAgent(BaseAgent):
         from .tracing import TurnTracer
         from .translate import to_adk_event
 
-        scoped_gcs = _use_run_gcs_token(gcs_token, session_id)
+        scoped_gcs = _use_run_gcs_token(gcs_token, session_id, expiry=gcs_token_expiry)
         # The RAW session id keys the Cloud Logging stream (what the client tails); the
         # Claude/checkpoint side needs a canonical UUID, mapped deterministically from it.
         sink = CloudLoggingSink(session_id=session_id)
@@ -679,6 +698,7 @@ class ToolkitAgent(BaseAgent):
             invocation_id=invocation_id,
             session_config_uri=session_config_uri, turn_config_uri=turn_config_uri,
             gcs_token=gcs_token, worker=worker_id,
+            gcs_token_expiry=claimed.get("gcs_token_expiry"),
         ):
             yield event
 

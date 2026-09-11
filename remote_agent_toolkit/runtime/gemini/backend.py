@@ -521,7 +521,7 @@ def deploy(
     # storage.buckets.update — warn, never fail the deploy.
     from .handoff import ensure_handoff_lifecycle
 
-    if not ensure_handoff_lifecycle(output_bucket):
+    if not ensure_handoff_lifecycle(output_bucket, credentials=credentials):
         import warnings
 
         warnings.warn(
@@ -1031,6 +1031,10 @@ class GeminiSession:
         self._stop_reason: StopReason | None = None
         self._last_result: RunResult | None = None
         self._gcs_token_stop: threading.Event | None = None  # stops the token refresher
+        self._submission_lock = threading.Lock()
+        self._submission_may_have_dispatched = False
+        self._submission_uncertain = False
+        self._gcs_token_expiry: str | None = None
         self._current_run: DrivenRun | None = None
         self._last_job: Any | None = None
         self._worker: WorkerEntry | None = None  # the pool worker the running turn is addressed to
@@ -1199,6 +1203,11 @@ class GeminiSession:
         self._stop_gcs_token_refresh()
         stop = threading.Event()
         self._gcs_token_stop = stop
+        # Seed renewal state before a worker can need it, and carry the actual
+        # initial expiry through both transports. Never bind an expiring token as
+        # an immortal credential on the worker.
+        write_run_token(engine._output_bucket, sid, token, expiry, **engine._gcs_store_kwargs())
+        self._gcs_token_expiry = expiry.isoformat() if expiry else None
 
         def refresh_loop() -> None:
             while not stop.wait(REFRESH_EVERY_S):
@@ -1206,7 +1215,8 @@ class GeminiSession:
                     fresh, fresh_expiry = mint_run_token(
                         engine._credentials, engine._output_bucket, sid
                     )
-                    write_run_token(engine._output_bucket, sid, fresh, fresh_expiry)
+                    write_run_token(engine._output_bucket, sid, fresh, fresh_expiry,
+                                    **engine._gcs_store_kwargs())
                 except Exception:  # noqa: BLE001 — the worker keeps its current token
                     logger.warning("run-scoped GCS token refresh failed for %s", sid, exc_info=True)
 
@@ -1214,6 +1224,7 @@ class GeminiSession:
         return token
 
     def _stop_gcs_token_refresh(self) -> None:
+        self._gcs_token_expiry = None
         stop = self._gcs_token_stop
         if stop is not None:
             stop.set()
@@ -1223,7 +1234,8 @@ class GeminiSession:
                 from .scoped_gcs import delete_run_token
 
                 try:
-                    delete_run_token(engine._output_bucket, self._session_id)
+                    delete_run_token(engine._output_bucket, self._session_id,
+                                     **engine._gcs_store_kwargs())
                 except Exception:  # noqa: BLE001 — the 1-day lifecycle rule backs this up
                     pass
 
@@ -1239,7 +1251,8 @@ class GeminiSession:
             )
         from .handoff import stage_secrets
 
-        return stage_secrets(engine._output_bucket, self._session_id, secrets)
+        return stage_secrets(engine._output_bucket, self._session_id, secrets,
+                             **engine._gcs_store_kwargs())
 
     def _bind_config(self, config: SessionConfig | None) -> None:
         """Persist the session's config at its stable key (called once, at session open)."""
@@ -1258,7 +1271,8 @@ class GeminiSession:
 
         self._session_config = config
         self._session_config_uri = persist_session_config(
-            engine._output_bucket, self._session_id, config.to_dict()
+            engine._output_bucket, self._session_id, config.to_dict(),
+            **engine._gcs_store_kwargs(),
         )
         self._session_config_resolved = True
 
@@ -1277,7 +1291,8 @@ class GeminiSession:
         from ...config import SessionConfig
         from .handoff import load_session_config
 
-        found = load_session_config(engine._output_bucket, self._session_id)
+        found = load_session_config(engine._output_bucket, self._session_id,
+                                    **engine._gcs_store_kwargs())
         if found is not None:
             uri, config_dict = found
             config = SessionConfig.from_dict(config_dict)
@@ -1301,6 +1316,60 @@ class GeminiSession:
         )
 
     def _submit(
+        self,
+        message: str,
+        resume: bool,
+        secrets: dict[str, str] | None = None,
+        turn_config: TurnConfig | None = None,
+        hooks: Any | None = None,
+    ) -> DrivenRun:
+        # A failed acquisition must never clean another in-flight turn's lease.
+        # This is a local ownership guard, not a distributed session lock.
+        if not self._submission_lock.acquire(blocking=False):
+            raise RuntimeError("a submission is already in progress on this session handle")
+        try:
+            if self._submission_uncertain:
+                raise RuntimeError("previous submission acceptance is unknown; reconcile it first")
+            if self._current_run is not None and not self._current_run.done:
+                raise RuntimeError("a turn is already active on this session handle")
+            self._submission_may_have_dispatched = False
+            self._last_job = None
+            try:
+                return self._submit_impl(message, resume, secrets, turn_config, hooks)
+            except Exception:
+                if self._submission_may_have_dispatched:
+                    # A timeout can follow remote acceptance. Do not invalidate
+                    # credentials or retire a worker that may be executing.
+                    self._submission_uncertain = True
+                else:
+                    self._abort_submission()
+                raise
+        finally:
+            self._submission_lock.release()
+
+    def _abort_submission(self) -> None:
+        """Best-effort rollback only when no dispatch could have been accepted."""
+        try:
+            self._stop_gcs_token_refresh()
+        except Exception:  # noqa: BLE001 — preserve the original setup error
+            logger.warning("could not clean up failed submission token lease")
+        worker, self._worker = self._worker, None
+        self._worker_retired = False
+        if worker is not None:
+            try:
+                self._engine._retire_worker(worker, cancel_job=True)
+            except Exception:  # noqa: BLE001 — pool TTL remains the backstop
+                logger.warning("could not retire failed submission worker")
+        uri, self._staged_secrets_uri = self._staged_secrets_uri, None
+        if uri:
+            from .handoff import delete_staged_secrets
+
+            try:
+                delete_staged_secrets(uri, **self._engine._gcs_store_kwargs(uri))
+            except Exception:  # noqa: BLE001 — lifecycle remains the backstop
+                logger.warning("could not clean up failed submission secrets")
+
+    def _submit_impl(
         self,
         message: str,
         resume: bool,
@@ -1334,8 +1403,10 @@ class GeminiSession:
             from .handoff import stage_turn_config
 
             turn_config_uri = stage_turn_config(
-                engine._output_bucket, sid, turn_config.to_dict()
+                engine._output_bucket, sid, turn_config.to_dict(), **engine._gcs_store_kwargs()
             )
+        # Resolve/validate the client overlay before crossing the dispatch boundary.
+        client_spec = self._client_spec(turn_config)
 
         worker: WorkerEntry | None = None  # per-worker dispatch: the worker this turn went to
         payload: dict | None = None
@@ -1350,11 +1421,14 @@ class GeminiSession:
                 session_config_gcs=self._session_config_uri,
                 turn_config_gcs=turn_config_uri,
                 gcs_token=gcs_token,
+                gcs_token_expiry=self._gcs_token_expiry,
             )
             if engine._subscription:
                 # Legacy shared-subscription pool (an engine deployed before per-worker
                 # dispatch): every idle worker competes for the one subscription.
-                engine._dispatch().publish(payload)
+                dispatcher = engine._dispatch()
+                self._submission_may_have_dispatched = True
+                dispatcher.publish(payload)
             else:
                 # Per-worker dispatch: take one idle worker off the roster (or spawn one
                 # when the pool is empty — the turn then waits for its boot instead of
@@ -1362,7 +1436,10 @@ class GeminiSession:
                 # subscription is the only channel it can land on.
                 worker = engine._claim_worker()
                 self._worker, self._worker_retired = worker, False
-                engine._dispatch().publish(payload, attributes=worker_attributes(worker.worker))
+                dispatcher = engine._dispatch()
+                attributes = worker_attributes(worker.worker)
+                self._submission_may_have_dispatched = True
+                dispatcher.publish(payload, attributes=attributes)
             # Refill off the critical path: creating the new worker's subscription takes
             # seconds on Pub/Sub, and nothing about THIS turn waits for it. Best-effort.
             engine._in_background(engine.fill_pool, 1, name="pool-refill")
@@ -1385,6 +1462,10 @@ class GeminiSession:
                 # leaves this one as prompt text, still running the turn on the runtime
                 # identity; the leftover is a token worth this run's own objects only.
                 directives += f"AGENT_GCS_TOKEN={gcs_token}\n"
+                if self._gcs_token_expiry:
+                    # AFTER the token: older token-aware workers must still parse
+                    # the bearer and must not accidentally fall back to ADC.
+                    directives += f"AGENT_GCS_TOKEN_EXPIRY={self._gcs_token_expiry}\n"
             prompt = directives + message
             # Two platform-runner regressions of 2026-07-28 shape this payload (engines
             # created before still work the old way; this form works on both):
@@ -1403,7 +1484,9 @@ class GeminiSession:
             cfg: dict[str, Any] = {"query": json.dumps(payload)}
             if engine._output_bucket:
                 cfg["output_gcs_uri"] = f"{engine._output_bucket}/jobs/{sid}.jsonl"
-            self._last_job = engine._agent_engines().run_query_job(name=engine._resource, config=cfg)
+            api = engine._agent_engines()
+            self._submission_may_have_dispatched = True
+            self._last_job = api.run_query_job(name=engine._resource, config=cfg)
 
         # Live channel: the GCS event mirror (quota-free, no ingestion lag). Cloud Logging
         # is still WRITTEN by every worker — it's the ops/debug channel, never tailed.
@@ -1418,6 +1501,7 @@ class GeminiSession:
             return tail_stream(
                 events_uri, sid, since=since,
                 start_after=watermark["key"] or None, watermark=watermark,
+                **engine._gcs_store_kwargs(),
             )
 
         async def history_reader() -> list:
@@ -1509,7 +1593,7 @@ class GeminiSession:
             factory = tail_source
 
         run = DrivenRun(
-            factory, sid, self._client_spec(turn_config),
+            factory, sid, client_spec,
             on_complete=self._on_complete, on_event=self._observe,
         )
         self._current_run = run
@@ -1543,7 +1627,8 @@ class GeminiSession:
         if self._staged_secrets_uri:
             from .handoff import delete_staged_secrets
 
-            delete_staged_secrets(self._staged_secrets_uri)
+            delete_staged_secrets(self._staged_secrets_uri,
+                                 **self._engine._gcs_store_kwargs(self._staged_secrets_uri))
             self._staged_secrets_uri = None
 
     async def interrupt(self, *, timeout: float = 120.0) -> None:
@@ -1599,13 +1684,15 @@ class GeminiSession:
                 "or an engine deployed before the inbox existed); the run was cancelled "
                 "without a checkpoint"
             )
+        # Completion clears self._worker. Capture the current remote target after
+        # the graceful-stop wait but before cancelling/awaiting the local tail.
+        worker = self._worker
+        job_name = getattr(self._last_job, "job_name", None) or (worker.job_name if worker else None)
         run.cancel(note=note)
         try:
             await run.task
         except asyncio.CancelledError:
             pass
-        worker = self._worker
-        job_name = getattr(self._last_job, "job_name", None) or (worker.job_name if worker else None)
         if job_name:
             engine = self._engine
             try:
@@ -1661,7 +1748,9 @@ class GeminiSession:
                 "AgentSpec(transcript=True)"
             )
         bucket, prefix = parse_gcs_uri(f"{engine._output_bucket}/checkpoints")
-        blobs = GcsBlobStore(bucket, (prefix + "/") if prefix else "")
+        blobs = GcsBlobStore(bucket, (prefix + "/") if prefix else "",
+                             **({"credentials": engine._credentials}
+                                if engine._credentials is not None else {}))
         # The worker keys the store by the SDK-canonical id, not the raw (numeric, on the
         # cold path) session id.
         return await BlobSessionStore(blobs).load_all(_claude_session_id(self._session_id))
@@ -2039,6 +2128,20 @@ class GeminiEngine:
             self, session_id, config_resolved=False
         )
 
+    def _gcs_store_kwargs(self, uri: str | None = None) -> dict:
+        """Inject this client's explicit identity without changing worker defaults.
+
+        Handoff/stream helpers already support a store. Their keys include the bucket
+        prefix, so the injected store deliberately has no prefix of its own.
+        """
+        from ...ports.blobstore import GcsBlobStore, parse_gcs_uri
+
+        uri = uri or self._output_bucket
+        if self._credentials is None or not uri:
+            return {}
+        bucket, _ = parse_gcs_uri(uri)
+        return {"store": GcsBlobStore(bucket, credentials=self._credentials)}
+
     def list_sessions(self) -> list[dict]:
         """Enumerate this engine's known past sessions, newest first.
 
@@ -2058,6 +2161,7 @@ class GeminiEngine:
             output_bucket=self._output_bucket,
             resource=self._resource,
             adk_sessions=adk_sessions,
+            **self._gcs_store_kwargs(),
         )
 
     def wait_until_warm(self, timeout: float = 600.0) -> bool:
@@ -2086,7 +2190,8 @@ class GeminiEngine:
             # A worker writes its readiness marker to the GCS mirror (events/<pool_id>/).
             # NB engines deployed before event streaming only ever logged it — for those
             # this times out (False, a soft signal: dispatch works regardless); redeploy.
-            markers = tail_stream(f"{self._output_bucket}/events", pool_id, since=created)
+            markers = tail_stream(f"{self._output_bucket}/events", pool_id, since=created,
+                                  **self._gcs_store_kwargs())
             async for _ in markers:
                 return True  # first marker since deploy => a worker is warm
             return False

@@ -221,7 +221,7 @@ def worker_credentials(
     def retry_soon() -> _dt.datetime:
         # google-auth needs a datetime back; a few minutes ahead makes it ask again soon
         # while the current token, which may still be valid, keeps being used.
-        return _dt.datetime.utcnow() + _dt.timedelta(minutes=5)
+        return _dt.datetime.now(_dt.timezone.utc).replace(tzinfo=None) + _dt.timedelta(minutes=5)
 
     def refresh_handler(_request: Any, scopes: Any = None) -> tuple[str, _dt.datetime]:
         if key is None:
@@ -242,7 +242,10 @@ def worker_credentials(
         return state["token"], retry_soon()
 
     return oauth2_credentials.Credentials(
-        token=token, expiry=expiry, refresh_handler=refresh_handler
+        # Legacy payloads without expiry get a conservative retry schedule, not
+        # google-auth's expiry=None (non-expiring) semantics. This cannot recover
+        # an already expired bearer; never fall back to ambient credentials.
+        token=token, expiry=expiry or retry_soon(), refresh_handler=refresh_handler
     )
 
 

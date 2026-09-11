@@ -231,7 +231,9 @@ def handoff_lifecycle_rules(output_bucket: str) -> tuple[str, list[dict]]:
     ]
 
 
-def ensure_handoff_lifecycle(output_bucket: str, bucket_obj: Any | None = None) -> bool:
+def ensure_handoff_lifecycle(
+    output_bucket: str, bucket_obj: Any | None = None, *, credentials: Any | None = None
+) -> bool:
     """Idempotently ensure the handoff lifecycle rules on the output bucket.
 
     Returns ``True`` when every needed rule is present (already or newly added),
@@ -246,7 +248,9 @@ def ensure_handoff_lifecycle(output_bucket: str, bucket_obj: Any | None = None) 
         if bucket_obj is None:
             from google.cloud import storage  # lazy: only deploy needs it
 
-            bucket_obj = storage.Client().bucket(name)
+            client = (storage.Client(credentials=credentials, project="_")
+                      if credentials is not None else storage.Client())
+            bucket_obj = client.bucket(name)
             bucket_obj.reload()
         rules = list(bucket_obj.lifecycle_rules or [])
         # Conditions in a GCS lifecycle rule are conjunctive. A prefix with a

@@ -55,21 +55,6 @@ for the tag with this file's section as the notes.
   Codex reports conversation-save failures as `checkpoint_error` while preserving a
   successfully saved `workspace_key` and the completed/interrupted turn's result.
 
-### Backwards-incompatible
-
-- **Codex resume fails explicitly for unreadable or corrupt existing checkpoints**
-  (#64). Denied metadata reads, malformed metadata/thread IDs, and missing/unreadable
-  rollouts no longer silently start a fresh conversation. Errors omit storage exception
-  text. **Update note:** handle the failed run and repair the checkpoint or deliberately
-  start a new session. Absent metadata and unsafe restore destinations retain their
-  existing fresh-conversation behavior. Checkpoint permissions are unchanged.
-
-### Changed
-
-- `remote_agent_toolkit.checkpoint.restore()` returns a `RestoreResult` (truthy iff a snapshot
-  existed; `.found`, `.skipped`) instead of a bare `bool`, and `BlobStore.get_tree()` returns the
-  list of skipped member names instead of `None`. Truthiness checks keep working; `is True`
-  comparisons do not.
 - **Gemini events are scoped to the submitted turn and addressed worker.** A previous
   turn's trailing checkpoint cannot retire a booting worker's subscription. Pickup
   requires the matching `turn_started` and unrelated events cannot extend its deadline.
@@ -79,10 +64,24 @@ for the tag with this file's section as the notes.
 
 ### Backwards-incompatible
 
+- **Codex resume fails explicitly for unreadable or corrupt existing checkpoints**
+  (#64). Denied metadata reads, malformed metadata/thread IDs, and missing/unreadable
+  rollouts no longer silently start a fresh conversation. Errors omit storage exception
+  text. **Update note:** handle the failed run and repair the checkpoint or deliberately
+  start a new session. Absent metadata and unsafe restore destinations retain their
+  existing fresh-conversation behavior. Checkpoint permissions are unchanged.
 - **The Gemini client requires turn IDs in the serving workers' event protocol.**
   Unsupported revisions fail before staging secrets or dispatching work. **Update note:**
   redeploy engines with this toolkit first, then update clients. Older clients can still
   drive upgraded workers. Pinned/split traffic must serve upgraded revisions throughout.
+
+### Changed
+
+- `remote_agent_toolkit.checkpoint.restore()` returns a `RestoreResult` (truthy iff a snapshot
+  existed; `.found`, `.skipped`) instead of a bare `bool`, and `BlobStore.get_tree()` returns the
+  list of skipped member names instead of `None`. Truthiness checks keep working; `is True`
+  comparisons do not.
+
 
 ## 0.3.1 — 2026-09-08
 

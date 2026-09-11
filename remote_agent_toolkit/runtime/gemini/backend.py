@@ -515,8 +515,9 @@ class GeminiSession:
         self._current_run: DrivenRun | None = None
         self._turn_id: str | None = None
         self._sandbox: str | None = None  # the sandbox the running turn was handed to
-        self._refresh_stop: threading.Event | None = None  # stops the token refresher
+        self._refresh_stop: threading.Event | None = None  # stops the GCS token refresher
         self._gcs_token_expiry: str | None = None
+        self._model_token_expiry: Any = None  # when the turn's model access ends
         self._session_config = config
         self._session_config_uri: str | None = None
         self._session_config_resolved = config_resolved
@@ -655,7 +656,7 @@ class GeminiSession:
 
         model_env: dict[str, str] = {}
         if engine._use_vertex:
-            from .model_token import mint_model_token, vertex_model_env
+            from .model_token import mint_turn_model_token, vertex_model_env
 
             if not engine._model_service_account or not engine._project:
                 raise RuntimeError(
@@ -664,14 +665,24 @@ class GeminiSession:
                     "ANTHROPIC_API_KEY as a secret to an engine deployed with use_vertex=False"
                 )
             try:
-                model_token, _ = mint_model_token(engine._credentials, engine._model_service_account)
+                model_token, model_expiry, extended = mint_turn_model_token(
+                    engine._credentials, engine._model_service_account, engine._max_turn_s
+                )
             except Exception as exc:  # noqa: BLE001
                 raise RuntimeError(
                     f"could not mint the model token by impersonating {engine._model_service_account} "
                     f"({type(exc).__name__}: {str(exc)[:200]}); the caller needs "
                     "roles/iam.serviceAccountTokenCreator on that account (ratk-gcp-setup grants it)"
                 ) from exc
+            if not extended and not engine._short_token_warned:
+                engine._short_token_warned = True
+                logger.warning(
+                    "model tokens for %s last an hour: a turn longer than that loses model access "
+                    "(set constraints/iam.allowServiceAccountCredentialLifetimeExtension for the "
+                    "account to mint tokens up to max_turn_s)", engine._model_service_account,
+                )
             model_env = vertex_model_env(model_token, engine._project, engine._vertex_region)
+            self._model_token_expiry = model_expiry
 
         stop = threading.Event()
         self._refresh_stop = stop
@@ -684,15 +695,6 @@ class GeminiSession:
                                     **engine._gcs_store_kwargs())
                 except Exception:  # noqa: BLE001 — the worker keeps its current token
                     logger.warning("run-scoped GCS token refresh failed for %s", sid, exc_info=True)
-                if engine._use_vertex and self._sandbox and self._turn_id == turn_id:
-                    try:
-                        fresh_model, _ = mint_model_token(engine._credentials, engine._model_service_account)
-                        engine._provider().call(
-                            self._sandbox, "/token",
-                            {"turn_id": turn_id, "model_token": fresh_model}, timeout_s=30,
-                        )
-                    except Exception:  # noqa: BLE001 — best effort; the turn keeps its token
-                        logger.warning("model token refresh failed for %s", sid, exc_info=True)
 
         threading.Thread(target=refresh_loop, name=f"token-refresh-{sid[:8]}", daemon=True).start()
         return token, model_env
@@ -1033,6 +1035,7 @@ class GeminiEngine:
         self._vertex_region = vertex_region
         self._pinned = pinned
         self._roster_store = roster_store
+        self._short_token_warned = False
         self._sessions: dict[str, GeminiSession] = {}
         self._roster_cached: Any = None
         self._background: list[threading.Thread] = []

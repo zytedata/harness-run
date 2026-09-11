@@ -26,6 +26,74 @@ for the tag with this file's section as the notes.
 
 ## Unreleased
 
+### Backwards-incompatible
+
+- **The `gemini` backend runs on Agent Sandbox instead of Agent Runtime query jobs** (#84,
+  DESIGN.md §13). `gemini.deploy` now builds the agent's container image with Docker, pushes it
+  to Artifact Registry and creates an immutable sandbox **template** (a template is a version);
+  a turn claims a ready sandbox off the roster or creates one, hands it the turn over HTTP
+  through the platform's proxy, streams events straight from the sandbox (the GCS mirror stays
+  the durable record and the fallback) and deletes the sandbox at the terminal event. The
+  sandbox has no Google identity: GCS access runs on the run-scoped token, model calls on a
+  one-hour token minted from a predict-only service account. Measured against the warm pool it
+  replaces: 1.3 s to the first event and ~6 s to the result of a one-tool Haiku turn (4.2 s /
+  14.5 s before); a turn with no ready sandbox takes ~20 s instead of ~150 s. Module, `deploy` /
+  `get_engine` / `list_engines`, `Engine` / `Session` / `Run` keep their names, so app code that
+  looks an engine up and runs turns keeps working. What breaks:
+  - `gemini.deploy` drops `service_account`, `scoped_gcs`, `min_instances`, `max_instances`,
+    `staging_bucket`, `new_engine`; adds `image_repo` (Artifact Registry Docker repo; default
+    `<location>-docker.pkg.dev/<project>/ratk`), `image` (skip the build, use a pushed image),
+    `model_service_account` (default `ratk-model@<project>`), `max_turn_s` (a turn's ceiling on
+    a sandbox, default 8 h), `internet_access`, `log`. `use_vertex`, `resource_limits`
+    (`cpu` now 1–8), `warm_pool` / `pool_size` / `pool_max_wait_s`, `output_bucket`,
+    `credentials` stay. Deploying needs the Docker CLI logged into the registry.
+  - `get_engine` drops `scoped_gcs`; `warm_pool` defaults to what the deploy recorded. A
+    **deploy record** under the output bucket (`deploys/<name>/<template>.json`) gives a
+    looked-up handle the baked spec and the model-credential settings.
+  - Versions: `engine.versions()` lists template ids newest first, `revisions()` their
+    metadata (`image`, `current`); `get_engine(name, version=)` **routes** to that template
+    (it used to assert on the serving revision); `set_traffic()` is gone ("serving" = newest
+    template); `delete_version()` deletes a template and its ready sandboxes; `engine.resource`
+    is a template; `engine.delete()` takes no `delete_pool_resources` (it always deletes the
+    sandboxes and every version's template).
+  - Session ids are always client-minted UUIDs; `list_sessions()` reads the event mirror only;
+    `history()` has the mirror layer only (no platform job output, no Cloud Logging).
+  - `session.resource_samples()`, the memory-pressure status event and the `memory_peak_bytes`
+    / `memory_limit_bytes` / `cpu_usec` keys on the result's `raw` are removed (a sandbox
+    exposes no cgroup files and has no logging identity). Cloud Trace spans and the
+    `remote_agent_toolkit_steps` / `remote_agent_toolkit_resources` Cloud Logging logs stop;
+    `session.history()` is the record.
+  - Events: `turn_started` carries the sandbox id as `worker` and `warm` (from the ready pool);
+    `control_ready` reports the HTTP channel; `workspace_ready.scoped_gcs` is always true. A
+    run whose sandbox dies mid-turn ends with an explained error result (`sandbox_unreachable`)
+    instead of a platform retry.
+  - `Session.send()` into a running turn raises `ControlUnavailable` while the turn is still
+    being dispatched (before its first event) — wait for the first event and send again.
+  - Dependencies: `google-cloud-agentplatform>=2.1` replaces `google-cloud-aiplatform<2`,
+    `google-adk`, `google-cloud-logging`, `google-cloud-pubsub` and `a2a-sdk`;
+    `runtime/gemini/constraints.txt` is gone (no pickle coupling to a deploy venv).
+  - IAM: the runtime service account, its custom role and the conditional bucket bindings are
+    no longer needed. The client identity needs `roles/aiplatform.user` (sandbox + template
+    permissions), storage on the output bucket, `artifactregistry.writer` on the image repo and
+    `iam.serviceAccountTokenCreator` on the model service account; the Agent Sandbox service
+    agent (`service-<number>@gcp-sa-vertex-sandbox`) needs `artifactregistry.reader` on the
+    repo. `ratk-gcp-setup` sets exactly this up (`--model-sa`, `--repo` replace
+    `--runtime-sa`, `--staging-bucket`). The `ports.dispatch` and `ports.eventsink` modules are
+    removed.
+  - Model tokens last an hour unless the organization policy
+    `constraints/iam.allowServiceAccountCredentialLifetimeExtension` lists the model service
+    account; then the client mints them for `max_turn_s`. Claude Code reads the token once, so a
+    turn longer than the token loses model access at that point (the client warns once).
+- **Codex resume fails explicitly for unreadable or corrupt existing checkpoints**
+  (#64). Denied metadata reads, malformed metadata/thread IDs, and missing/unreadable
+  rollouts no longer silently start a fresh conversation. Errors omit storage exception
+  text. **Update note:** handle the failed run and repair the checkpoint or deliberately
+  start a new session. Absent metadata and unsafe restore destinations retain their
+  existing fresh-conversation behavior. Checkpoint permissions are unchanged.
+- **Every event of a turn carries its `turn_id`** (#80): live streams and history recovery
+  select a turn by identity, never by clock, so a re-attached session's back-to-back turns
+  cannot replay each other's results.
+
 ### Fixed
 
 - **Resuming a session on another worker failed when the workspace held a virtualenv** (#74).
@@ -61,19 +129,6 @@ for the tag with this file's section as the notes.
   Live tails and all history-recovery fallbacks reject earlier turns and abandoned
   workers, including after reattachment. Early config errors carry the same identity.
   `Session.history()` still returns the complete session.
-
-### Backwards-incompatible
-
-- **Codex resume fails explicitly for unreadable or corrupt existing checkpoints**
-  (#64). Denied metadata reads, malformed metadata/thread IDs, and missing/unreadable
-  rollouts no longer silently start a fresh conversation. Errors omit storage exception
-  text. **Update note:** handle the failed run and repair the checkpoint or deliberately
-  start a new session. Absent metadata and unsafe restore destinations retain their
-  existing fresh-conversation behavior. Checkpoint permissions are unchanged.
-- **The Gemini client requires turn IDs in the serving workers' event protocol.**
-  Unsupported revisions fail before staging secrets or dispatching work. **Update note:**
-  redeploy engines with this toolkit first, then update clients. Older clients can still
-  drive upgraded workers. Pinned/split traffic must serve upgraded revisions throughout.
 
 ### Changed
 

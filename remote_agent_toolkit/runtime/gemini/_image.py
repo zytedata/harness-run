@@ -246,7 +246,9 @@ def image_uri(image_repo: str, spec_name: str, digest: str) -> str:
     import re
 
     slug = re.sub(r"[^a-z0-9._-]", "-", spec_name.lower()).strip("-.") or "agent"
-    return f"{image_repo.rstrip('/')}/ratk-{slug}:{digest}"
+    if not slug.startswith("ratk-"):
+        slug = f"ratk-{slug}"
+    return f"{image_repo.rstrip('/')}/{slug}:{digest}"
 
 
 def _run(cmd: list[str], *, capture: bool = False) -> subprocess.CompletedProcess:

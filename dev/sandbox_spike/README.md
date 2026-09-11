@@ -1,11 +1,15 @@
 # Sandbox spike: the harness inside an Agent Sandbox custom container
 
+> **Outcome (2026-09-11): built.** The spike's answer was yes, and `runtime/gemini/` was rewritten on
+> it the next day (DESIGN.md §13; `worker.py` is the productized `server.py`, `_image.py` generates
+> the Dockerfile). This directory stays as the record of the measurements and the platform limits.
+
 Question: can a Gemini Enterprise Agent Platform **sandbox** (gVisor, no ambient Google
 identity, Google-managed pre-warmed pools) replace the Agent Runtime query-job worker plus
 our own warm pool, at equal or better latency? Background and the shell-sandbox
-measurements are in the 2026-09-10 evaluation (DESIGN.md will get the outcome).
+measurements are in the 2026-09-10 evaluation.
 
-Three files:
+Four files:
 
 * `server.py` — the "runner": the toolkit harness (`local.deploy`) behind a stdlib HTTP
   server. The platform's `execute` API forwards a POST (URI + port + JSON) into the
@@ -15,6 +19,8 @@ Three files:
   non-root `appuser`, port 8080.
 * `probe.py` — creates a template from the pushed image and measures the go/no-go numbers
   (see its docstring); cleans up after itself.
+* `limits_probe.py` — the platform's undocumented ceilings (TTL, resources, proxy body sizes, the
+  per-call ceiling, call rate, concurrent creates, a long-running process); results below.
 
 ## One-time setup (operator; the classifier does not let the assistant run these)
 
@@ -94,6 +100,20 @@ Second run (`--pool 1 --turns 1 --idle-minutes 60 --ttl-check`):
 Consequence for a ready pool: set each sandbox's TTL to its intended idle life at creation
 (the roster's `expires_at` = create + TTL), the same model as today's day-long pool worker
 wait. Nothing needs to keep idle sandboxes alive.
+
+## Limits (2026-09-11, `limits_probe.py`, same project / image / 4 CPU / 8 GiB unless noted)
+
+| Limit | Measured |
+|---|---|
+| sandbox TTL | 1 h, 1 d, 7 d, 14 d and 30 d all accepted (`expire_time` set accordingly) |
+| resources | 8 CPU / 16 GiB template works (a 13 GiB allocation succeeds; template create 118 s); 16 CPU refused: "Request CPU exceeds maximum allowed: 8.0 vCPU" |
+| disk | `/tmp` 63 GB; `/` and `/workspace` overlay; a 2 GiB write takes 1.2 s |
+| proxied request body | 100 KB fine (0.5 s), 1 MB fine (4.2 s), 4 MB / 10 MB / 32 MB fail (`Execution Failed. Error: UNAVAILABLE`) |
+| proxied response body | 100 KB and 1 MB fine (0.3 s); 4 MB+ fail: "Response size too large. Received at least 2016214 bytes" → the worker pages `/events` under 1 MB |
+| one proxied call's duration | 30 / 60 / 120 / 300 s fine; 600 s → 502 Bad Gateway at 600 s (the sandbox stays healthy) → the client's long-poll holds 20 s |
+| call rate | 100 sequential `/health` calls in 18.5 s (5.4/s); 200 calls on 10 threads in 4.0 s (50/s); no 429 |
+| concurrent creates | 10 sandboxes created in parallel in 7.5 s wall (2.7–7.5 s each), all listed RUNNING; first answers 0.7–32 s later |
+| long-running process | a background ticker ran 25 min untouched across 5-minute `/exec` polls (the probe's sandbox then hit its own 30 min TTL — a probe bug, not a platform limit) |
 
 ## What decides go/no-go
 

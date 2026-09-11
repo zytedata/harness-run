@@ -18,7 +18,9 @@ container, so the whole worker contract is a handful of JSON-over-POST endpoints
   response at ~2 MB, measured 2026-09-11).
 * ``/control`` — ``{turn_id, op, message?, message_id?}``: steer / interrupt / stop into
   the running turn (the ``ControlChannel`` the harness reads; replaces the GCS inbox).
-* ``/token``   — ``{turn_id, model_token, expiry}``: a fresh model token for a long turn.
+* ``/token``   — ``{turn_id, model_token}``: replaces the turn's model-token file (Claude Code
+  does not re-read its token, so this only serves tooling that does; the client bounds a
+  turn's model access by the token's lifetime instead, see ``model_token.py``).
 * ``/exec``    — ``{command, cwd?, timeout?}`` → ``{stdout, stderr, returncode}``: the
   same contract as Google's shell image, for probes and debugging.
 

@@ -1,47 +1,45 @@
-"""Live smoke test — deploy throwaway engines from THIS checkout, run turns, tear down.
+"""Live smoke test — deploy a throwaway sandbox engine from THIS checkout, run turns, tear down.
 
-The offline suite (`make test`) can't catch platform-contract breakage: the Agent Runtime
+The offline suite (`make test`) can't catch platform-contract breakage: the Agent Sandbox
 side changes underneath us (see TESTING.md). This script is the standard live check for a
 branch that touches any deploy/runtime contract — it validates, on real infrastructure:
 
-  * ``gemini.deploy``: packaging, ``AgentEngineConfig``, the pickled ADK app template
-  * worker startup: the engine container unpickles the staged app and resolves
-    ``async_stream_query`` (the explicit ``class_method`` both dispatch paths use)
-  * a full turn round-trip per mode — **cold** (``run_query_job``, the prod default) and
-    **warm** (pub/sub dispatch to a pre-warmed pool worker)
-  * **session/turn config transport** (three checks on one extra session per mode):
-      - ``get_engine(name)`` is pure addressing; ``start_session(config=SessionConfig)``
-        binds a run-time system prompt that plants a marker — the reply must carry it,
-        proving the worker ran the session's config, not the deploy-baked spec;
-      - a second turn on the SAME session passes ``TurnConfig(output_schema=...)`` — the
-        worker steers the model to a JSON final message and the client parses it
-        (``result.structured_output``), proving the per-turn overlay reaches both sides;
-        the session config must STILL be in force: the schema leaves no room for the
-        marker in the text, so its persistence shows in the turn's ``effective_spec``
-        echo, whose system prompt must still carry the marker;
-      - both turns must stream the worker's ``effective_spec`` echo event carrying the
-        config pointers — the durable ground-truth record of what actually ran.
+  * ``gemini.deploy``: the image build + push (Docker), the template, the deploy record,
+    a ready pool of one sandbox (``wait_until_warm``)
+  * a **pool** turn: dispatch → first event / result latency on the ready sandbox, the
+    refill, the sandbox's deletion at the terminal event
+  * a **fresh** turn: ``get_engine`` (pure addressing) with a ``SessionConfig`` planting a
+    marker — the reply must carry it, proving the worker ran the session's config on top of
+    the baked spec; then a second turn on the SAME session (checkpoint resume on a new
+    sandbox) with a ``TurnConfig(output_schema=...)`` — the client parses the JSON and the
+    worker's ``effective_spec`` echo still carries the marker
+  * **control**: a steer into a running turn is acknowledged by a ``user`` event
+  * **isolation**: a turn whose task is a fixed shell script prints what the agent's shell
+    can reach — the metadata server's identity must be a tenant one that is 403 on our
+    project's storage and Vertex (the sandbox has no usable Google identity); only
+    statuses and names are printed, never tokens
+  * optional ``LONG_MINUTES=n``: a turn whose one Bash call sleeps that long (the model
+    token, the sandbox TTL and the /events long-poll all have to hold)
 
-Pass criteria per engine: terminal result with ``error=False``, ``turns > 0``, and the
-expected answer in the text (plus the config checks above). Engines are deleted in
-``finally`` (the warm one including its dispatch topic/sub); exit code is non-zero if any
-check fails.
+Pass criteria per check: terminal result with ``error=False``, ``turns > 0``, the expected
+answer in the text (plus the check's own assertions). The engine (templates + sandboxes)
+is deleted in ``finally``; exit code is non-zero if any check fails.
 
 Configure via env (defaults are the shared my-project test setup):
-  PROJECT, LOCATION, IMPERSONATE_SA (optional), MODE=cold|warm|both (default both),
-  SUFFIX (engine-name suffix; defaults to your username, so contributors don't collide).
+  PROJECT, LOCATION, IMAGE_REPO, MODEL_SA, SUFFIX (engine-name suffix; defaults to your
+  username), LONG_MINUTES, KEEP=1 (skip teardown).
 
 Run:
   make live-smoke                       # or:
   .venv/bin/python dev/live_smoke.py
 
-Costs real money and ~15 min: two ~4 min builds (parallel) + a few cents of Haiku turns.
+Needs Docker logged into the registry and ADC that can impersonate MODEL_SA. Costs a few
+cents of Haiku and ~5-10 min (mostly the image build on a cold Docker cache).
 """
 
 from __future__ import annotations
 
 import asyncio
-import concurrent.futures
 import getpass
 import os
 import re
@@ -53,200 +51,232 @@ from remote_agent_toolkit import AgentSpec, SessionConfig, SystemPrompt, TurnCon
 
 PROJECT = os.environ.get("PROJECT", "my-project")
 LOCATION = os.environ.get("LOCATION", "us-central1")
-MODE = os.environ.get("MODE", "both")
+IMAGE_REPO = os.environ.get("IMAGE_REPO") or f"{LOCATION}-docker.pkg.dev/{PROJECT}/ratk-sandbox"
+MODEL_SA = os.environ.get("MODEL_SA", "agent-runtime@my-project.iam.gserviceaccount.com")
 SUFFIX = re.sub(r"[^a-z0-9-]", "-", (os.environ.get("SUFFIX") or getpass.getuser()).lower())
+LONG_MINUTES = float(os.environ.get("LONG_MINUTES", "0") or 0)
+NAME = f"ratk-smoke-{SUFFIX}"
 
-TASK = (
-    'Run `python3 -c "print(6 * 7)"` in the shell and reply with just the number it prints.'
-)
+TASK = 'Run `python3 -c "print(6 * 7)"` in the shell and reply with just the number it prints.'
 JSON_TASK = (
     'Run `python3 -c "print(6 * 7)"` in the shell, then reply with a JSON object of the '
     'form {"answer": <the number it printed>}.'
 )
-ANSWER_SCHEMA = {
-    "type": "object",
-    "properties": {"answer": {"type": "integer"}},
-    "required": ["answer"],
-}
-
-# The session-config check plants this marker via a run-time system prompt; seeing it in
-# the reply proves the worker executed the session's config, not the deploy-baked spec.
+STEER_TASK = (
+    "First run `sleep 25` in the shell (a single Bash call; do not skip it). Then reply with "
+    "one line: the word FOLLOWUP followed by any extra instruction you received while waiting, "
+    "or NONE if you received none."
+)
+ANSWER_SCHEMA = {"type": "object", "properties": {"answer": {"type": "integer"}}, "required": ["answer"]}
+ISOLATION_SCRIPT = r"""
+python3 - <<'PY'
+import json, urllib.request as u
+def get(url, hdr=None):
+    try:
+        r = u.urlopen(u.Request(url, headers=hdr or {}), timeout=6)
+        return r.status, r.read().decode()[:300]
+    except Exception as e:
+        return getattr(e, "code", type(e).__name__), ""
+out = {}
+mds = "http://169.254.169.254/computeMetadata/v1/instance/service-accounts/default/"
+st, email = get(mds + "email", {"Metadata-Flavor": "Google"})
+out["mds_identity"] = f"{st} {email.strip()[-40:]}" if st == 200 else str(st)
+st, body = get(mds + "token", {"Metadata-Flavor": "Google"})
+tok = json.loads(body).get("access_token", "") if st == 200 and body.startswith("{") else ""
+out["mds_token"] = f"{st} len={len(tok)}"
+if tok:
+    h = {"Authorization": f"Bearer {tok}"}
+    out["gcs_list"] = str(get("https://storage.googleapis.com/storage/v1/b/my-project-agent-output/o?maxResults=1", h)[0])
+    out["vertex"] = str(get("https://aiplatform.googleapis.com/v1/projects/my-project/locations/us-central1/reasoningEngines", h)[0])
+import os
+out["env_token_names"] = sorted(k for k in os.environ if "TOKEN" in k or "KEY" in k)
+print("ISOLATION " + json.dumps(out))
+PY
+""".strip()
+ISOLATION_TASK = (
+    "Run exactly this shell script with the Bash tool, as ONE call, and reply with only the line "
+    "it prints that starts with ISOLATION (verbatim, nothing else):\n\n```bash\n" + ISOLATION_SCRIPT + "\n```"
+)
 MARKER = "SESSION-CONFIG-OK"
 
 
-def _credentials():
-    """Optional least-privilege SA impersonation; omit (return None) to use your own ADC."""
-    sa = os.environ.get("IMPERSONATE_SA")
-    if not sa:
-        return None
-    import google.auth
-    from google.auth import impersonated_credentials
-
-    scopes = ["https://www.googleapis.com/auth/cloud-platform"]
-    source, _ = google.auth.default(scopes=scopes)
-    return impersonated_credentials.Credentials(
-        source_credentials=source, target_principal=sa, target_scopes=scopes
-    )
+def log(label: str, msg: str) -> None:
+    print(f"[{label}] {time.strftime('%H:%M:%S')} {msg}", flush=True)
 
 
-def _spec(name: str) -> AgentSpec:
-    # Haiku + tight caps: the point is the round-trip, not the model's work.
-    return AgentSpec(name=name, model="claude-haiku-4-5", checkpoint=True,
-                     max_turns=8, max_budget_usd=1.0)
+def _spec() -> AgentSpec:
+    return AgentSpec(name=NAME, model="claude-haiku-4-5", checkpoint=True, max_turns=8, max_budget_usd=1.0)
 
 
-def _deploy(name: str, warm: bool, credentials):
-    print(f"[{name}] {time.strftime('%H:%M:%S')} deploying (warm_pool={warm}) ...", flush=True)
+async def _drive(label: str, run, *, on_event=None):
+    """Stream a run to completion; return (result, all events, first-event latency)."""
     t0 = time.time()
-    engine = gemini.deploy(
-        _spec(name), PROJECT, LOCATION, warm_pool=warm, pool_size=1, credentials=credentials
-    )
-    print(f"[{name}] deployed in {time.time() - t0:.0f}s", flush=True)
-    return engine
-
-
-async def _drive(label: str, run):
-    """Stream a run to completion; return (result, echo_events)."""
-    t0 = time.time()
-    echoes = []
-    turn_ids = set()
-    results = 0
+    events, first = [], None
     async for ev in run:
-        turn_ids.add((ev.raw or {}).get("turn_id"))
-        results += ev.kind == "result"
-        if (ev.raw or {}).get("event") == "effective_spec":
-            echoes.append(ev.raw)
+        first = first if first is not None else time.time() - t0
+        events.append(ev)
         summary = " ".join((ev.summary or "").split())[:90]
-        print(f"[{label}] {time.strftime('%H:%M:%S')} {ev.kind:11} {summary}", flush=True)
-    assert len(turn_ids) == 1 and None not in turn_ids, (label, turn_ids)
-    assert results == 1, (label, results)
+        log(label, f"+{time.time() - t0:5.1f}s {ev.kind:11} {summary}")
+        if on_event is not None:
+            await on_event(ev)
     r = run.result
     text = " ".join((r.text or "").split())
-    print(
-        f"[{label}] RESULT after {time.time() - t0:.0f}s: text={text[:120]!r} "
-        f"turns={r.num_turns} cost={'unknown' if r.cost_usd is None else f'${r.cost_usd:.4f}'} "
-        f"error={r.is_error} "
-        f"structured={r.structured_output!r}",
-        flush=True,
-    )
-    return r, echoes
+    log(label, f"RESULT after {time.time() - t0:.1f}s (first event {first}): text={text[:100]!r} "
+               f"turns={r.num_turns} cost={'?' if r.cost_usd is None else f'${r.cost_usd:.4f}'} "
+               f"error={r.is_error} structured={r.structured_output!r}")
+    assert sum(e.kind == "result" for e in events) == 1, "exactly one result event"
+    assert len({(e.raw or {}).get("turn_id") for e in events}) == 1, "one turn id on every event"
+    return r, events, first
 
 
-async def _exercise_baked(label: str, engine) -> bool:
-    """One plain turn on the deploy handle: the baked spec runs, nothing is staged."""
-    session = engine.start_session()
-    print(f"[{label}] {time.strftime('%H:%M:%S')} session started, sending turn", flush=True)
-    r, _ = await _drive(label, session.run(TASK))
-    text = " ".join((r.text or "").split())
-    return (not r.is_error) and bool(r.num_turns) and "42" in text
+def _ok(r, needle="42") -> bool:
+    return (not r.is_error) and bool(r.num_turns) and needle in " ".join((r.text or "").split())
 
 
-async def _exercise_configs(mode: str, name: str, credentials, verdicts) -> None:
-    """The config checks: session config binds; turn config overlays; echoes stream."""
-    # Pure addressing: no spec anywhere — the session config is the only run-time input.
-    engine = await asyncio.to_thread(
-        gemini.get_engine, name, PROJECT, LOCATION,
-        warm_pool=(mode == "warm"), credentials=credentials,
-    )
-    session = engine.start_session(config=SessionConfig(
-        system_prompt=SystemPrompt.inherit(
-            append=f"CRITICAL: end your final reply with the exact token {MARKER}."
-        ),
-    ))
-
-    label = f"{mode}-session-config"
+async def check_pool_turn(engine, verdicts) -> None:
+    label = "pool-turn"
     try:
-        r, echoes = await _drive(label, session.run(TASK))
-        text = " ".join((r.text or "").split())
-        ok = (not r.is_error) and bool(r.num_turns) and "42" in text and MARKER in text
-        # The worker's ground-truth echo must confirm what ran and where it came from.
-        ok = ok and any(
-            e.get("session_config_gcs") and MARKER in str(e["spec"].get("system_prompt"))
-            for e in echoes
-        )
-        verdicts[label] = ok
+        session = engine.start_session()
+        r, events, first = await _drive(label, session.run(TASK))
+        started = next(e for e in events if (e.raw or {}).get("event") == "turn_started")
+        verdicts[label] = _ok(r) and started.raw.get("warm") is True and first is not None and first < 4.0
+        verdicts["pool-latency"] = first is not None and first < 4.0
+        log(label, f"warm={started.raw.get('warm')} sandbox={started.raw.get('worker')}")
     except Exception:
-        print(f"[{label}] RUN FAILED:\n{traceback.format_exc()}", flush=True)
+        log(label, "FAILED:\n" + traceback.format_exc())
+        verdicts[label] = False
+
+
+async def check_configs(verdicts) -> None:
+    engine = await asyncio.to_thread(gemini.get_engine, NAME, PROJECT, LOCATION, warm_pool=False)
+    label = "session-config"
+    try:
+        session = engine.start_session(config=SessionConfig(
+            system_prompt=SystemPrompt.inherit(append=f"CRITICAL: end your final reply with the exact token {MARKER}.")))
+        r, events, _ = await _drive(label, session.run(TASK))
+        echoes = [e.raw for e in events if (e.raw or {}).get("event") == "effective_spec"]
+        verdicts[label] = _ok(r) and MARKER in (r.text or "") and any(
+            e.get("session_config_gcs") and MARKER in str(e["spec"].get("system_prompt")) for e in echoes)
+        first_turn = echoes[0]["turn_id"]
+    except Exception:
+        log(label, "FAILED:\n" + traceback.format_exc())
         verdicts[label] = False
         return
-
-    label = f"{mode}-turn-config"
+    label = "turn-config"
     try:
-        # Applications commonly reattach on every HTTP message. Reattach immediately:
-        # no process-local watermark and no delay to hide the previous turn's events.
-        first_turn_id = echoes[0]["turn_id"]
-        session = engine.get_session(session.session_id)
-        r, echoes = await _drive(label, session.send(
-            JSON_TASK,
-            config=TurnConfig(output_schema=ANSWER_SCHEMA, reasoning_effort="low"),
-        ))
-        ok = (not r.is_error) and bool(r.num_turns)
-        ok = ok and bool(echoes) and echoes[0]["turn_id"] != first_turn_id
-        # The per-turn overlay reached the worker (JSON steering) and the client (parse).
-        ok = ok and r.structured_output == {"answer": 42}
-        # The SESSION config persists across turns. The schema steers the final message to
-        # pure JSON, so the marker cannot appear in the text — the proof lives in the
-        # worker's echo: the effective spec of THIS turn must still carry the marker prompt.
-        ok = ok and any(
-            e.get("turn_config_gcs") and e.get("session_config_gcs")
-            and e["spec"].get("reasoning_effort") == "low"
-            and MARKER in str(e["spec"].get("system_prompt"))
-            for e in echoes
-        )
-        verdicts[label] = ok
+        session = engine.get_session(session.session_id)  # re-attach, as an app would
+        r, events, _ = await _drive(label, session.send(
+            JSON_TASK, config=TurnConfig(output_schema=ANSWER_SCHEMA, reasoning_effort="low")))
+        echoes = [e.raw for e in events if (e.raw or {}).get("event") == "effective_spec"]
+        ready = next(e.raw for e in events if (e.raw or {}).get("event") == "workspace_ready")
+        verdicts[label] = ((not r.is_error) and bool(r.num_turns) and r.structured_output == {"answer": 42}
+                           and bool(echoes) and echoes[0]["turn_id"] != first_turn
+                           and any(e.get("turn_config_gcs") and e.get("session_config_gcs")
+                                   and e["spec"].get("reasoning_effort") == "low"
+                                   and MARKER in str(e["spec"].get("system_prompt")) for e in echoes))
+        verdicts["resume-restored"] = ready.get("restored") is True
+        log(label, f"workspace restored on resume: {ready.get('restored')}")
     except Exception:
-        print(f"[{label}] RUN FAILED:\n{traceback.format_exc()}", flush=True)
+        log(label, "FAILED:\n" + traceback.format_exc())
+        verdicts[label] = False
+
+
+async def check_steer(engine, verdicts) -> None:
+    label = "steer"
+    try:
+        session = engine.start_session()
+        sent = {"done": False}
+
+        async def on_event(ev):
+            if not sent["done"] and (ev.raw or {}).get("event") == "tool_use" or (
+                    not sent["done"] and ev.kind == "tool_use"):
+                await asyncio.sleep(2.0)
+                session.send("EXTRA INSTRUCTION: mention the word PINEAPPLE in your reply.", message_id="steer-1")
+                sent["done"] = True
+                log(label, "steer sent")
+
+        r, events, _ = await _drive(label, session.run(STEER_TASK), on_event=on_event)
+        acked = any(e.kind == "user" and (e.raw or {}).get("message_id") == "steer-1" for e in events)
+        verdicts[label] = (not r.is_error) and sent["done"] and acked and "PINEAPPLE" in (r.text or "").upper()
+        log(label, f"acked={acked} sent={sent['done']}")
+    except Exception:
+        log(label, "FAILED:\n" + traceback.format_exc())
+        verdicts[label] = False
+
+
+async def check_isolation(engine, verdicts) -> None:
+    label = "isolation"
+    try:
+        import json as _json
+
+        session = engine.start_session()
+        r, events, _ = await _drive(label, session.run(ISOLATION_TASK))
+        line = next((ln for ln in (r.text or "").splitlines() if ln.strip().startswith("ISOLATION ")), "")
+        facts = _json.loads(line.strip()[len("ISOLATION "):]) if line else {}
+        log(label, f"facts={facts}")
+        identity = str(facts.get("mds_identity", ""))
+        verdicts[label] = (
+            (not r.is_error) and bool(facts)
+            and "gserviceaccount.com" not in identity  # a tenant identity, not one of ours
+            and facts.get("gcs_list") in ("403", "401", None) and facts.get("vertex") in ("403", "401", None)
+            and "ANTHROPIC_AUTH_TOKEN" in facts.get("env_token_names", [])  # the model token, by design
+        )
+    except Exception:
+        log(label, "FAILED:\n" + traceback.format_exc())
+        verdicts[label] = False
+
+
+async def check_long(engine, verdicts) -> None:
+    label = "long-turn"
+    secs = int(LONG_MINUTES * 60)
+    try:
+        session = engine.start_session()
+        r, events, _ = await _drive(label, session.run(
+            f'Run `sleep {secs} && python3 -c "print(6 * 7)"` in the shell as ONE Bash call (it takes '
+            f"{LONG_MINUTES:g} minutes; wait for it) and reply with just the number it prints.",
+            config=TurnConfig(max_turns=6)))
+        verdicts[label] = _ok(r)
+    except Exception:
+        log(label, "FAILED:\n" + traceback.format_exc())
         verdicts[label] = False
 
 
 async def main() -> int:
-    modes = ["cold", "warm"] if MODE == "both" else [MODE]
-    credentials = _credentials()
-    engines: dict[str, object] = {}
     verdicts: dict[str, bool] = {}
-    loop = asyncio.get_running_loop()
+    engine = None
     try:
-        with concurrent.futures.ThreadPoolExecutor(len(modes)) as pool:
-            futs = {
-                mode: loop.run_in_executor(
-                    pool, _deploy, f"ratk-smoke-{mode}-{SUFFIX}", mode == "warm", credentials
-                )
-                for mode in modes
-            }
-            for mode, fut in futs.items():
-                try:
-                    engines[mode] = await fut
-                except Exception:
-                    print(f"[{mode}] DEPLOY FAILED:\n{traceback.format_exc()}", flush=True)
-                    verdicts[mode] = False
-
-        async def guarded(mode):
-            try:
-                verdicts[mode] = await _exercise_baked(mode, engines[mode])
-            except Exception:
-                print(f"[{mode}] RUN FAILED:\n{traceback.format_exc()}", flush=True)
-                verdicts[mode] = False
-            await _exercise_configs(
-                mode, f"ratk-smoke-{mode}-{SUFFIX}", credentials, verdicts
-            )
-
-        await asyncio.gather(*(guarded(mode) for mode in engines))
+        log("deploy", f"deploying {NAME} (warm_pool=True, pool_size=1) ...")
+        t0 = time.time()
+        spec = _spec()
+        if LONG_MINUTES:
+            spec = AgentSpec(**{**spec.to_dict(), "env": {"BASH_DEFAULT_TIMEOUT_MS": str(int(LONG_MINUTES * 60 * 1000) + 120_000),
+                                                       "BASH_MAX_TIMEOUT_MS": str(int(LONG_MINUTES * 60 * 1000) + 120_000)}})
+        engine = await asyncio.to_thread(
+            gemini.deploy, spec, PROJECT, LOCATION, warm_pool=True, pool_size=1,
+            image_repo=IMAGE_REPO, model_service_account=MODEL_SA, log=lambda m: log("deploy", m),
+        )
+        log("deploy", f"deployed in {time.time() - t0:.0f}s: version={engine.version} image={engine.revisions()[0]['image']}")
+        verdicts["deploy"] = True
+        verdicts["warm"] = await asyncio.to_thread(engine.wait_until_warm, 60)
+        log("deploy", f"warm={verdicts['warm']}")
+        await check_pool_turn(engine, verdicts)
+        await asyncio.gather(check_configs(verdicts), check_steer(engine, verdicts), check_isolation(engine, verdicts))
+        if LONG_MINUTES:
+            await check_long(engine, verdicts)
+    except Exception:
+        log("main", "FAILED:\n" + traceback.format_exc())
+        verdicts.setdefault("deploy", False)
     finally:
-        for mode, engine in engines.items():
+        if engine is not None and not os.environ.get("KEEP"):
             try:
-                engine.delete(delete_pool_resources=(mode == "warm"))
-                print(f"[{mode}] engine deleted", flush=True)
+                await asyncio.to_thread(engine.delete)
+                log("teardown", "engine deleted (templates + sandboxes)")
             except Exception:
-                print(f"[{mode}] TEARDOWN FAILED — delete the engine manually! "
-                      f"gemini.get_engine(...).delete()\n{traceback.format_exc()}", flush=True)
-
+                log("teardown", "FAILED — delete by hand: gemini.get_engine(...).delete()\n" + traceback.format_exc())
     print("\n=== VERDICTS ===", flush=True)
-    checks = [
-        k for mode in modes for k in (mode, f"{mode}-session-config", f"{mode}-turn-config")
-    ]
-    for check in checks:
-        print(f"  {check}: {'PASS' if verdicts.get(check) else 'FAIL'}", flush=True)
-    return 0 if all(verdicts.get(check) for check in checks) else 1
+    for check, ok in verdicts.items():
+        print(f"  {check}: {'PASS' if ok else 'FAIL'}", flush=True)
+    return 0 if verdicts and all(verdicts.values()) else 1
 
 
 if __name__ == "__main__":

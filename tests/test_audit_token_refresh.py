@@ -64,30 +64,41 @@ def test_failed_initial_write_keeps_a_cleanup_handle_and_starts_no_thread(monkey
     assert session._refresh_stop is None
 
 
-def test_refresh_loop_re_mints_both_tokens_and_posts_the_model_token(monkeypatch):
-    from remote_agent_toolkit.runtime.gemini import model_token
-
-    minted = {"gcs": 0, "model": 0}
+def test_refresh_loop_re_mints_the_gcs_token(monkeypatch):
+    minted = {"gcs": 0}
     written = []
     monkeypatch.setattr(scoped_gcs, "mint_run_token",
                         lambda *a: (minted.__setitem__("gcs", minted["gcs"] + 1) or f"gcs-{minted['gcs']}", None))
     monkeypatch.setattr(scoped_gcs, "write_run_token", lambda b, s, t, e, **kw: written.append(t))
     monkeypatch.setattr(scoped_gcs, "delete_run_token", lambda *a, **kw: None)
-    monkeypatch.setattr(model_token, "mint_model_token",
-                        lambda *a, **kw: (minted.__setitem__("model", minted["model"] + 1) or f"model-{minted['model']}", None))
     monkeypatch.setattr(backend, "TOKEN_REFRESH_S", 0.01)
-    provider = FakeSandboxProvider()
-    engine = make_engine(provider)
-    session = engine.start_session()
-    session._sandbox = provider.create(engine.resource, ttl_s=60, display_name="x").name
-    turn_id = "t" * 32
-    session._turn_id = turn_id
-    session._mint_tokens(turn_id)
+    session = make_engine(FakeSandboxProvider()).start_session()
+    session._mint_tokens("t" * 32)
     import time
     deadline = time.time() + 2
-    while not provider.worker(session._sandbox).tokens and time.time() < deadline:
+    while len(written) < 2 and time.time() < deadline:
         time.sleep(0.01)
     session._stop_refresh()
     assert written[0] == "gcs-1" and len(written) >= 2  # the initial write, then a refresh
-    posted = provider.worker(session._sandbox).tokens[0]
-    assert posted["turn_id"] == turn_id and posted["model_token"].startswith("model-")
+
+
+def test_model_token_lifetime_follows_max_turn_and_falls_back_to_an_hour(monkeypatch):
+    from remote_agent_toolkit.runtime.gemini import model_token
+
+    asked = []
+
+    def mint(creds, sa, lifetime_s=3600):
+        asked.append(lifetime_s)
+        if lifetime_s > 3600:
+            raise RuntimeError("400 lifetime exceeds the maximum")
+        return "tok", None
+
+    monkeypatch.setattr(model_token, "mint_model_token", mint)
+    assert model_token.mint_turn_model_token(None, "sa", max_turn_s=1800) == ("tok", None, True)
+    assert asked == [3600]  # a short turn: the default hour, extended not needed
+    asked.clear()
+    assert model_token.mint_turn_model_token(None, "sa", max_turn_s=8 * 3600) == ("tok", None, False)
+    assert asked == [8 * 3600 + 600, 3600]  # asked for the turn's ceiling, fell back to an hour
+    asked.clear()
+    monkeypatch.setattr(model_token, "mint_model_token", lambda c, sa, lifetime_s=3600: (f"tok-{lifetime_s}", None))
+    assert model_token.mint_turn_model_token(None, "sa", max_turn_s=40 * 3600)[0] == f"tok-{12 * 3600}"  # IAM's cap

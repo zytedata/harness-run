@@ -101,6 +101,7 @@ def test_stage_build_context_is_complete_and_content_addressed(tmp_path: Path) -
 def test_image_uri_and_default_repo() -> None:
     assert _image.default_image_repo("proj", "us-central1") == "us-central1-docker.pkg.dev/proj/ratk"
     assert _image.image_uri("r/repo/", "My Agent_1", "abc") == "r/repo/ratk-my-agent_1:abc"
+    assert _image.image_uri("r/repo", "ratk-smoke", "abc") == "r/repo/ratk-smoke:abc"  # no double prefix
 
 
 def test_validate_resource_limits_rejects_malformed() -> None:

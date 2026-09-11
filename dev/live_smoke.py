@@ -74,7 +74,7 @@ import json, urllib.request as u
 def get(url, hdr=None):
     try:
         r = u.urlopen(u.Request(url, headers=hdr or {}), timeout=6)
-        return r.status, r.read().decode()[:300]
+        return r.status, r.read().decode()
     except Exception as e:
         return getattr(e, "code", type(e).__name__), ""
 out = {}

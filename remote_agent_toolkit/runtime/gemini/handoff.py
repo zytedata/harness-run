@@ -109,7 +109,7 @@ def persist_session_config(
 def load_session_config(
     output_bucket: str, session_id: str, store: Any | None = None
 ) -> tuple[str, dict] | None:
-    """Read back a session's persisted config: ``(uri, config_dict)``, or ``None`` if absent.
+    """Read back a session's config, or ``None`` only for a known missing object.
 
     The re-attach path: a fresh process resuming a session by id was not there when the
     config was bound, so it recovers BOTH the pointer its turns must carry and the dict
@@ -119,9 +119,17 @@ def load_session_config(
     bucket, key = parse_gcs_uri(uri)
     try:
         data = _store_for(bucket, store).get_bytes(key)
-        return uri, json.loads(data.decode("utf-8"))
-    except Exception:  # noqa: BLE001 — absent/unreadable → the session has no config
+    except KeyError:  # BlobStore's explicit missing-object contract
         return None
+    except Exception:  # noqa: BLE001 — do not expose service errors/credential material
+        raise RuntimeError("could not read persisted session config; refusing fallback") from None
+    try:
+        config = json.loads(data.decode("utf-8"))
+        if not isinstance(config, dict):
+            raise ValueError("not an object")
+    except (ValueError, UnicodeError):
+        raise RuntimeError("invalid persisted session config; refusing fallback") from None
+    return uri, config
 
 
 def stage_turn_config(

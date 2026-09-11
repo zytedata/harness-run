@@ -48,6 +48,8 @@ def harness_consumed_secret_names(spec: AgentSpec) -> set[str]:
     agent's own to use.
     """
     names: set[str] = {r.auth for r in spec.repos if getattr(r, "auth", None)}
+    for server in spec.mcp_servers:
+        names.update((server.header_secrets or {}).values())
     if any(m.kind == "github" for m in spec.mcp_servers):
         names.update(GITHUB_MCP_TOKEN_KEYS)
     if getattr(spec, "harness", "claude-code") == "codex":
@@ -57,6 +59,18 @@ def harness_consumed_secret_names(spec: AgentSpec) -> set[str]:
         # harness's to route here too.
         names.add(OPENROUTER_KEY_ENV)
     return names
+
+
+def mcp_header_secrets(server: Any, ctx: RunContext) -> dict[str, str]:
+    """Resolve header references only at the harness boundary; never log this result."""
+    server._validate_headers()
+    headers = {}
+    for header, name in (server.header_secrets or {}).items():
+        value = ctx.secrets.get(name)
+        if not isinstance(value, str) or not value:
+            raise ValueError("required MCP header secret is missing from run(secrets=...)")
+        headers[header] = value
+    return headers
 
 
 # Appended to the system prompt in interactive (checkpoint) mode. Turns every "present X
@@ -93,6 +107,9 @@ def runtime_env(spec: AgentSpec, ctx: RunContext) -> dict[str, str]:
 
     SECURITY: returns secret *values* — callers must never log this dict.
     """
+    from ..spec import _assert_non_secret_env
+
+    _assert_non_secret_env(spec.env)
     consumed = harness_consumed_secret_names(spec)
     env: dict[str, str] = {k: v for k, v in ctx.secrets.items() if k not in consumed}
     if spec.env:

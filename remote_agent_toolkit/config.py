@@ -39,6 +39,7 @@ from .spec import (
     RepoSource,
     SkillSource,
     SystemPrompt,
+    _assert_non_secret_env,
     _output_schema_to_dict,
 )
 
@@ -135,6 +136,7 @@ def _encode_field(name: str, value: Any) -> Any:
     if name == "output_schema" and value is not None:
         return _output_schema_to_dict(value)
     if name == "extra_env" and value is not None:
+        _assert_non_secret_env(value)
         return dict(value)
     return value
 
@@ -250,6 +252,7 @@ class SessionConfig(_ConfigBase):
         if self.repos is not INHERIT and self.repos is not None:
             _assert_repos_credential_free(self.repos)
         if self.extra_env is not INHERIT and self.extra_env is not None:
+            _assert_non_secret_env(self.extra_env)
             object.__setattr__(self, "extra_env", dict(self.extra_env))
 
 

@@ -81,6 +81,9 @@ spec = AgentSpec(
 
 The spec carries **no secrets** — credentials are passed per-invocation to `run`/`send` so nothing sensitive
 is ever baked into the deployment or shared across runs (see [Secrets & security](#secrets--security)).
+
+For authenticated remote MCP servers and migration of credential-bearing config, see
+[runtime secret references and validation boundaries](docs/secret-configuration.md).
 Every field except `name` and `model` has a sensible default (see [`spec.py`](remote_agent_toolkit/spec.py));
 a two-line spec (`AgentSpec(name=..., model=...)`) is a valid agent. For **structured output**, see the
 section below.

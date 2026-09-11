@@ -128,6 +128,8 @@ from ._shared import (
     OPENROUTER_PREFIX,
     drain_proxy,
     finalize_checkpoint,
+    harness_consumed_secret_names,
+    mcp_header_secrets,
     missing_openrouter_key_error,
     openrouter_cost_unknown,
     openrouter_schema_steer,
@@ -564,6 +566,16 @@ class CodexHarness:
                         f"{json.dumps(k)} = {json.dumps(v)}" for k, v in srv.headers.items()
                     )
                     overrides.append(f"mcp_servers.{name}.http_headers={{{table}}}")
+                secret_headers = mcp_header_secrets(srv, ctx)
+                if secret_headers:
+                    references = {}
+                    for header, value in secret_headers.items():
+                        env_name = f"RATK_MCP_HEADER_{len(env)}"
+                        env[env_name] = value
+                        references[header] = env_name
+                    table = ", ".join(f"{json.dumps(k)} = {json.dumps(v)}"
+                                      for k, v in references.items())
+                    overrides.append(f"mcp_servers.{name}.env_http_headers={{{table}}}")
             elif srv.kind == "stdio":
                 name = srv.name or "stdio"
                 overrides.append(f"mcp_servers.{name}.command={json.dumps(srv.command)}")
@@ -677,9 +689,10 @@ class CodexHarness:
             # The toolkit supplies PATH and caller-owned env explicitly.
             "allow_login_shell=false",
             "shell_environment_policy.ignore_default_excludes=true",
-            "shell_environment_policy.exclude=["
-            f'"OPENAI_API_KEY", "{OPENROUTER_KEY_ENV}", '
-            f'"{_OPENROUTER_PROXY_KEY_ENV}", "{_GITHUB_MCP_TOKEN_ENV}"]',
+            "shell_environment_policy.exclude=" + json.dumps(sorted({
+                "OPENAI_API_KEY", OPENROUTER_KEY_ENV, _OPENROUTER_PROXY_KEY_ENV,
+                _GITHUB_MCP_TOKEN_ENV, *mcp_env, *harness_consumed_secret_names(spec),
+            })),
             *(
                 self._openrouter_overrides(
                     model,

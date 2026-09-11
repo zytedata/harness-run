@@ -110,11 +110,14 @@ def access_boundary(bucket: str, prefixes: list[str], base: str = "") -> Any:
     rules = []
     for p in prefixes:
         obj = f"projects/_/buckets/{bucket}/objects/{p}"
-        expression = f'resource.name.startsWith("{obj}")'
+        # CEL accepts JSON string escapes. Keep caller-controlled names inside
+        # literals without restoring list clauses for exact-name-only objects:
+        # those extra clauses overflow STS tokens for service-account callers.
+        expression = f'resource.name.startsWith({json.dumps(obj, ensure_ascii=False)})'
         if p[len(base):].startswith(_LISTED_PREFIXES):
             expression += (
                 ' || api.getAttribute("storage.googleapis.com/objectListPrefix", "")'
-                f'.startsWith("{p}")'
+                f'.startsWith({json.dumps(p, ensure_ascii=False)})'
             )
         rules.append(
             downscoped.AccessBoundaryRule(

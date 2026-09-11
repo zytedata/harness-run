@@ -628,13 +628,18 @@ tasks — size it to the longest job the agent legitimately waits on. Two accoun
 whole run (`max_budget_usd` remains a global cap). Event-driven waiting instead of poll-loops is exactly
 what keeps long crawls nearly free in turns.
 
-Runs are hang-proofed on `gemini`: every log-tail poll is time-bounded (a dead connection costs a ~30 s
-retry, not a frozen run), and a **cold** run carries a job watchdog — when the remote job has terminated but
-the tail is still silent, the client first recovers the **real result from the durable GCS event mirror**
-(covers Cloud Logging ingestion lag, which can run several minutes), and only if no terminal record exists
-anywhere (worker OOM, external cancel, engine deleted) ends the run within ~3 minutes with an error result
-explaining the job state — instead of waiting out the 1 h tail cap. Warm turns run in a pool worker without
-a per-turn job handle, so they get the bounded polls only.
+On `gemini`, live events and recovery records carry the submitted turn's ID. Reattaching a
+session and immediately sending again cannot replay an earlier result. Per-worker warm
+dispatch also matches the addressed worker: only its `turn_started` acknowledges pickup,
+and late events from abandoned workers are ignored. Every storage poll is time-bounded.
+Cold jobs and per-worker warm jobs have a watchdog that recovers a matching durable result
+after job termination, or reports an error after its grace period. Legacy shared pools
+have no per-worker job handle and rely on bounded polling.
+
+When upgrading to turn IDs, redeploy engines before updating clients. Submission fails
+before dispatch if the serving revision does not advertise the protocol. With pinned or
+split traffic, every serving revision must support it. Older clients can drive upgraded
+workers during the rollout; `Session.history()` continues to return all turns.
 
 ## Talking to a running turn: steer, interrupt, stop
 

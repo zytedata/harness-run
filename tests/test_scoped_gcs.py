@@ -176,7 +176,7 @@ def test_gcs_blob_store_authorizes_with_the_default_credentials(monkeypatch):
     assert seen == {"project": None, "credentials": None}
 
 
-def test_cold_submit_carries_the_token_as_the_last_directive(monkeypatch):
+def test_cold_submit_carries_the_token_before_turn_identity(monkeypatch):
     import asyncio
     import types
 
@@ -214,7 +214,8 @@ def test_cold_submit_carries_the_token_as_the_last_directive(monkeypatch):
     asyncio.run(go())
     lines = captured["query"].split("\n")
     assert lines[0] == "AGENT_SESSION=sid-7"
-    assert lines[-2] == "AGENT_GCS_TOKEN=fake-run-token"     # last directive, then the message
+    assert lines[-3] == "AGENT_GCS_TOKEN=fake-run-token"
+    assert lines[-2].startswith("AGENT_TURN_ID=")
     assert lines[-1] == "hello"
 
     # scoped_gcs=False (a pre-token engine during a migration): no token, no directive.

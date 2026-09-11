@@ -17,9 +17,9 @@ Why this replaces tailing Cloud Logging (which stays as an emit-only ops/debug c
   visible one flush + one poll after it happened (~1-2 s), vs Cloud Logging's variable
   write→queryable lag (seconds to minutes — it dominated warm first-event latency).
 
-Object names are ``<epoch_ms:015d>-<seq:04d>.jsonl`` (worker clock, per-writer counter),
-so lexical order == chronological order and a name encodes its time — the tail resumes
-from a ``since`` watermark without reading anything. Writes are batched (~0.5 s or 50
+Object names include the worker clock, turn id, writer id and per-writer counter. Turn
+readers select by identity; legacy readers can still use timestamp/key floors. Writes
+are batched (~0.5 s or 50
 events, terminal ``result`` immediately) on a background thread and are best-effort like
 every telemetry path in the worker: a storage failure never fails a run.
 """
@@ -31,7 +31,8 @@ import json
 import queue
 import threading
 import time
-from typing import Any, AsyncIterator
+import uuid
+from typing import Any, AsyncIterator, Callable
 
 from ...events import AgentEvent
 from ...ports.blobstore import GcsBlobStore, parse_gcs_uri
@@ -67,8 +68,11 @@ class MirrorStream:
     swallowed by design: the mirror is telemetry, the run must not fail for it.
     """
 
-    def __init__(self, events_uri: str, session_id: str, *, store: Any | None = None) -> None:
+    def __init__(self, events_uri: str, session_id: str, *, store: Any | None = None,
+                 turn_id: str | None = None) -> None:
         self._session_id = session_id
+        self._turn_id = turn_id
+        self._writer_id = uuid.uuid4().hex[:12]
         self._queue: queue.Queue = queue.Queue()
         self._seq = 0
         try:
@@ -120,7 +124,9 @@ class MirrorStream:
         self._seq += 1
         key = (
             f"{self._prefix}{self._session_id}/"
-            f"{int(time.time() * 1000):015d}-{self._seq:04d}.jsonl"
+            f"{int(time.time() * 1000):015d}-"
+            f"{self._turn_id + '-' + self._writer_id + '-' if self._turn_id else ''}"
+            f"{self._seq:04d}.jsonl"
         )
         try:
             data = "\n".join(json.dumps(line) for line in lines).encode("utf-8")
@@ -137,10 +143,17 @@ async def tail_stream(
     start_after: str | None = None,
     watermark: dict | None = None,
     store: Any | None = None,
+    turn_id: str | None = None,
+    accept_event: Callable[[AgentEvent], bool] | None = None,
 ) -> AsyncIterator[AgentEvent]:
     """Stream a session's mirrored events live; stops after the terminal ``result``.
 
-    Polls the session's object listing (lexical == chronological) from a floor, skipping
+    With ``turn_id``, reads only that turn's objects and verifies each event's identity
+    before yielding or terminating. Clock floors and a prior handle's watermark are
+    unnecessary: a freshly reattached session is safe even on back-to-back sends. The
+    optional predicate excludes events from abandoned workers after redispatch.
+
+    Without ``turn_id``, polls the session's object listing from a floor, skipping
     previous turns' files without reading them. Two floors compose (the higher wins):
 
     * ``start_after`` — an exact object key; only strictly-later keys are consumed. THE
@@ -149,8 +162,8 @@ async def tail_stream(
       the back-to-back-turns hazard where a time floor with skew slack re-delivers the
       previous turn's just-written terminal result as the new turn's first event.
     * ``since`` (epoch seconds) — floors the names' leading epoch-ms stamp. The fallback
-      for re-attached sessions (fresh process, no watermark yet); its 5 s submit slack is
-      only safe when turns are NOT back-to-back, which re-attachment guarantees.
+      for legacy readers; clock slack alone cannot separate back-to-back turns, including
+      reattached sessions. Runtime turn submission uses the explicit identity instead.
 
     ``watermark`` (optional ``dict``) is updated in place — ``watermark["key"]`` is the
     last consumed object key — so the caller can hand it to the next turn's tail. Every
@@ -168,6 +181,7 @@ async def tail_stream(
     if start_after:
         consumed = max(consumed, start_after)
     start = time.monotonic()
+    seen_keys: set[str] = set()
     failures = 0
     while time.monotonic() - start < _MAX_WAIT_S:
         try:
@@ -182,7 +196,12 @@ async def tail_stream(
             await asyncio.sleep(_TAIL_POLL_S)
             continue
         for key in keys:
-            if key <= consumed:
+            if turn_id:
+                # Names are only a read optimization; the payload is verified below.
+                # Track exact keys so a later write with an earlier clock is not lost.
+                if f"-{turn_id}-" not in key.rsplit("/", 1)[-1] or key in seen_keys:
+                    continue
+            elif key <= consumed:
                 continue
             try:
                 data = await asyncio.wait_for(
@@ -195,9 +214,14 @@ async def tail_stream(
                 break
             failures = 0
             consumed = key
+            seen_keys.add(key)
             if watermark is not None:
                 watermark["key"] = key
             for event in _parse_jsonl(data, event_from_mirror):
+                if turn_id and (event.raw or {}).get("turn_id") != turn_id:
+                    continue
+                if accept_event is not None and not accept_event(event):
+                    continue
                 yield event
                 if event.kind == "result":
                     return

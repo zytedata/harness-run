@@ -277,6 +277,7 @@ def build_env(
         # batches as events happen and the client tails the listing (stream.py). Cloud
         # Logging is emit-only (ops/debug), never tailed.
         env["AGENT_EVENTS_GCS"] = f"{output_bucket}/events"
+        env["AGENT_EVENT_TURN_IDS"] = "1"
         # The control inbox (control.py): the worker polls control/<sid>/ while a turn
         # runs, so Session.send() can steer or interrupt it from any process. Its presence
         # in a revision's env is how the client knows that revision's workers read it.

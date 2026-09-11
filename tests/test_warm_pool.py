@@ -144,7 +144,7 @@ def test_legacy_warm_session_dispatches_to_the_shared_subscription(monkeypatch):
     # The turn was dispatched to the pool (not cold-started) and the pool was refilled.
     # The payload carries the run-scoped GCS token (a fake here: conftest stubs minting).
     assert published == [{"session_id": "warm-sid", "message": "go", "resume": False,
-                          "gcs_token": "fake-run-token"}]
+                          "gcs_token": "fake-run-token", "turn_id": published[0]["turn_id"]}]
     assert refilled == [1]
     assert result.text == "done" and result.num_turns == 3
     assert session.status == RunStatus.IDLE and session.stop_reason == StopReason.END_TURN
@@ -263,7 +263,8 @@ def test_pool_worker_claims_and_runs(monkeypatch):
     disp.publish({"session_id": "dispatched-sid", "message": "do it", "resume": False,
                   "secrets_gcs": "gs://bkt/invocation-secrets/dispatched-sid-x.json",
                   "session_config_gcs": "gs://bkt/session-config/dispatched-sid.json",
-                  "turn_config_gcs": "gs://bkt/turn-config/dispatched-sid-x.json"},
+                  "turn_config_gcs": "gs://bkt/turn-config/dispatched-sid-x.json",
+                  "turn_id": "a" * 32},
                  attributes={"worker": "abc123abc123abc123abc123"})
     opened = []
 
@@ -284,11 +285,12 @@ def test_pool_worker_claims_and_runs(monkeypatch):
 
     async def fake_run_turn(spec_, session_id, prompt, resume_sid, secrets_uri=None,
                             invocation_id="", session_config_uri=None, turn_config_uri=None,
-                            gcs_token=None, worker=None, gcs_token_expiry=None):
+                            gcs_token=None, worker=None, gcs_token_expiry=None,
+                            turn_id=None):
         seen.update(session_id=session_id, prompt=prompt, resume_sid=resume_sid,
                     secrets_uri=secrets_uri, invocation_id=invocation_id,
                     session_config_uri=session_config_uri, turn_config_uri=turn_config_uri,
-                    gcs_token=gcs_token, worker=worker)
+                    gcs_token=gcs_token, worker=worker, turn_id=turn_id)
         yield "turn-event"
 
     monkeypatch.setattr(agent, "_run_turn", fake_run_turn)
@@ -309,6 +311,7 @@ def test_pool_worker_claims_and_runs(monkeypatch):
                     "turn_config_uri": "gs://bkt/turn-config/dispatched-sid-x.json",
                     "invocation_id": "e-inv-77",
                     "gcs_token": None,
+                    "turn_id": "a" * 32,
                     "worker": "abc123abc123abc123abc123"}
 
 
@@ -733,7 +736,7 @@ def _per_worker_engine(monkeypatch):
     return engine, dispatch, ae
 
 
-def _seeded_tail(monkeypatch, sid="warm-sid"):
+def _seeded_tail(monkeypatch, dispatch, sid="warm-sid"):
     """Patch the backend's stream tail with a sink pre-seeded with a finished turn."""
     seed = InMemorySink(session_id=sid)
     seed.emit(AgentEvent(kind="status", summary="turn started",
@@ -742,8 +745,15 @@ def _seeded_tail(monkeypatch, sid="warm-sid"):
     seed.emit(AgentEvent(kind="result", summary="done", cost_usd=0.1,
                          raw={"subtype": "success", "is_error": False, "num_turns": 3,
                               "session_id": sid}))
-    monkeypatch.setattr(backend, "tail_stream", lambda uri, s, **kw: seed.tail(s))
-    return seed
+    async def tail(uri, s, **kw):
+        payload, attrs = dispatch.published[-1]
+        async for event in seed.tail(s):
+            event.raw = {**(event.raw or {}), "session_id": sid,
+                         "turn_id": payload["turn_id"], "worker": attrs["worker"]}
+            yield event
+
+    monkeypatch.setattr(backend, "tail_stream", tail)
+    return tail
 
 
 def test_fill_pool_gives_every_worker_its_own_channel_and_a_roster_entry(monkeypatch):
@@ -789,7 +799,7 @@ def test_warm_session_addresses_one_idle_worker_and_drops_its_channel(monkeypatc
     engine, dispatch, ae = _per_worker_engine(monkeypatch)
     engine.fill_pool(2)
     first, second = engine._roster().entries()
-    _seeded_tail(monkeypatch)
+    _seeded_tail(monkeypatch, dispatch)
 
     session = backend.GeminiSession(engine, "warm-sid")
     result = asyncio.run(_await(session.run("go")))
@@ -799,7 +809,7 @@ def test_warm_session_addresses_one_idle_worker_and_drops_its_channel(monkeypatc
     # token, never values), and the pool was refilled by one.
     assert dispatch.published == [(
         {"session_id": "warm-sid", "message": "go", "resume": False,
-         "gcs_token": "fake-run-token"},
+         "gcs_token": "fake-run-token", "turn_id": dispatch.published[0][0]["turn_id"]},
         {"worker": first.worker},
     )]
     remaining = engine._roster().entries()
@@ -818,7 +828,7 @@ def test_warm_session_spawns_a_worker_for_itself_on_an_empty_roster(monkeypatch)
     """A drained pool no longer strands turns: the turn spawns its own (un-rostered)
     worker and is addressed to it, and the usual refill re-warms the pool behind it."""
     engine, dispatch, ae = _per_worker_engine(monkeypatch)
-    _seeded_tail(monkeypatch)
+    _seeded_tail(monkeypatch, dispatch)
 
     session = backend.GeminiSession(engine, "warm-sid")
     result = asyncio.run(_await(session.run("go")))
@@ -840,12 +850,12 @@ def test_warm_session_redispatches_when_the_worker_never_starts_the_turn(monkeyp
     engine, dispatch, ae = _per_worker_engine(monkeypatch)
     engine.fill_pool(1)
     (first,) = engine._roster().entries()
-    seed = _seeded_tail(monkeypatch)
+    seeded_tail = _seeded_tail(monkeypatch, dispatch)
 
     async def silent_until_redispatched(uri, sid, **kw):
         while len(dispatch.published) < 2:
             await asyncio.sleep(0.005)
-        async for ev in seed.tail(sid):
+        async for ev in seeded_tail(uri, sid, **kw):
             yield ev
 
     monkeypatch.setattr(backend, "tail_stream", silent_until_redispatched)

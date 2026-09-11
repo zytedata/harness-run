@@ -44,6 +44,11 @@ for the tag with this file's section as the notes.
   traceback; and `workspace_ready` gains `restore_error` (the summarized exception, `None` when
   nothing went wrong) and `skipped` (member names left out), so a caller can tell a fresh start
   from a resume whose snapshot could not be restored.
+- **Claude resume no longer ends on a stopped background task's empty result.** A fresh
+  CLI may emit an old task notification and a zero-turn success before handling the
+  queued user prompt. The harness waits for that prompt without sending it twice, and
+  reports an explicit error if the CLI times out, exits, or crashes without answering.
+  Normal results, usage and errors keep their existing behavior.
 
 ### Changed
 

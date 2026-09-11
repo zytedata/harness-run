@@ -308,6 +308,9 @@ class ClaudeCodeHarness:
     # because a task that completed *mid-turn* is delivered inside the current invocation
     # (no re-invoke follows) and must not hang the run.
     _UNDELIVERED_GRACE_S = 20.0
+    # A resumed CLI can flush a stopped task's empty result before it handles query().
+    # Bound that startup handoff, not a model invocation that has already begun.
+    _RESUME_PROMPT_GRACE_S = 20.0
 
     # How many demoted (segment-boundary) result texts ride the final result event as
     # structured-output recovery candidates (``raw["segment_summaries"]``, newest first).
@@ -621,6 +624,18 @@ class ClaudeCodeHarness:
         budget_interrupted = False
         wait_deadline: float | None = None
         phase = _StreamPhase.ACTIVE  # the initial query has been submitted to the model
+        resume_opening = bool(options.resume)
+        orphaned_resume_task = False
+        awaiting_resume_prompt = False
+        resume_deadline: float | None = None
+
+        def resume_unanswered() -> AgentEvent:
+            return AgentEvent(
+                kind="result",
+                summary="Claude Code ended resume housekeeping without answering the new prompt",
+                raw={"subtype": "error_resume_prompt_unanswered", "is_error": True,
+                     "num_turns": 0, "session_id": ctx.session_id},
+            )
 
         def segment_summaries(final_ev: AgentEvent) -> list[str]:
             # Recovery candidates carried on the final result for build_result: each
@@ -733,6 +748,8 @@ class ClaudeCodeHarness:
                 why: str | None = None
                 if interrupt_pending is not None and interrupt_deadline is not None:
                     timeout, why = max(0.0, interrupt_deadline - now), "interrupt"
+                elif resume_deadline is not None:
+                    timeout, why = max(0.0, resume_deadline - now), "resume"
                 elif steer_deadline is not None:
                     timeout, why = max(0.0, steer_deadline - now), "steer"
                 elif not demoted or phase is _StreamPhase.ACTIVE:
@@ -745,6 +762,10 @@ class ClaudeCodeHarness:
                 if kind == "end":
                     break
                 if kind == "timeout":
+                    if why == "resume":
+                        async for final_event in finish(resume_unanswered()):
+                            yield final_event
+                        return
                     if why == "interrupt":
                         # No settle result: the model was not running when interrupted.
                         msg, interrupt_pending = interrupt_pending, None
@@ -834,6 +855,16 @@ class ClaudeCodeHarness:
                     for proxy_event in proxy.drain_events():
                         yield proxy_event
                 for event in translator.translate(message):
+                    raw = event.raw or {}
+                    if (resume_opening and raw.get("event") == "task_terminal"
+                            and raw.get("task_id") not in tracker.pending):
+                        # Fresh process: this task belonged to the restored conversation,
+                        # so _TaskTracker has never seen its task_started. Its notification
+                        # can precede init + an empty, zero-turn housekeeping result.
+                        orphaned_resume_task = True
+                    if event.kind in {"message", "thinking", "tool_use"}:
+                        resume_opening = awaiting_resume_prompt = False
+                        resume_deadline = None
                     tracker.observe(event)
                     steers.observe(event)
                     if event.kind == "message":
@@ -848,6 +879,7 @@ class ClaudeCodeHarness:
                         phase = _StreamPhase.ACTIVE
                         wait_deadline = None
                         steer_deadline = None
+                        resume_deadline = None
                     if event.kind != "result":
                         yield event
                         continue
@@ -869,6 +901,30 @@ class ClaudeCodeHarness:
                         )
                         yield await deliver(msg)
                         continue
+                    if (
+                        resume_opening and orphaned_resume_task
+                        and raw.get("subtype") == "success" and not raw.get("is_error")
+                        and raw.get("num_turns") == 0 and event.summary == "(no final text)"
+                        and "structured_output" not in raw and not raw.get("model_usage")
+                        and not any(from_claude_cli_usage(event.usage).values())
+                        and not event.cost_usd
+                    ):
+                        # query(ctx.prompt) is already queued. Keep reading it exactly once;
+                        # re-querying duplicates user work. This empty result is NEVER a
+                        # crash/timeout fallback or a structured-output recovery candidate.
+                        awaiting_resume_prompt = True
+                        phase = _StreamPhase.BETWEEN_INVOCATIONS
+                        resume_deadline = (
+                            asyncio.get_running_loop().time() + self._RESUME_PROMPT_GRACE_S
+                        )
+                        yield AgentEvent(
+                            kind="status",
+                            summary="resume housekeeping finished; waiting for the queued prompt",
+                            raw={"event": "awaiting_resume_prompt"},
+                        )
+                        continue
+                    resume_opening = awaiting_resume_prompt = False
+                    resume_deadline = None
                     reason = None if (event.raw or {}).get("is_error") else tracker.waiting()
                     if reason is None and steers.waiting():
                         # An operator message was sent and nothing proves the model saw
@@ -941,6 +997,10 @@ class ClaudeCodeHarness:
                     summary=f"claude stderr (tail): {tail}",
                     raw={"event": "claude_stderr", "log": str(stderr_log.path)},
                 )
+            if awaiting_resume_prompt and not finalized:
+                async for final_event in finish(resume_unanswered()):
+                    yield final_event
+                return
             if demoted and not finalized:
                 # A real result exists — the crash while waiting on tasks must not void
                 # it (same principle as the runtimes' late-harness-death handling).
@@ -967,7 +1027,10 @@ class ClaudeCodeHarness:
 
         # Stream ended / wait timed out without a clean final result: the last produced
         # result stands (then the defensive no-result fallback, as before).
-        if demoted and not finalized:
+        if awaiting_resume_prompt and not finalized:
+            async for final_event in finish(resume_unanswered()):
+                yield final_event
+        elif demoted and not finalized:
             async for final_event in finish(demoted[-1]):
                 yield final_event
         elif not finalized:

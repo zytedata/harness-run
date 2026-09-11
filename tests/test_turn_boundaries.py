@@ -1,31 +1,33 @@
-"""Turn identity survives dispatch, pickup, live tailing and history recovery."""
+"""The turn's live event source: the worker's /events first, the mirror as the fallback."""
+
+from __future__ import annotations
 
 import asyncio
-import json
-from types import SimpleNamespace as NS
 
 import pytest
-from test_warm_pool import _per_worker_engine
+from sandbox_fakes import FakeSandboxProvider, ScriptedWorker
 
-from remote_agent_toolkit import AgentSpec
 from remote_agent_toolkit.events import AgentEvent
-from remote_agent_toolkit.ports import eventsink
 from remote_agent_toolkit.ports.blobstore import LocalBlobStore
-from remote_agent_toolkit.runtime.gemini import adk_agent, backend, handoff, history, stream
+from remote_agent_toolkit.runtime.gemini import backend, history, stream
+from remote_agent_toolkit.runtime.gemini.provider import SandboxGone
 
-SID = "warm-sid"
+SID = "sid-1"
 URI = "gs://out/events"
+TURN = "t" * 32
 
 
-def event(kind, tag, turn_id="current", worker="worker"):
-    return AgentEvent(
-        kind=kind, summary=tag,
-        raw={"event": tag, "turn_id": turn_id, "worker": worker, "session_id": SID,
-             "subtype": "success", "is_error": False, "num_turns": 1},
-    )
+def event(kind, tag, turn_id=TURN):
+    return AgentEvent(kind=kind, summary=tag,
+                      raw={"event": tag, "turn_id": turn_id, "session_id": SID,
+                           "subtype": "success", "is_error": False, "num_turns": 1})
 
 
-def write(store, events, turn_id="current", now_ms=1000):
+def result_event(text="done", turn_id=TURN):
+    return event("result", text, turn_id)
+
+
+def write(store, events, turn_id=TURN, now_ms=1000):
     history.write_turn_mirror(URI, SID, [history.mirror_line(e) for e in events],
                               now_ms=now_ms, turn_id=turn_id, store=store)
 
@@ -33,286 +35,151 @@ def write(store, events, turn_id="current", now_ms=1000):
 @pytest.fixture
 def storage(tmp_path, monkeypatch):
     store = LocalBlobStore(str(tmp_path / "blobs"))
-    monkeypatch.setattr(stream, "GcsBlobStore", lambda *a, **kw: store)
-    monkeypatch.setattr(history, "GcsBlobStore", lambda *a, **kw: store)
-    monkeypatch.setattr(handoff, "load_session_config", lambda *a, **kw: None)
-    monkeypatch.setattr(eventsink, "CloudLoggingSink", lambda **kw: NS(emit=lambda e: None,
-                                                                        read=lambda sid: []))
     monkeypatch.setattr(stream, "_TAIL_POLL_S", 0.005)
+    monkeypatch.setattr(backend, "GONE_GRACE_S", 0.1)
+    monkeypatch.setattr(backend, "DIRECT_RETRY_SLEEP_S", 0.0)
     return store
 
 
-async def test_pickup_ignores_checkpoint_and_wrong_worker_until_matching_start():
-    picked_up = []
-
-    async def source():
-        yield event("status", "checkpoint_saved", "previous")
-        yield event("status", "turn_started", worker="abandoned")
-        await asyncio.sleep(0.02)
-        assert not picked_up, "an unrelated event retired the addressed subscription"
-        yield event("status", "turn_started")
-        yield event("result", "answer")
-
-    events = [e async for e in backend._pickup_watched_tail(
-        source, 1, lambda attempt: 1, SID, on_pickup=lambda: picked_up.append(True),
-        is_pickup=lambda e: e.raw.get("event") == "turn_started" and e.raw["worker"] == "worker",
-    )]
-    assert picked_up == [True]
-    assert [e.summary for e in events] == ["turn_started", "answer"]
+def _provider_with(worker):
+    provider = FakeSandboxProvider(lambda n: worker)
+    template = provider.add_template("g")
+    handle = provider.create(template, ttl_s=60, display_name="ratk-g-x")
+    return provider, handle.name
 
 
-async def test_unrelated_traffic_cannot_extend_pickup_deadline():
-    async def source():
-        while True:
-            yield event("status", "checkpoint_saved", "previous")
-            await asyncio.sleep(0.003)
-
-    async with asyncio.timeout(0.5):
-        events = [e async for e in backend._pickup_watched_tail(
-            source, 0.03, lambda attempt: 1, SID, max_redispatch=0,
-        )]
-    assert len(events) == 1 and events[0].raw["event"] == "pool_pickup_timeout"
+async def _collect(provider, sandbox, store, **kw):
+    return [e async for e in backend._stream_turn(
+        provider, sandbox, TURN, SID, events_uri=URI, store_kwargs={"store": store}, **kw)]
 
 
-async def test_tail_rejects_old_results_and_verifies_payload_identity(storage):
-    write(storage, [event("result", "old answer", "old")], turn_id="old")
-    # Even a wrong event in a current-turn object must not terminate the tail.
-    write(storage, [event("result", "wrong payload", "old"),
-                    event("result", "retired worker", worker="abandoned"),
-                    event("result", "new answer")], now_ms=1001)
-    events = [e async for e in stream.tail_stream(
-        URI, SID, store=storage, turn_id="current",
-        accept_event=lambda e: e.raw["worker"] == "worker",
-    )]
-    assert [e.summary for e in events] == ["new answer"]
+def test_direct_stream_delivers_in_order_and_stops_at_the_result(storage):
+    worker = ScriptedWorker()
+    provider, sandbox = _provider_with(worker)
+    worker.turns.append({"turn_id": TURN})
+    worker.emit(event("status", "turn_started"), event("message", "hi"), result_event("done"))
+    worker.emit(event("status", "checkpoint_saved"))  # after the result: never delivered
+    events = asyncio.run(_collect(provider, sandbox, storage))
+    assert [e.kind for e in events] == ["status", "message", "result"]
+    assert all(c[1] == "/events" for c in provider.calls)
+    assert provider.calls[0][2]["since"] == 0 and provider.calls[0][2]["wait"] == backend.EVENTS_WAIT_S
 
 
-async def test_tail_accepts_later_flush_with_an_earlier_clock(storage):
-    write(storage, [event("status", "turn_started")], now_ms=2000)
-    events = []
-    async for e in stream.tail_stream(URI, SID, store=storage, turn_id="current"):
-        events.append(e)
-        if len(events) == 1:
-            write(storage, [event("result", "answer")], now_ms=1000)
-    assert [e.summary for e in events] == ["turn_started", "answer"]
+def test_direct_stream_ignores_events_of_another_turn(storage):
+    worker = ScriptedWorker()
+    provider, sandbox = _provider_with(worker)
+    worker.turns.append({"turn_id": TURN})
+    worker.emit(event("result", "stale", turn_id="other"), event("message", "mine"), result_event("done"))
+    events = asyncio.run(_collect(provider, sandbox, storage))
+    assert [e.summary for e in events] == ["mine", "done"]
 
 
-@pytest.mark.parametrize("fallback", ["old", "current", "abandoned"])
-def test_recovery_filters_mirror_job_and_logging(storage, monkeypatch, fallback):
-    write(storage, [event("result", "old mirror", "old")], turn_id="old")
-    write(storage, [event("status", "turn_started")])
-    candidate = event("result", "fallback", "old" if fallback == "old" else "current",
-                      "abandoned" if fallback == "abandoned" else "worker")
-    storage.put_bytes(f"jobs/{SID}.jsonl", json.dumps({
-        "custom_metadata": {"kind": candidate.kind, "raw": candidate.raw},
-        "content": {"parts": [{"text": candidate.summary}]},
-    }).encode())
-    monkeypatch.setattr(eventsink, "CloudLoggingSink", lambda **kw: NS(read=lambda sid: [candidate]))
-    recovered = history.read_history("gs://out", SID, store=storage,
-                                     turn_id="current", worker="worker")
-    assert [e.summary for e in recovered] == (["fallback"] if fallback == "current" else ["turn_started"])
-    assert any(e.summary == "old mirror" for e in history.read_history("gs://out", SID, store=storage))
+def test_worker_ending_without_a_result_yields_an_explained_error(storage):
+    worker = ScriptedWorker()
+    provider, sandbox = _provider_with(worker)
+    worker.turns.append({"turn_id": TURN})
+    worker.emit(event("message", "half"))
+    worker.finish(error="Traceback: MemoryError")
+    events = asyncio.run(_collect(provider, sandbox, storage))
+    assert [e.kind for e in events] == ["message", "result"]
+    assert events[-1].raw["is_error"] and "MemoryError" in events[-1].summary
+    assert events[-1].raw["event"] == "worker_ended_without_result"
 
 
-async def test_reattached_back_to_back_sends_have_distinct_results(storage, monkeypatch):
-    engine, dispatch, _ = _per_worker_engine(monkeypatch)
-    publish = dispatch.publish
-    previous = []
+def test_gone_sandbox_falls_back_to_the_mirror_and_skips_delivered_events(storage):
+    worker = ScriptedWorker()
+    provider, sandbox = _provider_with(worker)
+    worker.turns.append({"turn_id": TURN})
+    worker.emit(event("status", "turn_started"), event("message", "one"))
+    # The worker flushed everything to the mirror, then the sandbox died (OOM) before the
+    # client's next poll: the mirror has the whole turn, the client already saw two events.
+    write(storage, [event("status", "turn_started"), event("message", "one"),
+                    event("message", "two"), result_event("done")])
 
-    def complete(payload, attributes=None):
-        publish(payload, attributes)
-        if previous:
-            write(storage, [event("status", "checkpoint_saved", previous[-1])],
-                  turn_id=previous[-1])
-        tid, wid = payload["turn_id"], attributes["worker"]
-        previous.append(tid)
-        write(storage, [event("status", "turn_started", tid, wid),
-                        event("result", payload["message"], tid, wid)], turn_id=tid)
+    async def go():
+        gen = backend._stream_turn(provider, sandbox, TURN, SID, events_uri=URI, store_kwargs={"store": storage})
+        out = [await gen.__anext__(), await gen.__anext__()]
+        provider.vanish(sandbox)
+        out += [e async for e in gen]
+        return out
 
-    monkeypatch.setattr(dispatch, "publish", complete)
-    results = []
-    async with asyncio.timeout(2):
-        for prompt in ["FIRST", "SECOND", "THIRD"]:
-            session = backend.GeminiSession(engine, SID)
-            results.append(await session.send(prompt))
-    engine._join_background()
-    assert [r.text for r in results] == ["FIRST", "SECOND", "THIRD"]
-    assert len(set(previous)) == 3
+    events = asyncio.run(go())
+    assert [e.summary for e in events] == ["turn_started", "one", "two", "done"]
+    assert events[-1].kind == "result" and not events[-1].raw["is_error"]
 
 
-async def test_redispatch_rejects_abandoned_workers_result(storage, monkeypatch):
-    engine, dispatch, ae = _per_worker_engine(monkeypatch)
-    publish = dispatch.publish
-
-    def complete(payload, attributes=None):
-        publish(payload, attributes)
-        if len(dispatch.published) < 2:
-            return
-        tid = payload["turn_id"]
-        old = dispatch.published[0][1]["worker"]
-        current = attributes["worker"]
-        write(storage, [event("status", "turn_started", tid, old),
-                        event("result", "ABANDONED", tid, old),
-                        event("status", "turn_started", tid, current),
-                        event("result", "CURRENT", tid, current)], turn_id=tid)
-
-    monkeypatch.setattr(dispatch, "publish", complete)
-    monkeypatch.setattr(backend, "pickup_deadline_s", lambda *a, **kw: 0.03)
-    async with asyncio.timeout(2):
-        result = await backend.GeminiSession(engine, SID).run("go")
-    engine._join_background()
-    assert result.text == "CURRENT" and not result.is_error
-    assert len(dispatch.published) == 2 and len(ae.cancelled) == 1
+def test_gone_sandbox_without_a_terminal_record_ends_the_run_after_the_grace(storage):
+    worker = ScriptedWorker()
+    provider, sandbox = _provider_with(worker)
+    worker.turns.append({"turn_id": TURN})
+    write(storage, [event("status", "turn_started")])  # partial mirror, no result
+    provider.vanish(sandbox)
+    events = asyncio.run(_collect(provider, sandbox, storage))
+    assert [e.kind for e in events] == ["status", "result"]
+    assert events[-1].raw["event"] == "sandbox_unreachable" and "gone" in events[-1].summary
 
 
-async def test_dead_current_job_cannot_recover_previous_success(storage, monkeypatch):
-    engine, dispatch, ae = _per_worker_engine(monkeypatch)
-    write(storage, [event("result", "OLD SUCCESS", "old")], turn_id="old")
-    publish = dispatch.publish
-
-    def start_only(payload, attributes=None):
-        publish(payload, attributes)
-        tid = payload["turn_id"]
-        write(storage, [event("status", "turn_started", tid, attributes["worker"])], turn_id=tid)
-
-    monkeypatch.setattr(dispatch, "publish", start_only)
-    monkeypatch.setattr(ae, "check_query_job", lambda **kw: NS(status="SUCCESS"))
-    watched = backend._watched_tail
-    monkeypatch.setattr(backend, "_watched_tail", lambda *a, **kw: watched(*a, **kw, quiet_s=0.01, grace_s=0.02))
-    async with asyncio.timeout(2):
-        result = await backend.GeminiSession(engine, SID).run("go")
-    engine._join_background()
-    assert result.is_error and "no terminal" in result.text
+def test_repeated_proxy_failures_fall_back_to_the_mirror(storage, monkeypatch):
+    worker = ScriptedWorker()
+    provider, sandbox = _provider_with(worker)
+    worker.turns.append({"turn_id": TURN})
+    provider.fail_next["/events"] = [RuntimeError("502")] * backend.DIRECT_MAX_FAILURES
+    write(storage, [event("message", "from-mirror"), result_event("done")])
+    events = asyncio.run(_collect(provider, sandbox, storage))
+    assert [e.summary for e in events] == ["from-mirror", "done"]
 
 
-async def test_redispatch_discards_events_buffered_during_retirement(storage, monkeypatch):
-    import time
-
-    engine, dispatch, ae = _per_worker_engine(monkeypatch)
-    publish = dispatch.publish
-    cancel = ae.cancel_query_job
-
-    def finish(payload, attributes=None):
-        publish(payload, attributes)
-        if len(dispatch.published) == 2:
-            tid, wid = payload["turn_id"], attributes["worker"]
-            write(storage, [event("status", "turn_started", tid, wid),
-                            event("result", "CURRENT", tid, wid)], turn_id=tid)
-
-    def retire(**kwargs):
-        payload, attrs = dispatch.published[0]
-        tid, wid = payload["turn_id"], attrs["worker"]
-        # The timed-out worker wakes while its cancellation RPC is still in progress.
-        # Its events pass the old filter and enter the pickup queue before replacement.
-        write(storage, [event("status", "turn_started", tid, wid),
-                        event("result", "ABANDONED", tid, wid)], turn_id=tid)
-        time.sleep(0.04)
-        cancel(**kwargs)
-
-    monkeypatch.setattr(dispatch, "publish", finish)
-    monkeypatch.setattr(ae, "cancel_query_job", retire)
-    monkeypatch.setattr(backend, "pickup_deadline_s", lambda *a, **kw: 0.03)
-    async with asyncio.timeout(2):
-        result = await backend.GeminiSession(engine, SID).run("go")
-    engine._join_background()
-    assert result.text == "CURRENT" and not result.is_error
+def test_one_proxy_blip_is_retried_directly(storage, monkeypatch):
+    worker = ScriptedWorker()
+    provider, sandbox = _provider_with(worker)
+    worker.turns.append({"turn_id": TURN})
+    provider.fail_next["/events"] = [RuntimeError("502")]
+    worker.emit(result_event("done"))
+    events = asyncio.run(_collect(provider, sandbox, storage))
+    assert [e.summary for e in events] == ["done"]
+    assert storage.list("") == []  # never touched the mirror
 
 
-@pytest.mark.parametrize("config_error", [False, True])
-async def test_worker_identifies_every_event_including_early_errors(storage, monkeypatch, tmp_path, config_error):
-    spec = AgentSpec(name="worker", model="m")
-    agent = adk_agent.build_agent(spec)
-    monkeypatch.setenv("AGENT_EVENTS_GCS", URI)
-    monkeypatch.setenv("AGENT_JOBS_ROOT", str(tmp_path / "jobs"))
-    monkeypatch.setattr(adk_agent, "_checkpoint_ports", lambda spec: (None, None))
-    monkeypatch.setattr(adk_agent, "_prepare_workspace", lambda *a: {"summary": "ready"})
-    monkeypatch.setattr(handoff, "fetch_config", lambda *a: None)
-
-    class Harness:
-        async def run(self, spec, ctx):
-            yield AgentEvent(kind="result", summary="done", raw={"subtype": "success"})
-
-    import remote_agent_toolkit.harness as harness
-    monkeypatch.setattr(harness, "resolve_harness", lambda spec: Harness())
-    events = [e async for e in agent._run_turn(
-        spec, SID, "go", None, worker="worker", turn_id="current",
-        session_config_uri="gs://out/missing" if config_error else None,
-    )]
-    assert events
-    for e in events:
-        assert e.custom_metadata["raw"]["turn_id"] == "current"
-        assert e.custom_metadata["raw"]["worker"] == "worker"
-    durable = history.read_history("gs://out", SID, store=storage, turn_id="current")
-    assert durable[-1].kind == "result"
-    assert (durable[-1].raw.get("event") == "config_error") is config_error
+def test_mirror_fallback_without_a_result_ends_with_an_explained_error(storage, monkeypatch):
+    worker = ScriptedWorker()
+    provider, sandbox = _provider_with(worker)
+    worker.turns.append({"turn_id": TURN})
+    provider.fail_next["/events"] = [RuntimeError("502")] * backend.DIRECT_MAX_FAILURES
+    events = asyncio.run(_collect(provider, sandbox, storage, mirror_max_wait_s=0.05))
+    assert len(events) == 1 and events[0].raw["event"] == "sandbox_unreachable"
+    assert "stopped answering" in events[0].summary
 
 
-def test_incompatible_engine_fails_before_dispatch_or_secret_staging(monkeypatch):
-    engine, dispatch, ae = _per_worker_engine(monkeypatch)
-    engine._turn_event_ids = False
-    session = backend.GeminiSession(engine, SID)
-    monkeypatch.setattr(session, "_stage_secrets", lambda *a: pytest.fail("secrets staged"))
-    with pytest.raises(RuntimeError, match="redeploy"):
-        session.run("go")
-    assert not dispatch.published and not ae.jobs
+def test_tail_stream_selects_the_turn_by_identity(storage):
+    write(storage, [event("result", "old", turn_id="previous")], turn_id="previous", now_ms=900)
+    write(storage, [event("message", "now"), result_event("done")])
+    # A key that names the turn but whose payload belongs to another turn is filtered too.
+    history.write_turn_mirror(URI, SID, [history.mirror_line(event("result", "spoof", turn_id="x"))],
+                              now_ms=1001, turn_id=TURN, store=storage)
+
+    async def go():
+        return [e async for e in stream.tail_stream(URI, SID, turn_id=TURN, store=storage, max_wait_s=1.0)]
+
+    events = asyncio.run(go())
+    assert [e.summary for e in events] == ["now", "done"]
 
 
-@pytest.mark.parametrize("targets,supported", [([], True), (["old"], False),
-                                             (["new"], True), (["old", "new"], False)])
-def test_protocol_discovery_checks_serving_revisions(targets, supported):
-    resource = "projects/p/locations/l/reasoningEngines/1"
-
-    def api(version, enabled):
-        env = [NS(name="AGENT_EVENT_TURN_IDS", value="1")] if enabled else []
-        return NS(name=f"{resource}/runtimeRevisions/{version}",
-                  spec=NS(deployment_spec=NS(env=env)))
-
-    latest = api("new", True)
-    latest.traffic_config = {"traffic_split_manual": {"targets": [
-        {"runtime_revision_name": f"{resource}/runtimeRevisions/{version}",
-         "percent": 100 // len(targets)} for version in targets
-    ]}} if targets else None
-    client = NS(agent_engines=NS(
-        get=lambda **kw: NS(api_resource=latest),
-        runtimes=NS(revisions=NS(list=lambda **kw: [NS(api_resource=api("old", False)),
-                                                   NS(api_resource=api("new", True))])),
-    ))
-    assert backend._supports_turn_event_ids(client, resource) is supported
+def test_read_history_scoped_to_a_turn(storage):
+    write(storage, [event("result", "old", turn_id="previous")], turn_id="previous", now_ms=900)
+    write(storage, [event("message", "now"), result_event("done")])
+    assert [e.summary for e in history.read_history("gs://out", SID, store=storage, turn_id=TURN)] == ["now", "done"]
+    assert len(history.read_history("gs://out", SID, store=storage)) == 3
 
 
-async def test_cold_directive_reaches_worker_without_becoming_prompt(monkeypatch):
-    agent = adk_agent.build_agent(AgentSpec(name="cold", model="m"))
-    seen = {}
-    tid = "a" * 32
+def test_stream_turn_handles_a_gone_sandbox_raised_by_the_provider_type(storage):
+    class Gone:
+        def call(self, *a, **kw):
+            raise SandboxGone("expired")
 
-    async def run_turn(spec, sid, prompt, resume_sid, *args, **kwargs):
-        seen.update(sid=sid, prompt=prompt, resume_sid=resume_sid, **kwargs)
-        yield "ran"
+    write(storage, [result_event("done")])
 
-    monkeypatch.setattr(agent, "_run_turn", run_turn)
-    ctx = NS(invocation_id="inv", session=None, user_content=NS(parts=[NS(text=(
-        f"AGENT_SESSION={SID}\nAGENT_RESUME={SID}\nAGENT_GCS_TOKEN=fake\n"
-        f"AGENT_TURN_ID={tid}\nanswer this"
-    ))]))
-    assert [e async for e in agent._run_async_impl(ctx)] == ["ran"]
-    assert seen["turn_id"] == tid and seen["prompt"] == "answer this"
-    assert seen["sid"] == SID and seen["resume_sid"] == SID
+    async def go():
+        return [e async for e in backend._stream_turn(Gone(), "s", TURN, SID, events_uri=URI,
+                                                      store_kwargs={"store": storage})]
 
-
-async def test_early_correlated_error_ends_warm_turn_without_redispatch(storage, monkeypatch):
-    engine, dispatch, ae = _per_worker_engine(monkeypatch)
-    publish = dispatch.publish
-
-    def fail(payload, attributes=None):
-        publish(payload, attributes)
-        tid = payload["turn_id"]
-        error = event("result", "config_error", tid, attributes["worker"])
-        error.raw.update(subtype="error", is_error=True)
-        write(storage, [error], turn_id=tid)
-
-    monkeypatch.setattr(dispatch, "publish", fail)
-    async with asyncio.timeout(2):
-        result = await backend.GeminiSession(engine, SID).run("go")
-    engine._join_background()
-    assert result.is_error and result.text == "config_error"
-    assert len(dispatch.published) == 1 and not ae.cancelled
+    assert [e.summary for e in asyncio.run(go())] == ["done"]

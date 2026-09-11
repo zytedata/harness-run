@@ -33,12 +33,7 @@ jobs:
           enable-cache: true
           cache-dependency-glob: pyproject.toml  # no lockfile — key the cache off deps
       - name: Install (runtime + dev group)
-        # -c applies the platform-critical pins (the pickle-coupled pydantic & co.), so a
-        # fresh resolve here matches the deploy contract that verify_deploy_env() — and
-        # its test — enforce. Without it, any new upstream release of a pickle-coupled
-        # package (e.g. pydantic 2.13.5, 2026-08) breaks CI until constraints.txt is
-        # refreshed, even though nothing in the repo changed.
-        run: uv pip install --system -e . --group dev -c remote_agent_toolkit/runtime/gemini/constraints.txt
+        run: uv pip install --system -e . --group dev
       - name: Lint
         run: ruff check .
       - name: Test

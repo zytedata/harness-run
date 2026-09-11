@@ -2,10 +2,9 @@
 import json
 
 import pytest
+from sandbox_fakes import FakeSandboxProvider, make_engine
 
-from remote_agent_toolkit import AgentSpec
 from remote_agent_toolkit.runtime.gemini import handoff
-from remote_agent_toolkit.runtime.gemini.backend import GeminiEngine
 
 
 class Store:
@@ -23,7 +22,7 @@ class Store:
     b"invalid-json", b"[]", b"null",
 ])
 def test_read_or_decode_failure_is_not_absence(outcome):
-    with pytest.raises(RuntimeError, match="session config") as error:
+    with pytest.raises(RuntimeError, match="refusing fallback") as error:
         handoff.load_session_config("gs://audit-bucket", "audit", store=Store(outcome))
     assert "dummy secret" not in str(error.value)
 
@@ -36,19 +35,14 @@ def test_known_absence_still_supports_an_unconfigured_session():
 def test_failed_reattach_does_not_dispatch_or_cache_fallback(monkeypatch):
     store = Store(PermissionError("denied"))
     monkeypatch.setattr(handoff, "GcsBlobStore", lambda *a, **kw: store)
-    engine = GeminiEngine("dummy", AgentSpec(name="audit", model="dummy"),
-                          "dummy", "dummy", output_bucket="gs://audit-bucket")
+    provider = FakeSandboxProvider()
+    engine = make_engine(provider, output_bucket="gs://audit-bucket")
     session = engine.get_session("audit")
-    monkeypatch.setattr(session, "_mint_gcs_token", lambda: None)
-
-    def no_dispatch():
-        pytest.fail("Config failure reached a platform dispatch")
-
-    monkeypatch.setattr(engine, "_agent_engines", no_dispatch)
-    with pytest.raises(RuntimeError, match="session config"):
+    with pytest.raises(RuntimeError, match="refusing fallback"):
         session.run("dummy")
     assert not session._session_config_resolved
     assert session._session_config_uri is None
+    assert provider.calls == []  # never reached the platform
     store.outcome = json.dumps({"permission_mode": "default"}).encode()
     assert session._client_spec().permission_mode == "default"
     assert session._session_config_resolved

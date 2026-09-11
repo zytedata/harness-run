@@ -53,9 +53,9 @@ from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from ._deploy import DEFAULT_RUNTIME_SA_ID  # engines run as it: deploy(service_account=) default
 from .handoff import handoff_lifecycle_rules
 
+DEFAULT_RUNTIME_SA_ID = "ratk-runtime"  # TODO(sandbox): rewritten with the sandbox IAM model
 DEFAULT_LOCATION = "us-central1"
 DEFAULT_OPERATOR_SA_ID = "agent-runtime"
 # The models checked in Vertex Model Garden. Each check costs a handful of input tokens

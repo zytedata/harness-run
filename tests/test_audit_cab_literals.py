@@ -13,7 +13,7 @@ from remote_agent_toolkit.runtime.gemini.scoped_gcs import access_boundary, run_
 @pytest.mark.parametrize("output_bucket", ["gs://audit-bucket", 'gs://audit-bucket/prefix"\\quoted'])
 def test_cab_names_are_encoded_as_literals(session_id, output_bucket):
     bucket, base, prefixes = run_object_prefixes(output_bucket, session_id)
-    listed = {f"{base}checkpoints/sessions/", f"{base}control/"}
+    listed = {f"{base}checkpoints/sessions/"}
     rules = access_boundary(bucket, prefixes, base).rules
     list_count = 0
     for prefix, rule in zip(prefixes, rules):
@@ -26,7 +26,7 @@ def test_cab_names_are_encoded_as_literals(session_id, output_bucket):
             )
             list_count += 1
         assert rule.availability_condition.expression == expected
-    assert list_count == 2
+    assert list_count == 1
 
 
 def test_neighboring_session_prefixes_remain_disjoint():

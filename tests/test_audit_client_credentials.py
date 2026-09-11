@@ -2,13 +2,15 @@
 import json
 from types import SimpleNamespace
 
-from remote_agent_toolkit import AgentSpec, SessionConfig
+from sandbox_fakes import FakeSandboxProvider
+from sandbox_fakes import make_engine as _make_engine
+
+from remote_agent_toolkit import SessionConfig
 from remote_agent_toolkit.ports import blobstore
-from remote_agent_toolkit.runtime.gemini import handoff, history
-from remote_agent_toolkit.runtime.gemini.backend import GeminiEngine, GeminiSession
+from remote_agent_toolkit.runtime.gemini import backend, handoff, history
 
 
-def test_handoff_and_config_operations_use_explicit_credentials(monkeypatch):
+def test_config_operations_use_explicit_credentials(monkeypatch):
     explicit = object()
     seen = []
 
@@ -27,13 +29,11 @@ def test_handoff_and_config_operations_use_explicit_credentials(monkeypatch):
 
     monkeypatch.setattr(blobstore, "GcsBlobStore", CaptureStore)
     monkeypatch.setattr(handoff, "GcsBlobStore", CaptureStore)
-    engine = GeminiEngine("dummy", AgentSpec(name="audit", model="dummy"), "dummy", "dummy",
-                          output_bucket="gs://audit-bucket/prefix", credentials=explicit)
-    session = GeminiSession(engine, "audit")
-    session._stage_secrets({"KEY": "dummy"})
+    engine = _make_engine(FakeSandboxProvider(), output_bucket="gs://audit-bucket/prefix", credentials=explicit)
+    session = backend.GeminiSession(engine, "audit")
     session._bind_config(SessionConfig(model="dummy"))
     engine.get_session("reattach")._client_spec()
-    assert len(seen) == 3 and all(credential is explicit for credential in seen)
+    assert len(seen) == 2 and all(credential is explicit for credential in seen)
 
 
 def test_history_uses_its_explicit_credentials(monkeypatch):
@@ -70,3 +70,10 @@ def test_lifecycle_bucket_client_uses_explicit_credentials(monkeypatch):
     monkeypatch.setattr(google.cloud.storage, "Client", client)
     assert handoff.ensure_handoff_lifecycle("gs://audit-bucket", credentials=explicit)
     assert seen == [{"credentials": explicit, "project": "_"}]
+
+
+def test_roster_and_records_use_the_engine_credentials():
+    explicit = object()
+    engine = _make_engine(FakeSandboxProvider(), credentials=explicit, roster_store=None)
+    assert engine._roster()._store._credentials is explicit
+    assert engine._gcs_store_kwargs()["store"]._credentials is explicit

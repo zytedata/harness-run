@@ -1,22 +1,14 @@
-"""Run-scoped GCS access for gemini workers.
+"""Run-scoped GCS access for sandbox workers.
 
-Why this exists (found and verified 2026-09-02, see README "Secrets & security"): the
-worker container runs the agent's shell as the same user as the worker, and that
-container authenticates as the Agent Runtime service agent through the metadata server.
-So a shell command inside the agent can mint that identity's token. With the identity
-holding ``objectAdmin`` on the output bucket, one run could list and read every other
-run's staged secrets, transcripts and configs, across every engine sharing the bucket.
+The sandbox has no Google identity that could open the output bucket (DESIGN.md §13.1),
+so the **client** mints one short-lived, downscoped token per turn (a Credential Access
+Boundary: this bucket, only this run's object prefixes) and the **worker** does all of the
+turn's GCS work with it — the event mirror, checkpoints, transcripts, artifacts. The
+agent's shell can read the token (it is in the worker's process), which is why it opens
+only the run's own objects: nothing another run wrote, nothing under another prefix.
 
-The fix: the **client** mints one short-lived, downscoped token per turn (a Credential
-Access Boundary: this bucket, only this run's object prefixes) and the **worker** does
-all of the turn's GCS work with it instead of the runtime identity. The runtime identity
-can then lose its bucket-wide role (the migration step in the README): a token minted
-from the metadata server no longer opens the bucket, and the run's own token opens only
-the run's own objects.
-
-The token rides the invocation like the other pointers do (a directive line on the cold
-path, a payload field on the warm path). It is a bearer token, so treat it as one: it is
-worth this run's own objects for at most an hour, and nothing else.
+The token rides the ``/turn`` body. It is a bearer token, so treat it as one: it is worth
+this run's own objects for at most an hour, and nothing else.
 
 Long turns: a downscoped token lives as long as its source token (at most an hour). The
 client refreshes it while the run is live by overwriting one object under the run's own
@@ -60,9 +52,7 @@ def run_object_prefixes(output_bucket: str, session_id: str) -> tuple[str, str, 
     ``output_bucket`` is the engine's ``gs://bucket[/prefix]``. The list is the whole GCS
     surface of a turn (handoff objects, the events mirror, checkpoints, artifacts); the
     checkpoint keys use the Claude session id the worker derives from the toolkit session
-    id (``session_store._claude_session_id``), so the mapping is done here too. The
-    control inbox is here because the worker polls it with these credentials: without
-    its prefix every list would 403 and ``send()`` / ``interrupt()`` would never arrive.
+    id (``session_store._claude_session_id``), so the mapping is done here too.
 
     Every writer of run objects must appear here: ``tests/test_scoped_gcs.py`` drives the
     checkpoint code (Codex thread persist + resume, transcript store, workspace snapshot)
@@ -81,20 +71,17 @@ def run_object_prefixes(output_bucket: str, session_id: str) -> tuple[str, str, 
         f"{base}checkpoints/workspace/{csid}.tar.gz",     # workspace snapshot
         f"{base}checkpoints/codex-threads/{csid}/",       # Codex conversation (harness/codex.py)
         f"{base}artifacts/{session_id}/",                 # produced files
-        f"{base}control/{session_id}/",                   # the turn's control inbox (control.py)
-        f"{base}control-delivered/{session_id}/",         # its delivered-message markers
     ]
     return bucket, base, prefixes
 
 
-# Prefixes the worker LISTS with the run token: the control inbox (control.py polls it) and
-# the checkpoint transcript directory (session_store.load enumerates batches on resume).
-# Every other object of a turn is read or written by exact name. Kept to the minimum on
-# purpose: STS caps the minted token at ~10.7k chars INCLUDING the caller's own token, and
-# a list clause adds ~500 chars per rule. Nine list clauses fit under a ~250-char user token
-# and overflow a ~1,100-char service-account token with "invalid_request" (measured
-# 2026-09-08, zapi-workflow-bot); two fit either with room to spare.
-_LISTED_PREFIXES = ("checkpoints/sessions/", "control/")
+# Prefixes the worker LISTS with the run token: the checkpoint transcript directory
+# (session_store.load enumerates batches on resume). Every other object of a turn is read
+# or written by exact name. Kept to the minimum on purpose: STS caps the minted token at
+# ~10.7k chars INCLUDING the caller's own token, and a list clause adds ~500 chars per
+# rule. Nine list clauses overflowed a ~1,100-char service-account token with
+# "invalid_request" (measured 2026-09-08); one fits with room to spare.
+_LISTED_PREFIXES = ("checkpoints/sessions/",)
 
 
 def access_boundary(bucket: str, prefixes: list[str], base: str = "") -> Any:
@@ -248,11 +235,3 @@ def worker_credentials(
         token=token, expiry=expiry or retry_soon(), refresh_handler=refresh_handler
     )
 
-
-def output_bucket_from_env(events_uri: str | None) -> str | None:
-    """The engine's ``gs://bucket[/prefix]`` from its ``AGENT_EVENTS_GCS`` (``.../events``)."""
-    if not events_uri:
-        return None
-    if events_uri.endswith("/events"):
-        return events_uri[: -len("/events")]
-    return events_uri

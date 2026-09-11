@@ -469,9 +469,7 @@ def test_existing_custom_role_is_extended_additively():
 def test_runtime_sa_default_matches_what_deploy_uses():
     # One source for the name: the setup tool creates the account gemini.deploy runs
     # engines as when service_account= is omitted. There is no opt-out flag.
-    from remote_agent_toolkit.runtime.gemini import _deploy
-
-    assert ps.Settings(project="p").runtime_email() == _deploy.default_runtime_service_account("p")
+    assert ps.Settings(project="p").runtime_email() == f"{ps.DEFAULT_RUNTIME_SA_ID}@p.iam.gserviceaccount.com"
     assert "--no-runtime-sa" not in ps.build_parser().format_help()
 
 

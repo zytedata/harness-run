@@ -7,21 +7,16 @@ channel: the worker appends small JSONL batch objects as events happen
 (:func:`tail_stream`). Same prefix, same line format as the old per-turn flush, so
 ``history.read_history`` / ``list_sessions`` read both eras unchanged.
 
-Why this replaces tailing Cloud Logging (which stays as an emit-only ops/debug channel):
+GCS list-after-write is strongly consistent, so an event is visible one flush + one poll
+after it happened (~1-2 s), and a GCS list has no shared read budget.
 
-* **No shared read budget.** Cloud Logging caps ``entries.list`` at 60 reads/min for the
-  whole project — one polling tail nearly exhausts it, and concurrent runs starve each
-  other (they now back off; see ``ports/eventsink.py``). GCS has no comparable cap: tens
-  of concurrent tails are a non-event.
-* **No ingestion lag.** GCS list-after-write is strongly consistent, so an event is
-  visible one flush + one poll after it happened (~1-2 s), vs Cloud Logging's variable
-  write→queryable lag (seconds to minutes — it dominated warm first-event latency).
-
-Object names include the worker clock, turn id, writer id and per-writer counter. Turn
-readers select by identity; legacy readers can still use timestamp/key floors. Writes
-are batched (~0.5 s or 50
-events, terminal ``result`` immediately) on a background thread and are best-effort like
-every telemetry path in the worker: a storage failure never fails a run.
+With the sandbox runtime the client streams a turn **directly** from the worker
+(``/events`` long-poll, ``backend.py``) and this tail is the fallback when the sandbox is
+unreachable — and the mirror stays the durable record either way. Object names include
+the worker clock, turn id, writer id and per-writer counter; turn readers select by
+identity. Writes are batched (~0.5 s or 50 events, terminal ``result`` immediately) on a
+background thread and are best-effort like every telemetry path in the worker: a storage
+failure never fails a run.
 """
 
 from __future__ import annotations
@@ -41,8 +36,7 @@ _FLUSH_INTERVAL_S = 0.5  # max time an event sits buffered before it is visible 
 _FLUSH_MAX_EVENTS = 50  # size-based flush for bursty streams
 _CLOSE_TIMEOUT_S = 10.0  # bound on draining the writer at turn end (close() is sync)
 _TAIL_POLL_S = 0.5  # client list cadence (a GCS list is cheap and uncapped)
-# Same resilience envelope as the Cloud Logging tail (ports/eventsink.py): bound every
-# call, ride out transient blips, surface persistent errors, never block forever.
+# Bound every call, ride out transient blips, surface persistent errors, never block forever.
 _POLL_TIMEOUT_S = 30.0
 _MAX_POLL_FAILURES = 10
 _MAX_WAIT_S = 3600.0
@@ -145,8 +139,12 @@ async def tail_stream(
     store: Any | None = None,
     turn_id: str | None = None,
     accept_event: Callable[[AgentEvent], bool] | None = None,
+    max_wait_s: float = _MAX_WAIT_S,
 ) -> AsyncIterator[AgentEvent]:
     """Stream a session's mirrored events live; stops after the terminal ``result``.
+
+    ``max_wait_s`` bounds the tail as a whole (default an hour); a caller that already
+    knows the writer is gone passes a short bound and synthesizes the end itself.
 
     With ``turn_id``, reads only that turn's objects and verifies each event's identity
     before yielding or terminating. Clock floors and a prior handle's watermark are
@@ -168,8 +166,7 @@ async def tail_stream(
     ``watermark`` (optional ``dict``) is updated in place — ``watermark["key"]`` is the
     last consumed object key — so the caller can hand it to the next turn's tail. Every
     storage call is bounded; transient errors ride out (up to ``_MAX_POLL_FAILURES``
-    consecutive), and ``_MAX_WAIT_S`` bounds the tail as a whole — same envelope as the
-    Cloud Logging tail this replaces.
+    consecutive), and ``max_wait_s`` bounds the tail as a whole.
     """
     from .history import _parse_jsonl, event_from_mirror
 
@@ -183,7 +180,7 @@ async def tail_stream(
     start = time.monotonic()
     seen_keys: set[str] = set()
     failures = 0
-    while time.monotonic() - start < _MAX_WAIT_S:
+    while time.monotonic() - start < max_wait_s:
         try:
             keys = await asyncio.wait_for(
                 asyncio.to_thread(blobs.list, sid_prefix), timeout=_POLL_TIMEOUT_S

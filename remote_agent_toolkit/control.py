@@ -12,9 +12,9 @@ interactive loop needs two more things while a turn is RUNNING:
 Both travel as a :class:`ControlMessage` over a :class:`ControlChannel` the runtime hands
 the harness in ``RunContext.control``. The harness reads the channel while the harness
 stream runs (:class:`ControlledStream`) and acts on each message. ``local`` uses the
-in-process :class:`LocalControlChannel`; ``gemini`` uses a GCS inbox the worker polls
-(``runtime/gemini/control.py``), so a message can come from any process that holds the
-session id.
+in-process :class:`LocalControlChannel`; ``gemini`` posts the message to the sandbox
+worker's ``/control`` endpoint, which feeds the same kind of queue on the worker's loop
+(``runtime/gemini/worker.py``).
 
 Every delivered message is surfaced as a ``user`` event whose ``raw["message_id"]`` is the
 caller's id — that event is the acknowledgement that the model has the message.

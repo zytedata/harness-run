@@ -126,10 +126,10 @@ one), runs Haiku turns against it, and tears everything down in `finally`:
   the way an application does.
 - **steer** — `session.send()` into a running turn (the model is inside a `sleep 25`): the
   `user` event must acknowledge the message id and the reply must reflect it.
-- **isolation** — a turn whose task is a fixed read-only script: the metadata server's
-  identity must not be one of ours, and its token must be 403 on the project's storage and
-  Vertex; the only credential-like env var is the turn's own `ANTHROPIC_AUTH_TOKEN`. Prints
-  statuses and names, never a token.
+- **isolation** — a fixed read-only script run through the worker's `/exec` on a fresh
+  sandbox (no model involved): the metadata server's identity must not be one of ours, its
+  token must be 403 on the project's storage and Vertex, and no credential-like env var is
+  set outside a turn. Prints statuses and names, never a token.
 - **long-turn** (`LONG_MINUTES`) — one Bash call that long; what it exercises is the model
   token's lifetime (an hour unless the org policy extends it), the sandbox TTL and the
   `/events` long-poll over hours.

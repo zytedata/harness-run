@@ -14,10 +14,10 @@ branch that touches any deploy/runtime contract — it validates, on real infras
     sandbox) with a ``TurnConfig(output_schema=...)`` — the client parses the JSON and the
     worker's ``effective_spec`` echo still carries the marker
   * **control**: a steer into a running turn is acknowledged by a ``user`` event
-  * **isolation**: a turn whose task is a fixed shell script prints what the agent's shell
-    can reach — the metadata server's identity must be a tenant one that is 403 on our
-    project's storage and Vertex (the sandbox has no usable Google identity); only
-    statuses and names are printed, never tokens
+  * **isolation**: a fixed shell script run through the worker's ``/exec`` (no model) prints
+    what the agent's shell can reach — the metadata server's identity must be a tenant one
+    that is 403 on our project's storage and Vertex (the sandbox has no usable Google
+    identity); only statuses and names are printed, never tokens
   * optional ``LONG_MINUTES=n``: a turn whose one Bash call sleeps that long (the model
     token, the sandbox TTL and the /events long-poll all have to hold)
 
@@ -93,10 +93,6 @@ out["env_token_names"] = sorted(k for k in os.environ if "TOKEN" in k or "KEY" i
 print("ISOLATION " + json.dumps(out))
 PY
 """.strip()
-ISOLATION_TASK = (
-    "Run exactly this shell script with the Bash tool, as ONE call, and reply with only the line "
-    "it prints that starts with ISOLATION (verbatim, nothing else):\n\n```bash\n" + ISOLATION_SCRIPT + "\n```"
-)
 MARKER = "SESSION-CONFIG-OK"
 
 
@@ -205,25 +201,32 @@ async def check_steer(engine, verdicts) -> None:
 
 
 async def check_isolation(engine, verdicts) -> None:
+    """What the agent's shell can reach — asked of the worker's /exec directly (no model)."""
     label = "isolation"
-    try:
-        import json as _json
+    import json as _json
 
-        session = engine.start_session()
-        r, events, _ = await _drive(label, session.run(ISOLATION_TASK))
-        line = next((ln for ln in (r.text or "").splitlines() if ln.strip().startswith("ISOLATION ")), "")
-        facts = _json.loads(line.strip()[len("ISOLATION "):]) if line else {}
-        log(label, f"facts={facts}")
+    sandbox = None
+    try:
+        handle = await asyncio.to_thread(engine._create_sandbox, 600)
+        sandbox = handle.name
+        out = await asyncio.to_thread(
+            engine._provider().call, sandbox, "/exec", {"command": ISOLATION_SCRIPT, "timeout": 60}, timeout_s=90)
+        line = next((ln for ln in (out.get("stdout") or "").splitlines() if ln.startswith("ISOLATION ")), "")
+        facts = _json.loads(line[len("ISOLATION "):]) if line else {}
+        log(label, f"rc={out.get('returncode')} facts={facts} stderr={(out.get('stderr') or '')[-120:]!r}")
         identity = str(facts.get("mds_identity", ""))
         verdicts[label] = (
-            (not r.is_error) and bool(facts)
+            bool(facts)
             and "gserviceaccount.com" not in identity  # a tenant identity, not one of ours
             and facts.get("gcs_list") in ("403", "401", None) and facts.get("vertex") in ("403", "401", None)
-            and "ANTHROPIC_AUTH_TOKEN" in facts.get("env_token_names", [])  # the model token, by design
+            and "ANTHROPIC_AUTH_TOKEN" not in facts.get("env_token_names", [])  # nothing outside a turn
         )
     except Exception:
         log(label, "FAILED:\n" + traceback.format_exc())
         verdicts[label] = False
+    finally:
+        if sandbox is not None:
+            await asyncio.to_thread(engine._release_sandbox, sandbox)
 
 
 async def check_long(engine, verdicts) -> None:

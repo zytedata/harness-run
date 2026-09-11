@@ -8,6 +8,7 @@ wiring — by swapping in a harness that yields canned AgentEvents.
 from __future__ import annotations
 
 import asyncio
+import os
 from typing import AsyncIterator
 
 import pytest
@@ -186,6 +187,73 @@ def test_resume_restores_workspace(tmp_path):
 
     asyncio.run(_await(session.send("continue please")))
     assert seen["restored"] is True  # _prepare_workspace restored the snapshot on resume
+
+
+def _seed_snapshot(engine, sid, populate):
+    from remote_agent_toolkit.checkpoint.workspace import snapshot
+    from remote_agent_toolkit.ports.blobstore import LocalBlobStore
+
+    seed = engine._blob_root.parent / f"seed-{sid}"
+    seed.mkdir(parents=True)
+    populate(seed)
+    snapshot(LocalBlobStore(str(engine._blob_root)), sid, str(seed))
+
+
+def _resume_events(engine, sid, prompt="continue"):
+    session = engine.get_session(sid)
+
+    async def collect():
+        return [ev async for ev in session.send(prompt)]
+
+    return asyncio.run(collect())
+
+
+def test_resume_restores_a_workspace_with_a_venv_symlink(tmp_path):
+    # #74: every coding run leaves a ``.venv`` whose ``bin/python`` is an absolute symlink;
+    # restoring such a snapshot on another worker aborted, and the fallback then tried to
+    # clone the repo into the half-restored directory.
+    spec = AgentSpec(name="demo", model="m", checkpoint=True)
+    engine = local.deploy(spec, workdir=str(tmp_path / "wd"))
+
+    def populate(seed):
+        (seed / "project" / ".venv" / "bin").mkdir(parents=True)
+        (seed / "project" / "a.py").write_text("x")
+        os.symlink("/usr/local/bin/python3", seed / "project" / ".venv" / "bin" / "python")
+
+    _seed_snapshot(engine, "venvsid", populate)
+    seen = {}
+    engine._harness = FakeHarness(
+        [_result_ev()],
+        on_run=lambda s, c: seen.update(
+            link=os.readlink(c.workspace / "project" / ".venv" / "bin" / "python"),
+            code=(c.workspace / "project" / "a.py").read_text(),
+        ),
+    )
+    events = _resume_events(engine, "venvsid")
+    assert seen == {"link": "/usr/local/bin/python3", "code": "x"}
+    ready = events[0].raw
+    assert ready["event"] == "workspace_ready" and ready["restored"] is True
+    assert ready["restore_error"] is None and ready["skipped"] == []
+
+
+def test_resume_with_a_broken_snapshot_starts_fresh_and_says_so(tmp_path):
+    # A snapshot that cannot be extracted is not the caller's clone error and not silence:
+    # the turn runs in a clean workspace and ``workspace_ready`` carries the reason.
+    spec = AgentSpec(name="demo", model="m", checkpoint=True)
+    engine = local.deploy(spec, workdir=str(tmp_path / "wd"))
+    _seed_snapshot(engine, "badsid", lambda seed: (seed / "a.txt").write_text("x"))
+    (engine._blob_root / "workspace" / "badsid.tar.gz").write_bytes(b"\x1f\x8b not a tarball")
+
+    seen = {}
+    engine._harness = FakeHarness(
+        [_result_ev()], on_run=lambda s, c: seen.update(files=sorted(os.listdir(c.workspace)))
+    )
+    events = _resume_events(engine, "badsid")
+    assert seen["files"] == []  # a clean directory, nothing half-restored
+    ready = events[0].raw
+    assert ready["restored"] is False
+    assert ready["restore_error"] and "restore failed" in events[0].summary
+    assert events[-1].kind == "result"
 
 
 def test_workspace_accessor_seed_and_collect(tmp_path):

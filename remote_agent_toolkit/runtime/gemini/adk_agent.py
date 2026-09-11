@@ -236,17 +236,15 @@ def _prepare_workspace(rc: Any, prefer_baked_skills: bool = True) -> dict:
     run time instead of the deploy-baked dir — used when a run-scoped spec declares skills
     that differ from the baked ones (including declaring none).
     """
+    from ...checkpoint.workspace import RestoreResult, try_restore, workspace_ready_event
     from ...skills import provision, skills_subdir
     from ...spec import SkillSource
 
-    restored = False
+    restored, restore_error = RestoreResult(found=False), None
     if rc.resume_sid and rc.blobs is not None:
-        from ...checkpoint.workspace import restore
-
-        try:
-            restored = restore(rc.blobs, rc.resume_sid, str(rc.workspace))
-        except Exception:  # noqa: BLE001 — fall back to a fresh workspace
-            restored = False
+        # A failed restore leaves no half-extracted files behind (restore cleans up), so the
+        # fresh path below can clone into the directory.
+        restored, restore_error = try_restore(rc.blobs, rc.resume_sid, str(rc.workspace))
     names: list[str] = []
     repos: list[str] = []
     if restored:
@@ -267,16 +265,7 @@ def _prepare_workspace(rc: Any, prefer_baked_skills: bool = True) -> dict:
             from ...integrations.git import provision_repos
 
             repos = provision_repos(rc.workspace, rc.spec.repos, rc.secrets)
-    return {
-        "event": "workspace_ready",
-        "restored": restored,
-        "skills": names,
-        "repos": repos,
-        "summary": (
-            f"workspace ready (restored={restored}, skills staged={len(names)}, "
-            f"repos cloned={len(repos)})"
-        ),
-    }
+    return workspace_ready_event(restored, restore_error, names, repos)
 
 
 class ToolkitAgent(BaseAgent):

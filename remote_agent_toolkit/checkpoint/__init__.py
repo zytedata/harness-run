@@ -7,6 +7,6 @@ local store is fatal for serverless).
 from __future__ import annotations
 
 from .session_store import BlobSessionStore
-from .workspace import restore, snapshot
+from .workspace import RestoreResult, restore, snapshot
 
-__all__ = ["BlobSessionStore", "snapshot", "restore"]
+__all__ = ["BlobSessionStore", "RestoreResult", "snapshot", "restore"]

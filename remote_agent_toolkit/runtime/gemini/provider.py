@@ -85,8 +85,8 @@ class SandboxProvider(Protocol):
         ...
 
     def list_templates(self, *, display_name: str | None = None) -> list[dict]:
-        """Templates under the host instance, newest first: ``{name, display_name,
-        image_uri, cpu, memory, create_time, state}``."""
+        """Live templates under the host instance, newest first: ``{name, display_name,
+        image_uri, cpu, memory, create_time, state}`` (deleted ones are not listed)."""
         ...
 
     def delete_template(self, name: str) -> None:
@@ -298,10 +298,15 @@ class AgentSandboxProvider:
             display = getattr(tpl, "display_name", None) or ""
             if display_name is not None and display != display_name:
                 continue
+            state = getattr(tpl, "state", None)
+            state_name = getattr(state, "name", str(state) if state else None)
+            if state_name and "DELETED" in state_name:
+                # The platform keeps deleted templates in the listing (observed 2026-09-11);
+                # they are not versions anyone can dispatch to.
+                continue
             env = getattr(tpl, "custom_container_environment", None)
             spec = getattr(env, "custom_container_spec", None)
             limits = getattr(getattr(env, "resources", None), "limits", None) or {}
-            state = getattr(tpl, "state", None)
             rows.append({
                 "name": tpl.name,
                 "display_name": display,
@@ -309,7 +314,7 @@ class AgentSandboxProvider:
                 "cpu": limits.get("cpu") if isinstance(limits, dict) else None,
                 "memory": limits.get("memory") if isinstance(limits, dict) else None,
                 "create_time": _ts(getattr(tpl, "create_time", None)),
-                "state": getattr(state, "name", str(state) if state else None),
+                "state": state_name,
             })
         rows.sort(key=lambda r: r["create_time"] or 0.0, reverse=True)
         return rows

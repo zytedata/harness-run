@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import math
 import secrets
 import threading
 import time
@@ -288,6 +289,10 @@ class OpenRouterProxy:
         expected_model: str | None = None,
         routing: Mapping[str, Any] | None = None,
     ) -> None:
+        if max_budget_usd is not None and (
+            not math.isfinite(max_budget_usd) or max_budget_usd < 0
+        ):
+            raise ValueError("max_budget_usd must be finite and non-negative, or None")
         self._api_key = api_key
         self._max_budget_usd = max_budget_usd
         self._expected_model = expected_model
@@ -346,6 +351,8 @@ class OpenRouterProxy:
             return True
 
     def _over_budget(self) -> bool:
+        if self._max_budget_usd == 0:
+            return True  # no priced response is required to exhaust a zero allowance
         cost = self.exact_cost_usd
         return (
             cost is not None and self._max_budget_usd is not None and cost >= self._max_budget_usd

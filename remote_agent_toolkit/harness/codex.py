@@ -47,8 +47,7 @@ Spec translation (parity notes):
 * ``reasoning_effort`` → per-turn ``effort`` (thread-sticky server-side, and re-applied
                          on every turn, so resume keeps it). Codex has no ``max`` level;
                          it is mapped to ``xhigh`` with a status warning.
-* ``allowed_tools`` / ``disallowed_tools`` → no Codex equivalent; ignored with a status
-                         warning.
+* ``allowed_tools`` / ``disallowed_tools`` → no Codex equivalent; rejected before launch.
 * ``max_buffer_size``  → inert: it caps one NDJSON message on the Claude Agent SDK's own
                          stdout transport, and the Codex app-server SDK frames its stream
                          itself with no equivalent knob.
@@ -635,6 +634,12 @@ class CodexHarness:
         openrouter_client_token: str | None = None,
     ) -> _CodexOptions:
         """Build ``openai_codex`` config + thread/turn args from ``spec`` + runtime ``ctx``."""
+        # These are restrictions, not optional hints. Validate before SDK setup or
+        # filesystem side effects; callers awaiting only a result may never see warnings.
+        if spec.permission_mode not in _PERMISSION_MAP:
+            raise ValueError("permission_mode has no codex mapping; choose a supported mode")
+        if spec.allowed_tools is not None or spec.disallowed_tools:
+            raise ValueError("allowed_tools/disallowed_tools have no codex equivalent")
         sdk = _sdk()
         ApprovalMode, CodexConfig, Sandbox = sdk.ApprovalMode, sdk.CodexConfig, sdk.Sandbox
 
@@ -642,20 +647,8 @@ class CodexHarness:
         # session rollouts, logs. The codex CLI refuses a CODEX_HOME that doesn't exist.
         codex_home = ctx.job_dir / "codex_home"
         codex_home.mkdir(parents=True, exist_ok=True)
-        sandbox_name, approval_name = _PERMISSION_MAP.get(
-            spec.permission_mode, _PERMISSION_MAP["bypassPermissions"]
-        )
+        sandbox_name, approval_name = _PERMISSION_MAP[spec.permission_mode]
         warnings: list[str] = []
-        if spec.permission_mode not in _PERMISSION_MAP:
-            warnings.append(
-                f"permission_mode {spec.permission_mode!r} has no codex mapping; "
-                "using bypassPermissions semantics (full access, no approvals)"
-            )
-        if spec.allowed_tools is not None or spec.disallowed_tools:
-            warnings.append(
-                "allowed_tools/disallowed_tools are Claude-specific and have no codex "
-                "equivalent; ignored"
-            )
         if spec.transcript and not spec.checkpoint:
             warnings.append(
                 "transcript=True persists nothing on codex: it keeps its conversation as a "

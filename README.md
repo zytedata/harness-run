@@ -175,8 +175,11 @@ What to know when running Codex:
   status warning.
 - **Which model actually ran**: every Codex turn emits one `model_routing` status event carrying
   what the Codex app-server recorded for the thread, and whether that matches what was asked for.
-- **Gaps**: `allowed_tools`/`disallowed_tools` have no Codex equivalent (ignored with a status
-  warning), and Codex has no background-task re-invocation, so `background_task_timeout` is inert.
+- **Gaps**: `allowed_tools`/`disallowed_tools` have no Codex equivalent and are rejected
+  before launch (including an explicitly empty allow list). Unknown `permission_mode`
+  values are also rejected; they never fall back to full access. Remove unsupported
+  settings only if the selected Codex sandbox provides the restrictions you need.
+  Codex has no background-task re-invocation, so `background_task_timeout` is inert.
   `permission_mode` maps onto Codex's sandbox+approval pairs (`bypassPermissions` → full access,
   never ask; `default` → workspace-write with Codex's auto-reviewer).
 - **OpenRouter models** reach the same surface — see below.

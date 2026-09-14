@@ -391,6 +391,32 @@ def test_run_turn_late_crash_keeps_terminal_result(tmp_path, monkeypatch):
     assert next(e for e in sunk if e.kind == "result").cost_usd == 9.8
 
 
+def test_worker_prep_falls_back_to_a_clean_workspace_when_the_snapshot_is_broken(tmp_path):
+    """#74, worker side: a snapshot that fails to extract must not leave half the files for
+    ``provision_repos`` to trip over, and the reason reaches ``workspace_ready``."""
+    from types import SimpleNamespace
+
+    from remote_agent_toolkit.checkpoint.workspace import snapshot
+    from remote_agent_toolkit.ports.blobstore import LocalBlobStore
+
+    class HalfThenFail(LocalBlobStore):
+        def get_tree(self, key, local_dir):
+            (tmp_path / "ws" / "repo").mkdir(parents=True)
+            (tmp_path / "ws" / "repo" / "half.py").write_text("partial")
+            raise OSError("archive aborted at member 162")
+
+    blobs = HalfThenFail(str(tmp_path / "store"))
+    snapshot(blobs, "sid", str(tmp_path))  # so exists() finds one
+    rc = SimpleNamespace(
+        resume_sid="sid", blobs=blobs, workspace=tmp_path / "ws",
+        spec=AgentSpec(name="w", model="m", checkpoint=True), secrets={},
+    )
+    ready = adk_agent._prepare_workspace(rc, prefer_baked_skills=False)
+    assert ready["restored"] is False
+    assert ready["restore_error"] == "OSError: archive aborted at member 162"
+    assert (tmp_path / "ws").is_dir() and list((tmp_path / "ws").iterdir()) == []
+
+
 def test_run_turn_surfaces_workspace_prep_crash(monkeypatch):
     # Workspace prep (repo clone / skills staging) runs BEFORE the first emitted event; a
     # failure there (e.g. a bad repo token) must also yield a terminal error, not silence.

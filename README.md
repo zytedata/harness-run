@@ -1064,7 +1064,7 @@ The contracts behind this:
 ```python
 gemini.deploy(spec, project=..., location=...)   # build + push the image, create a template; ops/CI only
 gemini.deploy(spec, ..., warm_pool=True, pool_size=2, pool_max_wait_s=3600)   # + a ready pool, idle life 1 h
-gemini.deploy(spec, ..., resource_limits={"cpu": "8", "memory": "16Gi"})      # sandbox CPU/RAM (default 4 / 8Gi; max 8 vCPU)
+gemini.deploy(spec, ..., resource_limits={"cpu": "8", "memory": "16Gi"})      # sandbox CPU/RAM (default 4 / 4Gi; max 8 vCPU)
 gemini.deploy(spec, ..., image="…-docker.pkg.dev/proj/ratk/my-agent:tag")     # use an image you pushed; no build
 gemini.get_engine("spider-builder", project=..., location=...)   # look up by name (app code; addressing only)
 gemini.list_engines(project=..., location=...)   # discover what's deployed: {name, resource, versions}
@@ -1361,7 +1361,7 @@ record — the fallback stream when a sandbox stops answering, and what `session
 reads Cloud Logging; there is no shared read quota to run into.
 
 **Cost.** A template costs nothing while nothing runs on it; a sandbox bills while it exists
-($0.085/vCPU-hour + $0.009/GiB-hour at the time of writing — $0.41/h for the default 4 vCPU / 8 GiB). A
+($0.085/vCPU-hour + $0.009/GiB-hour at the time of writing — $0.38/h for the default 4 vCPU / 4 GiB). A
 ready pool is therefore idle compute you pay for continuously: `warm_pool=True` trades money for latency —
 size the pool to your concurrency and `pool_max_wait_s` to your quiet gaps, and leave it off for batch
 agents where a ~20 s start is fine. Turn sandboxes are deleted at the terminal event, so a turn costs its own

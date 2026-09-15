@@ -460,7 +460,7 @@ These are facts measured during the PoC. The library encodes them so consumers i
   aiplatform/cloudpickle/pydantic layer via `constraints.txt`, and needed `NUM_WORKERS=1` to keep the
   platform's uvicorn from spawning `cpu_count + 1` processes; all gone).
 - **Template**: the image, `ports=[8080]`, `resources` requests = limits = `resource_limits` (default
-  4 CPU / 8 GiB; the platform refuses more than 8 vCPU; 16 GiB verified), `egress_control_config.internet_access`.
+  default 4 CPU / 4 GiB; 4 / 8 GiB run throughout the spike; the platform refuses more than 8 vCPU; 16 GiB verified), `egress_control_config.internet_access`.
   `customContainerSpec` carries only `imageUri` — no command, args or env — so everything per run arrives
   over HTTP after creation.
 

@@ -162,6 +162,9 @@ for the tag with this file's section as the notes.
   queued that early interrupts the harness right after it starts. Messages still queued when the
   turn ends (dispatch failed, sandbox died) are dropped and counted on `RunResult.warning`.
   `ControlUnavailable` is now raised only when a ready worker did not take the message.
+- **The default sandbox size is 4 CPU / 4 GiB** (`gemini.deploy(resource_limits=)` default was
+  `{"cpu": "4", "memory": "8Gi"}`). A deploy of an unchanged spec with the default creates a new
+  version, since the template's resources changed; pass `resource_limits` explicitly to keep 8 GiB.
 - **`deploy` no longer blocks on the template's long-running operation** (#84 field note): the
   template can list as ACTIVE minutes before the operation completes (nine minutes, measured), and
   the command sat on "creating template …" with nothing to look at. `create_template` now starts

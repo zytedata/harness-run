@@ -52,7 +52,7 @@ DEFAULT_MAX_WAIT_S = 24 * 3600.0
 # the end of its idle life still has this much life for the turn). The backstop for a
 # client that dies mid-turn: the platform deletes the sandbox then, whatever else failed.
 DEFAULT_MAX_TURN_S = 8 * 3600.0
-DEFAULT_RESOURCE_LIMITS = {"cpu": "4", "memory": "8Gi"}
+DEFAULT_RESOURCE_LIMITS = {"cpu": "4", "memory": "4Gi"}
 
 # After creating a sandbox, how long the proxy may take to route to it (measured 12–33 s,
 # the odd 78 s while a template's pool is still provisioning).
@@ -243,7 +243,7 @@ def deploy(
     ``max_turn_s`` bounds a turn's life on a sandbox (default 8 h): an on-demand sandbox's
     TTL, and the margin a pool sandbox keeps past its idle life. The platform enforces it
     even when the client dies. ``resource_limits`` sizes the container (default
-    ``{"cpu": "4", "memory": "8Gi"}``; at most 8 vCPUs).
+    ``{"cpu": "4", "memory": "4Gi"}``; at most 8 vCPUs).
 
     Prerequisites: the Docker CLI logged into the registry (``gcloud auth configure-docker
     <region>-docker.pkg.dev``), an Artifact Registry repo the Agent Sandbox service agent

@@ -17,10 +17,12 @@ branch that touches any deploy/runtime contract — it validates, on real infras
     sent before the turn's first event (the dispatch window) is queued and delivered too
   * **exec**: ``Session.exec()`` before dispatch waits for the worker and answers from the
     agent's cwd; mid-turn it sees the file the agent wrote; after the turn it raises
-    ``ControlUnavailable``. **Cross-process re-attach**: a fresh interpreter that only knows
-    the engine name and the session id (``get_engine(...).get_session(id)``) probes the same
-    running turn (its sandbox recovered from the event mirror) and, once the turn is over,
-    gets ``ControlUnavailable`` too
+    ``ControlUnavailable``
+  * **re-attach from another process**: a fresh interpreter that only knows the engine name
+    and the session id (``get_engine(...).get_session(id)``) adopts the running turn through
+    the event mirror — it probes the same workspace (and gets ``ControlUnavailable`` once the
+    turn is over), its steer is acknowledged on the owner's stream and shapes the reply, and
+    its ``interrupt()`` ends the owner's turn as ``INTERRUPTED``
   * **isolation**: a fixed shell script run through the worker's ``/exec`` (no model) prints
     what the agent's shell can reach — the metadata server's identity must be a tenant one
     that is 403 on our project's storage and Vertex (the sandbox has no usable Google
@@ -59,7 +61,7 @@ import sys
 import time
 import traceback
 
-from remote_agent_toolkit import AgentSpec, SessionConfig, SystemPrompt, TurnConfig, gemini
+from remote_agent_toolkit import AgentSpec, SessionConfig, StopReason, SystemPrompt, TurnConfig, gemini
 
 PROJECT = os.environ.get("PROJECT", "my-project")
 LOCATION = os.environ.get("LOCATION", "us-central1")
@@ -75,11 +77,12 @@ RESOURCE_LIMITS = (
 )
 
 # A fresh interpreter re-attaching by engine name + session id (the adopting-worker case):
-# it prints one JSON line — the probe's stdout, or the ControlUnavailable it got.
+# ``exec <command>`` / ``steer <message> <message_id>`` / ``interrupt``; one JSON verdict line.
 REATTACH_PROBE = r"""
 import asyncio, json, os, sys
 from remote_agent_toolkit import ControlUnavailable, gemini
-name, project, location, sid, command = sys.argv[1:6]
+name, project, location, sid, op = sys.argv[1:6]
+args = sys.argv[6:]
 creds = None
 if os.environ.get("IMPERSONATE"):  # the same identity the smoke itself drives the control plane as
     import google.auth
@@ -92,18 +95,28 @@ engine = gemini.get_engine(name, project=project, location=location, warm_pool=F
 session = engine.get_session(sid)
 async def main():
     try:
-        r = await session.exec(command, timeout=30)
-        print(json.dumps({"ok": r.ok, "stdout": r.stdout, "rc": r.returncode, "ms": r.duration_ms}))
+        if op == "exec":
+            r = await session.exec(args[0], timeout=30)
+            print(json.dumps({"ok": r.ok, "stdout": r.stdout, "rc": r.returncode, "ms": r.duration_ms}))
+        elif op == "steer":
+            session.send(args[0], message_id=args[1])  # adopts the running turn, posts the steer, exits
+            print(json.dumps({"adopted": session._adopted, "busy": session.busy}))
+        elif op == "interrupt":
+            await session.interrupt(timeout=90)
+            r = session.last_result
+            print(json.dumps({"adopted": session._adopted is False, "stop_reason": getattr(session.stop_reason, "value", None),
+                              "text": r.text if r else None, "error": r.is_error if r else None,
+                              "warning": r.warning if r else None}))
     except ControlUnavailable as exc:
         print(json.dumps({"unavailable": str(exc)}))
 asyncio.run(main())
 """
 
 
-async def reattach_probe(session_id: str, command: str) -> dict:
-    """Run ``command`` through ``Session.exec`` from a NEW process that re-attaches by id."""
+async def reattach_probe(session_id: str, op: str, *args: str) -> dict:
+    """``exec`` / ``steer`` / ``interrupt`` on the session from a NEW process that re-attaches by id."""
     proc = await asyncio.create_subprocess_exec(
-        sys.executable, "-c", REATTACH_PROBE, NAME, PROJECT, LOCATION, session_id, command,
+        sys.executable, "-c", REATTACH_PROBE, NAME, PROJECT, LOCATION, session_id, op, *args,
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
     )
     out, err = await asyncio.wait_for(proc.communicate(), 120)
@@ -294,6 +307,52 @@ async def check_early_steer(engine, verdicts) -> None:
         verdicts[label] = False
 
 
+async def check_reattach_control(engine, verdicts) -> None:
+    """send() and interrupt() from a fresh process that re-attaches by id: the steer is
+    acknowledged on the owner's stream and shapes the reply; the interrupt ends the owner's
+    turn as INTERRUPTED (through the worker, not the cancel fallback)."""
+    label = "reattach-steer"
+    try:
+        session = engine.start_session()
+        fired: dict[str, dict] = {}
+
+        async def on_steer(ev):
+            if "steer" not in fired and ev.kind == "tool_use":
+                t0 = time.time()
+                fired["steer"] = await reattach_probe(
+                    session.session_id, "steer",
+                    "EXTRA INSTRUCTION: mention the word KIWI in your reply.", "reattach-steer-1")
+                log(label, f"steer from a fresh process after {time.time() - t0:.1f}s: {fired['steer']}")
+
+        r, events, _ = await _drive(label, session.run(STEER_TASK), on_event=on_steer)
+        acked = any(e.kind == "user" and (e.raw or {}).get("message_id") == "reattach-steer-1" for e in events)
+        verdicts[label] = ((not r.is_error) and fired.get("steer", {}).get("adopted") is True and acked
+                           and "KIWI" in (r.text or "").upper())
+        log(label, f"acked={acked} adopted={fired.get('steer', {}).get('adopted')}")
+    except Exception:
+        log(label, "FAILED:\n" + traceback.format_exc())
+        verdicts[label] = False
+    label = "reattach-interrupt"
+    try:
+        session = engine.start_session()
+        fired = {}
+
+        async def on_interrupt(ev):
+            if "stop" not in fired and ev.kind == "tool_use":
+                t0 = time.time()
+                fired["stop"] = await reattach_probe(session.session_id, "interrupt")
+                log(label, f"interrupt from a fresh process returned after {time.time() - t0:.1f}s: {fired['stop']}")
+
+        r, events, _ = await _drive(label, session.run(STEER_TASK), on_event=on_interrupt)
+        probe = fired.get("stop", {})
+        verdicts[label] = (session.stop_reason == StopReason.INTERRUPTED and not r.is_error
+                           and probe.get("stop_reason") == "interrupted" and probe.get("warning") is None)
+        log(label, f"owner stop_reason={session.stop_reason} probe={probe}")
+    except Exception:
+        log(label, "FAILED:\n" + traceback.format_exc())
+        verdicts[label] = False
+
+
 async def check_exec(engine, verdicts) -> None:
     """Session.exec(): a probe before dispatch waits for the worker; mid-turn it sees the
     agent's files in the agent's cwd; after the turn it raises ControlUnavailable."""
@@ -319,7 +378,7 @@ async def check_exec(engine, verdicts) -> None:
             await asyncio.sleep(2)
         # A fresh process re-attaches by id while the turn runs: same sandbox, same file.
         t1 = time.time()
-        other = await reattach_probe(session.session_id, "cat probe.txt 2>/dev/null; pwd")
+        other = await reattach_probe(session.session_id, "exec", "cat probe.txt 2>/dev/null; pwd")
         log(label, f"re-attached process probe after {time.time() - t1:.1f}s: {other}")
         r, _events, _ = await _drive(label, run)
         try:
@@ -328,7 +387,7 @@ async def check_exec(engine, verdicts) -> None:
         except ControlUnavailable as exc:
             after = f"ControlUnavailable: {exc}"
         log(label, f"after the turn: {after}")
-        other_after = await reattach_probe(session.session_id, "pwd")
+        other_after = await reattach_probe(session.session_id, "exec", "pwd")
         log(label, f"re-attached process after the turn: {other_after}")
         verdicts[label] = (early.ok and early.stdout.strip().endswith("/workspace") and seen is not None
                            and not r.is_error and after.startswith("ControlUnavailable"))
@@ -407,7 +466,7 @@ async def main() -> int:
         await check_pool_turn(engine, verdicts)
         await asyncio.gather(check_configs(verdicts), check_steer(engine, verdicts),
                              check_early_steer(engine, verdicts), check_exec(engine, verdicts),
-                             check_isolation(engine, verdicts))
+                             check_reattach_control(engine, verdicts), check_isolation(engine, verdicts))
         if LONG_MINUTES:
             await check_long(engine, verdicts)
     except Exception:

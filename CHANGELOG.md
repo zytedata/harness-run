@@ -107,12 +107,26 @@ for the tag with this file's section as the notes.
   the platform proxy cuts a call at ~300 s) that kills the command and reports `returncode` 124.
   Only a running turn has a workspace to probe: called before the sandbox is known `exec()` waits
   for dispatch, called with no turn running or after the turn ended it raises `ControlUnavailable`
-  (`local` keeps the same rule for parity). A session re-attached in another process
-  (`engine.get_session(id)`) holds no run, but `exec()` recovers the running turn's sandbox from the
-  event mirror — every event names its turn and sandbox — so a job adopted mid-turn shows live code
-  too. `ExecResult` is exported from the package root. The worker's `/exec` now defaults its cwd to
-  the running turn's workspace (was the workspace root) and takes an optional `turn_id` it checks
-  against the running turn.
+  (`local` keeps the same rule for parity). `ExecResult` is exported from the package root. The
+  worker's `/exec` now defaults its cwd to the running turn's workspace (was the workspace root)
+  and takes an optional `turn_id` it checks against the running turn.
+- **A session re-attached in another process adopts its running turn** (`gemini`; #86 review). A
+  session held only by id (`engine.get_session(id)` in a fresh process — a poller, or a worker
+  adopting a job whose owner died mid-turn) had no run, so `exec()` raised `ControlUnavailable`
+  while the turn was still running, `interrupt()` was a no-op and `send()` started a **second**
+  concurrent turn — the thing the `Session` contract promises never happens. Every mirrored event
+  names its turn and sandbox (`raw.turn_id` / `raw.worker`, #80), so the first `send()`, `interrupt()`,
+  `exec()` or `run()` on such a session now reads the mirror once and, if the last `turn_started`
+  has no `result` after it, adopts that turn as the session's current run: events replay from the
+  worker then flow live, `send()` steers, `interrupt()` stops, `exec()` probes, `run()` raises,
+  `last_result` lands at the end. The adopter also runs the run-scoped storage token refresh (the
+  owner may be gone) and deletes the sandbox at the result (10 s late, in case the owner is still
+  reading); an adopter whose event loop merely shuts down leaves the turn to its owner. `Run` gained
+  `cancelled` / `cancel_note`. Live: a fresh interpreter knowing only the engine name and session
+  id probed, steered (acknowledged on the owner's stream, shaping the reply) and interrupted (the
+  owner's turn ended `INTERRUPTED`) turns running under another process. `dev/live_smoke.py` runs
+  those checks and takes `CPU` / `MEMORY` for the template's size (a 1 CPU template provisions in
+  ~30 s where 4 CPU ones hit the platform's 30-minute deadline on 2026-09-14/15).
 
 ### Fixed
 

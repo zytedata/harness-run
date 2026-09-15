@@ -24,12 +24,15 @@ from sandbox_fakes import FakeSandboxProvider, make_engine
 from remote_agent_toolkit import AgentSpec, SessionConfig, SkillSource, TurnConfig
 from remote_agent_toolkit.ports.blobstore import LocalBlobStore
 from remote_agent_toolkit.runtime import local
-from remote_agent_toolkit.runtime.gemini import backend, handoff, worker as worker_mod
+from remote_agent_toolkit.runtime.gemini import backend, handoff, history, worker as worker_mod
 
 
 def _patched_store(tmp_path, monkeypatch):
+    """One local store for the output bucket: session records (handoff) and the event mirror
+    (history — a re-attached session reads it once for a turn running under another process)."""
     store = LocalBlobStore(str(tmp_path / "blobs"))
     monkeypatch.setattr(handoff, "GcsBlobStore", lambda bucket, *a, **kw: store)
+    monkeypatch.setattr(history, "GcsBlobStore", lambda bucket, *a, **kw: store)
     return store
 
 

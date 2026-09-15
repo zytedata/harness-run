@@ -79,6 +79,12 @@ EXEC_MAX_TIMEOUT_S = 240.0
 EXEC_CALL_MARGIN_S = 30.0
 # How often exec() checks whether the turn has its sandbox yet while dispatch is in flight.
 EXEC_DISPATCH_POLL_S = 0.05
+# An adopted turn's sandbox is deleted this long after its result: the process that started
+# the turn may still be draining the last events from the worker (``_attach``).
+ADOPTED_RELEASE_DELAY_S = 10.0
+# interrupt() on a just-adopted turn gives the worker's replayed ``control_ready`` this long to
+# arrive before falling back to the cancel (the mirror may lag the worker by a flush).
+ADOPTED_READY_WAIT_S = 10.0
 # Client-side refresh cadence for the run's tokens (source tokens last an hour).
 TOKEN_REFRESH_S = 25 * 60
 
@@ -554,9 +560,11 @@ class GeminiSession:
         self._current_run: DrivenRun | None = None
         self._turn_id: str | None = None
         self._sandbox: str | None = None  # the sandbox the running turn was handed to
-        # (sandbox, turn_id) of this session's turn running under ANOTHER process, recovered
-        # from the event mirror for exec() on a re-attached session (``_attached_turn``).
-        self._attached: tuple[str, str] | None = None
+        # A session re-attached by id (``engine.get_session``) may have a turn running under
+        # another process: the first run()/send()/interrupt()/exec() here reads the mirror once
+        # and adopts that turn (``_attach``). Never set for a session started in this process.
+        self._foreign_check = not config_resolved
+        self._adopted = False  # the current run is another process's turn, adopted here
         self._refresh_stop: threading.Event | None = None  # stops the GCS token refresher
         self._gcs_token_expiry: str | None = None
         self._model_token_expiry: Any = None  # when the turn's model access ends
@@ -592,8 +600,11 @@ class GeminiSession:
         Returns at once: claiming or creating the sandbox and handing it the turn happen
         as the first step of the run's driver (a creation takes ~20 s), and a dispatch
         failure ends the run with an explained error result. Raises ``RuntimeError`` while
-        a turn is running — use :meth:`send` to talk to it.
+        a turn is running — here or, for a re-attached session, under another process
+        (:meth:`_attach`) — use :meth:`send` to talk to it.
         """
+        if not self.busy and self._foreign_check:
+            self._attach()
         if self.busy:
             raise RuntimeError(
                 "this session is running a turn; run() cannot start another one. Use "
@@ -633,7 +644,13 @@ class GeminiSession:
         ``RunResult.warning`` says how many. Raises
         :class:`~remote_agent_toolkit.control.ControlUnavailable` only when a ready
         worker did not take the message (proxy/platform failure, or the turn just ended).
+
+        A session re-attached in another process (``engine.get_session``) first adopts a
+        turn of it still running there (:meth:`_attach`): the message then steers that turn
+        instead of starting a second one.
         """
+        if not self.busy and self._foreign_check:
+            self._attach()
         if self.busy:
             return self._send_into_running_turn(
                 message, interrupt=interrupt, message_id=message_id,
@@ -779,6 +796,19 @@ class GeminiSession:
             model_env = vertex_model_env(model_token, engine._project, engine._vertex_region)
             self._model_token_expiry = model_expiry
 
+        self._start_refresh()
+        return token, model_env
+
+    def _start_refresh(self) -> None:
+        """Re-mint and re-record the run-scoped GCS token every ``TOKEN_REFRESH_S`` while the turn lives.
+
+        The worker reads the record back when its token nears expiry; a turn longer than a
+        token's hour depends on this loop — which is why an adopter (:meth:`_attach`) runs
+        one too: the process that started the turn may be gone.
+        """
+        engine, sid = self._engine, self._session_id
+        from .scoped_gcs import mint_run_token, write_run_token
+
         stop = threading.Event()
         self._refresh_stop = stop
 
@@ -792,16 +822,16 @@ class GeminiSession:
                     logger.warning("run-scoped GCS token refresh failed for %s", sid, exc_info=True)
 
         threading.Thread(target=refresh_loop, name=f"token-refresh-{sid[:8]}", daemon=True).start()
-        return token, model_env
 
-    def _stop_refresh(self) -> None:
+    def _stop_refresh(self, *, keep_record: bool = False) -> None:
+        """Stop the refresher; delete the token record too unless ``keep_record`` (the turn goes on elsewhere)."""
         self._gcs_token_expiry = None
         stop = self._refresh_stop
         if stop is not None:
             stop.set()
             self._refresh_stop = None
             engine = self._engine
-            if engine._output_bucket:
+            if engine._output_bucket and not keep_record:
                 from .scoped_gcs import delete_run_token
 
                 try:
@@ -973,7 +1003,13 @@ class GeminiSession:
         self._last_result = result
         self._stop_reason = stop_reason
         self._status = RunStatus.IDLE
-        self._stop_refresh()
+        run = self._current_run
+        adopted, self._adopted = self._adopted, False
+        # An adopter whose event loop shut down without asking to stop the turn (a poller
+        # exiting): the turn goes on under the process that started it — its sandbox and
+        # its token record stay.
+        walked_away = adopted and run is not None and run.cancelled and run.cancel_note is None
+        self._stop_refresh(keep_record=walked_away)
         dropped = self._drop_pending_control()
         if dropped:
             note = (
@@ -983,10 +1019,91 @@ class GeminiSession:
             result.warning = f"{result.warning}; {note}" if result.warning else note
             logger.warning("session %s: %s", self._session_id, note)
         sandbox, self._sandbox = self._sandbox, None
-        if sandbox is not None:
+        if sandbox is None or walked_away:
+            return
+        if adopted:
+            # The process that started the turn may still be draining its last events.
+            self._engine._in_background(self._release_later, sandbox, name="sandbox-release")
+        else:
             # A sandbox bills while it exists; the turn is over, so it goes. Multi-turn
             # continuity rides the checkpoint tar (DESIGN.md §13.1).
             self._engine._in_background(self._engine._release_sandbox, sandbox, name="sandbox-release")
+
+    def _release_later(self, sandbox: str) -> None:
+        time.sleep(ADOPTED_RELEASE_DELAY_S)
+        self._engine._release_sandbox(sandbox)
+
+    def _attach(self) -> DrivenRun | None:
+        """Adopt this session's turn running under **another** process, if the mirror records one.
+
+        A re-attached session (``engine.get_session(id)`` in a fresh process — a poller, or a
+        worker adopting a job whose owner died mid-turn) holds no run, but the turn's worker
+        is reachable all the same: every mirrored event names its turn and sandbox
+        (``raw.turn_id`` / ``raw.worker``, stamped by the worker), so the last
+        ``turn_started`` marker with no ``result`` after it is a turn still running there —
+        the same record :attr:`last_result` is rebuilt from. The adopted turn becomes this
+        session's current run: its events replay from the worker, then flow live, so
+        :meth:`send`, :meth:`interrupt` and :meth:`exec` work as for a turn started here and
+        :attr:`last_result` lands at its end. The adopter also runs the run-scoped GCS token
+        refresh (the owner may be gone) and deletes the sandbox at the result —
+        ``ADOPTED_RELEASE_DELAY_S`` after it, in case the owner is still draining events; an
+        adopter whose loop merely shuts down leaves the turn to its owner (``_on_complete``).
+
+        One mirror read, on the first call of a ``get_session`` session (a session started
+        here never has a foreign turn). Returns the adopted run, or None when nothing runs.
+        """
+        self._foreign_check = False
+        spec = self._client_spec()  # the session's record first: an unreadable re-attach fails there, with the fix
+        found = self._find_running_turn()
+        if found is None:
+            return None
+        sandbox, turn_id, control_ready = found
+        engine, sid = self._engine, self._session_id
+        self._turn_id, self._sandbox = turn_id, sandbox
+        self._control_ready = control_ready
+        self._drop_pending_control()
+        self._adopted = True
+        self._start_refresh()
+        events_uri = f"{engine._output_bucket}/events"
+        store_kwargs = engine._gcs_store_kwargs()
+
+        def source() -> AsyncIterator[AgentEvent]:
+            return _stream_turn(engine._provider(), sandbox, turn_id, sid,
+                                events_uri=events_uri, store_kwargs=store_kwargs)
+
+        run = DrivenRun(source, sid, spec, on_complete=self._on_complete, on_event=self._observe)
+        self._current_run = run
+        self._status = RunStatus.RUNNING
+        self._stop_reason = None
+        try:
+            asyncio.get_running_loop()
+            run.ensure_started()
+        except RuntimeError:
+            pass
+        logger.info("session %s: adopted turn %s running on %s", sid, turn_id, sandbox)
+        return run
+
+    def _find_running_turn(self) -> tuple[str, str, bool] | None:
+        """Scan the mirror for a started turn without a result: ``(sandbox, turn_id, control_ready)``."""
+        current: tuple[str, str] | None = None
+        ready = False
+        for event in self.history():
+            raw = event.raw or {}
+            if event.kind == "status" and raw.get("event") == "turn_started":
+                turn_id, worker = raw.get("turn_id"), raw.get("worker")
+                current = (str(worker), str(turn_id)) if turn_id and worker else None
+                ready = False
+            elif event.kind == "status" and raw.get("event") == "control_ready" and current is not None:
+                ready = True
+            elif event.kind == "result" and current is not None and raw.get("turn_id") in (None, current[1]):
+                current = None  # the turn delivered (or the client recorded its end); nothing to adopt
+        if current is None:
+            return None
+        worker, turn_id = current
+        if "/" not in worker:  # the worker records the sandbox id; the name hangs off the host instance
+            instance = self._engine._template.rsplit("/sandboxEnvironmentTemplates/", 1)[0]
+            worker = f"{instance}/sandboxEnvironments/{worker}"
+        return worker, turn_id, ready
 
     async def exec(
         self, command: str, *, cwd: str | None = None, timeout: float | None = None
@@ -1003,8 +1120,8 @@ class GeminiSession:
         proxy cuts a call at ~300 s.
 
         A session re-attached in another process (``engine.get_session(id)``) holds no run,
-        but a turn of it may still be running elsewhere: that turn's sandbox is recovered
-        from the session's event mirror (:meth:`_attached_turn`) and probed the same way.
+        but a turn of it may still be running elsewhere: that turn is adopted first
+        (:meth:`_attach`) and probed the same way.
         """
         if not isinstance(command, str) or not command:
             raise ValueError("exec() needs a non-empty command string")
@@ -1016,17 +1133,18 @@ class GeminiSession:
                 "the sandbox (nohup ... &) and poll its output."
             )
         run = self._current_run
+        if run is None and self._foreign_check:
+            run = await asyncio.to_thread(self._attach)  # re-attached: a turn running elsewhere?
+            if run is not None:
+                run.ensure_started()
         if run is None:
-            attached = await asyncio.to_thread(self._attached_turn)  # re-attached: a turn running elsewhere?
-            return await asyncio.to_thread(self._exec_now, command, cwd, limit, attached)
+            raise ControlUnavailable("no turn is running on this session: exec() probes the running turn's workspace")
         while self._sandbox is None and not run.done:
             await asyncio.sleep(EXEC_DISPATCH_POLL_S)  # the turn is being dispatched
         return await asyncio.to_thread(self._exec_now, command, cwd, limit)
 
-    def _exec_now(
-        self, command: str, cwd: str | None, limit: float, attached: tuple[str, str] | None = None
-    ) -> ExecResult:
-        sandbox, turn_id = attached or (self._sandbox, self._turn_id)
+    def _exec_now(self, command: str, cwd: str | None, limit: float) -> ExecResult:
+        sandbox, turn_id = self._sandbox, self._turn_id
         if sandbox is None or turn_id is None:
             raise ControlUnavailable(
                 "the turn has no reachable worker (it ended and its sandbox is gone, or it "
@@ -1036,56 +1154,10 @@ class GeminiSession:
         try:
             resp = self._engine._provider().call(sandbox, "/exec", body, timeout_s=limit + EXEC_CALL_MARGIN_S)
         except Exception as exc:  # noqa: BLE001 — proxy/platform/worker failure alike
-            if attached:
-                self._attached = None  # the recovered turn may be over: the next probe re-reads the mirror
             raise ControlUnavailable(f"the turn's sandbox did not answer the probe: {exc}") from exc
         if not resp.get("ok"):
-            if attached:
-                self._attached = None
             raise ControlUnavailable(f"the worker refused the probe: {resp.get('error')}")
         return ExecResult.from_dict(resp)
-
-    def _attached_turn(self) -> tuple[str, str]:
-        """The ``(sandbox, turn_id)`` of this session's turn running under **another** process.
-
-        A re-attached session (``engine.get_session(id)`` in a fresh process — a poller, or
-        a worker adopting a job whose owner died mid-turn) holds no run, but the turn's
-        worker is reachable all the same: every mirrored event names its turn and sandbox
-        (``raw.turn_id`` / ``raw.worker``, stamped by the worker), so the last
-        ``turn_started`` marker with no ``result`` after it is a turn still running there —
-        the same record :attr:`last_result` is rebuilt from. Resolved once (one mirror read)
-        and reused by every later probe; forgotten when the worker stops answering, so the
-        next probe re-reads the mirror. Raises
-        :class:`~remote_agent_toolkit.control.ControlUnavailable` when no such turn is
-        recorded — the poller's "the turn is over" signal, as for a session it drives itself.
-        """
-        if self._attached is None:
-            found = self._find_running_turn()
-            if found is None:
-                raise ControlUnavailable(
-                    "no turn is running on this session (none recorded under it, or the last one "
-                    "delivered its result): exec() probes the running turn's workspace"
-                )
-            self._attached = found
-        return self._attached
-
-    def _find_running_turn(self) -> tuple[str, str] | None:
-        """Scan the mirror: the ``(sandbox, turn_id)`` of a started turn without a result, or None."""
-        current: tuple[str, str] | None = None
-        for event in self.history():
-            raw = event.raw or {}
-            if event.kind == "status" and raw.get("event") == "turn_started":
-                turn_id, worker = raw.get("turn_id"), raw.get("worker")
-                current = (str(worker), str(turn_id)) if turn_id and worker else None
-            elif event.kind == "result" and current is not None and raw.get("turn_id") in (None, current[1]):
-                current = None  # the turn delivered (or the client recorded its end); nothing to probe
-        if current is None:
-            return None
-        worker, turn_id = current
-        if "/" not in worker:  # the worker records the sandbox id; the name hangs off the host instance
-            instance = self._engine._template.rsplit("/sandboxEnvironmentTemplates/", 1)[0]
-            worker = f"{instance}/sandboxEnvironments/{worker}"
-        return worker, turn_id
 
     async def interrupt(self, *, timeout: float = 120.0) -> None:
         """Interrupt the running turn and leave the session idle and resumable.
@@ -1095,7 +1167,8 @@ class GeminiSession:
         end-of-turn path — workspace snapshot, transcript, a terminal result with
         ``StopReason.INTERRUPTED`` that keeps the turn's accounting — and this returns once
         that result arrives. A later :meth:`send` resumes from that checkpoint. No-op when
-        nothing is running.
+        nothing is running — here or, for a re-attached session, under another process
+        (:meth:`_attach`).
 
         Fallback: when the worker is not reachable yet (the turn is still being dispatched)
         or does not end the turn within ``timeout`` seconds, the run is cancelled — it ends
@@ -1103,10 +1176,18 @@ class GeminiSession:
         sandbox is deleted (which stops the agent and its billing).
         """
         run = self._current_run
+        if run is None and self._foreign_check:
+            run = await asyncio.to_thread(self._attach)  # re-attached: a turn running elsewhere?
         if run is None or run.done:
             return
         run.ensure_started()
         assert run.task is not None
+        if self._adopted and not self._control_ready:
+            # The turn is known to be running (the mirror said so); its control_ready is on
+            # the worker's replay, which the mirror may not have flushed yet: wait for it.
+            deadline = time.monotonic() + ADOPTED_READY_WAIT_S
+            while not self._control_ready and not run.done and time.monotonic() < deadline:
+                await asyncio.sleep(EXEC_DISPATCH_POLL_S)
         note: str | None
         if self._control_ready and self._sandbox is not None:
             self._drop_pending_control()  # a stop makes queued steers moot; it goes straight out

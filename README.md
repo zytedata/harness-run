@@ -694,6 +694,17 @@ await session.send("OK, now do X")              # a normal turn, from the interr
   turn ended between your `busy` check and the post. Mind that race on your side: `send()` on a session
   that has just gone idle is a resume, i.e. a new turn with no secrets — check `session.busy` right
   before, and catch `ControlUnavailable`.
+- **From another process (`gemini`).** `engine.get_session(id)` in the process that started the turn
+  returns the live session. In a *different* process (a poller, or a worker adopting a job whose
+  owner died mid-turn) the session holds no run, so its first `send()`, `interrupt()`, `exec()` or
+  `run()` reads the session's event record once — every event names its turn and sandbox — and, if
+  a turn is still running there, **adopts** it: its events replay from the worker and then flow live
+  on the session's `Run`, `send()` steers it (no second turn is started; `run()` raises as it would
+  locally), `interrupt()` stops it, `exec()` probes it, and `last_result` lands at its end. The
+  adopter also keeps the turn's storage token fresh and deletes the sandbox at the result (a few
+  seconds late, in case the owner is still reading), so a job whose owner died is cleaned up; an
+  adopter that merely exits leaves the turn to its owner. With nothing running there `send()` is the
+  usual resume. Same-process re-attach needs none of this: the engine hands back the live session.
 - **Transport (`gemini`).** The client POSTs the message to the worker's `/control` endpoint through
   the platform's proxy (sub-second); the worker feeds it to the harness and dedupes on `message_id`.
   The worker announces the channel with a `control_ready` status event at the start of the turn;
@@ -740,13 +751,9 @@ while not run.done:
   over" and reads `run.result`.
 - **Read-only is your side of the contract.** Nothing polices the command; one that writes into
   the workspace races the agent.
-- **Re-attach works from any process.** `engine.get_session(id)` in the process that started the
-  turn returns the live session. In a *different* process (a poller, or a worker adopting a job whose
-  owner died mid-turn) the session holds no run, so `exec()` recovers the running turn's sandbox from
-  the session's event record — every event names its turn and sandbox — with one storage read that
-  the following probes reuse; with nothing running there it raises `ControlUnavailable`, as usual.
-  `exec()` is the only call that re-attaches to a running turn this way: on a re-attached session
-  `send()` starts a new turn and `interrupt()` is a no-op while the other process's turn still runs.
+- **From another process it works too.** A re-attached session's `exec()` first adopts the turn
+  running there (see [From another process](#talking-to-a-running-turn-steer-interrupt-stop-exec))
+  and probes its sandbox; with nothing running it raises `ControlUnavailable`, as usual.
 - **Transport (`gemini`).** The worker's `/exec` endpoint through the platform proxy (~0.3 s plus
   the command itself); the same endpoint `dev/live_smoke.py` uses to test the sandbox's isolation.
 

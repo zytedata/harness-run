@@ -1197,6 +1197,14 @@ running turns. Grants (tighten to your policy):
 | `roles/artifactregistry.writer` | the image repo | `deploy` pushes the agent image |
 | `roles/iam.serviceAccountTokenCreator` | **on the model service account** | every turn mints a one-hour Vertex token for the sandbox by impersonating it |
 
+Why `roles/aiplatform.user` and not a narrower custom role: the platform authorizes template calls with
+`aiplatform.sandboxEnvironmentTemplates.{list,get,create,delete}`, permissions that (as of 2026-09-15) are
+absent from IAM's public catalog — not testable on the project or on the host reasoning engine, listed by no
+predefined role, so a custom role cannot carry them. A custom role with the published
+`aiplatform.sandboxEnvironments.*` + `aiplatform.reasoningEngines.{create,get,list}` was tried live and
+failed on the first template listing. `roles/aiplatform.user` evidently includes them through an unpublished
+grant. Revisit when Agent Sandbox reaches GA.
+
 The principal that impersonates the operator SA needs `roles/iam.serviceAccountTokenCreator` **on that SA**
 (and on the model SA, if it drives turns as itself). Impersonation is the pattern for callers that already
 have a Google identity (humans, GCP-hosted services, CI with workload identity). A production app running

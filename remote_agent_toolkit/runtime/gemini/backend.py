@@ -313,8 +313,9 @@ def deploy(
         say(f"creating template {spec.name} from {image} ({limits['cpu']} CPU / {limits['memory']})")
         template = provider.create_template(
             display_name=spec.name, image_uri=image, cpu=limits["cpu"], memory=limits["memory"],
-            internet_access=internet_access,
+            internet_access=internet_access, log=say,
         )
+        say(f"template {template_id(template)} is ACTIVE")
     record = {
         "name": spec.name,
         "spec": spec.to_dict(),
@@ -434,7 +435,24 @@ def get_engine(
     if not templates:
         raise LookupError(f"no deployed engine named {name!r} in this project/location")
     if version is None:
-        chosen = templates[0]
+        active = [t for t in templates if t.get("state") in (None, "ACTIVE")]
+        if not active:
+            raise LookupError(
+                f"engine {name!r} has no ACTIVE version: "
+                + ", ".join(f"{template_id(t['name'])} is {t.get('state')}" for t in templates)
+                + ". A FAILED template is a deploy that did not come up; re-run gemini.deploy() "
+                "(it creates a new version and retires the failed ones)."
+            )
+        chosen = active[0]
+        if chosen is not templates[0]:
+            import warnings
+
+            skipped = [f"{template_id(t['name'])} ({t.get('state')})" for t in templates[: templates.index(chosen)]]
+            warnings.warn(
+                f"engine {name!r}: newer version(s) {', '.join(skipped)} are not ACTIVE; "
+                f"resolving to {template_id(chosen['name'])}",
+                stacklevel=2,
+            )
     else:
         wanted = template_id(str(version))
         chosen = next((t for t in templates if template_id(t["name"]) == wanted), None)

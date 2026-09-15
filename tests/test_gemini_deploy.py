@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import time
+
 import pytest
 from sandbox_fakes import FakeSandboxProvider
 
@@ -262,3 +264,30 @@ def test_list_engines_groups_templates_by_name():
     provider.add_template("b")
     rows = {r["name"]: r for r in backend.list_engines("p", "l", provider=provider)}
     assert rows["a"]["versions"] == 2 and rows["a"]["resource"] == newest and rows["b"]["versions"] == 1
+
+
+def test_get_engine_skips_failed_and_provisioning_templates(records, no_docker):
+    # A deploy whose template ended FAILED (field note on #84) must not become "the newest version".
+    provider = FakeSandboxProvider()
+    backend.deploy(_spec(), "proj", "l", output_bucket="gs://out", provider=provider)
+    failed = provider.add_template("test-agent", image="img:2", create_time=time.time() + 100)
+    provider.templates[failed]["state"] = "FAILED"
+    with pytest.warns(UserWarning, match="not ACTIVE; resolving to t1"):
+        engine = backend.get_engine("test-agent", "proj", "l", output_bucket="gs://out", provider=provider)
+    assert engine.version == "t1" and engine._spec_known
+    assert [r["state"] for r in engine.revisions()] == ["FAILED", "ACTIVE"]
+    provider.templates[engine.resource]["state"] = "FAILED"
+    with pytest.raises(LookupError, match="no ACTIVE version: t2 is FAILED, t1 is FAILED"):
+        backend.get_engine("test-agent", "proj", "l", output_bucket="gs://out", provider=provider)
+
+
+def test_deploy_reports_template_progress_and_retires_failed_versions(records, no_docker, monkeypatch):
+    provider = FakeSandboxProvider()
+    failed = provider.add_template("test-agent", image="img:0", create_time=1.0)
+    provider.templates[failed]["state"] = "FAILED"
+    lines = []
+    monkeypatch.setattr(backend.time, "sleep", lambda s: None)
+    engine = backend.deploy(_spec(), "proj", "l", output_bucket="gs://out", provider=provider, log=lines.append)
+    engine._join_background()
+    assert any("PROVISIONING" in line for line in lines) and any("is ACTIVE" in line for line in lines)
+    assert failed in provider.deleted_templates  # the failed attempt is retired with the previous versions

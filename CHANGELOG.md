@@ -162,6 +162,18 @@ for the tag with this file's section as the notes.
   queued that early interrupts the harness right after it starts. Messages still queued when the
   turn ends (dispatch failed, sandbox died) are dropped and counted on `RunResult.warning`.
   `ControlUnavailable` is now raised only when a ready worker did not take the message.
+- **`deploy` no longer blocks on the template's long-running operation** (#84 field note): the
+  template can list as ACTIVE minutes before the operation completes (nine minutes, measured), and
+  the command sat on "creating template …" with nothing to look at. `create_template` now starts
+  the create without waiting, polls the template listing and returns at ACTIVE, printing a
+  progress line through `deploy(log=)` every 30 s; a template that ends FAILED raises with the
+  operation's error message, and a template still PROVISIONING after 30 minutes raises with the
+  operation name instead of hanging. `SandboxProvider.create_template` gained `log=`.
+- **`get_engine` resolves to the newest ACTIVE template**, skipping FAILED and PROVISIONING ones
+  with a warning (it used to address whatever was newest — a FAILED deploy attempt included);
+  when no version is ACTIVE it raises a `LookupError` that lists each version's state.
+  `revisions()` keeps FAILED templates visible with their `state`; the provider's listing hides
+  DEPROVISIONING templates along with DELETED ones.
 - **`get_engine` warns when the resolved template has no deploy record** under the output bucket
   (the handle then only addresses the template and a Vertex-routed turn fails at dispatch). The
   usual cause is a `deploy` interrupted while waiting for the template to be created; the warning

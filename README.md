@@ -970,6 +970,17 @@ streams the events straight back from it; the sandbox is deleted at the terminal
 follows what the deploy recorded (`warm_pool`, the model identity, the baked spec) — pass
 `warm_pool=False` to bypass a pool deliberately.
 
+**What `deploy` waits for.** Pass `log=print` to follow it: image build and push, then `creating template …`,
+a `template <name>: PROVISIONING for 30s` line every 30 s while the platform provisions, `template <id> is
+ACTIVE`, pool fill. The template's provisioning time varies a lot — 12–20 s on most days, ten minutes on
+others (observed 2026-09-15 for 4 CPU / 8 GiB templates while 1 CPU / 1 GiB ones took 12 s); `deploy` returns
+the moment the template lists as ACTIVE rather than waiting for the platform's long-running operation, which
+has been seen to complete nine minutes after that. A template that ends FAILED makes `deploy` raise with the
+platform's reason (from the operation); FAILED versions stay visible in `engine.revisions()` with their
+`state`, `get_engine` skips them (with a warning) and resolves to the newest ACTIVE version, and the next
+successful deploy retires them. After 30 minutes of PROVISIONING `deploy` gives up with the operation name;
+the template may still come up — re-run the deploy later (idempotent) or delete it with `delete_version()`.
+
 **The deploy record.** `deploy` writes `deploys/<name>/<template id>.json` under the output bucket
 right after the template exists, before the pool is filled: the baked spec, the image, the model
 service account, the pool settings. `get_engine` reads it; without it the handle can still address

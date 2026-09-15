@@ -17,7 +17,7 @@ from __future__ import annotations
 import json
 import time
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 
 # The display name of the parent "instance" every template and sandbox hangs off. Agent
 # Sandbox resources are children of a ``reasoningEngine``; the toolkit keeps exactly one
@@ -79,9 +79,11 @@ class SandboxProvider(Protocol):
 
     def create_template(
         self, *, display_name: str, image_uri: str, cpu: str, memory: str,
-        internet_access: bool = True,
+        internet_access: bool = True, log: Callable[[str], None] | None = None,
     ) -> str:
-        """Create an immutable custom-container template; return its resource name."""
+        """Create an immutable custom-container template; return its resource name once it
+        is ACTIVE. ``log`` gets progress lines while the platform provisions it. A template
+        that ends FAILED raises ``SandboxError`` with the platform's reason."""
         ...
 
     def list_templates(self, *, display_name: str | None = None) -> list[dict]:
@@ -92,6 +94,24 @@ class SandboxProvider(Protocol):
     def delete_template(self, name: str) -> None:
         """Delete a template (fails while sandboxes created from it still exist)."""
         ...
+
+
+TEMPLATE_POLL_S = 5.0
+TEMPLATE_REPORT_S = 30.0
+TEMPLATE_TIMEOUT_S = 30 * 60.0
+
+
+def _state_name(obj: Any) -> str:
+    state = getattr(obj, "state", None)
+    return getattr(state, "name", str(state) if state else "") or ""
+
+
+def _error_text(error: Any) -> str:
+    """A long-running operation's ``error`` (a Status-like object or dict) as one line."""
+    if isinstance(error, dict):
+        return str(error.get("message") or error)[:500]
+    message = getattr(error, "message", None)
+    return str(message or error)[:500]
 
 
 def template_id(name: str) -> str:
@@ -262,10 +282,23 @@ class AgentSandboxProvider:
 
     def create_template(
         self, *, display_name: str, image_uri: str, cpu: str, memory: str,
-        internet_access: bool = True,
+        internet_access: bool = True, log: Callable[[str], None] | None = None,
     ) -> str:
+        """Create the template and return as soon as it lists as ACTIVE.
+
+        The create is a long-running operation whose completion can lag the template's
+        ACTIVE state by minutes (nine, measured 2026-09-15), so this does not block on the
+        operation: it polls the template listing (the new entry under ``display_name``)
+        every ``TEMPLATE_POLL_S`` and returns at ACTIVE, reporting progress through ``log``
+        every ``TEMPLATE_REPORT_S``. The operation is consulted for the failure reason when
+        the template ends FAILED, or when it finishes with an error first.
+        """
+        templates = self._client().sandboxes.templates
+        say = log or (lambda msg: None)
         try:
-            op = self._client().sandboxes.templates.create(
+            known = {t.name for t in templates.list(name=self.instance())
+                     if (getattr(t, "display_name", None) or "") == display_name}
+            op = templates.create(
                 name=self.instance(),
                 display_name=display_name,
                 config={
@@ -278,15 +311,70 @@ class AgentSandboxProvider:
                         },
                     },
                     "egress_control_config": {"internet_access": internet_access},
-                    "wait_for_completion": True,
+                    "wait_for_completion": False,
                 },
             )
         except Exception as exc:  # noqa: BLE001
             raise self._translate(exc) from exc
-        name = getattr(op.response, "name", None)
-        if not name:
-            raise SandboxError(f"template create returned no resource name: {op}")
-        return name
+        started = time.monotonic()
+        next_report = started + TEMPLATE_REPORT_S
+        target: str | None = getattr(op.response, "name", None)
+        last_state = "PROVISIONING"
+        while True:
+            try:
+                rows = [t for t in templates.list(name=self.instance())
+                        if (getattr(t, "display_name", None) or "") == display_name
+                        and t.name not in known and "DELETED" not in _state_name(t)]
+            except Exception as exc:  # noqa: BLE001 — a listing blip; the op check below still runs
+                rows = []
+                say(f"template listing failed ({type(exc).__name__}); retrying")
+            if target is not None:
+                rows = [t for t in rows if t.name == target] or rows
+            if rows:
+                rows.sort(key=lambda t: _ts(getattr(t, "create_time", None)) or 0.0, reverse=True)
+                target = rows[0].name
+                last_state = _state_name(rows[0]) or last_state
+                if "ACTIVE" in last_state:
+                    return target
+                if "FAILED" in last_state:
+                    raise SandboxError(
+                        f"template {template_id(target)} ({display_name}) ended FAILED: "
+                        f"{self._operation_error(templates, op.name) or 'the platform gave no reason'}"
+                    )
+            error = None
+            try:
+                current = templates.get_sandbox_environment_template_operation(operation_name=op.name)
+                if getattr(current, "done", False):
+                    error = getattr(current, "error", None)
+                    if error:
+                        raise SandboxError(f"template create for {display_name} failed: {_error_text(error)}")
+                    name = getattr(getattr(current, "response", None), "name", None)
+                    if name and target is None:
+                        target = name
+            except SandboxError:
+                raise
+            except Exception as exc:  # noqa: BLE001 — the listing is the source of truth
+                say(f"operation check failed ({type(exc).__name__}); relying on the template listing")
+            elapsed = time.monotonic() - started
+            if elapsed > TEMPLATE_TIMEOUT_S:
+                raise SandboxError(
+                    f"template {display_name} still {last_state} after {elapsed:.0f}s "
+                    f"(operation {op.name}); it may still come up — re-run the deploy later, or "
+                    "delete it via engine.delete_version()"
+                )
+            if time.monotonic() >= next_report:
+                say(f"template {display_name}: {last_state} for {elapsed:.0f}s")
+                next_report = time.monotonic() + TEMPLATE_REPORT_S
+            time.sleep(TEMPLATE_POLL_S)
+
+    @staticmethod
+    def _operation_error(templates: Any, operation_name: str) -> str | None:
+        try:
+            op = templates.get_sandbox_environment_template_operation(operation_name=operation_name)
+        except Exception:  # noqa: BLE001
+            return None
+        error = getattr(op, "error", None)
+        return _error_text(error) if error else None
 
     def list_templates(self, *, display_name: str | None = None) -> list[dict]:
         rows = []
@@ -300,9 +388,10 @@ class AgentSandboxProvider:
                 continue
             state = getattr(tpl, "state", None)
             state_name = getattr(state, "name", str(state) if state else None)
-            if state_name and "DELETED" in state_name:
-                # The platform keeps deleted templates in the listing (observed 2026-09-11);
-                # they are not versions anyone can dispatch to.
+            if state_name and ("DELETED" in state_name or "DEPROVISIONING" in state_name):
+                # The platform keeps deleted templates in the listing (observed 2026-09-11),
+                # and shows DEPROVISIONING while a delete runs; neither is a version anyone
+                # can dispatch to. FAILED and PROVISIONING ones are listed (with their state).
                 continue
             env = getattr(tpl, "custom_container_environment", None)
             spec = getattr(env, "custom_container_spec", None)

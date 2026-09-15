@@ -174,7 +174,9 @@ class FakeSandboxProvider:
                 if not display_prefix or sb["display_name"].startswith(display_prefix)]
 
     def create_template(self, *, display_name: str, image_uri: str, cpu: str, memory: str,
-                        internet_access: bool = True) -> str:
+                        internet_access: bool = True, log=None) -> str:
+        if log is not None:
+            log(f"template {display_name}: PROVISIONING for 0s")
         return self.add_template(display_name, image_uri, cpu, memory)
 
     def list_templates(self, *, display_name: str | None = None) -> list[dict]:

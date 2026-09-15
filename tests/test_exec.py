@@ -14,12 +14,13 @@ import uuid
 from typing import AsyncIterator
 
 import pytest
-from sandbox_fakes import FakeSandboxProvider, ScriptedWorker, make_engine, result_event
+from sandbox_fakes import INSTANCE, FakeSandboxProvider, ScriptedWorker, make_engine, result_event
 
 from remote_agent_toolkit import AgentSpec, ControlUnavailable, ExecResult, local
 from remote_agent_toolkit.control import EXEC_TIMEOUT_RC, run_shell
 from remote_agent_toolkit.events import AgentEvent
-from remote_agent_toolkit.runtime.gemini import backend
+from remote_agent_toolkit.ports.blobstore import LocalBlobStore
+from remote_agent_toolkit.runtime.gemini import backend, history
 from remote_agent_toolkit.runtime.gemini.provider import SandboxGone
 from remote_agent_toolkit.runtime.gemini.worker import Worker
 
@@ -143,10 +144,12 @@ def test_gemini_exec_waits_for_dispatch_and_runs_on_the_turns_worker(tmp_path):
     assert calls == [("/exec", 5.0), ("/exec", 5.0)]
 
 
-def test_gemini_exec_refuses_when_no_turn_runs_or_after_it_ended():
+def test_gemini_exec_refuses_when_no_turn_runs_or_after_it_ended(monkeypatch):
     provider = FakeSandboxProvider(lambda n: ScriptedWorker(auto=[result_event("done")]))
     engine = make_engine(provider)
     session = engine.start_session()
+    # No run in this process: exec() looks for a turn running elsewhere (the mirror; empty here).
+    monkeypatch.setattr(backend.GeminiSession, "history", lambda self: [])
 
     async def go():
         with pytest.raises(ControlUnavailable, match="no turn is running"):
@@ -217,6 +220,91 @@ def test_gemini_exec_when_dispatch_fails_raises_instead_of_waiting_forever():
     result = asyncio.run(go())
     engine._join_background()
     assert result.is_error
+
+
+# -- gemini: exec() from a session re-attached in another process ------------------------
+
+
+def _started(turn_id, worker):
+    return AgentEvent(kind="status", summary="turn started",
+                      raw={"event": "turn_started", "turn_id": turn_id, "worker": worker})
+
+
+def _result(turn_id=None):
+    raw = {"subtype": "success", "is_error": False}
+    if turn_id is not None:
+        raw["turn_id"] = turn_id
+    return AgentEvent(kind="result", summary="done", raw=raw)
+
+
+@pytest.mark.parametrize("events, expected", [
+    ([], None),
+    ([_started("t1", "s1")], (f"{INSTANCE}/sandboxEnvironments/s1", "t1")),
+    ([_started("t1", "s1"), _result("t1")], None),
+    ([_started("t1", "s1"), _result()], None),  # a client-recorded end (no turn stamp) closes it too
+    ([_started("t1", "s1"), _result("t1"), _started("t2", "s2")], (f"{INSTANCE}/sandboxEnvironments/s2", "t2")),
+    ([_started("t1", "s1"), _result("t0")], (f"{INSTANCE}/sandboxEnvironments/s1", "t1")),  # another turn's
+    ([_started("t1", None)], None),  # a worker that recorded no sandbox: nothing to reach
+    ([_started("t1", "projects/x/sandboxEnvironments/full")], ("projects/x/sandboxEnvironments/full", "t1")),
+])
+def test_find_running_turn_reads_the_last_started_turn_without_a_result(monkeypatch, events, expected):
+    session = make_engine(FakeSandboxProvider()).get_session("old-sid")
+    monkeypatch.setattr(backend.GeminiSession, "history", lambda self: list(events))
+    assert session._find_running_turn() == expected
+
+
+def test_gemini_exec_from_a_reattached_session_recovers_the_running_turns_sandbox(tmp_path, monkeypatch):
+    store = LocalBlobStore(str(tmp_path / "mirror"))
+    reads: list[str] = []
+    inner = store.list
+    store.list = lambda prefix: (reads.append(prefix), inner(prefix))[1]
+    monkeypatch.setattr(history, "GcsBlobStore", lambda bucket, *a, **kw: store)
+
+    provider = FakeSandboxProvider(lambda n: ScriptedWorker())
+    owner = make_engine(provider)
+    session = owner.start_session()
+    other = make_engine(provider)  # a fresh process: no handle on the running turn
+    adopted = other.get_session(session.session_id)
+    assert adopted is not session
+
+    def mirror(event, ms, turn_id):
+        history.write_turn_mirror("gs://out/events", session.session_id, [history.mirror_line(event)],
+                                  now_ms=ms, turn_id=turn_id, store=store)
+
+    async def go():
+        run = session.run("go")
+        while session._sandbox is None:
+            await asyncio.sleep(0.005)
+        sandbox = session._sandbox
+        w = provider.worker(sandbox)
+        w.workspace = str(tmp_path)
+        turn_id, worker = w.turns[0]["turn_id"], w.turns[0]["sandbox"]
+        assert "/" not in worker and sandbox.endswith("/" + worker)
+        mirror(_started(turn_id, worker), 1000, turn_id)  # what the real worker records as the turn begins
+        r1 = await adopted.exec("pwd", timeout=5)
+        r2 = await adopted.exec("echo again", timeout=5)
+        assert len(reads) == 1  # resolved once, reused
+        # The turn ends in the owner's process: the worker refuses further probes and the sandbox goes.
+        w.emit(result_event("done"))
+        w.finish()
+        await run
+        mirror(_result(turn_id), 2000, turn_id)
+        with pytest.raises(ControlUnavailable, match="did not answer the probe|refused the probe"):
+            await adopted.exec("pwd", timeout=5)
+        assert adopted._attached is None  # forgotten: the next probe asks the mirror again
+        with pytest.raises(ControlUnavailable, match=r"no turn is running on this session \(none recorded"):
+            await adopted.exec("pwd", timeout=5)
+        assert len(reads) == 2
+        return r1, r2, sandbox, turn_id, w
+
+    r1, r2, sandbox, turn_id, w = asyncio.run(go())
+    owner._join_background()
+    other._join_background()
+    assert r1.stdout.strip() == str(tmp_path) and r1.ok
+    assert r2.stdout == "again\n"
+    probes = [(sb, body["turn_id"]) for sb, path, body in provider.calls if path == "/exec"]
+    assert probes[:2] == [(sandbox, turn_id)] * 2  # reached the owner's sandbox, for its turn
+    assert [c["command"] for c in w.execs[:2]] == ["pwd", "echo again"]
 
 
 # -- local: Session.exec on the host ----------------------------------------------------

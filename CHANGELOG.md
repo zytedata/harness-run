@@ -107,9 +107,12 @@ for the tag with this file's section as the notes.
   the platform proxy cuts a call at ~300 s) that kills the command and reports `returncode` 124.
   Only a running turn has a workspace to probe: called before the sandbox is known `exec()` waits
   for dispatch, called with no turn running or after the turn ended it raises `ControlUnavailable`
-  (`local` keeps the same rule for parity). `ExecResult` is exported from the package root. The
-  worker's `/exec` now defaults its cwd to the running turn's workspace (was the workspace root)
-  and takes an optional `turn_id` it checks against the running turn.
+  (`local` keeps the same rule for parity). A session re-attached in another process
+  (`engine.get_session(id)`) holds no run, but `exec()` recovers the running turn's sandbox from the
+  event mirror — every event names its turn and sandbox — so a job adopted mid-turn shows live code
+  too. `ExecResult` is exported from the package root. The worker's `/exec` now defaults its cwd to
+  the running turn's workspace (was the workspace root) and takes an optional `turn_id` it checks
+  against the running turn.
 
 ### Fixed
 

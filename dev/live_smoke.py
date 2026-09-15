@@ -17,7 +17,10 @@ branch that touches any deploy/runtime contract — it validates, on real infras
     sent before the turn's first event (the dispatch window) is queued and delivered too
   * **exec**: ``Session.exec()`` before dispatch waits for the worker and answers from the
     agent's cwd; mid-turn it sees the file the agent wrote; after the turn it raises
-    ``ControlUnavailable``
+    ``ControlUnavailable``. **Cross-process re-attach**: a fresh interpreter that only knows
+    the engine name and the session id (``get_engine(...).get_session(id)``) probes the same
+    running turn (its sandbox recovered from the event mirror) and, once the turn is over,
+    gets ``ControlUnavailable`` too
   * **isolation**: a fixed shell script run through the worker's ``/exec`` (no model) prints
     what the agent's shell can reach — the metadata server's identity must be a tenant one
     that is 403 on our project's storage and Vertex (the sandbox has no usable Google
@@ -31,7 +34,9 @@ is deleted in ``finally``; exit code is non-zero if any check fails.
 
 Configure via env (defaults are the shared my-project test setup):
   PROJECT, LOCATION, IMAGE_REPO, MODEL_SA, SUFFIX (engine-name suffix; defaults to your
-  username), LONG_MINUTES, KEEP=1 (skip teardown), IMPERSONATE=<service account email>
+  username), CPU / MEMORY (the template's size, default the runtime's 4 / 4Gi — a 4 CPU
+  template took the platform up to its 30-minute deadline on 2026-09-14/15; CPU=1 MEMORY=1Gi
+  provisions in seconds), LONG_MINUTES, KEEP=1 (skip teardown), IMPERSONATE=<service account email>
   (drive everything but the Docker push as that account — to prove a role is sufficient;
   your ADC needs roles/iam.serviceAccountTokenCreator on it).
 
@@ -47,6 +52,7 @@ from __future__ import annotations
 
 import asyncio
 import getpass
+import json
 import os
 import re
 import sys
@@ -63,6 +69,48 @@ SUFFIX = re.sub(r"[^a-z0-9-]", "-", (os.environ.get("SUFFIX") or getpass.getuser
 LONG_MINUTES = float(os.environ.get("LONG_MINUTES", "0") or 0)
 NAME = f"ratk-smoke-{SUFFIX}"
 IMPERSONATE = os.environ.get("IMPERSONATE") or None
+RESOURCE_LIMITS = (
+    {"cpu": os.environ["CPU"], "memory": os.environ["MEMORY"]}
+    if os.environ.get("CPU") or os.environ.get("MEMORY") else None
+)
+
+# A fresh interpreter re-attaching by engine name + session id (the adopting-worker case):
+# it prints one JSON line — the probe's stdout, or the ControlUnavailable it got.
+REATTACH_PROBE = r"""
+import asyncio, json, os, sys
+from remote_agent_toolkit import ControlUnavailable, gemini
+name, project, location, sid, command = sys.argv[1:6]
+creds = None
+if os.environ.get("IMPERSONATE"):  # the same identity the smoke itself drives the control plane as
+    import google.auth
+    from google.auth import impersonated_credentials
+    source, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
+    creds = impersonated_credentials.Credentials(
+        source_credentials=source, target_principal=os.environ["IMPERSONATE"],
+        target_scopes=["https://www.googleapis.com/auth/cloud-platform"], lifetime=600)
+engine = gemini.get_engine(name, project=project, location=location, warm_pool=False, credentials=creds)
+session = engine.get_session(sid)
+async def main():
+    try:
+        r = await session.exec(command, timeout=30)
+        print(json.dumps({"ok": r.ok, "stdout": r.stdout, "rc": r.returncode, "ms": r.duration_ms}))
+    except ControlUnavailable as exc:
+        print(json.dumps({"unavailable": str(exc)}))
+asyncio.run(main())
+"""
+
+
+async def reattach_probe(session_id: str, command: str) -> dict:
+    """Run ``command`` through ``Session.exec`` from a NEW process that re-attaches by id."""
+    proc = await asyncio.create_subprocess_exec(
+        sys.executable, "-c", REATTACH_PROBE, NAME, PROJECT, LOCATION, session_id, command,
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+    )
+    out, err = await asyncio.wait_for(proc.communicate(), 120)
+    line = next((ln for ln in out.decode().splitlines() if ln.startswith("{")), None)
+    if line is None:
+        raise RuntimeError(f"re-attach probe printed no verdict (rc={proc.returncode}): {err.decode()[-600:]}")
+    return json.loads(line)
 
 
 def _credentials():
@@ -269,6 +317,10 @@ async def check_exec(engine, verdicts) -> None:
                            f"({r.duration_ms}ms)")
                 break
             await asyncio.sleep(2)
+        # A fresh process re-attaches by id while the turn runs: same sandbox, same file.
+        t1 = time.time()
+        other = await reattach_probe(session.session_id, "cat probe.txt 2>/dev/null; pwd")
+        log(label, f"re-attached process probe after {time.time() - t1:.1f}s: {other}")
         r, _events, _ = await _drive(label, run)
         try:
             await session.exec("pwd")
@@ -276,8 +328,13 @@ async def check_exec(engine, verdicts) -> None:
         except ControlUnavailable as exc:
             after = f"ControlUnavailable: {exc}"
         log(label, f"after the turn: {after}")
+        other_after = await reattach_probe(session.session_id, "pwd")
+        log(label, f"re-attached process after the turn: {other_after}")
         verdicts[label] = (early.ok and early.stdout.strip().endswith("/workspace") and seen is not None
                            and not r.is_error and after.startswith("ControlUnavailable"))
+        verdicts["exec-reattach"] = (other.get("ok") is True and "PAPAYA" in other["stdout"]
+                                     and other["stdout"].strip().endswith("/workspace")
+                                     and "unavailable" in other_after)
     except Exception:
         log(label, "FAILED:\n" + traceback.format_exc())
         verdicts[label] = False
@@ -341,7 +398,7 @@ async def main() -> int:
         engine = await asyncio.to_thread(
             gemini.deploy, spec, PROJECT, LOCATION, warm_pool=True, pool_size=1,
             image_repo=IMAGE_REPO, model_service_account=MODEL_SA, log=lambda m: log("deploy", m),
-            credentials=CREDS,
+            credentials=CREDS, resource_limits=RESOURCE_LIMITS,
         )
         log("deploy", f"deployed in {time.time() - t0:.0f}s: version={engine.version} image={engine.revisions()[0]['image']}")
         verdicts["deploy"] = True

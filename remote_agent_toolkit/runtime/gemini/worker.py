@@ -21,8 +21,11 @@ container, so the whole worker contract is a handful of JSON-over-POST endpoints
 * ``/token``   — ``{turn_id, model_token}``: replaces the turn's model-token file (Claude Code
   does not re-read its token, so this only serves tooling that does; the client bounds a
   turn's model access by the token's lifetime instead, see ``model_token.py``).
-* ``/exec``    — ``{command, cwd?, timeout?}`` → ``{stdout, stderr, returncode}``: the
-  same contract as Google's shell image, for probes and debugging.
+* ``/exec``    — ``{command, cwd?, timeout?, turn_id?}`` → ``{stdout, stderr, returncode,
+  truncated, duration_ms, cwd}``: a shell command in the running turn's workspace (the
+  agent's cwd; a relative ``cwd`` is resolved against it, no turn → the workspace root).
+  ``Session.exec()`` on the client; the same contract as Google's shell image, so it also
+  serves probes and debugging by hand. Output is capped per stream (``control.run_shell``).
 
 Application errors are answered with HTTP 200 and ``{"ok": false, "error": ...}`` — the
 proxy's treatment of non-2xx worker answers is not documented, and the client only needs
@@ -38,7 +41,6 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import subprocess
 import sys
 import threading
 import time
@@ -48,7 +50,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from ...control import ControlMessage
+from ...control import ControlMessage, run_shell
 from ...events import AgentEvent
 
 BOOT = time.time()
@@ -101,6 +103,7 @@ class TurnRecord:
         self.cond = threading.Condition(lock)
         self.control: _TurnControl | None = None
         self.model_token_file: Path | None = None
+        self.workspace: Path | None = None  # the agent's cwd once the turn set it up
 
     def append(self, line: dict) -> None:
         with self.cond:
@@ -115,27 +118,20 @@ class TurnRecord:
             self.cond.notify_all()
 
 
-def _exec(body: dict, workspace_root: str) -> dict:
+def _exec(body: dict, workspace: str | Path, running: str | None) -> dict:
+    """``/exec``: ``command`` under ``/bin/bash -c`` in ``cwd`` (relative → under ``workspace``)."""
     cmd = body.get("command")
-    if not isinstance(cmd, str):
-        return {"ok": False, "error": "command (str) is required"}
-    cwd = body.get("cwd") or workspace_root
-    if not os.path.isdir(cwd):
-        cwd = None
+    if not isinstance(cmd, str) or not cmd:
+        return {"ok": False, "error": "command (non-empty str) is required"}
+    turn_id = body.get("turn_id")
+    if turn_id and turn_id != running:
+        return {"ok": False, "error": f"turn {turn_id} is not running on this worker"}
+    cwd = Path(workspace)
+    if body.get("cwd"):
+        cwd = cwd / str(body["cwd"])  # absolute stays absolute (Path semantics)
     timeout = body.get("timeout")
-    t0 = time.time()
-    try:
-        p = subprocess.run(
-            ["/bin/bash", "-c", cmd], cwd=cwd, capture_output=True, text=True,
-            timeout=float(timeout) if timeout else None,
-        )
-        out, err, rc = p.stdout, p.stderr, p.returncode
-    except subprocess.TimeoutExpired as exc:
-        out = exc.stdout.decode() if isinstance(exc.stdout, bytes) else (exc.stdout or "")
-        err = f"command exceeded {timeout}s and was killed"
-        rc = 124
-    return {"ok": True, "stdout": out, "stderr": err, "returncode": rc,
-            "duration_ms": int((time.time() - t0) * 1000)}
+    result = run_shell(cmd, cwd=str(cwd), timeout=float(timeout) if timeout else None)
+    return {"ok": True, **result.to_dict(), "cwd": str(cwd)}
 
 
 # -- the turn ------------------------------------------------------------------------
@@ -275,7 +271,7 @@ class Worker:
         if path == "/token":
             return self.token(body)
         if path == "/exec":
-            return _exec(body, self.workspace_root)
+            return self.exec(body)
         return {"ok": False, "error": "not found"}
 
     # -- the turn -----------------------------------------------------------------------
@@ -362,10 +358,11 @@ class Worker:
             session_store = BlobSessionStore(blobs)
 
         control = _TurnControl(asyncio.get_running_loop(), self._lock)
-        with self._lock:
-            record.control = control
         job_dir = Path(self.workspace_root) / "jobs" / claude_sid
         job_dir.mkdir(parents=True, exist_ok=True)
+        with self._lock:
+            record.control = control
+            record.workspace = job_dir / "workspace"  # RunContext.workspace, before it exists
         if model_env.get("ANTHROPIC_AUTH_TOKEN"):
             # Kept for a helper-based refresh (see /token); the env token is what the CLI reads.
             record.model_token_file = job_dir / "model-token"
@@ -482,6 +479,13 @@ class Worker:
             "running_turn": running[0] if running else None,
             "turns": turns,
         }
+
+    def exec(self, body: dict) -> dict:
+        """``/exec``: a shell command in the running turn's workspace (else the workspace root)."""
+        with self._lock:
+            running = next(((t, r) for t, r in self._turns.items() if not r.done), None)
+        turn_id, workspace = (None, None) if running is None else (running[0], running[1].workspace)
+        return _exec(body, workspace or self.workspace_root, turn_id)
 
     def start_turn(self, body: dict) -> dict:
         turn_id = str(body.get("turn_id") or "")

@@ -15,6 +15,9 @@ branch that touches any deploy/runtime contract — it validates, on real infras
     worker's ``effective_spec`` echo still carries the marker
   * **control**: a steer into a running turn is acknowledged by a ``user`` event; a steer
     sent before the turn's first event (the dispatch window) is queued and delivered too
+  * **exec**: ``Session.exec()`` before dispatch waits for the worker and answers from the
+    agent's cwd; mid-turn it sees the file the agent wrote; after the turn it raises
+    ``ControlUnavailable``
   * **isolation**: a fixed shell script run through the worker's ``/exec`` (no model) prints
     what the agent's shell can reach — the metadata server's identity must be a tenant one
     that is 403 on our project's storage and Vertex (the sandbox has no usable Google
@@ -243,6 +246,43 @@ async def check_early_steer(engine, verdicts) -> None:
         verdicts[label] = False
 
 
+async def check_exec(engine, verdicts) -> None:
+    """Session.exec(): a probe before dispatch waits for the worker; mid-turn it sees the
+    agent's files in the agent's cwd; after the turn it raises ControlUnavailable."""
+    label = "exec"
+    try:
+        from remote_agent_toolkit import ControlUnavailable
+
+        session = engine.start_session()
+        run = session.run("Create a file named probe.txt containing exactly the word PAPAYA in your "
+                          "working directory, then wait 20 seconds (sleep 20), then reply with just 'done'.")
+        t0 = time.time()
+        early = await session.exec("pwd", timeout=30)  # no sandbox yet: waits for dispatch
+        log(label, f"early exec after {time.time() - t0:.1f}s: rc={early.returncode} "
+                   f"cwd={early.stdout.strip()!r} stderr={early.stderr[-100:]!r} {early.duration_ms}ms")
+        seen = None
+        while not run.done:
+            r = await session.exec("cat probe.txt 2>/dev/null; ls", timeout=30)
+            if "PAPAYA" in r.stdout:
+                seen = time.time() - t0
+                log(label, f"probe.txt seen mid-turn after {seen:.1f}s: {' '.join(r.stdout.split())[:80]!r} "
+                           f"({r.duration_ms}ms)")
+                break
+            await asyncio.sleep(2)
+        r, _events, _ = await _drive(label, run)
+        try:
+            await session.exec("pwd")
+            after = "answered (unexpected)"
+        except ControlUnavailable as exc:
+            after = f"ControlUnavailable: {exc}"
+        log(label, f"after the turn: {after}")
+        verdicts[label] = (early.ok and early.stdout.strip().endswith("/workspace") and seen is not None
+                           and not r.is_error and after.startswith("ControlUnavailable"))
+    except Exception:
+        log(label, "FAILED:\n" + traceback.format_exc())
+        verdicts[label] = False
+
+
 async def check_isolation(engine, verdicts) -> None:
     """What the agent's shell can reach — asked of the worker's /exec directly (no model)."""
     label = "isolation"
@@ -309,7 +349,8 @@ async def main() -> int:
         log("deploy", f"warm={verdicts['warm']}")
         await check_pool_turn(engine, verdicts)
         await asyncio.gather(check_configs(verdicts), check_steer(engine, verdicts),
-                             check_early_steer(engine, verdicts), check_isolation(engine, verdicts))
+                             check_early_steer(engine, verdicts), check_exec(engine, verdicts),
+                             check_isolation(engine, verdicts))
         if LONG_MINUTES:
             await check_long(engine, verdicts)
     except Exception:

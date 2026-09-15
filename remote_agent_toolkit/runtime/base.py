@@ -12,6 +12,7 @@ from ..events import AgentEvent, RunResult, RunStatus, StopReason
 
 if TYPE_CHECKING:
     from ..config import SessionConfig, TurnConfig
+    from ..control import ExecResult
 
 
 @runtime_checkable
@@ -59,7 +60,8 @@ class Session(Protocol):
     ``pending → running ↔ idle(stop_reason) → terminated`` (DESIGN.md §4). A session
     is addressable by ``session_id``, so another process can re-attach via
     :meth:`Engine.get_session` and poll / continue it — and, while a turn is running,
-    :meth:`send` into it or :meth:`interrupt` it (see :mod:`remote_agent_toolkit.control`).
+    :meth:`send` into it, :meth:`interrupt` it or :meth:`exec` a probe in its workspace
+    (see :mod:`remote_agent_toolkit.control`).
     """
 
     def run(
@@ -127,6 +129,32 @@ class Session(Protocol):
         ``num_turns``). A later :meth:`send` resumes from that state. No-op when nothing is
         running. Only when the harness cannot be reached or does not stop in time does the
         run fall back to a plain cancel — an error result whose ``warning`` says so.
+        """
+        ...
+
+    async def exec(
+        self, command: str, *, cwd: str | None = None, timeout: float | None = None
+    ) -> ExecResult:
+        """Run a shell command in the running turn's workspace and return its output.
+
+        A read-only probe of the agent's work while it is still working — ``git diff`` of
+        the workspace, a file listing — for an application that wants to show progress
+        before the turn delivers. ``command`` runs under ``/bin/bash -c`` with ``cwd`` the
+        agent's working directory (the same directory :attr:`workspace` names on ``local``;
+        a relative ``cwd`` is resolved against it). ``timeout`` in seconds defaults to
+        :data:`~remote_agent_toolkit.control.EXEC_DEFAULT_TIMEOUT_S`; a command that runs
+        past it is killed and reports ``returncode`` 124. Output is capped per stream and
+        the result says ``truncated`` rather than failing.
+
+        Only a **running** turn has a workspace to probe: on ``gemini`` the sandbox exists
+        for the turn's duration, and ``local`` keeps the same rule so code written against
+        it behaves the same way remotely. Called while the turn is still being dispatched
+        (no worker yet) it waits for the worker; called when no turn runs, or once the turn
+        ended, it raises :class:`~remote_agent_toolkit.control.ControlUnavailable`. The
+        command's own failure is not an exception: read ``returncode`` / ``stderr``.
+
+        Read-only is the caller's contract — nothing here polices the command, and a
+        command that writes into the workspace races the agent.
         """
         ...
 

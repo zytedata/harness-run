@@ -27,7 +27,7 @@ import time
 import uuid
 from typing import Any, AsyncIterator, Callable, TYPE_CHECKING
 
-from ...control import ControlMessage, ControlUnavailable
+from ...control import EXEC_DEFAULT_TIMEOUT_S, ControlMessage, ControlUnavailable, ExecResult
 from ...events import AgentEvent, RunResult, RunStatus, StopReason
 from .._run import DrivenRun
 from .history import event_from_mirror
@@ -73,6 +73,12 @@ GONE_GRACE_S = 30.0
 DISPATCH_ATTEMPTS = 3
 # A pool entry expiring within this many seconds is not dispatched to.
 CLAIM_MARGIN_S = 120.0
+# Session.exec(): the platform proxy cuts a sandbox call at ~300 s (measured: 300 s answered,
+# 600 s was a 502), so a probe's timeout is capped below that, with a margin for the transport.
+EXEC_MAX_TIMEOUT_S = 240.0
+EXEC_CALL_MARGIN_S = 30.0
+# How often exec() checks whether the turn has its sandbox yet while dispatch is in flight.
+EXEC_DISPATCH_POLL_S = 0.05
 # Client-side refresh cadence for the run's tokens (source tokens last an hour).
 TOKEN_REFRESH_S = 25 * 60
 
@@ -978,6 +984,52 @@ class GeminiSession:
             # A sandbox bills while it exists; the turn is over, so it goes. Multi-turn
             # continuity rides the checkpoint tar (DESIGN.md §13.1).
             self._engine._in_background(self._engine._release_sandbox, sandbox, name="sandbox-release")
+
+    async def exec(
+        self, command: str, *, cwd: str | None = None, timeout: float | None = None
+    ) -> ExecResult:
+        """Run a shell command in the running turn's sandbox workspace (``Session.exec``).
+
+        Posted to the worker's ``/exec`` through the platform proxy; the worker runs it
+        under ``/bin/bash -c`` in the agent's cwd (``/workspace/jobs/<sid>/workspace``, or
+        ``cwd`` under it). While the turn is still being dispatched this waits for the
+        worker (~1 s from the ready pool, 15–25 s on a fresh sandbox); it raises
+        :class:`~remote_agent_toolkit.control.ControlUnavailable` when no turn is running,
+        once the turn ended (its sandbox is deleted at the terminal event) or when the
+        sandbox did not answer. ``timeout`` is capped at ``EXEC_MAX_TIMEOUT_S`` because the
+        proxy cuts a call at ~300 s.
+        """
+        if not isinstance(command, str) or not command:
+            raise ValueError("exec() needs a non-empty command string")
+        limit = EXEC_DEFAULT_TIMEOUT_S if timeout is None else float(timeout)
+        if limit > EXEC_MAX_TIMEOUT_S:
+            raise ValueError(
+                f"exec() timeout must be at most {EXEC_MAX_TIMEOUT_S:g}s on gemini: the platform "
+                "proxy cuts a sandbox call at ~300 s. Run a longer probe in the background inside "
+                "the sandbox (nohup ... &) and poll its output."
+            )
+        run = self._current_run
+        if run is None:
+            raise ControlUnavailable("no turn is running on this session: exec() probes the running turn's workspace")
+        while self._sandbox is None and not run.done:
+            await asyncio.sleep(EXEC_DISPATCH_POLL_S)  # the turn is being dispatched
+        return await asyncio.to_thread(self._exec_now, command, cwd, limit)
+
+    def _exec_now(self, command: str, cwd: str | None, limit: float) -> ExecResult:
+        sandbox, turn_id = self._sandbox, self._turn_id
+        if sandbox is None or turn_id is None:
+            raise ControlUnavailable(
+                "the turn has no reachable worker (it ended and its sandbox is gone, or it "
+                "was never dispatched)"
+            )
+        body = {"turn_id": turn_id, "command": command, "cwd": cwd, "timeout": limit}
+        try:
+            resp = self._engine._provider().call(sandbox, "/exec", body, timeout_s=limit + EXEC_CALL_MARGIN_S)
+        except Exception as exc:  # noqa: BLE001 — proxy/platform/worker failure alike
+            raise ControlUnavailable(f"the turn's sandbox did not answer the probe: {exc}") from exc
+        if not resp.get("ok"):
+            raise ControlUnavailable(f"the worker refused the probe: {resp.get('error')}")
+        return ExecResult.from_dict(resp)
 
     async def interrupt(self, *, timeout: float = 120.0) -> None:
         """Interrupt the running turn and leave the session idle and resumable.

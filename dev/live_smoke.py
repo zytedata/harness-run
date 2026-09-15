@@ -28,7 +28,9 @@ is deleted in ``finally``; exit code is non-zero if any check fails.
 
 Configure via env (defaults are the shared my-project test setup):
   PROJECT, LOCATION, IMAGE_REPO, MODEL_SA, SUFFIX (engine-name suffix; defaults to your
-  username), LONG_MINUTES, KEEP=1 (skip teardown).
+  username), LONG_MINUTES, KEEP=1 (skip teardown), IMPERSONATE=<service account email>
+  (drive everything but the Docker push as that account — to prove a role is sufficient;
+  your ADC needs roles/iam.serviceAccountTokenCreator on it).
 
 Run:
   make live-smoke                       # or:
@@ -57,6 +59,24 @@ MODEL_SA = os.environ.get("MODEL_SA", "agent-runtime@my-project.iam.gserviceacco
 SUFFIX = re.sub(r"[^a-z0-9-]", "-", (os.environ.get("SUFFIX") or getpass.getuser()).lower())
 LONG_MINUTES = float(os.environ.get("LONG_MINUTES", "0") or 0)
 NAME = f"ratk-smoke-{SUFFIX}"
+IMPERSONATE = os.environ.get("IMPERSONATE") or None
+
+
+def _credentials():
+    """ADC, or ADC impersonating ``IMPERSONATE`` (the control plane then runs as that account)."""
+    if not IMPERSONATE:
+        return None
+    import google.auth
+    from google.auth import impersonated_credentials
+
+    source, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
+    return impersonated_credentials.Credentials(
+        source_credentials=source, target_principal=IMPERSONATE,
+        target_scopes=["https://www.googleapis.com/auth/cloud-platform"], lifetime=3600,
+    )
+
+
+CREDS = _credentials()
 
 TASK = 'Run `python3 -c "print(6 * 7)"` in the shell and reply with just the number it prints.'
 JSON_TASK = (
@@ -145,7 +165,8 @@ async def check_pool_turn(engine, verdicts) -> None:
 
 
 async def check_configs(verdicts) -> None:
-    engine = await asyncio.to_thread(gemini.get_engine, NAME, PROJECT, LOCATION, warm_pool=False)
+    engine = await asyncio.to_thread(gemini.get_engine, NAME, PROJECT, LOCATION, warm_pool=False,
+                                       credentials=CREDS)
     label = "session-config"
     try:
         session = engine.start_session(config=SessionConfig(
@@ -270,7 +291,8 @@ async def main() -> int:
     verdicts: dict[str, bool] = {}
     engine = None
     try:
-        log("deploy", f"deploying {NAME} (warm_pool=True, pool_size=1) ...")
+        log("deploy", f"deploying {NAME} (warm_pool=True, pool_size=1) as "
+                      f"{IMPERSONATE or 'the ADC principal'} ...")
         t0 = time.time()
         spec = _spec()
         if LONG_MINUTES:
@@ -279,6 +301,7 @@ async def main() -> int:
         engine = await asyncio.to_thread(
             gemini.deploy, spec, PROJECT, LOCATION, warm_pool=True, pool_size=1,
             image_repo=IMAGE_REPO, model_service_account=MODEL_SA, log=lambda m: log("deploy", m),
+            credentials=CREDS,
         )
         log("deploy", f"deployed in {time.time() - t0:.0f}s: version={engine.version} image={engine.revisions()[0]['image']}")
         verdicts["deploy"] = True

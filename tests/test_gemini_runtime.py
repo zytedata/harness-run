@@ -433,27 +433,114 @@ def test_run_while_busy_raises_and_send_steers_through_control():
     assert w.controls[0]["op"] == "steer" and w.controls[0]["message_id"] == "m-1"
 
 
-def test_send_before_the_worker_is_reachable_raises_control_unavailable():
-    from remote_agent_toolkit import ControlUnavailable
+def _acking_worker(name):
+    """A worker that acks every control message with a ``user`` event (and records it)."""
 
+    def on_control(w, body):
+        w.emit(AgentEvent(kind="user", summary=body["message"] or "",
+                          raw={"event": "user_message", "message_id": body.get("message_id"),
+                               "interrupt": body["op"] == "interrupt"}))
+
+    return ScriptedWorker(on_control=on_control)
+
+
+def test_send_before_the_worker_is_ready_is_queued_and_delivered_in_order():
+    # agentic-scraping (#84): a user message posted while the turn is being dispatched
+    # (~1 s from the pool, 15–25 s on a fresh sandbox) used to raise ControlUnavailable and
+    # every consumer needed a retry loop. The session queues it and posts it after control_ready.
+    provider = FakeSandboxProvider(_acking_worker)
+    engine = make_engine(provider)
+    session = engine.start_session()
+
+    async def go():
+        run = session.run("go")
+        assert session.send("first", message_id="m-1") is run       # no sandbox yet: queued
+        assert session.send("second", interrupt=True, message_id="m-2") is run
+        assert session._pending_control and session._sandbox is None
+        while session._sandbox is None:
+            await asyncio.sleep(0.005)
+        w = provider.worker(session._sandbox)
+        assert w.controls == []                                      # dispatched, not ready: still queued
+        assert session.send("third", message_id="m-3") is run
+        w.emit(AgentEvent(kind="status", summary="ready", raw={"event": "control_ready"}))
+        while len(w.controls) < 3:
+            await asyncio.sleep(0.005)
+        assert session.send("fourth", message_id="m-4") is run       # ready and drained: posted directly
+        while len(w.controls) < 4:
+            await asyncio.sleep(0.005)
+        w.emit(result_event("done"))
+        w.finish()
+        events = []
+        async for ev in run:
+            events.append(ev)
+        return await run, w, events
+
+    result, w, events = asyncio.run(go())
+    assert [(c["op"], c["message_id"]) for c in w.controls] == [
+        ("steer", "m-1"), ("interrupt", "m-2"), ("steer", "m-3"), ("steer", "m-4")]
+    acks = [ev.raw["message_id"] for ev in events if ev.kind == "user"]
+    assert acks == ["m-1", "m-2", "m-3", "m-4"]
+    assert result.text == "done" and result.warning is None
+    assert not session._pending_control and not session._flushing
+
+
+def test_queued_messages_are_dropped_with_a_warning_when_the_turn_ends_before_the_worker_is_ready():
     engine = make_engine(FakeSandboxProvider(lambda n: ScriptedWorker()))
     session = engine.start_session()
 
     async def go():
         run = session.run("go")
-        with pytest.raises(ControlUnavailable, match="still being dispatched"):
-            session.send("early")
+        session.send("early")
+        session.send("also early")
         while session._sandbox is None:
             await asyncio.sleep(0.005)
-        provider = engine._provider()
-        provider.fail_next["/control"] = [RuntimeError("proxy down")]
-        with pytest.raises(ControlUnavailable, match="did not take"):
-            session.send("now")
-        provider.worker(session._sandbox).finish()  # end without a result
+        engine._provider().worker(session._sandbox).finish()  # ends without control_ready or a result
         return await run
 
     result = asyncio.run(go())
     assert result.is_error and "without a terminal result" in result.text
+    assert "2 message(s) sent into this turn were never delivered" in result.warning
+    assert not session._pending_control
+
+
+def test_queued_messages_when_the_dispatch_fails_land_on_the_dispatch_failed_result():
+    provider = FakeSandboxProvider(lambda n: ScriptedWorker())
+    provider.fail_next["/turn"] = [RuntimeError("proxy down")] * backend.DISPATCH_ATTEMPTS
+    session = make_engine(provider).start_session()
+
+    async def go():
+        run = session.run("go")
+        session.send("early")
+        return await run
+
+    result = asyncio.run(go())
+    assert result.is_error and "could not hand the turn" in result.text
+    assert "1 message(s) sent into this turn were never delivered" in result.warning
+
+
+def test_send_to_a_ready_worker_that_does_not_take_it_raises_control_unavailable():
+    from remote_agent_toolkit import ControlUnavailable
+
+    provider = FakeSandboxProvider(lambda n: ScriptedWorker())
+    engine = make_engine(provider)
+    session = engine.start_session()
+
+    async def go():
+        run = session.run("go")
+        while session._sandbox is None:
+            await asyncio.sleep(0.005)
+        w = provider.worker(session._sandbox)
+        w.emit(AgentEvent(kind="status", summary="ready", raw={"event": "control_ready"}))
+        while not session._control_ready:
+            await asyncio.sleep(0.005)
+        provider.fail_next["/control"] = [RuntimeError("proxy down")]
+        with pytest.raises(ControlUnavailable, match="did not take"):
+            session.send("now")
+        w.finish()
+        return await run
+
+    result = asyncio.run(go())
+    assert result.is_error and result.warning is None  # nothing was left queued
 
 
 def test_interrupt_posts_stop_and_waits_for_the_interrupted_result():

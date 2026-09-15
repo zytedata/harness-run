@@ -139,6 +139,64 @@ def test_delete_releases_every_sandbox_and_retires_all_versions(monkeypatch):
     assert old not in provider.deleted_templates  # still has a sandbox: left with a warning
 
 
+def test_delete_of_engine_x_leaves_the_pool_of_engine_x_suffixed_alone(monkeypatch):
+    # agentic-scraping (#84) field report: engines versioned by suffixing the name (``x`` and
+    # ``x-b040d27``) — ``x``'s teardown swept ``x-b040d27``'s ready sandboxes because its
+    # display-name prefix ``ratk-x-`` matched them. The sweep goes by template now.
+    provider = FakeSandboxProvider()
+    legacy = make_engine(provider, warm=True, spec=AgentSpec(name="x", model="m"))
+    legacy.fill_pool(1)
+    pinned = make_engine(provider, warm=True, spec=AgentSpec(name="x-b040d27", model="m"))
+    pinned.fill_pool(2)
+    # A rare shape: a sandbox of x-b040d27 whose suffix is itself 8 hex chars, and one
+    # without a template on the listing row (the shape fallback applies to that one only).
+    lookalike = provider.create(pinned.resource, ttl_s=60, display_name="ratk-x-deadbeef")
+    provider.sandboxes[lookalike.name]["display_name"] = "ratk-x-b040d27a"
+    templateless = provider.create(legacy.resource, ttl_s=60, display_name="ratk-x-0123abcd")
+    provider.sandboxes[templateless.name]["template"] = None
+    before = set(provider.live())
+    monkeypatch.setattr(backend.time, "sleep", lambda s: None)
+    legacy.delete(timeout=1.0)
+    legacy._join_background()
+    survivors = set(provider.live())
+    assert survivors == {e.sandbox for e in pinned._roster().entries()} | {lookalike.name}
+    assert templateless.name in provider.deleted and len(before - survivors) == 2
+    assert legacy.resource in provider.deleted_templates and pinned.resource in provider.templates
+    assert pinned.wait_until_warm(timeout=0.01)  # its pool is intact and healthy
+
+
+def test_stale_pool_entries_are_refilled_even_when_the_turn_falls_back_to_a_fresh_sandbox():
+    # Same field report: two stale entries were consumed, the turn ran on a created sandbox
+    # (warm=False) and nothing refilled, leaving the pool empty until a manual fill.
+    provider = FakeSandboxProvider()
+    engine = make_engine(provider, warm=True)
+    engine.fill_pool(2)
+    stale = [e.sandbox for e in engine._roster().entries()]
+    for sb in stale:
+        provider.vanish(sb)
+    result = asyncio.run(_await(engine.start_session().run("go")))
+    engine._join_background()
+    assert result.text == "done"
+    turns = [c[0] for c in provider.calls if c[1] == "/turn"]
+    assert turns[:2] == stale and turns[2] not in stale and len(turns) == 3
+    refilled = engine._roster().entries()
+    assert len(refilled) == 2 and not {e.sandbox for e in refilled} & set(stale)
+
+
+def test_wait_until_warm_drops_rostered_sandboxes_that_no_longer_answer():
+    provider = FakeSandboxProvider()
+    engine = make_engine(provider, warm=True)
+    engine.fill_pool(2)
+    first, second = [e.sandbox for e in engine._roster().entries()]
+    provider.vanish(first)
+    assert engine.wait_until_warm(timeout=0.01) is True
+    assert [e.sandbox for e in engine._roster().entries()] == [second]
+    provider.vanish(second)
+    assert engine.wait_until_warm(timeout=0.01) is False
+    engine._join_background()
+    assert engine._roster().entries() == [] and second in provider.deleted
+
+
 def test_delete_version_retires_one_template_and_its_rostered_sandboxes(monkeypatch):
     provider = FakeSandboxProvider()
     engine = make_engine(provider, warm=True)

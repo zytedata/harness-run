@@ -400,8 +400,14 @@ These are facts measured during the PoC. The library encodes them so consumers i
 - The client POSTs `{"op": "steer"|"interrupt"|"stop", "message", "message_id"}` to the sandbox worker's
   `/control` through the platform's proxy (~0.3 s); the worker feeds it to the harness's `ControlChannel`
   (an asyncio queue on the turn's loop) and dedupes on `message_id`. The worker announces the channel with a
-  `control_ready` event; until the turn's first event the client refuses (`ControlUnavailable`) because it
-  does not yet know which sandbox took the turn. History: before §13 the channel was a **GCS inbox**
+  `control_ready` event; until then the client **queues** the message in the session (it does not yet know
+  which sandbox took the turn, or the worker has not built its channel) and a housekeeping thread posts the
+  queue in order the moment `control_ready` is observed on the stream — so `send()` never refuses a message
+  during the dispatch window (~1 s from the pool, 15–25 s on a fresh sandbox; agentic-scraping's inbox
+  flushes pending user messages exactly then). Messages still queued when the turn ends (dispatch failed,
+  sandbox died) are dropped and counted on `RunResult.warning`; `interrupt()` drops the queue and posts its
+  `stop` directly. `ControlUnavailable` is left for a *ready* worker that did not take the message.
+  History: before §13 the channel was a **GCS inbox**
   (`control/<sid>/…`, polled by the worker every ~1.5 s, delivered markers under `control-delivered/`) because
   a query job had no inbound channel other than cancel; the transport sat behind the `ControlChannel`
   protocol, which is what let it be swapped.

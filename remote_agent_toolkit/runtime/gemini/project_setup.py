@@ -497,13 +497,34 @@ class GcpApi:
     # -- who am I -----------------------------------------------------------------
 
     def adc_email(self) -> str | None:
-        """The ADC principal's email, when discoverable (for the default impersonation grant)."""
+        """The ADC principal's email, when discoverable (for the default impersonation grant).
+
+        A service-account credential names itself. A user credential (``gcloud auth
+        application-default login``) is asked at Google's userinfo endpoint with a bare
+        bearer token — NOT through the authorized session, whose ``x-goog-user-project``
+        quota header makes that endpoint answer 403 for a user without
+        ``serviceusage.serviceUsageConsumer`` on the project — with tokeninfo as the fallback.
+        """
         self._http()
         email = getattr(self._credentials, "service_account_email", None)
         if email and email != "default":
             return email
         try:
-            r = self._http().get("https://openidconnect.googleapis.com/v1/userinfo")
+            import requests
+            from google.auth.transport.requests import Request
+
+            creds = self._credentials
+            if not getattr(creds, "valid", False):
+                creds.refresh(Request())
+            token = creds.token
+            r = requests.get(
+                "https://openidconnect.googleapis.com/v1/userinfo",
+                headers={"Authorization": f"Bearer {token}"}, timeout=15,
+            )
+            if r.ok and r.json().get("email"):
+                return r.json()["email"]
+            r = requests.get("https://oauth2.googleapis.com/tokeninfo",
+                             params={"access_token": token}, timeout=15)
             if r.ok:
                 return r.json().get("email")
         except Exception:  # noqa: BLE001 — absence of an email is handled by the caller

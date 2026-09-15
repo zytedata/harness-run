@@ -77,6 +77,9 @@ CLAIM_MARGIN_S = 120.0
 TOKEN_REFRESH_S = 25 * 60
 
 
+_SANDBOX_NAME_RE = re.compile(r"[0-9a-f]{8}")  # the suffix ``_create_sandbox`` appends
+
+
 def _slug(name: str) -> str:
     return re.sub(r"[^a-z0-9-]", "-", name.lower()).strip("-") or "agent"
 
@@ -446,6 +449,18 @@ def get_engine(
                            **_store_kwargs(output_bucket, credentials))
         if output_bucket else None
     ) or {}
+    if output_bucket and not record:
+        import warnings
+
+        warnings.warn(
+            f"engine {name!r} version {template_id(chosen['name'])} has no deploy record under "
+            f"{output_bucket}: this handle can only address the template — a turn routed "
+            "through Vertex fails at dispatch for lack of a model service account. Usually the "
+            "deploy that created this version was interrupted before it wrote the record; re-run "
+            "gemini.deploy() for the engine (idempotent: the image and the template are reused, "
+            "the record is written).",
+            stacklevel=2,
+        )
     spec = None
     if isinstance(record.get("spec"), dict):
         try:
@@ -523,6 +538,11 @@ class GeminiSession:
         self._session_config_resolved = config_resolved
         # Set when the worker announced it reads /control (control_ready); reset per turn.
         self._control_ready = False
+        # Messages sent into the turn before the worker was ready wait here and are posted,
+        # in order, the moment control_ready arrives (``_flush_control``).
+        self._control_lock = threading.Lock()
+        self._pending_control: list[ControlMessage] = []
+        self._flushing = False
 
     # -- public API ------------------------------------------------------------
 
@@ -574,9 +594,18 @@ class GeminiSession:
         same :class:`Run` is returned: with ``interrupt=False`` the model sees it at its
         next step, with ``interrupt=True`` the model is interrupted first and continues
         from the message, in the same sandbox and workspace. The ``user`` event on the
-        stream, carrying ``message_id``, acknowledges delivery. Raises
-        :class:`~remote_agent_toolkit.control.ControlUnavailable` when the turn has no
-        reachable worker yet (still being dispatched) or the worker refused the message.
+        stream, carrying ``message_id``, acknowledges delivery.
+
+        A message sent while the turn is still being dispatched (no sandbox yet, or the
+        worker has not announced its control channel) is **queued in this session** and
+        posted, in order, the moment the worker announces ``control_ready`` — the same run
+        keeps flowing, and the ``user`` event acknowledges it like any other. An
+        ``interrupt=True`` message queued that early interrupts the harness right after
+        it starts, so the model's first step is the message. If the turn ends before the
+        queue drained (dispatch failed, the sandbox died), the messages are dropped and
+        ``RunResult.warning`` says how many. Raises
+        :class:`~remote_agent_toolkit.control.ControlUnavailable` only when a ready
+        worker did not take the message (proxy/platform failure, or the turn just ended).
         """
         if self.busy:
             return self._send_into_running_turn(
@@ -609,12 +638,21 @@ class GeminiSession:
         return self._current_run
 
     def _post_control(self, msg: ControlMessage) -> None:
+        """Post ``msg`` to the running turn's worker, or queue it until the worker is ready.
+
+        Queued while the turn has no sandbox yet, the worker has not announced
+        ``control_ready``, or an earlier queue is still being flushed (so order holds).
+        """
+        with self._control_lock:
+            if not self._control_ready or self._sandbox is None or self._flushing:
+                self._pending_control.append(msg)
+                return
+        self._post_control_now(msg)
+
+    def _post_control_now(self, msg: ControlMessage) -> None:
         sandbox, turn_id = self._sandbox, self._turn_id
         if sandbox is None or turn_id is None:
-            raise ControlUnavailable(
-                "the turn has no reachable worker yet (it is still being dispatched to a "
-                "sandbox); wait for its first event and send() again"
-            )
+            raise ControlUnavailable("the turn has no reachable worker (it ended, or was never dispatched)")
         try:
             resp = self._engine._provider().call(
                 sandbox, "/control", {"turn_id": turn_id, **msg.to_dict()}, timeout_s=30,
@@ -626,7 +664,37 @@ class GeminiSession:
 
     def _observe(self, event: AgentEvent) -> None:
         if event.kind == "status" and (event.raw or {}).get("event") == "control_ready":
-            self._control_ready = True
+            with self._control_lock:
+                self._control_ready = True
+                start = bool(self._pending_control) and not self._flushing
+                if start:
+                    self._flushing = True
+            if start:
+                self._engine._in_background(self._flush_control, name="control-flush")
+
+    def _flush_control(self) -> None:
+        """Post the queued control messages in order (off the event loop; one at a time)."""
+        while True:
+            with self._control_lock:
+                if not self._pending_control:
+                    self._flushing = False
+                    return
+                msg = self._pending_control[0]
+            try:
+                self._post_control_now(msg)
+            except ControlUnavailable as exc:
+                logger.warning("queued message %s for turn %s was not delivered: %s",
+                               msg.message_id, self._turn_id, exc)
+            with self._control_lock:
+                self._pending_control.pop(0)
+
+    def _drop_pending_control(self) -> int:
+        """Forget the queued messages (the turn is over or being stopped); how many."""
+        with self._control_lock:
+            dropped = len(self._pending_control)
+            self._pending_control.clear()
+            self._flushing = False
+        return dropped
 
     # -- credentials for the turn -------------------------------------------------
 
@@ -811,6 +879,7 @@ class GeminiSession:
         self._turn_id = turn_id
         self._sandbox = None
         self._control_ready = False
+        self._drop_pending_control()
         events_uri = f"{engine._output_bucket}/events"
         store_kwargs = engine._gcs_store_kwargs()
 
@@ -841,33 +910,51 @@ class GeminiSession:
         return run
 
     def _dispatch(self, body: dict) -> str:
-        """Claim (or create) a sandbox and hand it the turn; return the sandbox name. Sync."""
+        """Claim (or create) a sandbox and hand it the turn; return the sandbox name. Sync.
+
+        Every ready-pool entry consumed on the way — the one that took the turn, and any
+        that turned out dead (deleted under the roster, OOM, TTL) — is replaced by a refill
+        off the critical path, so a batch of stale entries cannot drain the pool to empty
+        on a turn that never used it.
+        """
         engine = self._engine
         last: Exception | None = None
-        for _attempt in range(DISPATCH_ATTEMPTS):
-            sandbox, warm = engine._claim_sandbox()
-            body["sandbox"] = sandbox.rsplit("/", 1)[-1]
-            body["warm"] = warm
-            try:
-                resp = engine._provider().call(sandbox, "/turn", body, timeout_s=60)
-                if not resp.get("ok"):
-                    raise SandboxError(f"the worker refused the turn: {resp.get('error')}")
-            except Exception as exc:  # noqa: BLE001 — drop this sandbox, try another
-                last = exc
-                logger.warning("dispatch to %s failed: %s", sandbox, exc)
-                engine._release_sandbox(sandbox)
-                continue
-            self._sandbox = sandbox
-            if warm and engine._warm:
-                engine._in_background(engine.fill_pool, 1, name="pool-refill")
-            return sandbox
-        raise RuntimeError(f"no sandbox took the turn after {DISPATCH_ATTEMPTS} attempts: {last}")
+        consumed = 0  # pool entries taken off the roster by this dispatch
+        try:
+            for _attempt in range(DISPATCH_ATTEMPTS):
+                sandbox, warm = engine._claim_sandbox()
+                consumed += int(warm)
+                body["sandbox"] = sandbox.rsplit("/", 1)[-1]
+                body["warm"] = warm
+                try:
+                    resp = engine._provider().call(sandbox, "/turn", body, timeout_s=60)
+                    if not resp.get("ok"):
+                        raise SandboxError(f"the worker refused the turn: {resp.get('error')}")
+                except Exception as exc:  # noqa: BLE001 — drop this sandbox, try another
+                    last = exc
+                    logger.warning("dispatch to %s failed: %s", sandbox, exc)
+                    engine._release_sandbox(sandbox)
+                    continue
+                self._sandbox = sandbox
+                return sandbox
+            raise RuntimeError(f"no sandbox took the turn after {DISPATCH_ATTEMPTS} attempts: {last}")
+        finally:
+            if consumed and engine._warm:
+                engine._in_background(engine.fill_pool, consumed, name="pool-refill")
 
     def _on_complete(self, result: RunResult, stop_reason: StopReason) -> None:
         self._last_result = result
         self._stop_reason = stop_reason
         self._status = RunStatus.IDLE
         self._stop_refresh()
+        dropped = self._drop_pending_control()
+        if dropped:
+            note = (
+                f"{dropped} message(s) sent into this turn were never delivered: the turn "
+                "ended before its worker took control messages"
+            )
+            result.warning = f"{result.warning}; {note}" if result.warning else note
+            logger.warning("session %s: %s", self._session_id, note)
         sandbox, self._sandbox = self._sandbox, None
         if sandbox is not None:
             # A sandbox bills while it exists; the turn is over, so it goes. Multi-turn
@@ -896,8 +983,9 @@ class GeminiSession:
         assert run.task is not None
         note: str | None
         if self._control_ready and self._sandbox is not None:
+            self._drop_pending_control()  # a stop makes queued steers moot; it goes straight out
             try:
-                await asyncio.to_thread(self._post_control, ControlMessage(op="stop"))
+                await asyncio.to_thread(self._post_control_now, ControlMessage(op="stop"))
                 await asyncio.wait_for(asyncio.shield(run.task), timeout)
                 return
             except asyncio.TimeoutError:
@@ -1185,11 +1273,35 @@ class GeminiEngine:
                 live = [e for e in self._roster().entries() if e.expires_at > time.time() + CLAIM_MARGIN_S]
             except Exception:  # noqa: BLE001 — a listing blip is not "cold"
                 live = []
-            if live:
+            if live and self._prune_dead(live):
                 return True
             if time.monotonic() >= deadline:
                 return False
             time.sleep(2.0)
+
+    def _prune_dead(self, entries: list[SandboxEntry]) -> list[SandboxEntry]:
+        """The entries whose worker still answers ``/health``; the others leave the roster.
+
+        A rostered sandbox can be gone without the roster knowing (deleted by another
+        action, OOM-killed, the platform reclaimed it): reporting such an entry as "ready"
+        would be a lie, so the ones that do not answer are dropped and deleted best-effort.
+        """
+        alive: list[SandboxEntry] = []
+        for entry in entries:
+            try:
+                ok = self._provider().call(entry.sandbox, "/health", {}, timeout_s=15).get("ok")
+            except Exception as exc:  # noqa: BLE001 — gone, or the proxy cannot reach it
+                logger.warning("rostered sandbox %s does not answer (%s); dropping it", entry.id, exc)
+                ok = False
+            if ok:
+                alive.append(entry)
+                continue
+            try:
+                self._roster().remove(entry.id)
+            except Exception:  # noqa: BLE001
+                logger.warning("could not remove %s from the roster", entry.id, exc_info=True)
+            self._in_background(self._release_sandbox, entry.sandbox, name="pool-prune")
+        return alive
 
     def _retire_templates(self, templates: list[str], timeout: float = 600.0) -> None:
         """Drop previous versions: their rostered sandboxes, then the templates (best-effort)."""
@@ -1254,21 +1366,38 @@ class GeminiEngine:
     def delete(self, *, timeout: float = 600.0) -> None:
         """Tear down the engine (ops action): its sandboxes, then every version's template.
 
-        Deletes the rostered ready sandboxes of every version, sweeps any other sandbox of
-        this engine's display-name prefix under the host instance (orphans of crashed
+        Deletes the rostered ready sandboxes of every version, sweeps any other sandbox
+        created from this engine's templates under the host instance (orphans of crashed
         clients), then deletes the templates — retrying up to ``timeout`` while the
         platform still sees sandboxes under them.
+
+        The sweep matches on the sandbox's **template**, not on its display name: the
+        name of engine ``x`` is a prefix of the names of engine ``x-<revision>`` (the
+        pattern the README recommends for side-by-side toolkit revisions), and tearing
+        ``x`` down must leave ``x-<revision>``'s ready pool alone.
         """
         provider = self._provider()
         templates = [t["name"] for t in provider.list_templates(display_name=self.name)]
         if self._template not in templates:
             templates.append(self._template)
+        owned = {template_id(t) for t in templates}
         try:
             for sb in provider.list(display_prefix=self._display_prefix()):
+                if not self._owns_sandbox(sb, owned):
+                    continue
                 self._release_sandbox(sb["name"])
         except Exception:  # noqa: BLE001 — the roster sweep below still runs
             logger.warning("could not list sandboxes of %s", self.name, exc_info=True)
         self._retire_templates(templates, timeout=timeout)
+
+    def _owns_sandbox(self, sandbox: dict, owned_templates: set[str]) -> bool:
+        """Whether a listed sandbox (display name already under our prefix) is this engine's."""
+        template = sandbox.get("template")
+        if template:
+            return template_id(template) in owned_templates
+        # No template on the row: fall back to the exact shape of our names, ``<prefix><8 hex>``.
+        display = sandbox.get("display_name") or ""
+        return _SANDBOX_NAME_RE.fullmatch(display[len(self._display_prefix()):]) is not None
 
     def versions(self) -> list[str]:
         """This engine's template ids, newest first."""

@@ -96,6 +96,27 @@ for the tag with this file's section as the notes.
 
 ### Fixed
 
+- **`engine.delete()` no longer deletes the ready sandboxes of an engine whose name extends
+  this one's** (#84 field report). The orphan sweep matched sandboxes by display-name *prefix*, and
+  `ratk-x-` is a prefix of `ratk-x-b040d27-…` — so tearing down `x` next to the revision-suffixed
+  `x-b040d27` (the naming the README recommends for side-by-side toolkit revisions) emptied the
+  latter's pool, whose next turn then hit `FAILED_PRECONDITION` on each stale entry and fell back
+  to a cold sandbox. The sweep now matches on the sandbox's **template** (one of this engine's
+  versions), with the exact `<prefix><8 hex>` name shape as the fallback for a listing row without
+  a template.
+- **A dispatch that consumed stale pool entries refills them.** When rostered sandboxes turned
+  out dead and the turn fell back to a created sandbox, no refill was scheduled (the refill was tied
+  to the turn *using* a pool sandbox), so a batch of stale entries drained the pool to empty on a
+  turn that never used it. Every entry taken off the roster by a dispatch — used or dead — is now
+  replaced off the critical path.
+- **`wait_until_warm()` verifies the sandboxes it reports as ready.** Rostered entries that no
+  longer answer `/health` (deleted by another action, OOM, reclaimed) are dropped from the roster
+  and deleted, so `deploy --warm N` cannot print `ready` for a pool another action has emptied.
+- **`ratk-gcp-setup` discovers the ADC principal on a plain `gcloud auth application-default
+  login`.** It asked Google's userinfo endpoint through the project-quota session, whose
+  `x-goog-user-project` header made the endpoint answer 403 for a user without
+  `serviceusage.serviceUsageConsumer` on the project, so the audit demanded `--impersonator` for
+  the caller themself. It now asks with a bare bearer token (tokeninfo as the fallback).
 - **Resuming a session on another worker failed when the workspace held a virtualenv** (#74).
   Every `.venv` has `bin/python` as a symlink to an absolute path, and the restore extracted
   the snapshot with `tarfile`'s `data` filter, which refuses such a link — after writing every
@@ -132,6 +153,19 @@ for the tag with this file's section as the notes.
 
 ### Changed
 
+- **`send()` into a turn that is still starting is queued instead of refused** (#84, from
+  agentic-scraping's integration). Between `run()` and the worker's `control_ready` event (~1 s
+  from the ready pool, 15–25 s when a sandbox is created) `send()` used to raise
+  `ControlUnavailable`, so every consumer needed a retry loop around the dispatch window. The
+  session now holds the message and posts it the moment the worker announces its channel — in
+  order, acknowledged by the same `user` event, on the same `Run`. An `interrupt=True` message
+  queued that early interrupts the harness right after it starts. Messages still queued when the
+  turn ends (dispatch failed, sandbox died) are dropped and counted on `RunResult.warning`.
+  `ControlUnavailable` is now raised only when a ready worker did not take the message.
+- **`get_engine` warns when the resolved template has no deploy record** under the output bucket
+  (the handle then only addresses the template and a Vertex-routed turn fails at dispatch). The
+  usual cause is a `deploy` interrupted while waiting for the template to be created; the warning
+  says to re-run `deploy`, which is idempotent (image and template reused, record written).
 - `remote_agent_toolkit.checkpoint.restore()` returns a `RestoreResult` (truthy iff a snapshot
   existed; `.found`, `.skipped`) instead of a bare `bool`, and `BlobStore.get_tree()` returns the
   list of skipped member names instead of `None`. Truthiness checks keep working; `is True`

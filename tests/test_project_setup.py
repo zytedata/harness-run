@@ -564,3 +564,35 @@ def test_grant_gives_up_on_missing_member_without_retry_window():
 
     with pytest.raises(ps.GcpError):
         ps._grant(lambda: {"bindings": []}, set_policy, [("roles/x", "serviceAccount:sa@x")])
+
+
+def test_adc_email_asks_userinfo_with_a_bare_bearer_token_and_falls_back_to_tokeninfo(monkeypatch):
+    # Field report on #84: on a plain ``gcloud auth application-default login`` the principal
+    # was not discovered — the authorized session's quota-project header made userinfo 403.
+    import requests
+
+    class Creds:
+        valid = True
+        token = "tok"
+
+    calls = []
+
+    class Resp:
+        def __init__(self, ok, payload):
+            self.ok, self._payload = ok, payload
+
+        def json(self):
+            return self._payload
+
+    def fake_get(url, headers=None, params=None, timeout=None):
+        calls.append((url, headers, params))
+        if "userinfo" in url:
+            return Resp(False, {"error": "403"})
+        return Resp(True, {"email": "dev@example.com", "scope": "openid email"})
+
+    monkeypatch.setattr(requests, "get", fake_get)
+    api = ps.GcpApi(project=PROJECT, credentials=Creds())
+    api._session = object()  # _http() already ran
+    assert api.adc_email() == "dev@example.com"
+    assert calls[0][1] == {"Authorization": "Bearer tok"} and "x-goog-user-project" not in str(calls[0])
+    assert "tokeninfo" in calls[1][0]

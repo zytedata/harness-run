@@ -225,14 +225,23 @@ def test_get_engine_without_a_record_is_addressing_only(no_docker, monkeypatch):
     provider = FakeSandboxProvider()
     old = provider.add_template("test-agent", create_time=1.0)
     new = provider.add_template("test-agent", create_time=2.0)
-    engine = backend.get_engine("test-agent", "proj", "l", provider=provider)
+    # The gap is announced at lookup, where the operator looks (field report on #84: a deploy
+    # interrupted mid-poll left an ACTIVE template with no record; turns failed days later).
+    with pytest.warns(UserWarning, match="version t2 has no deploy record under gs://proj-agent-output.*re-run gemini.deploy"):
+        engine = backend.get_engine("test-agent", "proj", "l", provider=provider)
     assert engine.resource == new and not engine._spec_known and engine.spec.model == ""
     assert engine.versions() == ["t2", "t1"]
     assert [r["current"] for r in engine.revisions()] == [True, False]
-    pinned = backend.get_engine("test-agent", "proj", "l", version="t1", provider=provider)
+    with pytest.warns(UserWarning, match="version t1 has no deploy record"):
+        pinned = backend.get_engine("test-agent", "proj", "l", version="t1", provider=provider)
     assert pinned.resource == old and pinned.version == "t1"
     with pytest.raises(LookupError, match="no version"):
         backend.get_engine("test-agent", "proj", "l", version="t9", provider=provider)
+    import warnings
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")  # no bucket to look in: nothing to warn about
+        backend.get_engine("test-agent", provider=provider)
     with pytest.raises(LookupError, match="no deployed engine"):
         backend.get_engine("other", "proj", "l", provider=provider)
 

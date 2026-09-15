@@ -13,7 +13,8 @@ branch that touches any deploy/runtime contract — it validates, on real infras
     the baked spec; then a second turn on the SAME session (checkpoint resume on a new
     sandbox) with a ``TurnConfig(output_schema=...)`` — the client parses the JSON and the
     worker's ``effective_spec`` echo still carries the marker
-  * **control**: a steer into a running turn is acknowledged by a ``user`` event
+  * **control**: a steer into a running turn is acknowledged by a ``user`` event; a steer
+    sent before the turn's first event (the dispatch window) is queued and delivered too
   * **isolation**: a fixed shell script run through the worker's ``/exec`` (no model) prints
     what the agent's shell can reach — the metadata server's identity must be a tenant one
     that is 403 on our project's storage and Vertex (the sandbox has no usable Google
@@ -200,6 +201,27 @@ async def check_steer(engine, verdicts) -> None:
         verdicts[label] = False
 
 
+async def check_early_steer(engine, verdicts) -> None:
+    """A send() during the dispatch window (before any event) is queued and delivered."""
+    label = "early-steer"
+    try:
+        session = engine.start_session()
+        run = session.run(STEER_TASK)
+        session.send("EXTRA INSTRUCTION: mention the word MANGO in your reply.", message_id="early-1")
+        queued = bool(session._pending_control) and session._sandbox is None
+        log(label, f"sent before the first event; queued={queued}")
+        r, events, first = await _drive(label, run)
+        acked = any(e.kind == "user" and (e.raw or {}).get("message_id") == "early-1" for e in events)
+        ready_at = next((i for i, e in enumerate(events) if (e.raw or {}).get("event") == "control_ready"), None)
+        ack_at = next((i for i, e in enumerate(events) if e.kind == "user"), None)
+        verdicts[label] = (not r.is_error) and queued and acked and "MANGO" in (r.text or "").upper() \
+            and r.warning is None
+        log(label, f"acked={acked} control_ready_at={ready_at} ack_at={ack_at} warning={r.warning!r}")
+    except Exception:
+        log(label, "FAILED:\n" + traceback.format_exc())
+        verdicts[label] = False
+
+
 async def check_isolation(engine, verdicts) -> None:
     """What the agent's shell can reach — asked of the worker's /exec directly (no model)."""
     label = "isolation"
@@ -263,7 +285,8 @@ async def main() -> int:
         verdicts["warm"] = await asyncio.to_thread(engine.wait_until_warm, 60)
         log("deploy", f"warm={verdicts['warm']}")
         await check_pool_turn(engine, verdicts)
-        await asyncio.gather(check_configs(verdicts), check_steer(engine, verdicts), check_isolation(engine, verdicts))
+        await asyncio.gather(check_configs(verdicts), check_steer(engine, verdicts),
+                             check_early_steer(engine, verdicts), check_isolation(engine, verdicts))
         if LONG_MINUTES:
             await check_long(engine, verdicts)
     except Exception:

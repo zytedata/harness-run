@@ -672,8 +672,15 @@ await session.send("OK, now do X")              # a normal turn, from the interr
   mirror and in `history()` as an event of kind `user` (the text as `summary`; `raw["message_id"]`,
   `raw["interrupt"]`), emitted when the harness hands it to the model. Pass your own
   `message_id=` to match it up; the worker dedupes on it, so a retried send after re-attaching never
-  reaches the model twice. Until that event arrives the message is "waiting" — on `gemini` about
-  2 s (the worker polls its inbox every 1.5 s), plus whatever tool call the model is in the middle of.
+  reaches the model twice. Until that event arrives the message is "waiting" — on `gemini` well under a
+  second to reach the worker, plus whatever tool call the model is in the middle of.
+- **A message sent while the turn is still starting is queued, not refused.** Between `run()` and
+  the worker's `control_ready` event (~1 s from the ready pool, 15–25 s when a sandbox has to be
+  created) the session holds the message and posts it the moment the worker is ready — in order,
+  acknowledged by the same `user` event, on the same `Run`. An `interrupt=True` message queued that
+  early interrupts the harness right after it starts, so the model's first step is the message. If
+  the turn ends before the queue drained (dispatch failed, the sandbox died) the messages are dropped
+  and `result.warning` says how many. No retry loop needed on the caller's side.
 - **`interrupt()` is "interrupt and stop"**: the harness stops what the model is doing and the turn
   ends with `StopReason.INTERRUPTED` — not an error; `cost_usd` / `usage` / `num_turns` are real, the
   checkpoint includes the interrupted turn's workspace changes, and the next `send()` resumes from it.
@@ -682,15 +689,17 @@ await session.send("OK, now do X")              # a normal turn, from the interr
   an error result whose `warning` says so, and no checkpoint.
 - **Guards.** `run()` on a running session raises: a second concurrent turn under one session id would
   corrupt its checkpoint and transcript. `secrets` / `config` / `hooks` cannot change mid-turn and are
-  rejected on a running `send()`. A running turn on a `gemini` engine whose serving revision was
-  deployed before the control inbox existed raises `ControlUnavailable` (nothing is sent) — a typed
-  exception, so a caller can queue the message until the session is idle instead.
-- **Transport (`gemini`).** The client writes the message to `control/<sid>/` under the output bucket;
-  the worker polls that prefix while the harness runs, hands each message over in order and deletes
-  it, and records the id under `control-delivered/<sid>/`. The worker announces the inbox with a
-  `control_ready` status event at the start of the turn. Messages that arrive before a cold worker
-  starts wait in the inbox; a message that lands just after the turn ended is delivered at the start
-  of the session's next turn. On `local` the same channel is an in-process queue.
+  rejected on a running `send()`. `send()` raises `ControlUnavailable` (a typed exception; nothing was
+  delivered) only when a *ready* worker did not take the message: the platform proxy failed, or the
+  turn ended between your `busy` check and the post. Mind that race on your side: `send()` on a session
+  that has just gone idle is a resume, i.e. a new turn with no secrets — check `session.busy` right
+  before, and catch `ControlUnavailable`.
+- **Transport (`gemini`).** The client POSTs the message to the worker's `/control` endpoint through
+  the platform's proxy (sub-second); the worker feeds it to the harness and dedupes on `message_id`.
+  The worker announces the channel with a `control_ready` status event at the start of the turn;
+  until then the message waits in the client's queue (above). A message can only reach a running
+  turn — nothing carries over to the session's next turn. On `local` the same channel is an
+  in-process queue.
 
 The interactive system-prompt suffix (`checkpoint=True`) still tells the model to end its turn for a
 genuine decision; steering is additive — the way to talk to an agent that is *already* working.
@@ -961,6 +970,16 @@ streams the events straight back from it; the sandbox is deleted at the terminal
 follows what the deploy recorded (`warm_pool`, the model identity, the baked spec) — pass
 `warm_pool=False` to bypass a pool deliberately.
 
+**The deploy record.** `deploy` writes `deploys/<name>/<template id>.json` under the output bucket
+right after the template exists, before the pool is filled: the baked spec, the image, the model
+service account, the pool settings. `get_engine` reads it; without it the handle can still address
+the template but a Vertex-routed turn fails for lack of a model service account, so `get_engine`
+**warns** at lookup when the record is missing. The usual cause is a `deploy` interrupted while it
+waited for the platform to create the template (the template came up, the record was never written).
+**The fix is to re-run the same `deploy`**: it is idempotent — the image is found in the registry and
+not rebuilt, the newest template already serves it so no new version is created, and the record is
+written.
+
 ### Deploy / session / turn: the three configuration scopes
 
 An engine is deployed per agent *role*, but much of its configuration is naturally
@@ -1069,6 +1088,14 @@ gemini.get_engine("spider-builder", ..., version="…")   # pin: turns run on th
 **`version=` routes.** Any template can be dispatched to, so a pinned handle keeps running its version
 after a newer deploy — useful for a canary or a rollback (redeploy the old spec: same digest, same image,
 a new template). "Serving" simply means "newest"; there is no traffic configuration.
+
+**A display name is one lineage.** Because `get_engine(name)` resolves the newest template and a deploy
+retires the previous versions once its pool is filled, an engine name is a single-revision resource by
+design: two deployers on different toolkit revisions (or different specs) addressing the same name
+replace each other's version. Consumers that run several toolkit revisions side by side — a `dev`
+branch next to `main`, a pinned release next to a candidate — should put the revision in the name
+(`spider-builder-b040d27`) and tear down the names they stop using with `engine.delete()`. Deleting an
+engine touches only sandboxes created from *its* templates, so `x` can be torn down next to `x-<rev>`.
 
 ## Past jobs: listing sessions & reading history
 
@@ -1209,7 +1236,16 @@ account's token. For that to work:
    so a turn longer than that loses model access at the hour. To run longer turns, list the model service
    account in the organization policy `constraints/iam.allowServiceAccountCredentialLifetimeExtension`
    (up to 12 h): the client then mints tokens for `max_turn_s` (a `deploy` knob, default 8 h) and warns
-   once per handle when it cannot.
+   once per handle when it cannot. The policy can be set on the project (it needs
+   `roles/orgpolicy.policyAdmin`, which is granted at the organization level):
+
+   ```bash
+   gcloud resource-manager org-policies allow \
+     constraints/iam.allowServiceAccountCredentialLifetimeExtension \
+     ratk-model@$PROJECT.iam.gserviceaccount.com --project $PROJECT
+   gcloud resource-manager org-policies describe \
+     constraints/iam.allowServiceAccountCredentialLifetimeExtension --project $PROJECT --effective
+   ```
 
 Prefer an API key (e.g. for models you haven't enabled on Vertex)? Deploy with `use_vertex=False` and pass
 `ANTHROPIC_API_KEY` as a per-invocation secret — the toolkit then uses the key (no Vertex routing), so any
@@ -1219,7 +1255,11 @@ a long-lived key, so prefer Vertex for anything exposed to untrusted input (see
 
 **Concrete shared setup** (`my-project`): location `us-central1` (Claude: `us-central1` + `global`);
 operator SA `agent-runtime@my-project.iam.gserviceaccount.com`; image repo
-`us-central1-docker.pkg.dev/my-project/ratk`. Sketch for a fresh project:
+`us-central1-docker.pkg.dev/my-project/ratk`. The setup tool's default operator SA is
+`agent-runtime@`, so audit this project with `ratk-gcp-setup --project my-project
+--operator-sa agent-runtime --check`; the tool discovers the ADC principal itself (a plain
+`gcloud auth application-default login` included) and `--impersonator user:...` only names *other*
+people to grant. Sketch for a fresh project:
 
 ```bash
 PROJECT=your-project; REGION=us-central1; NUMBER=$(gcloud projects describe $PROJECT --format='value(projectNumber)')

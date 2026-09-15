@@ -172,6 +172,17 @@ for the tag with this file's section as the notes.
   progress line through `deploy(log=)` every 30 s; a template that ends FAILED raises with the
   operation's error message, and a template still PROVISIONING after 30 minutes raises with the
   operation name instead of hanging. `SandboxProvider.create_template` gained `log=`.
+- **A stuck template blocks the next one; `deploy` now clears them.** Five 4 CPU template
+  creates in two days sat PROVISIONING until the platform's own deadline (30 min 31 s, every time)
+  and ended `INTERNAL` with no reason — with the same image and config as templates that came up
+  in 90 s, and while a 1 CPU one came up in 33 s. Each stall followed an earlier stuck or FAILED
+  template, and a stalled create completed 34 s after that FAILED template was deleted: a failed
+  template appears to hold its warm-pool capacity until it is deleted. `create_template` now
+  deletes every FAILED template under the host instance before creating (any engine's — a FAILED
+  template is never usable), deletes the new template when it ends FAILED (the error still carries
+  the platform's reason), and waits 32 minutes — past that deadline — before giving up on a
+  template still PROVISIONING, deleting it too so it does not hold up the re-run. Each deletion is
+  reported through `log=`; one the platform refuses is named in the error instead.
 - **`get_engine` resolves to the newest ACTIVE template**, skipping FAILED and PROVISIONING ones
   with a warning (it used to address whatever was newest — a FAILED deploy attempt included);
   when no version is ACTIVE it raises a `LookupError` that lists each version's state.

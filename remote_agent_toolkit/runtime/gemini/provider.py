@@ -83,7 +83,10 @@ class SandboxProvider(Protocol):
     ) -> str:
         """Create an immutable custom-container template; return its resource name once it
         is ACTIVE. ``log`` gets progress lines while the platform provisions it. A template
-        that ends FAILED raises ``SandboxError`` with the platform's reason."""
+        that ends FAILED raises ``SandboxError`` with the platform's reason. FAILED templates
+        under the host instance are deleted first, and a template that ends FAILED or is still
+        PROVISIONING at the timeout is deleted too: a stuck template holds capacity that keeps
+        the next create from provisioning (observed 2026-09-14/15)."""
         ...
 
     def list_templates(self, *, display_name: str | None = None) -> list[dict]:
@@ -98,7 +101,9 @@ class SandboxProvider(Protocol):
 
 TEMPLATE_POLL_S = 5.0
 TEMPLATE_REPORT_S = 30.0
-TEMPLATE_TIMEOUT_S = 30 * 60.0
+# Past the platform's own deadline: a template it cannot provision ends FAILED / INTERNAL after
+# 30 min 31 s (five cases, 2026-09-14/15), so waiting 32 min reports its verdict, not ours.
+TEMPLATE_TIMEOUT_S = 32 * 60.0
 
 
 def _state_name(obj: Any) -> str:
@@ -292,12 +297,30 @@ class AgentSandboxProvider:
         every ``TEMPLATE_POLL_S`` and returns at ACTIVE, reporting progress through ``log``
         every ``TEMPLATE_REPORT_S``. The operation is consulted for the failure reason when
         the template ends FAILED, or when it finishes with an error first.
+
+        **Stuck templates hold capacity.** Five 4 CPU creates in two days (2026-09-14/15) sat
+        PROVISIONING until the platform's own deadline (30 min 31 s each) and ended FAILED /
+        ``INTERNAL`` with no reason, with the same image and config as templates that came up
+        in 90 s; every one followed an earlier stuck or FAILED template, and a stalled create
+        completed 34 s after that FAILED template was deleted. So: every FAILED template under
+        the host instance is deleted before creating (any engine's — a FAILED template is never
+        usable), a template that ends FAILED is deleted before the error is raised, and one
+        still PROVISIONING at ``TEMPLATE_TIMEOUT_S`` (past that deadline) is deleted too, so a
+        re-run does not queue behind it. Each deletion goes through ``log``; one the platform
+        refuses is named in the error instead.
         """
         templates = self._client().sandboxes.templates
         say = log or (lambda msg: None)
         try:
-            known = {t.name for t in templates.list(name=self.instance())
-                     if (getattr(t, "display_name", None) or "") == display_name}
+            listed = list(templates.list(name=self.instance()))
+        except Exception as exc:  # noqa: BLE001
+            raise self._translate(exc) from exc
+        known = {t.name for t in listed if (getattr(t, "display_name", None) or "") == display_name}
+        for stale in listed:
+            if "FAILED" in _state_name(stale):
+                self._reap(templates, stale.name, getattr(stale, "display_name", None) or "", say,
+                           why="a FAILED template holds warm-pool capacity until it is deleted")
+        try:
             op = templates.create(
                 name=self.instance(),
                 display_name=display_name,
@@ -337,9 +360,11 @@ class AgentSandboxProvider:
                 if "ACTIVE" in last_state:
                     return target
                 if "FAILED" in last_state:
+                    reason = self._operation_error(templates, op.name) or "the platform gave no reason"
+                    note = self._reap(templates, target, display_name, say,
+                                      why="it would hold capacity from the next create")
                     raise SandboxError(
-                        f"template {template_id(target)} ({display_name}) ended FAILED: "
-                        f"{self._operation_error(templates, op.name) or 'the platform gave no reason'}"
+                        f"template {template_id(target)} ({display_name}) ended FAILED: {reason}; {note}"
                     )
             error = None
             try:
@@ -347,7 +372,13 @@ class AgentSandboxProvider:
                 if getattr(current, "done", False):
                     error = getattr(current, "error", None)
                     if error:
-                        raise SandboxError(f"template create for {display_name} failed: {_error_text(error)}")
+                        note = ""
+                        if target is not None:
+                            note = "; " + self._reap(templates, target, display_name, say,
+                                                     why="it would hold capacity from the next create")
+                        raise SandboxError(
+                            f"template create for {display_name} failed: {_error_text(error)}{note}"
+                        )
                     name = getattr(getattr(current, "response", None), "name", None)
                     if name and target is None:
                         target = name
@@ -357,15 +388,32 @@ class AgentSandboxProvider:
                 say(f"operation check failed ({type(exc).__name__}); relying on the template listing")
             elapsed = time.monotonic() - started
             if elapsed > TEMPLATE_TIMEOUT_S:
+                note = "nothing listed under that name to delete"
+                if target is not None:
+                    note = self._reap(templates, target, display_name, say,
+                                      why="a stuck template holds capacity from the next create")
                 raise SandboxError(
                     f"template {display_name} still {last_state} after {elapsed:.0f}s "
-                    f"(operation {op.name}); it may still come up — re-run the deploy later, or "
-                    "delete it via engine.delete_version()"
+                    f"(operation {op.name}), past the platform's ~30-minute deadline; {note} — "
+                    "re-run the deploy"
                 )
             if time.monotonic() >= next_report:
                 say(f"template {display_name}: {last_state} for {elapsed:.0f}s")
                 next_report = time.monotonic() + TEMPLATE_REPORT_S
             time.sleep(TEMPLATE_POLL_S)
+
+    @staticmethod
+    def _reap(templates: Any, name: str, display_name: str, say: Callable[[str], None], *, why: str) -> str:
+        """Best-effort delete of a FAILED or stuck template; a one-line account for the caller."""
+        label = f"template {template_id(name)} ({display_name})"
+        try:
+            templates.delete(name=name)
+        except Exception as exc:  # noqa: BLE001 — report, never mask the create's own outcome
+            say(f"could not delete {label}: {type(exc).__name__}: {str(exc)[:200]} — {why}")
+            return (f"could not delete it ({type(exc).__name__}); delete it via "
+                    f"engine.delete_version() — {why}")
+        say(f"deleted {label}: {why}")
+        return f"deleted it ({why})"
 
     @staticmethod
     def _operation_error(templates: Any, operation_name: str) -> str | None:

@@ -978,8 +978,15 @@ the moment the template lists as ACTIVE rather than waiting for the platform's l
 has been seen to complete nine minutes after that. A template that ends FAILED makes `deploy` raise with the
 platform's reason (from the operation); FAILED versions stay visible in `engine.revisions()` with their
 `state`, `get_engine` skips them (with a warning) and resolves to the newest ACTIVE version, and the next
-successful deploy retires them. After 30 minutes of PROVISIONING `deploy` gives up with the operation name;
-the template may still come up — re-run the deploy later (idempotent) or delete it with `delete_version()`.
+successful deploy retires them. The platform itself gives up on a template after about 30 minutes of
+PROVISIONING and fails it with a bare `INTERNAL` (seen five times in two days for 4 CPU templates, never for
+1 CPU ones, with images and configs identical to templates that came up in 90 s); every such stall followed an
+earlier stuck or FAILED template, and one completed 34 s after that FAILED template was deleted, so a failed
+template appears to hold its warm-pool capacity until deleted. `deploy` therefore deletes every FAILED template
+under the host instance before creating a new one (logging each), deletes its own template when it ends FAILED,
+and after 32 minutes of PROVISIONING gives up with the operation name, deleting the stuck template so it does
+not hold up the re-run (idempotent). If a create runs past ten minutes, `engine.revisions()` and
+`delete_version()` on anything FAILED is the manual version of the same fix.
 
 **The deploy record.** `deploy` writes `deploys/<name>/<template id>.json` under the output bucket
 right after the template exists, before the pool is filled: the baked spec, the image, the model

@@ -438,7 +438,8 @@ These are facts measured during the PoC. The library encodes them so consumers i
   engine template's host instance) and whether `control_ready` was announced — and builds a `DrivenRun`
   over the same `_stream_turn` the owner uses (the worker replays the whole turn from `since=0`, then
   streams; the mirror tail is the fallback). From there the session behaves as the owner's: steer,
-  stop, probe, `last_result`. Ownership rules: the adopter runs its own run-scoped token refresher (the
+  stop, probe, `last_result` — and `Session.current_run` (protocol) hands the adopter the `Run`
+  itself, so it consumes the events instead of polling. Ownership rules: the adopter runs its own run-scoped token refresher (the
   owner may be dead; the worker reads the record back), deletes the sandbox `ADOPTED_RELEASE_DELAY_S`
   (10 s) after the result so a still-alive owner can drain its last events first (its `/events` call is
   served from memory the moment the result lands, and the mirror holds the result anyway), and an

@@ -119,7 +119,10 @@ for the tag with this file's section as the notes.
   `exec()` or `run()` on such a session now reads the mirror once and, if the last `turn_started`
   has no `result` after it, adopts that turn as the session's current run: events replay from the
   worker then flow live, `send()` steers, `interrupt()` stops, `exec()` probes, `run()` raises,
-  `last_result` lands at the end. The adopter also runs the run-scoped storage token refresh (the
+  `last_result` lands at the end. **`Session.current_run`** (new on the protocol, with `busy`) is
+  the running turn's `Run` or `None` — on such a session it hands the adopter that run, so it
+  consumes the events as the owner would instead of polling `last_result`; on `local` it is the
+  in-process run. The adopter also runs the run-scoped storage token refresh (the
   owner may be gone) and deletes the sandbox at the result (10 s late, in case the owner is still
   reading); an adopter whose event loop merely shuts down leaves the turn to its owner. `Run` gained
   `cancelled` / `cancel_note`. Live: a fresh interpreter knowing only the engine name and session

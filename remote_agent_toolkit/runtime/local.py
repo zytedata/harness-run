@@ -218,6 +218,12 @@ class LocalSession:
         """Whether a turn of this session is running (or started and not yet finished)."""
         return self._current_run is not None and not self._current_run.done
 
+    @property
+    def current_run(self) -> DrivenRun | None:
+        """The running turn's run, or None (``runtime.base.Session``; one process on ``local``)."""
+        run = self._current_run
+        return run if run is not None and not run.done else None
+
     def _send_into_running_turn(
         self,
         message: str,

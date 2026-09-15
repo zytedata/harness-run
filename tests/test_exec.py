@@ -242,7 +242,9 @@ def test_local_exec_runs_in_the_sessions_workspace_while_the_turn_runs(tmp_path)
         engine._harness = harness
         with pytest.raises(ControlUnavailable, match="no turn is running"):
             await session.exec("pwd")
+        assert session.current_run is None
         run = session.run("go")
+        assert session.current_run is run and session.busy
         (session.workspace / "sub").mkdir()
         r = await session.exec("pwd; echo hi >&2; exit 4", timeout=10)
         rel = await session.exec("pwd", cwd="sub", timeout=10)
@@ -251,6 +253,7 @@ def test_local_exec_runs_in_the_sessions_workspace_while_the_turn_runs(tmp_path)
             await session.exec("")
         harness.release.set()
         await run
+        assert session.current_run is None and not session.busy
         with pytest.raises(ControlUnavailable, match="no turn is running"):
             await session.exec("pwd")
         return r, rel, slow

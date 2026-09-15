@@ -588,6 +588,9 @@ result = run.result
 
 # re-attach later / elsewhere by session id, then poll or continue
 session = engine.get_session(session_id)
+if (run := session.current_run) is not None:             # a turn still running (even under another process)
+    async for ev in run:
+        print(ev.kind, ev.summary)
 if session.status == "idle" and session.stop_reason == "needs_input":
     await session.send("yes, that schema looks right")     # resumes the conversation (a fresh turn)
 ```
@@ -699,7 +702,9 @@ await session.send("OK, now do X")              # a normal turn, from the interr
   owner died mid-turn) the session holds no run, so its first `send()`, `interrupt()`, `exec()` or
   `run()` reads the session's event record once — every event names its turn and sandbox — and, if
   a turn is still running there, **adopts** it: its events replay from the worker and then flow live
-  on the session's `Run`, `send()` steers it (no second turn is started; `run()` raises as it would
+  on the session's `Run` — `session.current_run` hands you that `Run`, so an adopter consumes the
+  events exactly as the owner would (`async for ev in run`, `await run`) instead of polling
+  `last_result` — `send()` steers it (no second turn is started; `run()` raises as it would
   locally), `interrupt()` stops it, `exec()` probes it, and `last_result` lands at its end. The
   adopter also keeps the turn's storage token fresh and deletes the sandbox at the result (a few
   seconds late, in case the owner is still reading), so a job whose owner died is cleaned up; an

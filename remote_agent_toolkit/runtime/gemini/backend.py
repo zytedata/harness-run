@@ -663,6 +663,19 @@ class GeminiSession:
         """Whether a turn of this session is running (or started and not yet finished)."""
         return self._current_run is not None and not self._current_run.done
 
+    @property
+    def current_run(self) -> DrivenRun | None:
+        """The running turn's run, or None (``runtime.base.Session``).
+
+        On a session re-attached in another process the first access adopts a turn of it
+        still running there (:meth:`_attach`; one mirror read) and returns that run: its
+        events replay from the worker, then flow live, and it completes with the turn.
+        """
+        run = self._current_run
+        if run is None and self._foreign_check:
+            run = self._attach()
+        return run if run is not None and not run.done else None
+
     def _send_into_running_turn(
         self, message: str, *, interrupt: bool, message_id: str | None,
         secrets: dict[str, str] | None, config: TurnConfig | None, hooks: Any | None,

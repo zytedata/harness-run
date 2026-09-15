@@ -179,6 +179,25 @@ class Session(Protocol):
         ...
 
     @property
+    def busy(self) -> bool:
+        """Whether a turn of this session is running (started and not yet finished)."""
+        ...
+
+    @property
+    def current_run(self) -> Run | None:
+        """The running turn's :class:`Run`, or ``None`` when no turn is running.
+
+        The same object :meth:`run` / :meth:`send` returned: iterate it for the events,
+        await it for the result. Its point is the session that did **not** start the
+        turn — on ``gemini`` a session re-attached in another process (a worker adopting
+        a job whose owner died mid-turn) adopts the turn still running there on its first
+        access (one storage read; ``None`` when nothing runs), and this hands the adopter
+        that run so it consumes the events exactly as the owner would, instead of
+        polling :attr:`last_result`.
+        """
+        ...
+
+    @property
     def workspace(self):  # -> pathlib.Path
         """The agent's working directory — always a leaf named ``workspace``.
 

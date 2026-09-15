@@ -126,6 +126,53 @@ def test_send_from_a_reattached_session_steers_the_turn_running_elsewhere(tmp_pa
     assert len(bucket.mirror_reads) == 1
 
 
+def test_current_run_hands_a_reattached_session_the_adopted_run(tmp_path, monkeypatch):
+    """The public handle: an adopter consumes the run's events as the owner would."""
+    bucket = _Bucket(tmp_path, monkeypatch)
+    provider = FakeSandboxProvider(lambda n: ScriptedWorker())
+    owner, session, other, adopter = _two_processes(provider)
+
+    async def go():
+        run, w, turn_id = await _owner_turn(provider, session, bucket)
+        assert session.current_run is run  # the owner's own handle
+        w.emit(AgentEvent(kind="message", summary="first"))
+        adopted = adopter.current_run
+        assert adopted is not None and adopted is adopter.current_run and adopter.busy
+        assert len(bucket.mirror_reads) == 1
+        seen = []
+
+        async def consume():
+            async for ev in adopted:
+                seen.append(ev.kind)
+            return adopted.result
+
+        consumer = asyncio.ensure_future(consume())
+        await asyncio.sleep(0.05)
+        w.emit(AgentEvent(kind="message", summary="second"), result_event("done"))
+        w.finish()
+        await run
+        result = await consumer
+        assert session.current_run is None and adopter.current_run is None  # both idle now
+        return seen, result
+
+    seen, result = asyncio.run(go())
+    owner._join_background()
+    other._join_background()
+    assert seen == ["message", "message", "result"]  # replayed, then live, then the terminal result
+    assert result.text == "done" and adopter.last_result.text == "done"
+    assert len(bucket.mirror_reads) == 1  # current_run after the turn does not look again
+
+
+def test_current_run_is_none_on_a_reattached_session_with_nothing_running(tmp_path, monkeypatch):
+    bucket = _Bucket(tmp_path, monkeypatch)
+    provider = FakeSandboxProvider()
+    sid = make_engine(provider).start_session().session_id
+    bucket.write(sid, "t-old", _started("t-old", "s-old"), _result("t-old"))
+    adopter = make_engine(provider).get_session(sid)
+    assert adopter.current_run is None and adopter.current_run is None and not adopter.busy
+    assert len(bucket.mirror_reads) == 1  # checked once
+
+
 def test_interrupt_from_a_reattached_session_stops_the_turn_running_elsewhere(tmp_path, monkeypatch):
     bucket = _Bucket(tmp_path, monkeypatch)
 

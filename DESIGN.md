@@ -942,7 +942,10 @@ every sandbox under the parent instance); the shell/custom-container surface is 
 - **Cost.** Same rates ($0.085/vCPU-h + $0.009/GiB-h). A ready sandbox bills like an idle warm worker; a
   sandbox is billed while it exists, so delete at turn end and size the ready pool + TTL to the dispatch
   pattern exactly as `pool_size` / `pool_max_wait_s` are sized today. The template's Google-side pre-warmed
-  pool: billing not documented (open question).
+  pool: billing not documented — **open question, to be settled against the billing report** (2026-09-16:
+  the pool is persistent, see §13.4; if it bills at sandbox rates, two 4 CPU / 4 GiB containers are
+  ~$0.75/h ≈ $18/day per template, and "a cold engine bills only for image storage" would need the
+  template created on demand and reaped when idle rather than at deploy).
 
 ### 13.2 Feature survey: what carries over, what changes, what is lost
 
@@ -1025,7 +1028,12 @@ release with these notes in the CHANGELOG; other teams update when it merges. Wh
   Report to Google; no impact on us.
 - **Google-side pool** for a template: size, minimum instances and whether it bills are not exposed. If a
   large image (the Codex CLI adds tens of MB, `packages` can add GBs) slows pool refill, refill latency
-  grows but stays off the critical path.
+  grows but stays off the critical path. *Measured 2026-09-16*: the pool is persistent — two sandboxes
+  created back to back from a 34.2 h-old template both had PID 1 with 34.2 h uptime, so Google keeps at
+  least two template-sized containers running per ACTIVE template from creation on, whether or not
+  anything is ever created from it. The docs only say sandboxes bill while they exist; the pool's billing
+  is unverified (needs the billing report: Agent Compute / Agent Memory SKUs on days without runs). This
+  matters most for adopters wanting tens to hundreds of engines with pre-baked dependencies.
 - **Observability**: Cloud Logging and Cloud Trace are dropped (accepted). *Resolved 2026-09-16*: the
   platform exposes nothing about a sandbox's CPU/memory from outside (363 `aiplatform` metric types, none
   for sandboxes; the `reasoning_engine/*/allocation_time` series report only for Agent Runtime engines), but

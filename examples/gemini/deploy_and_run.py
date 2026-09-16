@@ -9,11 +9,11 @@ Prerequisites (see the top-level README "GCP setup & required permissions"):
     model enabled in Vertex Model Garden, and Docker logged into the registry (the deploy builds
     and pushes the agent's image).
 Configure via env (defaults are the shared my-project test setup):
-  PROJECT, LOCATION, IMPERSONATE_SA (optional least-priv impersonation), WARM=1 (warm pool).
+  PROJECT, LOCATION, IMPERSONATE_SA (optional least-priv impersonation), WARM=1 (ready pool).
 
 Run:
   .venv/bin/python examples/gemini/deploy_and_run.py             # reuse-or-deploy, then run a turn
-  TEARDOWN=1 .venv/bin/python examples/gemini/deploy_and_run.py  # tear the engine down (+ warm pool)
+  TEARDOWN=1 .venv/bin/python examples/gemini/deploy_and_run.py  # tear the engine down (templates + ready sandboxes)
 
 The engine is REUSED if one of this name already exists (a subsequent run skips the image
 build); it's left in place afterwards for that reuse. A template itself costs nothing; a ready

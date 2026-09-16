@@ -3,8 +3,8 @@
 Drives ``claude_agent_sdk.query()`` against the per-run working directory and translates
 each streamed SDK message into a generic :class:`AgentEvent` (via :mod:`translate`), so
 the rest of the toolkit — and every runtime (``local`` / ``gemini``) — stays harness-
-agnostic. This is the generalized, ADK-free core of the PoC ``ClaudeCodeAgent``: the
-ADK / Agent Engine wrapping is a ``gemini``-side concern, not the harness's.
+agnostic. This is the generalized core of the PoC ``ClaudeCodeAgent``: running it in a
+sandbox (the worker, the HTTP contract) is a ``gemini``-side concern, not the harness's.
 
 ``claude_agent_sdk`` is imported lazily inside methods, so importing this module needs no
 third-party deps.

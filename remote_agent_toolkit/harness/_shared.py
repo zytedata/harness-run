@@ -264,9 +264,10 @@ async def run_with_openrouter_proxy(
 def finalize_checkpoint(spec: AgentSpec, ctx: Any) -> AgentEvent | None:
     """Checkpoint the workspace inline at the terminal result event (DESIGN.md §6).
 
-    Done as a direct side-effect (not post-loop): the async Agent Engine executor
-    stops draining the generator after the final event, so post-loop work is dead
-    code in-cloud. Best-effort — a checkpoint failure never fails the run.
+    Done as a direct side-effect (not post-loop): the former Agent Engine executor
+    stopped draining the generator after the final event, so post-loop work was dead
+    code in-cloud — the sandbox worker drains fully, but inline stays the contract.
+    Best-effort — a checkpoint failure never fails the run.
 
     A caller-owned cwd (``ctx.workspace_dir``) is checkpointed as conversation only: the
     directory is already durable, so there is nothing to preserve, while snapshotting it

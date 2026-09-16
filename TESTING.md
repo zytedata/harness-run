@@ -89,7 +89,7 @@ before a deploy builds the real image. See [`dev/README.md`](dev/README.md).
 ### Why offline green isn't enough
 
 The platform's behavior changes **server-side, with zero client changes** — the offline
-suite stays green through it. Measured examples: on Agent Runtime (2026-07-28) new engines'
+suite stays green through it. Measured examples: on the former Agent Runtime backend (2026-07-28) new engines'
 job workers stopped resolving a default `class_method` and the job runner started
 kill-and-retrying workers; Agent Sandbox is a v1beta1 surface whose SDK renamed
 `agent_engines` → `runtimes` between 1.x and 2.x and whose proxy limits (call ceiling,

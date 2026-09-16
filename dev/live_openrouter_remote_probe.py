@@ -1,4 +1,4 @@
-"""Paid Gemini Agent Runtime check for OpenRouter on both harnesses.
+"""Paid remote (Agent Sandbox) check for OpenRouter on both harnesses.
 
 One throwaway engine contains both CLIs. It checks every model's basic and structured-output
 turns on both harnesses. It also checks resume, budgets, provider selection, whole routing
@@ -506,7 +506,8 @@ def _install_signal_teardown() -> None:
     """On SIGTERM/SIGINT: delete the engine, then exit non-zero.
 
     Installed BEFORE ``gemini.deploy``, because that call is the longest part of the run
-    (5-10 min) and the process is routinely wrapped in a ``timeout`` or interrupted. An
+    (the image build, then a template create the platform has taken up to 30 min over) and
+    the process is routinely wrapped in a ``timeout`` or interrupted. An
     interrupt during the deploy would otherwise leave a billing engine behind with nothing
     printed. There is no engine object yet in that window, so ``_teardown`` falls back to
     deleting by name.

@@ -97,7 +97,7 @@ class Session(Protocol):
         """Send ``message`` to the session: resume it when idle, talk to the turn when running.
 
         **Idle** (e.g. after a ``needs_input`` pause): starts a new turn that resumes via
-        checkpoint on a warm worker (DESIGN.md §3.7). Pass ``secrets`` again — they are not
+        checkpoint on a ready or fresh sandbox (DESIGN.md §3.7). Pass ``secrets`` again — they are not
         persisted across turns, so repo push auth is re-embedded on resume. ``config`` is a
         per-turn :class:`~remote_agent_toolkit.config.TurnConfig`; the SESSION config cannot
         change here (bound at :meth:`Engine.start_session`, world snapshot-restored). *hooks*
@@ -291,5 +291,5 @@ class Engine(Protocol):
 
     @property
     def resource(self) -> str:
-        """The underlying resource name (e.g. the Agent Engine resource path)."""
+        """The underlying resource name (e.g. the sandbox template's resource path on ``gemini``)."""
         ...

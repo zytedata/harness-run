@@ -3,7 +3,7 @@
 A `dev/` script does not normally get tests. This one does, because the mechanism it
 guards costs real money when it fails: the probe runs for many minutes, so it is routinely
 wrapped in a `timeout` or interrupted, and SIGTERM/SIGINT kill the process WITHOUT running
-`finally`. That happened while the probe was being written and left an Agent Engine
+`finally`. That happened while the probe was being written and left an engine
 billing until it was deleted by hand. These tests pin the behaviors that prevent a repeat,
 including an interrupt during the deploy, when there is no engine object yet and the engine
 has to be deleted by name. They touch no network and no cloud.

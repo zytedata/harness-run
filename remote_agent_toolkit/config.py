@@ -69,9 +69,8 @@ INHERIT: Any = _Inherit()
 def _assert_repos_credential_free(repos: Sequence[RepoSource]) -> None:
     """Reject a ``RepoSource`` whose URL embeds ``user:token@`` credentials.
 
-    Configs are staged as GCS objects referenced from persisted payloads (the platform
-    keeps a job's input verbatim; a Pub/Sub message is retained until acked) and are kept
-    for post-mortem debugging — so they must never carry secret values.
+    The worker gets configs in the turn body, and the client also writes them to GCS as
+    the 30-day post-mortem record — so they must never carry secret values.
     """
     from urllib.parse import urlsplit
 

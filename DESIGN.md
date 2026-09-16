@@ -14,11 +14,12 @@ without re-learning the platform's sharp edges.
 ## 1. Goals & non-goals
 
 **Goals**
-- Let a team define an agent **declaratively** and run it both **locally** (dev) and **remotely** on
-  **Gemini Agent Runtime** (prod) through *one* API — local deploy is first-class, not an afterthought.
+- Let a team define an agent **declaratively** and run it both **locally** (dev) and **remotely** in a
+  **Google Agent Sandbox** (prod; §13 — Gemini Agent Runtime query jobs until 2026-09-11) through *one*
+  API — local deploy is first-class, not an afterthought.
 - Cover the use-cases in the requirements doc: background long-running jobs (self-heal, QA, analysis)
   *and* interactive, human-in-the-loop jobs (requirement-building, prompt-driven setup).
-- Bake in the hard-won platform knowledge (latency, checkpointing, warm pool, IAM, build constraints)
+- Bake in the hard-won platform knowledge (latency, checkpointing, the ready pool, IAM, build constraints)
   so consumers inherit it for free.
 - Be a **source of knowledge**, not just code: the README + design docs explain *why*.
 
@@ -45,18 +46,19 @@ without re-learning the platform's sharp edges.
 |---|---|---|
 | What | Server-hosted agent harness exposed as REST (`/v1/agents`, `/v1/sessions`) | Client library (`claude_agent_sdk`) that drives the Claude Code loop in-process |
 | Runs where | Anthropic infra (loop + sandbox container) | **Your** process / container |
-| On our platform? | ❌ Not offered on Vertex/Bedrock/Foundry | ✅ via `AnthropicVertex` model access on Gemini Agent Runtime |
+| On our platform? | ❌ Not offered on Vertex/Bedrock/Foundry | ✅ via `AnthropicVertex` model access from our own container (Agent Sandbox) |
 | Object model | Versioned `Agent` → `Environment` → `Session` → events | `query()` / `ClaudeAgentOptions` / `SessionStore` |
 
-**Decision:** build on the **Claude Agent SDK** (the only Claude harness runnable on Gemini Agent
-Runtime, via `AnthropicVertex` model access), and **borrow CMA's API shape** as the conceptual template.
+**Decision:** build on the **Claude Agent SDK** (the only Claude harness runnable in our own container on
+Google's platform, via `AnthropicVertex` model access), and **borrow CMA's API shape** as the conceptual template.
 We cannot host *on* CMA.
 
-> **Naming.** We call the platform **Gemini Agent Runtime** — Google's recent rename of what was
-> "Vertex AI Agent Engine". The public namespace is **`gemini.*`** (`gemini.deploy`, `gemini.get_engine`).
-> The underlying Google Python SDK is imported as `agentplatform` / `google-cloud-aiplatform` — the
-> `vertexai` namespace was renamed to `agentplatform` in aiplatform 1.154 and now emits a
-> `FutureWarning` on `Client()`; that's an internal detail, not part of our surface.
+> **Naming.** The remote backend runs in **Agent Sandbox**, the sandbox-environment feature of Google's
+> Gemini Enterprise Agent Platform (§13; before 2026-09-11 it ran as **Gemini Agent Runtime** query jobs —
+> Google's rename of "Vertex AI Agent Engine" — which the history sections below still describe). The public
+> namespace stayed **`gemini.*`** (`gemini.deploy`, `gemini.get_engine`). The underlying Google Python SDK is
+> `google-cloud-agentplatform` 2.x (`client.sandboxes` / `client.runtimes`); that's an internal detail, not
+> part of our surface.
 
 What we borrow from CMA / the SDK (things our PoC did implicitly or not at all):
 - **Versioned agent-definition vs. run** split → control plane / data plane.

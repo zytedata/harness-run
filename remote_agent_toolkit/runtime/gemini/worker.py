@@ -7,7 +7,7 @@ container, so the whole worker contract is a handful of JSON-over-POST endpoints
 * ``/health``  — liveness + facts (uptime, uid, writable dirs, the running turn if any).
   The client polls it after creating a sandbox until the proxy routes.
 * ``/turn``    — start ONE turn (``{turn_id, session_id, prompt, resume, session_config,
-  turn_config, secrets, gcs, model_env, sandbox}``); ``{ok: false}`` while one runs.
+  turn_config, secrets, gcs, model_env, model_token, sandbox}``); ``{ok: false}`` while one runs.
   The worker overlays the configs on the image's **baked** spec exactly as the query-job
   worker did, echoes the merged ``effective_spec``, prepares the workspace (restore or
   skills + repos) and drives the harness. Every event goes to the in-memory turn record
@@ -18,9 +18,12 @@ container, so the whole worker contract is a handful of JSON-over-POST endpoints
   response at ~2 MB, measured 2026-09-11).
 * ``/control`` — ``{turn_id, op, message?, message_id?}``: steer / interrupt / stop into
   the running turn (the ``ControlChannel`` the harness reads; replaces the GCS inbox).
-* ``/token``   — ``{turn_id, model_token}``: replaces the turn's model-token file (Claude Code
-  does not re-read its token, so this only serves tooling that does; the client bounds a
-  turn's model access by the token's lifetime instead, see ``model_token.py``).
+* ``/token``   — ``{turn_id, model_token: {access_token, expires_at}}``: replaces the model
+  token the worker's **metadata server** serves. That server (loopback only, the port in
+  ``RATK_METADATA_PORT``) speaks the GCE metadata protocol for exactly one thing — the running
+  turn's model token — and the agent env points Claude Code at it (``GCE_METADATA_HOST``), so
+  the CLI fetches the token itself and fetches it again before it expires. The client pushes
+  a fresh hourly token here for as long as the turn runs (``model_token.py``).
 * ``/exec``    — ``{command, cwd?, timeout?, turn_id?}`` → ``{stdout, stderr, returncode,
   truncated, duration_ms, cwd}``: a shell command in the running turn's workspace (the
   agent's cwd; a relative ``cwd`` is resolved against it, no turn → the workspace root).
@@ -32,13 +35,15 @@ proxy's treatment of non-2xx worker answers is not documented, and the client on
 the JSON. Nothing here logs env, secret or token values.
 
 The container has no Google identity on purpose: GCS access runs on the run-scoped token
-the client sends (``scoped_gcs.py``), model access on the model token in ``model_env``.
+the client sends (``scoped_gcs.py``), model access on the model token the metadata server
+serves (never in the agent's environment; the shell can still fetch it, like the CLI does).
 Stdlib HTTP server; the toolkit and the harness SDKs are imported inside the turn.
 """
 
 from __future__ import annotations
 
 import asyncio
+import datetime as _dt
 import json
 import os
 import sys
@@ -55,6 +60,9 @@ from ...events import AgentEvent
 
 BOOT = time.time()
 WORKSPACE_ROOT = os.environ.get("RATK_WORKSPACE_ROOT", "/workspace")
+# The model-token metadata server (loopback). Not a template port: never proxied.
+DEFAULT_METADATA_PORT = 8081
+DEFAULT_TOKEN_EXPIRES_IN_S = 3600  # reported when the client sent no expiry
 BAKED_SPEC_PATH = os.environ.get("RATK_BAKED_SPEC", "/opt/toolkit/spec.json")
 
 # /events paging: the proxy rejects answers past ~2 MB ("Response size too large", measured
@@ -102,7 +110,7 @@ class TurnRecord:
         self.finished_at: float | None = None
         self.cond = threading.Condition(lock)
         self.control: _TurnControl | None = None
-        self.model_token_file: Path | None = None
+        self.model_token: dict | None = None  # {"access_token", "expires_at"} the metadata server serves
         self.workspace: Path | None = None  # the agent's cwd once the turn set it up
 
     def append(self, line: dict) -> None:
@@ -199,13 +207,6 @@ def _line(event: AgentEvent) -> dict:
     return line
 
 
-def _write_private(path: Path, value: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as fh:
-        fh.write(value)
-
-
 class Worker:
     """The endpoints and the turn runner of one sandbox process.
 
@@ -222,6 +223,7 @@ class Worker:
         baked_skills: Path | None | str = "auto",
         blob_store_factory: Any | None = None,
         mirror_factory: Any | None = None,
+        metadata_port: int | None = None,
     ) -> None:
         self.workspace_root = workspace_root
         self.baked_spec_path = baked_spec_path
@@ -231,8 +233,47 @@ class Worker:
         self._mirror_factory = mirror_factory
         self._lock = threading.Lock()
         self._turns: dict[str, TurnRecord] = {}
+        # The metadata server binds lazily, on the first turn that carries a model token
+        # (``0`` → an ephemeral port; tests). ``None`` → ``RATK_METADATA_PORT`` or 8081.
+        self._metadata_port = metadata_port
+        self._metadata: _MetadataServer | None = None
 
     # -- plumbing ---------------------------------------------------------------------
+
+    @property
+    def metadata_host(self) -> str | None:
+        """``host:port`` of the model-token metadata server once it is up (``None`` before)."""
+        return self._metadata.host if self._metadata is not None else None
+
+    def _ensure_metadata_server(self) -> str:
+        with self._lock:
+            if self._metadata is None:
+                port = self._metadata_port
+                if port is None:
+                    port = int(os.environ.get("RATK_METADATA_PORT", str(DEFAULT_METADATA_PORT)))
+                self._metadata = _MetadataServer(self, port)
+            return self._metadata.host
+
+    def _metadata_env(self) -> dict[str, str]:
+        """Env that makes Claude Code's Google auth take its token from our metadata server."""
+        return {
+            "GCE_METADATA_HOST": self._ensure_metadata_server(),
+            # Skip the library's "am I on GCE?" probe (it would also accept the answer).
+            "METADATA_SERVER_DETECTION": "assume-present",
+        }
+
+    def served_model_token(self) -> dict | None:
+        """The metadata-protocol token answer for the running turn, or ``None`` when there is none."""
+        with self._lock:
+            running = next((r for r in self._turns.values() if not r.done), None)
+            record = running.model_token if running is not None else None
+        if record is None:
+            return None
+        expires_in = DEFAULT_TOKEN_EXPIRES_IN_S
+        expires_at = _parse_naive_utc(record.get("expires_at"))
+        if expires_at is not None:
+            expires_in = max(0, int((expires_at - _dt.datetime.now(_dt.UTC).replace(tzinfo=None)).total_seconds()))
+        return {"access_token": record["access_token"], "expires_in": expires_in, "token_type": "Bearer"}
 
     def baked_spec(self) -> Any:
         if self._baked is None:
@@ -363,10 +404,13 @@ class Worker:
         with self._lock:
             record.control = control
             record.workspace = job_dir / "workspace"  # RunContext.workspace, before it exists
-        if model_env.get("ANTHROPIC_AUTH_TOKEN"):
-            # Kept for a helper-based refresh (see /token); the env token is what the CLI reads.
-            record.model_token_file = job_dir / "model-token"
-            _write_private(record.model_token_file, model_env["ANTHROPIC_AUTH_TOKEN"])
+        model_token = _token_record(body.get("model_token"))
+        if model_token is not None:
+            # Served by the metadata server, not placed in the env: the CLI fetches it and
+            # re-fetches it near expiry, and /token swaps in the client's refreshed one.
+            with self._lock:
+                record.model_token = model_token
+            model_env = {**model_env, **self._metadata_env()}
         rc = RunContext(
             spec=spec,
             prompt=prompt,
@@ -478,6 +522,7 @@ class Worker:
             "baked_spec": self._baked is not None or os.path.exists(self.baked_spec_path),
             "running_turn": running[0] if running else None,
             "turns": turns,
+            "metadata_host": self.metadata_host,
         }
 
     def exec(self, body: dict) -> dict:
@@ -554,16 +599,107 @@ class Worker:
         record = self._turns.get(str(body.get("turn_id")))
         if record is None:
             return {"ok": False, "error": "unknown turn_id"}
-        token = body.get("model_token")
-        if not isinstance(token, str) or not token:
-            return {"ok": False, "error": "model_token is required"}
-        if record.model_token_file is None:
-            return {"ok": False, "error": "this turn runs without a model token"}
-        _write_private(record.model_token_file, token)
+        token = _token_record(body.get("model_token"))
+        if token is None:
+            return {"ok": False, "error": "model_token {access_token, expires_at} is required"}
+        with self._lock:
+            if record.model_token is None:
+                return {"ok": False, "error": "this turn runs without a model token"}
+            record.model_token = token
         return {"ok": True}
 
 
 WORKER: Worker | None = None
+
+
+def _token_record(value: Any) -> dict | None:
+    """Normalize a ``model_token`` body value to ``{"access_token", "expires_at"}`` (``None``: absent/invalid)."""
+    if isinstance(value, str) and value:
+        return {"access_token": value, "expires_at": None}
+    if isinstance(value, dict) and isinstance(value.get("access_token"), str) and value["access_token"]:
+        expires_at = value.get("expires_at")
+        return {"access_token": value["access_token"],
+                "expires_at": str(expires_at) if isinstance(expires_at, str) and expires_at else None}
+    return None
+
+
+def _parse_naive_utc(value: Any) -> _dt.datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = _dt.datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(_dt.UTC).replace(tzinfo=None)
+    return parsed
+
+
+class _MetadataHandler(BaseHTTPRequestHandler):
+    """The GCE metadata protocol, reduced to what a Google auth client asks for a token.
+
+    Real metadata servers demand ``Metadata-Flavor: Google`` and echo it back; so does this
+    one. Everything but the token answer is a constant (the universe domain, the project,
+    the account) — the client libraries read those around the token call.
+    """
+
+    server_version = "ratk-metadata/1"
+
+    def _send(self, code: int, body: str, ctype: str = "text/plain") -> None:
+        data = body.encode("utf-8")
+        self.send_response(code)
+        self.send_header("Metadata-Flavor", "Google")
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def do_GET(self) -> None:  # noqa: N802
+        worker: Worker = self.server.worker  # type: ignore[attr-defined]
+        if self.headers.get("Metadata-Flavor") != "Google":
+            self._send(403, "Missing Metadata-Flavor:Google header.")
+            return
+        path = urlsplit(self.path).path.rstrip("/")
+        if "/service-accounts/" in path and path.endswith("/token"):
+            answer = worker.served_model_token()
+            if answer is None:
+                self._send(404, "no model token: no turn carrying one is running")
+                return
+            self._send(200, json.dumps(answer), "application/json")
+            return
+        if path.endswith("/universe/universe-domain"):
+            self._send(200, "googleapis.com")
+            return
+        if "/service-accounts/" in path and path.endswith("/email"):
+            self._send(200, "default")
+            return
+        if path in _METADATA_DIRECTORIES:
+            self._send(200, "ok")
+            return
+        self._send(404, "not found")
+
+    def log_message(self, fmt: str, *args: Any) -> None:  # quiet: never the answer
+        sys.stderr.write(f"{time.strftime('%H:%M:%S')} metadata {urlsplit(self.path).path}\n")
+
+
+_METADATA_DIRECTORIES = frozenset({
+    "", "/computeMetadata", "/computeMetadata/v1", "/computeMetadata/v1/instance",
+    "/computeMetadata/v1/instance/service-accounts",
+    "/computeMetadata/v1/instance/service-accounts/default",
+})
+
+
+class _MetadataServer(ThreadingHTTPServer):
+    """Loopback-only server for :class:`_MetadataHandler`, started on construction."""
+
+    daemon_threads = True
+    allow_reuse_address = True
+
+    def __init__(self, worker: Worker, port: int) -> None:
+        super().__init__(("127.0.0.1", port), _MetadataHandler)
+        self.worker = worker
+        self.host = f"127.0.0.1:{self.server_address[1]}"
+        threading.Thread(target=self.serve_forever, name="ratk-metadata", daemon=True).start()
 
 
 class Handler(BaseHTTPRequestHandler):

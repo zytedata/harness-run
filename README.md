@@ -931,11 +931,13 @@ the blast radius:
    coerced, the exposure is limited to that one scoped token for that one run.
 3. **Least secrets per run** — pass only what the task needs.
 
-**LLM API key.** By default `gemini` routes the model through **Vertex** with a **one-hour token** the client
-mints per turn from a predict-only service account (`ratk-model@<project>`, created by `ratk-gcp-setup`) and
-hands to the sandbox as `ANTHROPIC_AUTH_TOKEN`. The agent's shell can read that token — the sandbox has no
-other identity — but it is worth `aiplatform.endpoints.predict` for at most an hour (or `max_turn_s`, see
-[GCP setup](#gcp-setup--required-permissions)) and nothing else; see
+**LLM API key.** By default `gemini` routes the model through **Vertex** with **hourly tokens** the client
+mints from a predict-only service account (`ratk-model@<project>`, created by `ratk-gcp-setup`) and the
+sandbox worker serves to Claude Code from a loopback metadata server (the client pushes a fresh one every
+25 minutes while the turn runs, so long turns just work — see [Long turns](#gcp-setup--required-permissions)).
+The token is not in the agent's environment, but the agent's shell can fetch it the way the CLI does — the
+sandbox has no other identity — and it is worth `aiplatform.endpoints.predict` for at most an hour and
+nothing else; see
 [What the agent's shell can reach](#what-the-agents-shell-can-reach) below. `deploy(..., use_vertex=False)`
 switches to API-key mode, where you pass `ANTHROPIC_API_KEY` as a per-invocation secret — then the agent can
 read a long-lived key, so prefer Vertex for anything exposed to untrusted input. Locally the agent likewise inherits your shell's environment (including
@@ -961,8 +963,9 @@ its shell is therefore what the turn itself brought along, and the toolkit keeps
   runs on a short-lived, downscoped token the client mints per turn — this bucket, only this run's object
   prefixes (`runtime/gemini/scoped_gcs.py`). Another run's records are unreachable with it. The client
   refreshes it for turns longer than an hour through an object under the run's own prefix.
-- **Model token.** A one-hour Vertex token for the predict-only model service account (above): model
-  calls, nothing else. Spend past the run's `max_budget_usd` is the only thing a coerced agent could add.
+- **Model token.** An hourly Vertex token for the predict-only model service account (above), served by
+  the worker's loopback metadata server (`GCE_METADATA_HOST` in the agent's env points at it): model calls,
+  nothing else. Spend past the run's `max_budget_usd` is the only thing a coerced agent could add.
 - **The turn's own secrets** — those the caller passed, routed as the table above says.
 
 Sandboxes are created per turn and deleted at its end, so nothing a run leaves behind survives into the
@@ -1316,20 +1319,15 @@ account's token. For that to work:
 2. Set `spec.model` to the id shown in Model Garden — for current Claude models that's the family alias (e.g.
    `claude-opus-4-8`), the same form you use locally. The toolkit defaults `CLOUD_ML_REGION` to `global`,
    where these models are served; override `vertex_region` at deploy if you need a specific location.
-3. **Long turns.** IAM mints impersonated tokens for one hour by default; Claude Code reads the token once,
-   so a turn longer than that loses model access at the hour. To run longer turns, list the model service
-   account in the organization policy `constraints/iam.allowServiceAccountCredentialLifetimeExtension`
-   (up to 12 h): the client then mints tokens for `max_turn_s` (a `deploy` knob, default 8 h) and warns
-   once per handle when it cannot. The policy can be set on the project (it needs
-   `roles/orgpolicy.policyAdmin`, which is granted at the organization level):
-
-   ```bash
-   gcloud resource-manager org-policies allow \
-     constraints/iam.allowServiceAccountCredentialLifetimeExtension \
-     ratk-model@$PROJECT.iam.gserviceaccount.com --project $PROJECT
-   gcloud resource-manager org-policies describe \
-     constraints/iam.allowServiceAccountCredentialLifetimeExtension --project $PROJECT --effective
-   ```
+3. **Long turns need no setup.** IAM mints the model token for one hour, but the sandbox worker serves it to
+   Claude Code from a loopback **metadata server** (the CLI's Google auth fetches it as on a VM and refreshes
+   it itself when it nears expiry), and the client re-mints a token every 25 minutes and pushes it to the
+   worker for as long as the turn runs. The one condition: a client process must hold the session while the
+   turn runs — the one that started it, or one that re-attached with `get_session` (see
+   [From another process](#talking-to-a-running-turn-steer-interrupt-stop)) — because the sandbox itself
+   cannot mint tokens; a turn whose last client exits keeps running on its current tokens and loses model
+   access within the hour. `max_turn_s` (a `deploy` knob, default 8 h) bounds the sandbox's lifetime, not
+   the token.
 
 Prefer an API key (e.g. for models you haven't enabled on Vertex)? Deploy with `use_vertex=False` and pass
 `ANTHROPIC_API_KEY` as a per-invocation secret — the toolkit then uses the key (no Vertex routing), so any

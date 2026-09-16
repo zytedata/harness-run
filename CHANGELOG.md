@@ -34,8 +34,9 @@ for the tag with this file's section as the notes.
   a turn claims a ready sandbox off the roster or creates one, hands it the turn over HTTP
   through the platform's proxy, streams events straight from the sandbox (the GCS mirror stays
   the durable record and the fallback) and deletes the sandbox at the terminal event. The
-  sandbox has no Google identity: GCS access runs on the run-scoped token, model calls on a
-  one-hour token minted from a predict-only service account. Measured against the warm pool it
+  sandbox has no Google identity: GCS access runs on the run-scoped token, model calls on
+  hourly tokens minted from a predict-only service account and served to Claude Code by the
+  worker's loopback metadata server. Measured against the warm pool it
   replaces: 1.3 s to the first event and ~6 s to the result of a one-tool Haiku turn (4.2 s /
   14.5 s before); a turn with no ready sandbox takes ~20 s instead of ~150 s. Module, `deploy` /
   `get_engine` / `list_engines`, `Engine` / `Session` / `Run` keep their names, so app code that
@@ -80,10 +81,17 @@ for the tag with this file's section as the notes.
     repo. `ratk-gcp-setup` sets exactly this up (`--model-sa`, `--repo` replace
     `--runtime-sa`, `--staging-bucket`). The `ports.dispatch` and `ports.eventsink` modules are
     removed.
-  - Model tokens last an hour unless the organization policy
-    `constraints/iam.allowServiceAccountCredentialLifetimeExtension` lists the model service
-    account; then the client mints them for `max_turn_s`. Claude Code reads the token once, so a
-    turn longer than the token loses model access at that point (the client warns once).
+  - **Turns longer than an hour keep model access, with no setup.** The model token is not
+    in the agent's environment any more: the worker serves it from a loopback **metadata
+    server** and points Claude Code at it (`GCE_METADATA_HOST`), so the CLI fetches the token
+    as it would on a VM and refreshes it itself when it nears expiry; the client re-mints an
+    hourly token every 25 minutes and pushes it to the worker (`/token` now takes
+    `{access_token, expires_at}`) for as long as it holds the running turn — a session
+    re-attached from another process does the same. The organization-policy route
+    (`constraints/iam.allowServiceAccountCredentialLifetimeExtension`, tokens minted for
+    `max_turn_s`) is gone; `max_turn_s` remains the sandbox's lifetime bound. The condition
+    that remains: some client process must hold the session while the turn runs — the sandbox
+    cannot mint tokens, so a turn whose last client exits loses model access within the hour.
 - **Codex resume fails explicitly for unreadable or corrupt existing checkpoints**
   (#64). Denied metadata reads, malformed metadata/thread IDs, and missing/unreadable
   rollouts no longer silently start a fresh conversation. Errors omit storage exception

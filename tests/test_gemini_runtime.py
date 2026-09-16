@@ -101,6 +101,100 @@ def test_worker_runs_the_turn_and_maps_the_session_id(tmp_path, monkeypatch):
     assert worker.handle("/health", {})["running_turn"] is None
 
 
+class _RecordingMirror:
+    def __init__(self):
+        self.events = []
+
+    def append(self, event):
+        self.events.append(event)
+
+    def close(self, timeout=None):
+        pass
+
+
+def test_worker_samples_resources_to_the_mirror_only_and_stamps_the_result(tmp_path, monkeypatch):
+    import time
+
+    _DoneHarness.seen = []
+
+    class _Slow(_DoneHarness):
+        async def run(self, spec, rc):
+            yield AgentEvent(kind="message", summary="working")
+            # Let the sampler record the calm baseline, cross the pressure threshold
+            # mid-turn, then let it see that too.
+            deadline = time.time() + 3
+            while len([e for e in mirror.events if (e.raw or {}).get("event") == "resource_sample"]) < 2 and time.time() < deadline:
+                await asyncio.sleep(0.01)
+            (tmp_path / "cg" / "memory" / "memory.usage_in_bytes").write_text(f"{900 << 20}\n")
+            while not any((e.raw or {}).get("event") == "memory_pressure" for e in mirror.events) and time.time() < deadline:
+                await asyncio.sleep(0.01)
+            yield result_event("done", num_turns=4)
+
+    _patch_harness(monkeypatch, _Slow)
+    cg = tmp_path / "cg"
+    (cg / "memory").mkdir(parents=True)
+    (cg / "cpuacct").mkdir()
+    (cg / "memory" / "memory.usage_in_bytes").write_text(f"{100 << 20}\n")
+    (cg / "memory" / "memory.limit_in_bytes").write_text("9223372036854775807\n")
+    (cg / "cpuacct" / "cpuacct.usage").write_text("3420000000\n")
+    (tmp_path / "meminfo").write_text("MemTotal:        1048576 kB\n")
+    mirror = _RecordingMirror()
+    worker = Worker(workspace_root=str(tmp_path / "ws"), baked=AgentSpec(name="w", model="m"), baked_skills=None,
+                    mirror_factory=lambda uri, sid, tid: mirror, metadata_port=0,
+                    resource_root=cg, resource_meminfo=tmp_path / "meminfo", resource_sample_s=0.01)
+
+    live = _drive(worker, _body(gcs={"output_bucket": "gs://out"}))
+    kinds = [((e.raw or {}).get("event") or e.kind) for e in live]
+    assert "resource_sample" not in kinds  # the live stream never carries the periodic samples
+    assert kinds.count("memory_pressure") == 1 and kinds[-1] == "result"
+    samples = [e for e in mirror.events if (e.raw or {}).get("event") == "resource_sample"]
+    assert len(samples) >= 2 and all(e.raw["turn_id"] == live[0].raw["turn_id"] for e in samples)
+    assert samples[0].raw["memory_current_bytes"] == 100 << 20 and samples[0].raw["memory_limit_bytes"] == 1 << 30
+    assert [e for e in mirror.events if e.kind == "result"][0].raw["memory_peak_bytes"] == 900 << 20
+    result = live[-1]
+    assert result.raw["memory_peak_bytes"] == 900 << 20 and result.raw["memory_limit_bytes"] == 1 << 30
+    assert result.raw["cpu_usec"] == 3_420_000 and result.raw["turn_id"]
+
+
+def test_a_failed_harness_result_still_carries_the_resource_peak(tmp_path, monkeypatch):
+    class _Boom:
+        async def run(self, spec, rc):
+            yield AgentEvent(kind="message", summary="working")
+            raise RuntimeError("harness crashed")
+
+    _patch_harness(monkeypatch, _Boom)
+    cg = tmp_path / "cg"
+    (cg / "memory").mkdir(parents=True)
+    (cg / "memory" / "memory.usage_in_bytes").write_text(f"{300 << 20}\n")
+    (tmp_path / "meminfo").write_text("MemTotal:        1048576 kB\n")
+    worker = Worker(workspace_root=str(tmp_path / "ws"), baked=AgentSpec(name="w", model="m"), baked_skills=None,
+                    mirror_factory=lambda uri, sid, tid: _NullMirror(), metadata_port=0,
+                    resource_root=cg, resource_meminfo=tmp_path / "meminfo", resource_sample_s=0.01)
+    live = _drive(worker, _body())
+    result = live[-1]
+    assert result.kind == "result" and result.raw["is_error"] and result.raw["event"] == "harness_error"
+    assert result.raw["memory_peak_bytes"] == 300 << 20 and result.raw["memory_limit_bytes"] == 1 << 30
+
+
+def test_history_hides_samples_and_resource_samples_returns_rows(monkeypatch):
+    from sandbox_fakes import FakeSandboxProvider, make_engine
+
+    from remote_agent_toolkit.runtime.gemini import history as history_mod
+
+    events = [
+        AgentEvent(kind="status", summary="turn started", raw={"event": "turn_started"}),
+        AgentEvent(kind="status", summary="resource sample", raw={
+            "event": "resource_sample", "at": "2026-09-16T17:00:00+00:00", "memory_current_bytes": 5, "cpu_usec": 7}),
+        result_event("42"),
+    ]
+    monkeypatch.setattr(history_mod, "read_history", lambda *a, **kw: list(events))
+    session = make_engine(FakeSandboxProvider()).start_session()
+    assert [e.summary for e in session.history()] == ["turn started", "42"]
+    assert len(session.history(include_samples=True)) == 3
+    assert session.resource_samples() == [{"time": __import__("datetime").datetime(2026, 9, 16, 17, tzinfo=__import__("datetime").UTC),
+                                           "memory_current_bytes": 5, "cpu_usec": 7}]
+
+
 def test_a_turn_with_a_model_token_points_the_cli_at_the_workers_metadata_server(tmp_path, monkeypatch):
     import json
     import urllib.request

@@ -97,6 +97,10 @@ class RunResult:
         warning: Non-fatal anomaly note — e.g. the harness process exited abnormally
             *after* emitting this result. The result (text, spend, usage) is real and
             kept; the warning records that the run didn't shut down cleanly.
+        resources: The turn's resource high-water marks as the worker sampled them
+            inside its container (``gemini``): ``memory_peak_bytes``,
+            ``memory_limit_bytes``, ``cpu_usec`` — whichever were readable. ``None``
+            when nothing was sampled (``local``, sampling disabled, no cgroup).
     """
 
     text: str | None
@@ -109,3 +113,4 @@ class RunResult:
     session_id: str | None = None
     artifacts: tuple[str, ...] = field(default=())
     warning: str | None = None
+    resources: dict[str, int] | None = None

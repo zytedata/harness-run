@@ -23,6 +23,9 @@ branch that touches any deploy/runtime contract — it validates, on real infras
     the event mirror — it probes the same workspace (and gets ``ControlUnavailable`` once the
     turn is over), its steer is acknowledged on the owner's stream and shapes the reply, and
     its ``interrupt()`` ends the owner's turn as ``INTERRUPTED``
+  * **resources** (with pool-turn): the result carries the worker-sampled ``memory_peak_bytes`` /
+    ``memory_limit_bytes``, ``session.resource_samples()`` has rows, and no sample reached
+    the live stream
   * **isolation**: a fixed shell script run through the worker's ``/exec`` (no model) prints
     what the agent's shell can reach — the metadata server's identity must be a tenant one
     that is 403 on our project's storage and Vertex (the sandbox has no usable Google
@@ -238,6 +241,14 @@ async def check_pool_turn(engine, verdicts) -> None:
         verdicts[label] = _ok(r) and started.raw.get("warm") is True and first is not None and first < 4.0
         verdicts["pool-latency"] = first is not None and first < 4.0
         log(label, f"warm={started.raw.get('warm')} sandbox={started.raw.get('worker')}")
+        # In-sandbox CPU/RAM sampling: the peak rides the result, the samples sit in the mirror only.
+        rows = await asyncio.to_thread(session.resource_samples)
+        streamed = [e for e in events if (e.raw or {}).get("event") == "resource_sample"]
+        log(label, f"resources={r.resources} samples={len(rows)} first={rows[0] if rows else None} "
+                   f"samples on the live stream={len(streamed)} (must be 0)")
+        verdicts["resources"] = (bool(r.resources) and "memory_peak_bytes" in r.resources
+                                 and "memory_limit_bytes" in r.resources and len(rows) >= 1 and not streamed
+                                 and all(row["time"] is not None for row in rows))
     except Exception:
         log(label, "FAILED:\n" + traceback.format_exc())
         verdicts[label] = False
@@ -474,6 +485,9 @@ async def check_long(engine, verdicts) -> None:
             log(label, f"resource probe failed: {exc!r}")
         r, events, _ = await driving
         elapsed = time.time() - started
+        rows = await asyncio.to_thread(session.resource_samples)
+        log(label, f"resources={r.resources}; {len(rows)} samples in the mirror"
+                   + (f", last {rows[-1]}" if rows else ""))
         ok = _ok(r) and "42" in (r.text or "")
         if TOKEN_LIFETIME_S:
             ok = ok and elapsed > TOKEN_LIFETIME_S

@@ -31,6 +31,7 @@ from ...control import EXEC_DEFAULT_TIMEOUT_S, ControlMessage, ControlUnavailabl
 from ...events import AgentEvent, RunResult, RunStatus, StopReason
 from .._run import DrivenRun
 from .history import event_from_mirror
+from .resources import is_sample
 from .provider import SandboxError, SandboxGone, SandboxProvider, template_id
 from .roster import SandboxEntry
 from .stream import tail_stream
@@ -182,7 +183,7 @@ async def _stream_turn(
 
     skip = yielded
     async for event in tail_stream(
-        events_uri, session_id, turn_id=turn_id,
+        events_uri, session_id, turn_id=turn_id, accept_event=lambda ev: not is_sample(ev),
         max_wait_s=GONE_GRACE_S if gone else mirror_max_wait_s, **store_kwargs,
     ):
         if skip:
@@ -1267,12 +1268,38 @@ class GeminiSession:
 
     # -- records ------------------------------------------------------------------
 
-    def history(self) -> list:
-        """All persisted events of this session, oldest first (the GCS event mirror)."""
+    def history(self, *, include_samples: bool = False) -> list:
+        """All persisted events of this session, oldest first (the GCS event mirror).
+
+        The worker's periodic ``resource_sample`` events are left out unless
+        ``include_samples`` (see :meth:`resource_samples`).
+        """
         from .history import read_history
+        from .resources import is_sample
 
         engine = self._engine
-        return read_history(engine._output_bucket, self._session_id, credentials=engine._credentials)
+        events = read_history(engine._output_bucket, self._session_id, credentials=engine._credentials)
+        return events if include_samples else [e for e in events if not is_sample(e)]
+
+    def resource_samples(self) -> list[dict]:
+        """This session's sandbox CPU/RAM samples, oldest first (OOM forensics).
+
+        Each row: ``time`` (aware datetime, the worker's clock) + ``memory_current_bytes`` /
+        ``memory_limit_bytes`` / ``memory_peak_bytes`` / ``cpu_usec`` as available, sampled
+        by the worker inside the sandbox every 20 s (``RATK_RESOURCE_SAMPLE_S``) and written
+        to the event mirror only — so it works for re-attached sessions, and for a sandbox
+        the platform killed mid-turn, whose last sample landed at most one interval before
+        death. The live stream carries the single ``memory_pressure`` warning instead, and
+        the terminal result's ``raw`` the ``memory_peak_bytes`` / ``memory_limit_bytes`` /
+        ``cpu_usec`` high-water marks.
+        """
+        from .history import read_history
+        from .resources import sample_rows
+
+        engine = self._engine
+        return sample_rows(
+            read_history(engine._output_bucket, self._session_id, credentials=engine._credentials)
+        )
 
     async def transcripts(self) -> dict[str, list[dict]]:
         """This session's persisted harness transcripts (see ``runtime.base.Session``)."""

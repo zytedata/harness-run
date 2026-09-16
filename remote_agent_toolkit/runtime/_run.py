@@ -72,8 +72,18 @@ def build_result(result_ev: AgentEvent, session_id: str, spec: AgentSpec) -> tup
         cost_usd=result_ev.cost_usd,
         usage=result_ev.usage,
         session_id=raw.get("session_id") or session_id,
+        resources=_resources(raw),
     )
     return result, stop_reason_for(raw, spec.checkpoint)
+
+
+_RESOURCE_KEYS = ("memory_peak_bytes", "memory_limit_bytes", "cpu_usec")
+
+
+def _resources(raw: dict) -> dict[str, int] | None:
+    """The worker-sampled high-water marks on a result event's ``raw`` (``None`` if none)."""
+    found = {k: int(raw[k]) for k in _RESOURCE_KEYS if isinstance(raw.get(k), int) and not isinstance(raw.get(k), bool)}
+    return found or None
 
 
 class DrivenRun:

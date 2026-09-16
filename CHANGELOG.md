@@ -59,10 +59,16 @@ for the tag with this file's section as the notes.
     sandboxes and every version's template).
   - Session ids are always client-minted UUIDs; `list_sessions()` reads the event mirror only;
     `history()` has the mirror layer only (no platform job output, no Cloud Logging).
-  - `session.resource_samples()`, the memory-pressure status event and the `memory_peak_bytes`
-    / `memory_limit_bytes` / `cpu_usec` keys on the result's `raw` are removed (a sandbox
-    exposes no cgroup files and has no logging identity). Cloud Trace spans and the
-    `remote_agent_toolkit_steps` / `remote_agent_toolkit_resources` Cloud Logging logs stop;
+  - CPU/RAM self-sampling stays but moves: the worker samples its cgroup (gVisor mounts v1
+    accounting) every 20 s (`RATK_RESOURCE_SAMPLE_S` replaces `AGENT_RESOURCE_SAMPLE_S`) and
+    writes the samples to the session's **event mirror only** instead of the
+    `remote_agent_toolkit_resources` Cloud Logging log — `session.resource_samples()` reads
+    them from there (rows as before: `time` + `memory_current_bytes` / `memory_limit_bytes` /
+    `memory_peak_bytes` / `cpu_usec`), `session.history()` leaves them out unless
+    `include_samples=True`. The memory-pressure status event and the `memory_peak_bytes` /
+    `memory_limit_bytes` / `cpu_usec` keys on the result's `raw` are unchanged, and the same
+    three now come as `RunResult.resources` (`None` when nothing was sampled, e.g. `local`).
+    Cloud Trace spans and the `remote_agent_toolkit_steps` Cloud Logging log stop;
     `session.history()` is the record.
   - Events: `turn_started` carries the sandbox id as `worker` and `warm` (from the ready pool);
     `control_ready` reports the HTTP channel; `workspace_ready.scoped_gcs` is always true. A

@@ -960,7 +960,7 @@ every sandbox under the parent instance); the shell/custom-container surface is 
 | Vertex model access without a key in the env | **adapted**: a predict-only OAuth token in the env | refresh needed for turns > 1 h |
 | Versions / revisions (`versions()`, `revisions()`, `set_traffic`, `delete_version`, `get_engine(version=)`) | **replaced**: template = version; no traffic config | a pin is real routing now (any template can be dispatched to), which is *better* than today's assertion; `set_traffic` has no equivalent — "serving" = newest template |
 | `resource_limits` | unchanged shape | template `resources`; 4 CPU / 8 GiB verified, ceiling unknown |
-| Resource sampling (`resource_samples()`, memory-pressure event, peak in result) | **dropped** (decided 2026-09-11) | in-sandbox sampling goes (gVisor exposes no cgroup files, and the sandbox has no logging identity to ship samples); observability of sandbox resources is to be investigated *outside* the container (platform metrics for sandboxes, if any) — `resources.py` is deleted |
+| Resource sampling (`resource_samples()`, memory-pressure event, peak in result) | **kept**, re-homed (dropped 2026-09-11, back 2026-09-16) | the worker samples its cgroup (gVisor mounts **v1** accounting; `MemTotal` = the template limit) and writes samples to the turn's **event mirror only** — no logging identity needed, and off the live stream; the pressure event stays on the stream, the peak on the result (`RunResult.resources`). The platform itself exposes nothing for sandboxes (no Monitoring metric type, no usage fields; checked 2026-09-16) |
 | Cloud Logging per-step log (`remote_agent_toolkit_steps`) | **dropped** (decided 2026-09-11) | the sandbox has no logging identity; the event mirror is the record; `eventsink.CloudLoggingSink` and the `EventSink` port go |
 | Cloud Trace spans per turn (`tracing.py`) | **lost** | no exporter identity in the sandbox; acceptable (the console never showed the job path properly anyway) |
 | Platform job retries on OOM / crash | **lost** | the client re-dispatches or fails the turn explicitly; arguably better than a silent replay |
@@ -989,9 +989,11 @@ release with these notes in the CHANGELOG; other teams update when it merges. Wh
    returns template metadata (no `serving` flag).
 3. **Session ids** are always client-minted UUIDs (today cold turns get numeric ADK ids). `list_sessions()`
    is GCS-only. `history()` loses layers 2 and 3 (job output, Cloud Logging) — the mirror is the record.
-4. **`session.resource_samples()` is removed**, along with the memory-pressure status event and the
-   `memory_peak_bytes` / `cpu_usec` keys on the result's `raw`. `session.transcripts()`, `history()`,
-   `last_result`, `workspace` (still raises remotely) unchanged.
+4. **`session.resource_samples()` stays** (re-homed 2026-09-16: rows come from the event mirror, which
+   `history()` filters unless `include_samples=True`), and so do the memory-pressure status event and the
+   `memory_peak_bytes` / `memory_limit_bytes` / `cpu_usec` keys on the result's `raw` — now also
+   `RunResult.resources`. `session.transcripts()`, `last_result`, `workspace` (still raises remotely)
+   unchanged.
 5. **Observability side channels**: no Cloud Trace spans; the `remote_agent_toolkit_steps` and
    `remote_agent_toolkit_resources` Cloud Logging logs stop. The event mirror (`history()`) is the record;
    the TESTING.md debugging recipes that query Cloud Logging are rewritten against it.
@@ -1024,9 +1026,12 @@ release with these notes in the CHANGELOG; other teams update when it merges. Wh
 - **Google-side pool** for a template: size, minimum instances and whether it bills are not exposed. If a
   large image (the Codex CLI adds tens of MB, `packages` can add GBs) slows pool refill, refill latency
   grows but stays off the critical path.
-- **Observability**: Cloud Logging, Cloud Trace and in-sandbox resource sampling are dropped (accepted).
-  What the platform exposes about a sandbox's CPU/memory from outside is an open investigation; until then
-  an OOM shows up as the worker going unreachable mid-turn, which the client reports as an explained error.
+- **Observability**: Cloud Logging and Cloud Trace are dropped (accepted). *Resolved 2026-09-16*: the
+  platform exposes nothing about a sandbox's CPU/memory from outside (363 `aiplatform` metric types, none
+  for sandboxes; the `reasoning_engine/*/allocation_time` series report only for Agent Runtime engines), but
+  gVisor mounts cgroup v1 accounting inside, so in-sandbox sampling is back, shipped on the turn's own
+  mirror (§13.2). An OOM still shows up as the worker going unreachable mid-turn, reported as an explained
+  error — now with the last sample at most 20 s before death.
 - **Snapshot restore** (memory + disk): set aside — same-image restriction (checkpoint bullet above).
 
 ### 13.5 Plan

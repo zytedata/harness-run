@@ -1227,9 +1227,8 @@ echoed — including a secret a coerced agent printed. Treat the checkpoint pref
 ## Observability: what you get, what you don't
 
 The sandbox runtime keeps **one record**: the event mirror (`session.history()`, and the live stream).
-There is no Cloud Logging step log, no Cloud Trace span tree and no CPU/RAM self-sampling any more — the
-sandbox has no Google identity to ship telemetry with and exposes no cgroup files (gVisor). What replaces
-them:
+There is no Cloud Logging step log and no Cloud Trace span tree any more — the sandbox has no Google
+identity to ship telemetry with. What replaces them:
 
 - **Events are the record.** Every turn streams `turn_started` (with the sandbox id), `effective_spec`,
   `workspace_ready`, the harness events and the terminal `result`; `session.history()` reads the same
@@ -1241,8 +1240,29 @@ them:
   16 GiB verified).
 - **Cost** is reported per run as `result.cost_usd` as before.
 
-Platform-side sandbox metrics (CPU/RAM from outside the container) are an open investigation; until then
-an OOM is diagnosed from the last events before the `sandbox_unreachable` result.
+**CPU / memory.** The platform exposes **no** resource metrics for sandboxes (no Cloud Monitoring metric
+type, no usage fields on the sandbox resource — checked 2026-09-16), so the worker samples **itself**: gVisor
+mounts cgroup v1 accounting and reports the template's memory limit as `MemTotal`. Three outputs:
+
+- **Per-session samples** — every 20 s (`RATK_RESOURCE_SAMPLE_S` in the image env; `0` disables) to the
+  session's **event mirror only**, not the live stream, so a watcher is not drowned and the record survives a
+  mid-turn kill: after an OOM the last sample sits at most one interval before death. `session.history()`
+  skips them (`history(include_samples=True)` keeps them); read them as rows with:
+
+  ```python
+  session = engine.get_session("<session-id>")      # or any session you already hold
+  for row in session.resource_samples():            # oldest first
+      print(row["time"], row.get("memory_current_bytes"), row.get("memory_limit_bytes"), row.get("cpu_usec"))
+  ```
+- **A visible warning** — the first time memory crosses 85 % of the limit, a `memory pressure: …` status
+  event lands on the normal event stream, so a watcher sees trouble before the platform kills the sandbox
+  at the limit (the fix: deploy with higher `resource_limits`).
+- **Peak in every result** — `result.resources` (and the terminal result event's `raw`) carries
+  `memory_peak_bytes` / `memory_limit_bytes` / `cpu_usec`, so completed *and failed* turns report their
+  high-water mark for free.
+
+The idle baseline with Claude Code is ~550 MiB (the CLI ~500 MiB, the worker ~110 MiB); what the samples
+show above that is your agent's own work.
 
 ## GCP setup & required permissions
 

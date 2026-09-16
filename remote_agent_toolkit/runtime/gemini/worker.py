@@ -224,6 +224,9 @@ class Worker:
         blob_store_factory: Any | None = None,
         mirror_factory: Any | None = None,
         metadata_port: int | None = None,
+        resource_root: Path | None = None,
+        resource_meminfo: Path | None = None,
+        resource_sample_s: float | None = None,
     ) -> None:
         self.workspace_root = workspace_root
         self.baked_spec_path = baked_spec_path
@@ -237,6 +240,11 @@ class Worker:
         # (``0`` → an ephemeral port; tests). ``None`` → ``RATK_METADATA_PORT`` or 8081.
         self._metadata_port = metadata_port
         self._metadata: _MetadataServer | None = None
+        # CPU/RAM self-sampling (resources.py): where to read (tests point at fake trees)
+        # and how often (``None`` → the RATK_RESOURCE_SAMPLE_S env / 20 s).
+        self._resource_root = resource_root
+        self._resource_meminfo = resource_meminfo
+        self._resource_sample_s = resource_sample_s
 
     # -- plumbing ---------------------------------------------------------------------
 
@@ -436,6 +444,24 @@ class Worker:
             if stream is not None:
                 stream.append(event)
 
+        # Periodic samples go to the mirror only (durable, off the live stream); the
+        # pressure warning goes on the stream; the peak rides the result (resources.py).
+        from .resources import start_sampler
+
+        sampler = start_sampler(
+            session_id, on_event=surface,
+            sample_emit=(lambda ev: stream.append(identify(ev))) if stream is not None else None,
+            sample_s=self._resource_sample_s,
+            **({"root": self._resource_root} if self._resource_root is not None else {}),
+            **({"meminfo": self._resource_meminfo} if self._resource_meminfo is not None else {}),
+        )
+
+        def enriched(event: AgentEvent) -> AgentEvent:
+            if sampler is not None and event.kind == "result":
+                event.raw = dict(event.raw or {})
+                sampler.enrich_result(event.raw)
+            return event
+
         saw_result = False
         try:
             surface(AgentEvent(
@@ -471,7 +497,7 @@ class Worker:
 
             async for event in resolve_harness(spec).run(spec, rc):
                 saw_result = saw_result or event.kind == "result"
-                surface(event)
+                surface(enriched(event))
         except Exception as exc:  # noqa: BLE001 — a silent death is undebuggable
             if saw_result:
                 surface(AgentEvent(
@@ -483,13 +509,15 @@ class Worker:
                     raw={"event": "late_harness_error", "session_id": session_id},
                 ))
             else:
-                surface(AgentEvent(
+                surface(enriched(AgentEvent(
                     kind="result",
                     summary=f"agent run failed: {str(exc)[:300]}",
                     raw={"event": "harness_error", "is_error": True, "subtype": "error",
                          "session_id": session_id},
-                ))
+                )))
         finally:
+            if sampler is not None:
+                sampler.stop()
             if stream is not None:
                 stream.close()
             set_default_gcs_credentials(None)

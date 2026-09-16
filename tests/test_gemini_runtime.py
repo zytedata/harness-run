@@ -31,6 +31,7 @@ def _real_worker_factory(tmp_path, spec, blobs=None):
             workspace_root=str(tmp_path / "ws" / name.rsplit("/", 1)[-1]), baked=spec, baked_skills=None,
             blob_store_factory=(lambda bucket, prefix: blobs) if blobs is not None else None,
             mirror_factory=lambda uri, sid, tid: _NullMirror(),
+            metadata_port=0,  # an ephemeral loopback port: the suite runs in parallel
         )
     return factory
 
@@ -98,6 +99,37 @@ def test_worker_runs_the_turn_and_maps_the_session_id(tmp_path, monkeypatch):
     assert rc.secrets == {"K": "v"} and rc.env == {"ANTHROPIC_AUTH_TOKEN": "tok"}
     assert rc.control is not None and rc.workspace.name == "workspace"
     assert worker.handle("/health", {})["running_turn"] is None
+
+
+def test_a_turn_with_a_model_token_points_the_cli_at_the_workers_metadata_server(tmp_path, monkeypatch):
+    import json
+    import urllib.request
+
+    _DoneHarness.seen = []
+    served = {}
+
+    class _Probing(_DoneHarness):
+        async def run(self, spec, rc):
+            # What Claude Code's Google auth does inside the turn: fetch the token from the metadata host.
+            req = urllib.request.Request(
+                f"http://{rc.env['GCE_METADATA_HOST']}/computeMetadata/v1/instance/service-accounts/default/token",
+                headers={"Metadata-Flavor": "Google"})
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                served.update(json.loads(resp.read()))
+            async for ev in super().run(spec, rc):
+                yield ev
+
+    _patch_harness(monkeypatch, _Probing)
+    worker = _real_worker_factory(tmp_path, AgentSpec(name="w", model="m"))("s1")
+
+    events = _drive(worker, _body(model_env={"CLAUDE_CODE_USE_VERTEX": "1"},
+                                  model_token={"access_token": "TOK", "expires_at": None}))
+    assert events[-1].kind == "result"
+    _spec, rc = _DoneHarness.seen[0]
+    assert rc.env["CLAUDE_CODE_USE_VERTEX"] == "1" and "ANTHROPIC_AUTH_TOKEN" not in rc.env
+    assert rc.env["GCE_METADATA_HOST"] == worker.metadata_host and rc.env["METADATA_SERVER_DETECTION"] == "assume-present"
+    assert served == {"access_token": "TOK", "expires_in": 3600, "token_type": "Bearer"}
+    assert worker.served_model_token() is None  # the turn is over: nothing to serve
 
 
 def test_worker_refuses_a_second_concurrent_turn_and_unknown_turns(tmp_path, monkeypatch):
@@ -336,8 +368,9 @@ def test_session_run_streams_from_the_worker_and_releases_the_sandbox(tmp_path, 
     (sandbox, path, body), = [c for c in provider.calls if c[1] == "/turn"]
     assert body["secrets"] == {"SH_APIKEY": "SUPERSECRET"} and body["prompt"] == "go"
     assert body["gcs"]["token"] == "fake-run-token" and body["gcs"]["output_bucket"] == "gs://out"
-    assert body["model_env"]["ANTHROPIC_AUTH_TOKEN"] == "fake-model-token"
+    assert body["model_token"] == {"access_token": "fake-model-token", "expires_at": None}
     assert body["model_env"]["CLAUDE_CODE_USE_VERTEX"] == "1"
+    assert "ANTHROPIC_AUTH_TOKEN" not in body["model_env"]  # served by the worker's metadata server
     assert body["session_config"] is None and body["turn_config"] is None
     # The sandbox was created for this turn (no pool) and deleted at the terminal event.
     assert provider.deleted == [sandbox] and provider.live() == []

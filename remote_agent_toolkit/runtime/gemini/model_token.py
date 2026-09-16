@@ -2,17 +2,14 @@
 
 The sandbox has no usable Google identity (DESIGN.md §13.1), so the client mints the model
 token: an access token for a **predict-only service account** the client may impersonate
-(``roles/iam.serviceAccountTokenCreator`` on it), handed to the worker with the turn and
-consumed by Claude Code as ``ANTHROPIC_AUTH_TOKEN`` with ``CLAUDE_CODE_USE_VERTEX=1`` /
-``CLAUDE_CODE_SKIP_VERTEX_AUTH=1`` (verified live 2026-09-10).
-
-Claude Code reads that token once, at start, and does not consult ``apiKeyHelper`` in
-this mode (checked 2026-09-11: with no token in the env the CLI hangs on its own auth), so
-the token's **lifetime** is what bounds a turn's model access. IAM mints impersonated
-tokens for up to an hour by default and up to 12 hours when the organization policy
-``constraints/iam.allowServiceAccountCredentialLifetimeExtension`` lists the account:
-:func:`mint_model_token` asks for the turn's ceiling and falls back to an hour when IAM
-refuses (:func:`mint_turn_model_token`).
+(``roles/iam.serviceAccountTokenCreator`` on it). The worker does not put the token in the
+agent's environment: it serves it from a loopback **metadata server** (``worker.py``), and
+Claude Code — pointed at it with ``GCE_METADATA_HOST`` and ``CLAUDE_CODE_USE_VERTEX=1`` —
+fetches it the way it would on a Compute Engine VM and fetches it *again* when it nears
+expiry (google-auth refreshes a token with less than five minutes left; verified with the
+CLI 2026-09-16). So the client keeps minting hourly tokens for as long as the turn runs and
+pushes each one to the worker (``/token``, ``backend.GeminiSession._start_refresh``) — no
+organization policy, no long-lived credential anywhere.
 
 SECURITY: the token is worth ``aiplatform.endpoints.predict`` in the project for its
 lifetime and nothing else; treat it as a bearer, never log it.
@@ -28,8 +25,7 @@ from typing import Any
 DEFAULT_MODEL_SA_ID = "ratk-model"
 
 _CLOUD_PLATFORM = "https://www.googleapis.com/auth/cloud-platform"
-DEFAULT_LIFETIME_S = 3600
-MAX_LIFETIME_S = 12 * 3600  # IAM's ceiling with the lifetime-extension org policy
+DEFAULT_LIFETIME_S = 3600  # IAM's default ceiling for an impersonated token
 
 
 def default_model_service_account(project: str) -> str:
@@ -62,32 +58,23 @@ def mint_model_token(
     return creds.token, creds.expiry
 
 
-def vertex_model_env(token: str, project: str, region: str) -> dict[str, str]:
-    """The agent env that routes Claude Code to Vertex with ``token`` as the bearer."""
+def token_record(token: str, expiry: _dt.datetime | None) -> dict[str, Any]:
+    """The ``model_token`` body the worker takes on ``/turn`` and ``/token``.
+
+    ``expires_at`` is the naive-UTC ISO timestamp (or ``None`` when IAM gave none); the
+    worker turns it into the ``expires_in`` the metadata protocol reports.
+    """
+    return {"access_token": token, "expires_at": expiry.isoformat() if expiry else None}
+
+
+def vertex_model_env(project: str, region: str) -> dict[str, str]:
+    """The agent env that routes Claude Code to Vertex.
+
+    No bearer here: the worker adds ``GCE_METADATA_HOST`` (its metadata server) when the
+    turn carries a model token, and the CLI's Google auth fetches the token from it.
+    """
     return {
         "CLAUDE_CODE_USE_VERTEX": "1",
-        "CLAUDE_CODE_SKIP_VERTEX_AUTH": "1",
-        "ANTHROPIC_AUTH_TOKEN": token,
         "ANTHROPIC_VERTEX_PROJECT_ID": project,
         "CLOUD_ML_REGION": region,
     }
-
-
-def mint_turn_model_token(
-    source_credentials: Any | None, service_account: str, max_turn_s: float
-) -> tuple[str, _dt.datetime | None, bool]:
-    """A model token that outlives a ``max_turn_s`` turn when IAM allows; else an hour.
-
-    Returns ``(token, expiry, extended)``: ``extended`` is ``False`` when the account's
-    lifetime cannot be extended beyond the default hour (the org policy is not set for
-    it) and the turn's model access therefore ends after an hour — callers surface that.
-    """
-    wanted = int(min(MAX_LIFETIME_S, max(DEFAULT_LIFETIME_S, max_turn_s + 600)))
-    if wanted > DEFAULT_LIFETIME_S:
-        try:
-            token, expiry = mint_model_token(source_credentials, service_account, wanted)
-            return token, expiry, True
-        except Exception:  # noqa: BLE001 — the policy is not set: fall back to an hour
-            pass
-    token, expiry = mint_model_token(source_credentials, service_account, DEFAULT_LIFETIME_S)
-    return token, expiry, wanted <= DEFAULT_LIFETIME_S

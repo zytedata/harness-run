@@ -28,7 +28,14 @@ branch that touches any deploy/runtime contract — it validates, on real infras
     that is 403 on our project's storage and Vertex (the sandbox has no usable Google
     identity); only statuses and names are printed, never tokens
   * optional ``LONG_MINUTES=n``: a turn whose one Bash call sleeps that long (the model
-    token, the sandbox TTL and the /events long-poll all have to hold)
+    token, the sandbox TTL and the /events long-poll all have to hold). While it sleeps the
+    check probes the container's ``/proc`` and cgroup files through ``session.exec()`` and
+    logs what they say (input for the resource-metrics question).
+  * optional ``TOKEN_LIFETIME_S=n`` (with ``LONG_MINUTES``): mint the model token for that
+    many seconds instead of an hour and refresh it at 40 % of that, so a turn longer than the
+    lifetime proves the refresh chain — client re-mint → ``/token`` → worker metadata server
+    → Claude Code re-fetch — in minutes instead of an hour (``TOKEN_LIFETIME_S=360
+    LONG_MINUTES=7``).
 
 Pass criteria per check: terminal result with ``error=False``, ``turns > 0``, the expected
 answer in the text (plus the check's own assertions). The engine (templates + sandboxes)
@@ -38,7 +45,7 @@ Configure via env (defaults are the shared my-project test setup):
   PROJECT, LOCATION, IMAGE_REPO, MODEL_SA, SUFFIX (engine-name suffix; defaults to your
   username), CPU / MEMORY (the template's size, default the runtime's 4 / 4Gi — a 4 CPU
   template took the platform up to its 30-minute deadline on 2026-09-14/15; CPU=1 MEMORY=1Gi
-  provisions in seconds), LONG_MINUTES, KEEP=1 (skip teardown), IMPERSONATE=<service account email>
+  provisions in seconds), LONG_MINUTES, TOKEN_LIFETIME_S, KEEP=1 (skip teardown), IMPERSONATE=<service account email>
   (drive everything but the Docker push as that account — to prove a role is sufficient;
   your ADC needs roles/iam.serviceAccountTokenCreator on it).
 
@@ -69,6 +76,14 @@ IMAGE_REPO = os.environ.get("IMAGE_REPO") or f"{LOCATION}-docker.pkg.dev/{PROJEC
 MODEL_SA = os.environ.get("MODEL_SA", "agent-runtime@my-project.iam.gserviceaccount.com")
 SUFFIX = re.sub(r"[^a-z0-9-]", "-", (os.environ.get("SUFFIX") or getpass.getuser()).lower())
 LONG_MINUTES = float(os.environ.get("LONG_MINUTES", "0") or 0)
+TOKEN_LIFETIME_S = int(os.environ.get("TOKEN_LIFETIME_S", "0") or 0)
+if TOKEN_LIFETIME_S:
+    from remote_agent_toolkit.runtime.gemini import backend as _backend
+    from remote_agent_toolkit.runtime.gemini import model_token as _model_token
+
+    _real_mint = _model_token.mint_model_token
+    _model_token.mint_model_token = lambda creds, sa, lifetime_s=TOKEN_LIFETIME_S: _real_mint(creds, sa, TOKEN_LIFETIME_S)
+    _backend.TOKEN_REFRESH_S = TOKEN_LIFETIME_S * 0.4
 NAME = f"ratk-smoke-{SUFFIX}"
 IMPERSONATE = os.environ.get("IMPERSONATE") or None
 RESOURCE_LIMITS = (
@@ -428,16 +443,43 @@ async def check_isolation(engine, verdicts) -> None:
             await asyncio.to_thread(engine._release_sandbox, sandbox)
 
 
+PROC_PROBE = (
+    "echo '--- meminfo'; head -3 /proc/meminfo; echo '--- cpus'; nproc; grep -c ^processor /proc/cpuinfo; "
+    "echo '--- cgroup'; cat /sys/fs/cgroup/memory.max /sys/fs/cgroup/memory.current /sys/fs/cgroup/cpu.max "
+    "/sys/fs/cgroup/cpu.stat 2>&1 | head -12; ls /sys/fs/cgroup 2>&1 | head -5; "
+    "echo '--- stat'; head -1 /proc/stat; cat /proc/loadavg; echo '--- self'; grep -E 'VmRSS|VmHWM' /proc/self/status; "
+    "echo '--- ps'; ps -eo pid,rss,pcpu,comm --sort=-rss 2>&1 | head -6"
+)
+
+
 async def check_long(engine, verdicts) -> None:
     label = "long-turn"
     secs = int(LONG_MINUTES * 60)
     try:
         session = engine.start_session()
-        r, events, _ = await _drive(label, session.run(
+        if TOKEN_LIFETIME_S:
+            log(label, f"model token lifetime {TOKEN_LIFETIME_S}s, refresh every {TOKEN_LIFETIME_S * 0.4:.0f}s; "
+                       f"the turn sleeps {secs}s, so the CLI's second model call needs a refreshed token")
+        started = time.time()
+        driving = asyncio.ensure_future(_drive(label, session.run(
             f'Run `sleep {secs} && python3 -c "print(6 * 7)"` in the shell as ONE Bash call (it takes '
             f"{LONG_MINUTES:g} minutes; wait for it) and reply with just the number it prints.",
-            config=TurnConfig(max_turns=6)))
-        verdicts[label] = _ok(r)
+            config=TurnConfig(max_turns=6))))
+        await asyncio.sleep(min(60, secs / 3))
+        try:
+            probe = await session.exec(PROC_PROBE, timeout=30)
+            log(label, f"in-container resource files (rc={probe.returncode}):\n{probe.stdout[:3000]}"
+                       + (f"\nstderr: {probe.stderr[:500]}" if probe.stderr else ""))
+        except Exception as exc:  # noqa: BLE001 — the probe is informational
+            log(label, f"resource probe failed: {exc!r}")
+        r, events, _ = await driving
+        elapsed = time.time() - started
+        ok = _ok(r) and "42" in (r.text or "")
+        if TOKEN_LIFETIME_S:
+            ok = ok and elapsed > TOKEN_LIFETIME_S
+            log(label, f"turn took {elapsed:.0f}s vs token lifetime {TOKEN_LIFETIME_S}s; "
+                       f"model token expiry on the client now {session._model_token_expiry}")
+        verdicts[label] = ok
     except Exception:
         log(label, "FAILED:\n" + traceback.format_exc())
         verdicts[label] = False

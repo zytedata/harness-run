@@ -498,12 +498,18 @@ These are facts measured during the PoC. The library encodes them so consumers i
   **no per-sandbox IAM**: `aiplatform.sandboxEnvironments.execute` covers every sandbox under the host
   instance, so the client identity is the trust boundary and the roster is only a coordination device.
 - **The model identity** (`ratk-model@`, `model_token.py`): a service account with only the
-  `ratkRuntimePredict` custom role (`aiplatform.endpoints.predict`). The client mints its access token per
-  turn (an hour by default; up to `max_turn_s` ≤ 12 h when the org policy
-  `constraints/iam.allowServiceAccountCredentialLifetimeExtension` lists the account) and hands it to the
-  worker as `ANTHROPIC_AUTH_TOKEN` with `CLAUDE_CODE_USE_VERTEX=1` / `CLAUDE_CODE_SKIP_VERTEX_AUTH=1`
-  (verified live). Claude Code reads it once and does not consult `apiKeyHelper` in this mode (checked
-  2026-09-11), so the token's lifetime bounds the turn's model access.
+  `ratkRuntimePredict` custom role (`aiplatform.endpoints.predict`). The client mints its access token
+  (an hour, IAM's default ceiling) per turn and every 25 minutes after that, pushing each one to the worker
+  (`/token`). The worker never puts it in the agent's environment: it runs a loopback **metadata server**
+  that speaks the GCE metadata protocol for exactly one thing, the running turn's token, and sets
+  `GCE_METADATA_HOST` / `CLAUDE_CODE_USE_VERTEX=1` for the CLI — whose Google auth then fetches the token as
+  it would on a VM and re-fetches it when less than five minutes remain (verified with the CLI 2026-09-16:
+  a two-step turn crossing that threshold re-read the token and finished). So a turn's model access lasts as
+  long as some client process holds the session — the starter or an adopter (`_attach`) — with no org
+  policy and no long-lived credential. (History: the token used to ride `ANTHROPIC_AUTH_TOKEN` with
+  `CLAUDE_CODE_SKIP_VERTEX_AUTH=1`; the CLI reads that once and does not consult `apiKeyHelper` in that
+  mode, so the token's lifetime bounded the turn — an hour, or up to 12 h behind the org policy
+  `constraints/iam.allowServiceAccountCredentialLifetimeExtension`, which nobody on the team could set.)
 - **The sandbox has no usable Google identity** (verified live 2026-09-10 and by every `live-smoke` run):
   the metadata server answers with a tenant-project workload identity that is 403 on the project's storage,
   Vertex and resource manager. So what the agent's shell can reach is exactly what the turn brought: the
@@ -889,9 +895,9 @@ every sandbox under the parent instance); the shell/custom-container surface is 
   ANTHROPIC_AUTH_TOKEN=<token>` (verified locally and in the spike). The client mints it by impersonating a
   **predict-only service account** (the `ratkRuntimePredict` custom role is exactly right; the client needs
   `serviceAccountTokenCreator` on it) with a 1 h lifetime and refreshes it for long turns the same way the
-  GCS token is refreshed (a token object under the run's prefix, read by a Claude Code `apiKeyHelper` in the
-  image, or re-injected over `/turn`). The agent's shell can read it — as it can read the metadata-server
-  token today — but it is predict-only, run-scoped in time, and there is no metadata server behind it.
+  GCS token is refreshed (built as: the worker serves it from a loopback metadata server behind
+  `GCE_METADATA_HOST`, the CLI refreshes on its own, the client re-pushes over `/token` — §13.1). The
+  agent's shell can fetch it from that loopback server, as the CLI does — but it is predict-only and hourly.
   `use_vertex=False` (API-key mode) and OpenRouter work unchanged (the key rides `secrets`).
 - **Events: direct by default, mirror as the record.** The live stream a `Run` consumes comes straight from
   the worker: `POST /events {since, wait}` **long-polls** — the worker holds the request until new events
@@ -1006,7 +1012,8 @@ release with these notes in the CHANGELOG; other teams update when it merges. Wh
   Verify each with a probe before building.
 - **Long turns**: model token refresh (1 h) and the per-call `execute` timeout (a `/events` poll is short;
   the turn itself runs in the background thread — verified for 70 s+ commands, not for hours). Run a 60-min
-  turn probe.
+  turn probe. *Resolved 2026-09-16*: the worker's metadata server + client re-push (§13.1) carries the model
+  token across hours; the smoke's `TOKEN_LIFETIME_S=360 LONG_MINUTES=7` run exercises the whole chain.
 - **No per-sandbox IAM**: the instance is the trust boundary. One instance per project/location is fine
   while all callers are one tenant; multi-tenant callers would need one instance (and client identity)
   each.

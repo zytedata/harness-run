@@ -54,7 +54,7 @@ def test_dispatch_failure_releases_every_sandbox_tried_and_stops_the_refresher(m
     session = engine.start_session()
     stops = []
     real_stop = session._stop_refresh
-    monkeypatch.setattr(session, "_stop_refresh", lambda: stops.append(1) or real_stop())
+    monkeypatch.setattr(session, "_stop_refresh", lambda **kw: stops.append(1) or real_stop(**kw))
     result = asyncio.run(_await(session.run("dummy", secrets={"KEY": "AUDIT_FAKE"})))
     engine._join_background()
     assert result.is_error

@@ -94,6 +94,43 @@ for the tag with this file's section as the notes.
   select a turn by identity, never by clock, so a re-attached session's back-to-back turns
   cannot replay each other's results.
 
+### Added
+
+- **`Session.exec(command, *, cwd=None, timeout=None) -> ExecResult`** (#85): a read-only shell
+  probe of the running turn's workspace, for showing the agent's work while it works (agentic-scraping
+  renders the workspace's `git diff` every ~10 s in its change panel; the events cannot give that —
+  Codex reports paths only, Claude Code old/new strings without context, and shell edits escape
+  both). The command runs under `/bin/bash -c` in the agent's cwd (`cwd=` relative to it), on
+  `gemini` through the sandbox worker's existing `/exec` endpoint and on `local` on the host; both
+  share one implementation (`control.run_shell`): output capped at 500 000 characters per stream
+  with `truncated` flagged instead of failing, a timeout (default 60 s; at most 240 s on `gemini`,
+  the platform proxy cuts a call at ~300 s) that kills the command and reports `returncode` 124.
+  Only a running turn has a workspace to probe: called before the sandbox is known `exec()` waits
+  for dispatch, called with no turn running or after the turn ended it raises `ControlUnavailable`
+  (`local` keeps the same rule for parity). `ExecResult` is exported from the package root. The
+  worker's `/exec` now defaults its cwd to the running turn's workspace (was the workspace root)
+  and takes an optional `turn_id` it checks against the running turn.
+- **A session re-attached in another process adopts its running turn** (`gemini`; #86 review). A
+  session held only by id (`engine.get_session(id)` in a fresh process — a poller, or a worker
+  adopting a job whose owner died mid-turn) had no run, so `exec()` raised `ControlUnavailable`
+  while the turn was still running, `interrupt()` was a no-op and `send()` started a **second**
+  concurrent turn — the thing the `Session` contract promises never happens. Every mirrored event
+  names its turn and sandbox (`raw.turn_id` / `raw.worker`, #80), so the first `send()`, `interrupt()`,
+  `exec()` or `run()` on such a session now reads the mirror once and, if the last `turn_started`
+  has no `result` after it, adopts that turn as the session's current run: events replay from the
+  worker then flow live, `send()` steers, `interrupt()` stops, `exec()` probes, `run()` raises,
+  `last_result` lands at the end. **`Session.current_run`** (new on the protocol, with `busy`) is
+  the running turn's `Run` or `None` — on such a session it hands the adopter that run, so it
+  consumes the events as the owner would instead of polling `last_result`; on `local` it is the
+  in-process run. The adopter also runs the run-scoped storage token refresh (the
+  owner may be gone) and deletes the sandbox at the result (10 s late, in case the owner is still
+  reading); an adopter whose event loop merely shuts down leaves the turn to its owner. `Run` gained
+  `cancelled` / `cancel_note`. Live: a fresh interpreter knowing only the engine name and session
+  id probed, steered (acknowledged on the owner's stream, shaping the reply) and interrupted (the
+  owner's turn ended `INTERRUPTED`) turns running under another process. `dev/live_smoke.py` runs
+  those checks and takes `CPU` / `MEMORY` for the template's size (a 1 CPU template provisions in
+  ~30 s where 4 CPU ones hit the platform's 30-minute deadline on 2026-09-14/15).
+
 ### Fixed
 
 - **`engine.delete()` no longer deletes the ready sandboxes of an engine whose name extends

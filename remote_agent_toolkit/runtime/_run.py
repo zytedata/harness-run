@@ -95,6 +95,7 @@ class DrivenRun:
         # marker) without consuming it; called before the event is queued.
         self._on_event = on_event
         self._cancel_note: str | None = None
+        self._cancelled = False
         self._queue: asyncio.Queue = asyncio.Queue()
         self._task: asyncio.Task | None = None
         self._status = RunStatus.PENDING
@@ -118,6 +119,7 @@ class DrivenRun:
                     self._on_event(event)
                 await self._queue.put(event)
         except asyncio.CancelledError:
+            self._cancelled = True
             self._finalize(result_ev, error="interrupted")
             await self._queue.put(_SENTINEL)
             raise
@@ -161,6 +163,16 @@ class DrivenRun:
             self._stop_reason = StopReason.ERROR
         self._status = RunStatus.IDLE
         self._on_complete(self._result, self._stop_reason)
+
+    @property
+    def cancelled(self) -> bool:
+        """Whether the driver task was cancelled (``cancel()``, or the event loop shutting down)."""
+        return self._cancelled
+
+    @property
+    def cancel_note(self) -> str | None:
+        """The reason a caller gave ``cancel()``; None for a cancellation nobody asked for."""
+        return self._cancel_note
 
     def cancel(self, note: str | None = None) -> None:
         """Cancel the driver task (the fallback when the harness cannot be stopped cleanly).

@@ -396,7 +396,7 @@ These are facts measured during the PoC. The library encodes them so consumers i
 - The in-sandbox **Bash tool default timeout is 120 s** (Claude Code's own) — long commands need an explicit
   timeout (`BASH_DEFAULT_TIMEOUT_MS` in `spec.env`) or backgrounding.
 
-**Turn control (steer / interrupt a running turn; `control.py`, the worker's `/control`)**
+**Turn control (steer / interrupt / probe a running turn; `control.py`, the worker's `/control` and `/exec`)**
 - The client POSTs `{"op": "steer"|"interrupt"|"stop", "message", "message_id"}` to the sandbox worker's
   `/control` through the platform's proxy (~0.3 s); the worker feeds it to the harness's `ControlChannel`
   (an asyncio queue on the turn's loop) and dedupes on `message_id`. The worker announces the channel with a
@@ -421,6 +421,32 @@ These are facts measured during the PoC. The library encodes them so consumers i
   follow-up `query()`. Codex: `turn/steer` is native (the model sees it after its current step);
   `interrupt()` yields `turn/completed status=interrupted`, after which a new `thread.turn()` on the same
   thread continues the run.
+- **`exec()` is the read-only probe** (`Session.exec(command, cwd=, timeout=) -> ExecResult`, #85): the
+  client POSTs `{"turn_id", "command", "cwd", "timeout"}` to the worker's `/exec`, which runs it under
+  `/bin/bash -c` in the running turn's workspace (the agent's cwd) through `control.run_shell` — the same
+  function `local` runs on the host, so the output cap (500 000 characters per stream, `truncated` flagged)
+  and the timeout semantics (killed, `returncode` 124) are identical. Only a running turn can be probed
+  (the sandbox is deleted at the terminal event; `local` keeps the rule for parity): before the sandbox is
+  known `exec()` waits for dispatch, afterwards it raises `ControlUnavailable`. The timeout is capped at
+  240 s on `gemini` because the proxy cuts a call at ~300 s. Motivation: agentic-scraping renders the
+  workspace's `git diff` every ~10 s while the coding agent works — exact and harness-independent, which
+  the events (paths only on Codex, context-free old/new strings on Claude Code) are not.
+- **A re-attached session adopts its turn running under another process** (`GeminiSession._attach`).
+  `get_session(id)` in a fresh process holds no run; the first `send()` / `interrupt()` / `exec()` /
+  `run()` reads the mirror once — the last `turn_started` marker without a `result` after it names the
+  turn and its sandbox (every event is stamped with both, #80; the sandbox name is rebuilt from the
+  engine template's host instance) and whether `control_ready` was announced — and builds a `DrivenRun`
+  over the same `_stream_turn` the owner uses (the worker replays the whole turn from `since=0`, then
+  streams; the mirror tail is the fallback). From there the session behaves as the owner's: steer,
+  stop, probe, `last_result` — and `Session.current_run` (protocol) hands the adopter the `Run`
+  itself, so it consumes the events instead of polling. Ownership rules: the adopter runs its own run-scoped token refresher (the
+  owner may be dead; the worker reads the record back), deletes the sandbox `ADOPTED_RELEASE_DELAY_S`
+  (10 s) after the result so a still-alive owner can drain its last events first (its `/events` call is
+  served from memory the moment the result lands, and the mirror holds the result anyway), and an
+  adopter whose event loop shuts down without an explicit `cancel()` (a poller exiting) releases
+  nothing — the turn goes on under its owner. The check is one-shot per session object: a session
+  started in the process never has a foreign turn, and a `get_session` one that found none resumes as
+  before.
 - **`interrupt()` is a stop, not a cancel.** The turn's normal end-of-turn path runs (snapshot,
   transcript, terminal result with `StopReason.INTERRUPTED`, accounting kept), so the interrupted turn's
   workspace changes are in the checkpoint the next `send()` restores. `cancel_query_job` remains the

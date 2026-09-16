@@ -14,6 +14,7 @@ import time
 import uuid
 from typing import Any, Callable
 
+from remote_agent_toolkit.control import run_shell
 from remote_agent_toolkit.events import AgentEvent
 from remote_agent_toolkit.runtime.gemini import backend
 from remote_agent_toolkit.runtime.gemini.history import mirror_line
@@ -36,7 +37,8 @@ class ScriptedWorker:
 
     ``/turn`` accepts once and records the body; ``/events`` answers like the real worker
     (blocks up to ``wait`` for news, pages everything past ``since``); ``/control`` records
-    the message and calls ``on_control`` (a test hook that may emit the reaction).
+    the message and calls ``on_control`` (a test hook that may emit the reaction); ``/exec``
+    really runs the command (``control.run_shell``) in ``workspace`` and records the body.
     """
 
     def __init__(self, *, on_control: Callable[[ScriptedWorker, dict], None] | None = None,
@@ -44,6 +46,8 @@ class ScriptedWorker:
         self.turns: list[dict] = []
         self.controls: list[dict] = []
         self.tokens: list[dict] = []
+        self.execs: list[dict] = []
+        self.workspace: str | None = None  # where /exec runs (None: this process's cwd)
         self.lines: list[dict] = []
         self.done = False
         self.error: str | None = None
@@ -96,6 +100,12 @@ class ScriptedWorker:
         if path == "/token":
             self.tokens.append(dict(body))
             return {"ok": True}
+        if path == "/exec":
+            self.execs.append(dict(body))
+            if self.turns and self.done:
+                return {"ok": False, "error": f"turn {body.get('turn_id')} is not running on this worker"}
+            result = run_shell(body["command"], cwd=self.workspace, timeout=body.get("timeout"))
+            return {"ok": True, **result.to_dict(), "cwd": self.workspace}
         return {"ok": False, "error": "not found"}
 
 

@@ -1617,12 +1617,17 @@ class GeminiSession:
             except Exception:  # noqa: BLE001 — best effort (job may already be done)
                 pass
 
-    def history(self) -> list:
+    def history(self, *, require_result: bool = False) -> list:
         """All persisted events of this session, oldest first (see ``history.read_history``).
 
         Reads the durable record — mirrored ``events/`` files, else the platform job output,
         else Cloud Logging — so it works for a session re-attached from another process long
         after the run. Empty when nothing was persisted (or the log entries expired).
+
+        ``require_result`` skips a record that has no terminal result and tries the next one,
+        for a caller recovering the OUTCOME of a run whose stream ended without one. Leave it
+        off to read the fullest record: the layers are not interchangeable, and the mirror is
+        the only one spanning every turn.
         """
         from .history import read_history
 
@@ -1632,6 +1637,7 @@ class GeminiSession:
             self._session_id,
             project=engine._project,
             credentials=engine._credentials,
+            require_result=require_result,
         )
 
     async def transcripts(self) -> dict[str, list[dict]]:

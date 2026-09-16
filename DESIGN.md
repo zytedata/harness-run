@@ -942,10 +942,8 @@ every sandbox under the parent instance); the shell/custom-container surface is 
 - **Cost.** Same rates ($0.085/vCPU-h + $0.009/GiB-h). A ready sandbox bills like an idle warm worker; a
   sandbox is billed while it exists, so delete at turn end and size the ready pool + TTL to the dispatch
   pattern exactly as `pool_size` / `pool_max_wait_s` are sized today. The template's Google-side pre-warmed
-  pool: billing not documented — **open question, to be settled against the billing report** (2026-09-16:
-  the pool is persistent, see §13.4; if it bills at sandbox rates, two 4 CPU / 4 GiB containers are
-  ~$0.75/h ≈ $18/day per template, and "a cold engine bills only for image storage" would need the
-  template created on demand and reaped when idle rather than at deploy).
+  pool: not documented, **verified free 2026-09-16** against the billing report (see §13.4) — so a cold
+  engine (image + template, no sandbox) bills only for image storage, however many engines exist.
 
 ### 13.2 Feature survey: what carries over, what changes, what is lost
 
@@ -1031,9 +1029,13 @@ release with these notes in the CHANGELOG; other teams update when it merges. Wh
   grows but stays off the critical path. *Measured 2026-09-16*: the pool is persistent — two sandboxes
   created back to back from a 34.2 h-old template both had PID 1 with 34.2 h uptime, so Google keeps at
   least two template-sized containers running per ACTIVE template from creation on, whether or not
-  anything is ever created from it. The docs only say sandboxes bill while they exist; the pool's billing
-  is unverified (needs the billing report: Agent Compute / Agent Memory SKUs on days without runs). This
-  matters most for adopters wanting tens to hundreds of engines with pre-baked dependencies.
+  anything is ever created from it. The docs only say sandboxes bill while they exist. *Billing verified
+  2026-09-16* from the project's September report (grouped by SKU): "Agent Platform Compute" 134.86 h
+  ($7.89) and "Agent Platform Memory" 380.58 GiB-h ($2.59) for the whole month, across ~320 sandboxes
+  created since 09-10. Seven 4 CPU templates had been ACTIVE for one to two days by then; had their pools
+  billed, they alone would have added ~190 vCPU-h per template per day. So the pool is Google's cost, and
+  an idle template is free — which is what makes one engine per project (tens to hundreds of templates
+  with pre-baked dependencies) affordable. Still worth asking Google whether the pool size is tunable.
 - **Observability**: Cloud Logging and Cloud Trace are dropped (accepted). *Resolved 2026-09-16*: the
   platform exposes nothing about a sandbox's CPU/memory from outside (363 `aiplatform` metric types, none
   for sandboxes; the `reasoning_engine/*/allocation_time` series report only for Agent Runtime engines), but

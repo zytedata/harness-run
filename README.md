@@ -1443,14 +1443,14 @@ one proxy round trip of its emission) and the worker keeps writing the **GCS eve
 record — the fallback stream when a sandbox stops answering, and what `session.history()` reads. Nothing
 reads Cloud Logging; there is no shared read quota to run into.
 
-**Cost.** A sandbox bills while it exists
+**Cost.** A template costs nothing while nothing runs on it; a sandbox bills while it exists
 ($0.085/vCPU-hour + $0.009/GiB-hour at the time of writing — $0.38/h for the default 4 vCPU / 4 GiB). A
 ready pool is therefore idle compute you pay for continuously: `warm_pool=True` trades money for latency —
 size the pool to your concurrency and `pool_max_wait_s` to your quiet gaps, and leave it off for batch
-agents where a ~20 s start is fine. Whether a *template* costs anything while nothing runs on it is not
-documented and not yet verified against a bill: Google keeps a pool of pre-started containers per template
-(two sandboxes created from a 34-hour-old template both had a PID 1 that was 34 hours old), so treat
-"idle templates are free" as unconfirmed and delete engine versions nobody runs. Turn sandboxes are
+agents where a ~20 s start is fine. Google keeps a pool of pre-started containers per template (two
+sandboxes created from a 34-hour-old template both had a PID 1 that was 34 hours old); that pool is not
+billed to you — the September 2026 billing report for the project shows 135 Agent Platform Compute hours
+in total, where one template's pool alone would have added ~190 vCPU-hours per day. Turn sandboxes are
 deleted at the terminal event, so a turn costs its own
 duration. Tear a pool down with `engine.delete()`. Model token cost is the same either way and is reported
 per run as `result.cost_usd`.

@@ -1423,6 +1423,10 @@ class GeminiSession:
                 asyncio.to_thread(
                     read_history, engine._output_bucket, sid,
                     project=engine._project, credentials=engine._credentials,
+                    # The watchdog wants the run's OUTCOME: skip a layer that has events but
+                    # no terminal result, or a mirror truncated by a dead worker token reads
+                    # as "job died" while the job output holds the real result.
+                    require_result=True,
                 ),
                 timeout=60,
             )

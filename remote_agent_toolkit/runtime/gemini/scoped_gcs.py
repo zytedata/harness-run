@@ -55,6 +55,11 @@ REFRESH_EVERY_S = 25 * 60
 # runs past 60 min lost their event mirror for exactly this reason.)
 REFRESH_HORIZON = _dt.timedelta(minutes=10)
 
+# Consecutive refresh failures after which the token is presumed dead for good. Below this
+# a failure is usually a transient blip and the current token still works; at it, the run
+# has almost certainly lost GCS for the rest of the turn.
+DEAD_TOKEN_AFTER = 3
+
 _CLOUD_PLATFORM = "https://www.googleapis.com/auth/cloud-platform"
 
 
@@ -221,7 +226,7 @@ def worker_credentials(
     """
     from google.oauth2 import credentials as oauth2_credentials
 
-    state = {"token": token}
+    state: dict[str, Any] = {"token": token, "failures": 0, "escalated": False}
     get_json = fetch or _http_get_json
     key = None
     if output_bucket:
@@ -251,10 +256,30 @@ def worker_credentials(
             data = get_json(url, state["token"])
             fresh = data.get("token")
             if fresh:
+                state["failures"], state["escalated"] = 0, False
                 state["token"] = fresh
                 return fresh, within_horizon(_parse_expiry(data.get("expiry")))
-        except Exception:  # noqa: BLE001 — keep the current token; never crash the turn
-            logger.warning("run-scoped GCS token refresh failed; keeping the current token")
+        except Exception as exc:  # noqa: BLE001 — keep the current token; never crash the turn
+            # Never raise: the turn keeps working and still delivers its result through the
+            # platform job output, so a dead token must not take a healthy run down with it.
+            # But say so ONCE, loudly, with the reason — the old code logged the same line on
+            # every retry (hundreds per run) and never said the token was gone for good.
+            state["failures"] += 1
+            if state["failures"] == 1:
+                logger.warning(
+                    "run-scoped GCS token refresh failed for %s; keeping the current token "
+                    "(%s: %s)", session_id, type(exc).__name__, str(exc)[:200],
+                )
+            elif state["failures"] >= DEAD_TOKEN_AFTER and not state["escalated"]:
+                state["escalated"] = True
+                logger.error(
+                    "run-scoped GCS token for %s could not be renewed %d times running and is "
+                    "presumed dead; the replacement can only be fetched WITH a live token, so "
+                    "every GCS write from this worker will now fail silently. The run itself "
+                    "continues and its result still reaches the platform job output, but the "
+                    "live event mirror stops here (%s: %s)",
+                    session_id, state["failures"], type(exc).__name__, str(exc)[:200],
+                )
         return state["token"], retry_soon()
 
     return oauth2_credentials.Credentials(

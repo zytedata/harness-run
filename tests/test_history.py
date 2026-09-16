@@ -57,6 +57,34 @@ def test_read_history_prefers_mirror_and_keeps_turn_order(tmp_path):
     assert [e.summary for e in events] == ["turn1", "turn2-done"]  # all turns, in order
 
 
+def test_read_history_require_result_skips_a_truncated_mirror(tmp_path):
+    """A worker that loses its GCS credentials mid-turn stops adding to the mirror but still
+    gets its result into the job output. Without require_result the long, recent, resultless
+    mirror wins and the run reads as dead."""
+    store = LocalBlobStore(str(tmp_path))
+    sid = "truncated-sid"
+    history.write_turn_mirror("gs://bkt/events", sid,
+                              [history.mirror_line(AgentEvent(kind="message", summary="mid"))],
+                              now_ms=1000, store=store)
+    store.put_bytes(f"jobs/{sid}.jsonl", json.dumps(
+        {"content": {"parts": [{"text": "done"}]},
+         "custom_metadata": {"kind": "result", "raw": {"is_error": False}}}).encode())
+
+    assert [e.summary for e in history.read_history("gs://bkt", sid, store=store)] == ["mid"]
+    recovered = history.read_history("gs://bkt", sid, store=store, require_result=True)
+    assert [e.kind for e in recovered] == ["result"]
+
+
+def test_read_history_require_result_falls_back_when_nothing_is_complete(tmp_path):
+    store = LocalBlobStore(str(tmp_path))
+    sid = "still-running"
+    history.write_turn_mirror("gs://bkt/events", sid,
+                              [history.mirror_line(AgentEvent(kind="message", summary="mid"))],
+                              now_ms=1000, store=store)
+    events = history.read_history("gs://bkt", sid, store=store, require_result=True)
+    assert [e.summary for e in events] == ["mid"]  # partial beats nothing
+
+
 def test_read_history_falls_back_to_platform_job_output(tmp_path):
     store = LocalBlobStore(str(tmp_path))
     line = {"content": {"parts": [{"text": "done"}]},

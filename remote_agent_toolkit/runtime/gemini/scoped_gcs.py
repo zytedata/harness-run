@@ -46,6 +46,15 @@ TOKEN_KEY_SUFFIX = "gcs-token.json"
 # ~4 minutes before expiry, so a 25-minute cadence leaves a wide margin.
 REFRESH_EVERY_S = 25 * 60
 
+# Worker side: never ride a token closer than this to its death. The worker fetches its
+# replacement WITH the current token, so an expired one can never fetch anything — the
+# refresh must happen while the current token still works. google-auth only refreshes a
+# credential it believes is near expiry, and the worker is handed a bare token string with
+# no expiry attached, so without a horizon it believes the token never expires and refreshes
+# only after a call has already failed with 401 — too late to recover. (AT-2971/AT-2972: two
+# runs past 60 min lost their event mirror for exactly this reason.)
+REFRESH_HORIZON = _dt.timedelta(minutes=10)
+
 _CLOUD_PLATFORM = "https://www.googleapis.com/auth/cloud-platform"
 
 
@@ -201,7 +210,11 @@ def worker_credentials(
     """Worker side: google-auth credentials carrying the run's token, refreshing from GCS.
 
     The refresh handler reads the run's token object with the token that is about to
-    expire (google-auth refreshes early, so it is still valid) and swaps in the new one.
+    expire and swaps in the new one. That read only works while the current token is alive,
+    so the credential is always given an expiry no further out than ``REFRESH_HORIZON`` —
+    including when the caller knows no expiry at all (the worker is handed a bare token
+    string) and when the token object reports one far in the future. google-auth refreshes a
+    little before the expiry it is shown, so this keeps the swap happening on a live token.
     When there is no bucket to read from or the read fails, the current token is kept and
     the failure is logged; the turn then keeps working until the token really expires.
     ``fetch`` is injectable for tests (``(url, bearer) -> dict``).
@@ -220,6 +233,12 @@ def worker_credentials(
         # while the current token, which may still be valid, keeps being used.
         return _dt.datetime.utcnow() + _dt.timedelta(minutes=5)
 
+    def within_horizon(when: _dt.datetime | None) -> _dt.datetime:
+        # Refresh no later than the horizon, whatever the token object claims. A real expiry
+        # further out would park the worker on one token past the client's next re-mint.
+        horizon = _dt.datetime.utcnow() + REFRESH_HORIZON
+        return min(when, horizon) if when else horizon
+
     def refresh_handler(_request: Any, scopes: Any = None) -> tuple[str, _dt.datetime]:
         if key is None:
             return state["token"], retry_soon()
@@ -233,13 +252,13 @@ def worker_credentials(
             fresh = data.get("token")
             if fresh:
                 state["token"] = fresh
-                return fresh, _parse_expiry(data.get("expiry")) or retry_soon()
+                return fresh, within_horizon(_parse_expiry(data.get("expiry")))
         except Exception:  # noqa: BLE001 — keep the current token; never crash the turn
             logger.warning("run-scoped GCS token refresh failed; keeping the current token")
         return state["token"], retry_soon()
 
     return oauth2_credentials.Credentials(
-        token=token, expiry=expiry, refresh_handler=refresh_handler
+        token=token, expiry=within_horizon(expiry), refresh_handler=refresh_handler
     )
 
 

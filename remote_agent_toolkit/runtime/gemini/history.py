@@ -128,13 +128,29 @@ def read_history(
     project: str | None = None,
     credentials: Any | None = None,
     store: Any | None = None,
+    require_result: bool = False,
 ) -> list[AgentEvent]:
     """All persisted events for ``session_id``, oldest first (empty if nothing is found).
 
     Tries the mirror (all turns), then the platform job output (last cold job), then Cloud
-    Logging (retention-bounded). Layers are alternatives, not merged — the first hit is the
-    most complete record available.
+    Logging (retention-bounded). Layers are alternatives, not merged — the first hit wins.
+
+    ``require_result`` changes what counts as a hit, for the caller that needs the turn's
+    OUTCOME rather than its record: a layer without a terminal ``result`` is skipped and the
+    next one is tried. A worker whose GCS credentials die mid-turn keeps running and still
+    writes its result to the job output and Cloud Logging, but its mirror stops at the last
+    event it managed to upload — long, recent, and missing the answer. Default ``False``
+    keeps the plain "most events available" behaviour, because the layers are NOT
+    interchangeable: the mirror spans every turn while the job output holds only the last
+    cold job, so preferring a complete-but-narrower layer would silently drop earlier turns
+    from a multi-turn session. A skipped layer is still returned if no later layer qualifies.
     """
+    def hit(events: list[AgentEvent]) -> bool:
+        if not events:
+            return False
+        return not require_result or any(ev.kind == "result" for ev in events)
+
+    fallback: list[AgentEvent] = []
     if output_bucket:
         bucket, prefix = parse_gcs_uri(output_bucket)
         blobs = store if store is not None else GcsBlobStore(bucket)
@@ -144,15 +160,17 @@ def read_history(
         events: list[AgentEvent] = []
         for key in blobs.list(f"{base}{_EVENTS_PREFIX}/{session_id}/"):
             events.extend(_parse_jsonl(blobs.get_bytes(key), event_from_mirror))
-        if events:
+        if hit(events):
             return events
+        fallback = fallback or events
 
         # 2. Platform job output (cold path; the last job under this session).
         try:
             data = blobs.get_bytes(f"{base}{_JOBS_PREFIX}/{session_id}.jsonl")
             events = _parse_jsonl(data, event_from_adk_line)
-            if events:
+            if hit(events):
                 return events
+            fallback = fallback or events
         except KeyError:
             pass
 
@@ -161,9 +179,10 @@ def read_history(
 
     sink = CloudLoggingSink(project=project, credentials=credentials)
     try:
-        return sink.read(session_id)
+        events = sink.read(session_id)
     except Exception:  # noqa: BLE001 — no logging access / no entries → empty history
-        return []
+        events = []
+    return events if hit(events) else (fallback or events)
 
 
 def list_sessions(

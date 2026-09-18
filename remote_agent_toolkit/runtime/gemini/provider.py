@@ -1,4 +1,4 @@
-"""``SandboxProvider`` — the one platform seam of the sandbox runtime (DESIGN.md §13.6).
+"""``SandboxProvider`` — the one platform seam of the sandbox runtime (DESIGN.md §13.5).
 
 The runtime asks the platform for four things only: create a container from a template,
 reach an HTTP port on it through an authenticated proxy, delete it, and enforce a TTL —

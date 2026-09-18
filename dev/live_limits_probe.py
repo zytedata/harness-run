@@ -1,6 +1,8 @@
-"""Live probe: the undocumented limits of Agent Sandbox custom containers (DESIGN.md §13.4).
+"""Live probe: the undocumented limits of Agent Sandbox custom containers (DESIGN.md §13.2).
 
-Runs against the spike image (see README.md) and answers, with numbers:
+Runs against an image built by ``gemini.deploy`` (``--image``: the ``image`` field of a deploy
+record, or any ``engine.revisions()`` entry) — it needs only the worker's ``/health`` and ``/exec``
+— and answers, with numbers (the 2026-09-11 findings are tabulated in TESTING.md, "The limits probe"):
 
 1. TTL ceiling: which ``ttl`` values a create accepts (1 h .. 30 d) and what comes back
 2. resources: does an 8 CPU / 16 GiB template (and 16 / 32) provision, and is the memory real
@@ -9,13 +11,13 @@ Runs against the spike image (see README.md) and answers, with numbers:
 5. per-call proxy ceiling: ``/exec sleep N`` for growing N (this bounds the /events long-poll)
 6. call rate: a sequential burst and a 10-thread burst of /health (any 429?)
 7. concurrent creates: 10 sandboxes at once (quota?), then a listing under the instance
-8. long turn (``--long-minutes``): an in-container ticker for N minutes with periodic execs,
-   then a harness turn whose Bash tool sleeps 200 s (a turn longer than one proxy call), then a
-   normal turn on the same, hour-old sandbox
+8. long-running process (``--long-minutes``): an in-container ticker for N minutes with periodic
+   execs, then a look at the sandbox after that long (a harness turn on an hour-old sandbox is
+   ``make live-smoke``'s ``LONG_MINUTES`` job)
 
-Needs google-cloud-agentplatform>=2.1 in its own venv. Prints statuses, names and timings
+Runs in the toolkit venv (the 2.x SDK is a toolkit dependency). Prints statuses, names and timings
 only; every created resource is deleted in ``finally`` unless --keep. Independent groups run
-in threads so the whole thing takes ~max(long-minutes, 15 min).
+in threads so the whole thing takes ~max(long-minutes, 15 min). COSTS REAL MONEY — by hand, never in CI.
 """
 
 from __future__ import annotations
@@ -29,19 +31,13 @@ import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import agentplatform
-import google.auth
-import google.auth.transport.requests as tr
 from agentplatform._genai import types
 
-SPEC = {"name": "ratk-sandbox-spike", "model": "claude-haiku-4-5", "max_turns": 8, "max_budget_usd": 1.0}
-
 ap = argparse.ArgumentParser()
-ap.add_argument("--image", required=True)
+ap.add_argument("--image", required=True, help="a sandbox image built by gemini.deploy")
 ap.add_argument("--project", default="my-project")
 ap.add_argument("--location", default="us-central1")
-ap.add_argument("--vertex-region", default="global")
-ap.add_argument("--model-sa", default="agent-runtime@my-project.iam.gserviceaccount.com")
-ap.add_argument("--long-minutes", type=float, default=0.0, help="ticker + long harness turn")
+ap.add_argument("--long-minutes", type=float, default=0.0, help="in-container ticker for that long")
 ap.add_argument("--sleep-steps", default="30,60,120,300,600", help="per-call ceiling probe")
 ap.add_argument("--instance", default=None)
 ap.add_argument("--keep", action="store_true")
@@ -147,54 +143,6 @@ def delete_sandbox(sb: str) -> None:
     with _CREATED:
         if sb in created["sbs"]:
             created["sbs"].remove(sb)
-
-
-def mint_model_token(lifetime_s: int = 3600) -> str:
-    creds, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
-    s = tr.AuthorizedSession(creds)
-    r = s.post(
-        f"https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/{args.model_sa}:generateAccessToken",
-        json={"scope": ["https://www.googleapis.com/auth/cloud-platform"], "lifetime": f"{lifetime_s}s"},
-    )
-    r.raise_for_status()
-    return r.json()["accessToken"]
-
-
-def run_turn(sb: str, label: str, prompt: str, extra_env: dict | None = None, poll_s: float = 0.5) -> dict:
-    env = {
-        "CLAUDE_CODE_USE_VERTEX": "1",
-        "CLAUDE_CODE_SKIP_VERTEX_AUTH": "1",
-        "ANTHROPIC_AUTH_TOKEN": mint_model_token(),
-        "ANTHROPIC_VERTEX_PROJECT_ID": args.project,
-        "CLOUD_ML_REGION": args.vertex_region,
-        **(extra_env or {}),
-    }
-    turn_id = f"t{int(time.time() * 1000)}"
-    t0 = time.time()
-    acc = call(sb, "/turn", {"turn_id": turn_id, "spec": SPEC, "prompt": prompt, "env": env})
-    if "turn_id" not in acc:
-        raise RuntimeError(f"turn not accepted: {acc}")
-    first, since, calls = None, 0, 0
-    while True:
-        ev = call(sb, "/events", {"turn_id": turn_id, "since": since})
-        calls += 1
-        for e in ev["events"]:
-            first = first or time.time() - t0
-            log(f"    [{label}] +{time.time() - t0:6.1f}s {e['kind']:11} {e['summary'][:70]}")
-        since = ev["next"]
-        if ev["done"]:
-            break
-        time.sleep(poll_s)
-    total = time.time() - t0
-    res = ev.get("result") or {}
-    text = " ".join((res.get("text") or "").split())
-    ok = (not res.get("is_error")) and "42" in text and not ev.get("error")
-    if ev.get("error"):
-        log(f"    [{label}] ERROR: {ev['error'][-600:]}")
-    out = {"first_event_s": None if first is None else round(first, 1), "result_s": round(total, 1), "ok": ok,
-           "polls": calls, "cost_usd": res.get("cost_usd"), "text": text[:80]}
-    log(f"  MEASURED [{label}] first event {out['first_event_s']}s, result {out['result_s']}s, ok={ok}")
-    return out
 
 
 # ---------------------------------------------------------------- probe groups
@@ -359,10 +307,6 @@ def probe_long(sb: str, minutes: float) -> None:
             log(f"  long: exec FAILED {err_str(exc)}")
     r = call(sb, "/exec", {"command": "wc -l < /workspace/tick; uptime -s; cat /proc/uptime", "timeout": 10})
     out["after"] = " | ".join((r.get("stdout") or "").strip().splitlines())
-    # a harness turn whose single Bash call outlives a proxy call, then a normal turn
-    out["turn_sleep200"] = run_turn(sb, "long-turn", 'Run `sleep 200 && python3 -c "print(6 * 7)"` in the shell (it takes over three minutes, wait for it) and reply with just the number it prints.',
-                                    extra_env={"BASH_DEFAULT_TIMEOUT_MS": "600000", "BASH_MAX_TIMEOUT_MS": "600000"}, poll_s=2.0)
-    out["turn_after"] = run_turn(sb, "after-long", 'Run `python3 -c "print(6 * 7)"` in the shell and reply with just the number it prints.')
     note("long", out)
 
 

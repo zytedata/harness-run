@@ -47,12 +47,5 @@ money, so they run by hand, never in CI. See [`TESTING.md`](../TESTING.md) for w
 | [`live_usage_probe.py`](live_usage_probe.py) | `make live-usage` | usage/cost accounting on both harnesses — incl. the Codex subagent rollout recovery, which rides non-public rollout details; `SCENARIO=<name>` for one scenario |
 | [`live_interactive_probe.py`](live_interactive_probe.py) | `make live-interactive` | turn control on the local runtime, both harnesses: steer, interrupt + continue, stop, resume; prints a latency table |
 | [`chat.py`](chat.py) | `make chat` | a local chat page for trying turn control by hand: Send while the agent works = steer, Interrupt & send, Stop, resume; `HARNESS=codex` for Codex; needs `fastapi` + `uvicorn` in the venv |
+| [`live_limits_probe.py`](live_limits_probe.py) | — | the platform's undocumented ceilings (TTL, resources, disk, proxy body sizes, per-call ceiling, call rate, concurrent creates) against any deployed image; ~15 min, a few cents; findings in [`TESTING.md`](../TESTING.md) |
 | [`openrouter_endpoints.py`](openrouter_endpoints.py) | — | lists a model's OpenRouter providers and their advertised features; free unless you pass `--probe` |
-
-## `sandbox_spike/` — the spike that led to the sandbox runtime
-
-The 2026-09-10 spike image and probe (the toolkit + harness behind a tiny HTTP runner, measured against
-the then-current warm pool) and the 2026-09-11 limits probe. Kept as the record of the measurements and
-the platform limits; the production runtime is `runtime/gemini/` (`worker.py`, `_image.py`). Setup
-commands, results and the limits table are in [`sandbox_spike/README.md`](sandbox_spike/README.md);
-the design is DESIGN.md §13.

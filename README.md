@@ -275,7 +275,10 @@ the provider's model name, region when available, the HTTP status, the exact req
 provider routing the request asked for (`requested_routing`).
 Failed responses are reported too, so a retried request is visible. The result uses the sum of
 the exact costs. `max_budget_usd` is checked between model responses, so one response may take
-the total above the cap. The proxy then refuses the next request.
+the total above the cap. The proxy then refuses the next request (a zero budget refuses the first).
+This is admission between responses, not a hard spending ceiling: concurrent requests can pass it
+together, and a response OpenRouter reports no cost for adds nothing to the total. For a hard ceiling,
+use the provider's own prepaid or spending limits.
 
 ```python
 run = session.run(task, secrets={"OPENROUTER_API_KEY": key})
@@ -970,9 +973,8 @@ its shell is therefore what the turn itself brought along, and the toolkit keeps
 
 Sandboxes are created per turn and deleted at its end, so nothing a run leaves behind survives into the
 next one; multi-turn continuity rides the checkpoint (a credential-scrubbed tar in your bucket). There is
-no runtime service account, no per-worker message channel and no platform-persisted job input any more —
-the earlier identity model and its migration are history (DESIGN.md §6 and
-[PR #41](https://github.com/zytedata/remote-agent-toolkit/pull/41) record them; §13 the move).
+no runtime service account, no per-worker message channel and no platform-persisted job input
+(DESIGN.md §6 and §13).
 
 ## Pre-baked engine dependencies
 
@@ -1102,7 +1104,9 @@ run2 = await session.send(                                     # same session co
 turn's workspace (with the agent's uncommitted work) and never re-reads those fields. A
 mid-conversation change could not be honored — so the API refuses to express it: `send()`
 takes no session config, and `get_session(sid)` re-attach reads back the config the opener
-persisted rather than accepting one.
+persisted rather than accepting one. Only a definite "no such object" from the bucket means the
+session has no config: a permission error, a timeout or a malformed record fails the re-attach
+instead of silently running the baked spec, and the next attempt re-reads.
 
 The contracts behind this:
 
@@ -1418,9 +1422,8 @@ code never deploys — it looks an engine up by name and runs.
 A ready sandbox's worker is already running and reachable; a turn is one HTTPS round trip to hand it the
 prompt, tokens and configs, and the events stream straight back from it (one long-poll per event batch,
 ~0.2 s proxy round trip). Sandboxes are created from Google's pre-warmed pool per template, so the ~20 s
-of the no-pool path is route propagation, not boot. The previous design (Agent Runtime query jobs and
-our own warm pool) measured 4.2 s / 14.5 s with a warm worker and ~150 s cold; DESIGN.md §13 has the
-comparison and the spike.
+of the no-pool path is route propagation, not boot. DESIGN.md §13 has the architecture and the measured
+numbers.
 
 **How `warm_pool=True` works.** `gemini.deploy(spec, warm_pool=True, pool_size=N)` creates N sandboxes from
 the new template, waits until each answers, and records them in a **roster** (client-owned GCS objects under

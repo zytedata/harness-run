@@ -89,9 +89,7 @@ before a deploy builds the real image. See [`dev/README.md`](dev/README.md).
 ### Why offline green isn't enough
 
 The platform's behavior changes **server-side, with zero client changes** — the offline
-suite stays green through it. Measured examples: on the former Agent Runtime backend (2026-07-28) new engines'
-job workers stopped resolving a default `class_method` and the job runner started
-kill-and-retrying workers; Agent Sandbox is a v1beta1 surface whose SDK renamed
+suite stays green through it. Agent Sandbox is a v1beta1 surface whose SDK renamed
 `agent_engines` → `runtimes` between 1.x and 2.x and whose proxy limits (call ceiling,
 body caps) are undocumented and were measured, not read. The §6/§13 contracts in
 [`DESIGN.md`](DESIGN.md) exist because of such findings; live validation is how we keep
@@ -146,13 +144,35 @@ and the Docker CLI logged into the registry (`docker login -u oauth2accesstoken
 `my-project` test project and its `ratk-sandbox` repo; `MODEL_SA` overrides the model
 service account (default: the spike's `agent-runtime@`).
 
-### The limits probe (`dev/sandbox_spike/limits_probe.py`)
+### The limits probe (`dev/live_limits_probe.py`)
 
 Not part of the regular ladder: it measures the platform's undocumented ceilings (TTL, CPU and
-memory, proxy body sizes, the per-call ceiling, call rate, concurrent creates) and takes ~15 min
-plus the optional long turn. Re-run it when the platform announces changes to Agent Sandbox or
-when a limit in `backend.py` / `worker.py` (`EVENTS_WAIT_S`, `EVENTS_PAGE_BYTES`) needs
-re-grounding; the 2026-09-11 findings are in [`dev/sandbox_spike/README.md`](dev/sandbox_spike/README.md).
+memory, disk, proxy body sizes, the per-call ceiling, call rate, concurrent creates) and takes
+~15 min plus the optional long-running-process check. It runs against any image `gemini.deploy`
+built (`--image`, from a deploy record or `engine.revisions()`), needs only the worker's `/health`
+and `/exec`, creates its own templates and sandboxes and deletes them in `finally`. Re-run it when
+the platform announces changes to Agent Sandbox or when a limit in `backend.py` / `worker.py`
+(`EVENTS_WAIT_S`, `EVENTS_PAGE_BYTES`, the `exec()` timeout cap) needs re-grounding.
+
+```bash
+.venv/bin/python dev/live_limits_probe.py --image us-central1-docker.pkg.dev/<project>/ratk-sandbox/<image>:<tag> [--long-minutes 25]
+```
+
+Findings of 2026-09-11 (my-project / us-central1, 4 CPU / 8 GiB unless noted):
+
+| Limit | Measured |
+|---|---|
+| sandbox TTL | 1 h, 1 d, 7 d, 14 d and 30 d all accepted (`expire_time` set accordingly) |
+| resources | 8 CPU / 16 GiB template works (a 13 GiB allocation succeeds; template create 118 s); 16 CPU refused: "Request CPU exceeds maximum allowed: 8.0 vCPU" |
+| disk | `/tmp` 63 GB; `/` and `/workspace` overlay; a 2 GiB write takes 1.2 s |
+| proxied request body | 100 KB fine (0.5 s), 1 MB fine (4.2 s), 4 MB / 10 MB / 32 MB fail (`Execution Failed. Error: UNAVAILABLE`) |
+| proxied response body | 100 KB and 1 MB fine (0.3 s); 4 MB+ fail: "Response size too large. Received at least 2016214 bytes" → the worker pages `/events` under 1 MB |
+| one proxied call's duration | 30 / 60 / 120 / 300 s fine; 600 s → 502 Bad Gateway at 600 s (the sandbox stays healthy) → the client's long-poll holds 20 s, `exec()` is capped at 240 s |
+| call rate | 100 sequential `/health` calls in 18.5 s (5.4/s); 200 calls on 10 threads in 4.0 s (50/s); no 429 |
+| concurrent creates | 10 sandboxes created in parallel in 7.5 s wall (2.7–7.5 s each), all listed RUNNING; first answers 0.7–32 s later |
+| long-running process | a background ticker ran 25 min untouched across 5-minute `/exec` polls |
+| exec resets the TTL? | **no**: a 480 s-TTL sandbox was gone at 540 s despite an exec at 420 s (so a pool sandbox's TTL is set at creation to its whole intended life) |
+| idle sandbox after 60 min | answers the first call in 0.9 s, same process |
 
 ### The OpenRouter model check
 
@@ -279,7 +299,7 @@ When the smoke test doesn't cover your change (e.g. validating crash/retry behav
 new event field), follow the same pattern — it's what keeps live testing safe and cheap.
 Worked examples in [`dev/`](dev): `live_two_turn_probe.py` (two turns on one session over
 the event stream — the probe that caught the stale-result replay bug) and
-`sandbox_spike/limits_probe.py` (the platform's ceilings, measured):
+`live_limits_probe.py` (the platform's ceilings, measured):
 
 - **Throwaway, named engines**: suffix with something identifying (`-itest`, your name) so
   leftovers are attributable; never point a probe at someone's standing engine.

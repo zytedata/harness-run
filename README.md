@@ -1443,18 +1443,18 @@ one proxy round trip of its emission) and the worker keeps writing the **GCS eve
 record — the fallback stream when a sandbox stops answering, and what `session.history()` reads. Nothing
 reads Cloud Logging; there is no shared read quota to run into.
 
-**Cost.** A sandbox bills while it exists
+**Cost.** A template costs nothing while nothing runs on it; a sandbox bills while it exists
 ($0.085/vCPU-hour + $0.009/GiB-hour at the time of writing — $0.38/h for the default 4 vCPU / 4 GiB). A
 ready pool is therefore idle compute you pay for continuously: `warm_pool=True` trades money for latency —
 size the pool to your concurrency and `pool_max_wait_s` to your quiet gaps, and leave it off for batch
 agents where a ~20 s start is fine. Google keeps a pool of pre-started containers per template (two
-sandboxes created from a 34-hour-old template both had a PID 1 that was 34 hours old). The pool is not
-billed at sandbox rates: the project's daily billing report shows 124 Agent Platform Compute hours on a
-day when five 4 CPU templates were ACTIVE, where their pools alone would have been ~190 vCPU-hours each.
-Whether some smaller charge hides in the memory line is not settled yet (the GiB-hours run ~2.8× the
-vCPU-hours although our templates are 1:1), so treat "an idle template is free" as very likely rather
-than proven, and delete engine versions nobody runs. Turn sandboxes are deleted at the terminal event,
-so a turn costs its own
+sandboxes created from a 34-hour-old template both had a PID 1 that was 34 hours old), and that pool is
+Google's cost, not yours: ten idle 4 CPU / 4 GiB templates with no sandbox ever created from them were
+kept for a full billing day (2026-09-17) and the project's Agent Platform Compute / Memory lines went
+*down* that day (55 vCPU-h / 145 GiB-h, below the ready-pool sandboxes alone), where billed pools would
+have added ~1000–1900 GiB-h. So a cold engine costs only its image storage; still delete engine versions
+nobody runs, because each ACTIVE template competes for provisioning capacity. Turn sandboxes are deleted
+at the terminal event, so a turn costs its own
 duration. Tear a pool down with `engine.delete()`. Model token cost is the same either way and is reported
 per run as `result.cost_usd`.
 

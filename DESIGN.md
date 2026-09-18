@@ -942,10 +942,10 @@ every sandbox under the parent instance); the shell/custom-container surface is 
 - **Cost.** Same rates ($0.085/vCPU-h + $0.009/GiB-h). A ready sandbox bills like an idle warm worker; a
   sandbox is billed while it exists, so delete at turn end and size the ready pool + TTL to the dispatch
   pattern exactly as `pool_size` / `pool_max_wait_s` are sized today. The template's Google-side pre-warmed
-  pool: not documented; the billing report shows no charge at sandbox rates (see §13.4), a smaller
-  memory-only charge is not yet excluded. Target principle: a cold engine (image + template, no sandbox)
-  bills only for image storage, however many engines exist; if the resource-level billing export ever
-  shows pool pods, the fallback is to create the template on first use and reap it when idle.
+  pool: not documented, **verified unbilled 2026-09-17** (see §13.4: ten idle templates for a full billing
+  day, zero effect on the bill). So a cold engine (image + template, no sandbox) bills only for image
+  storage, however many engines exist. Should Google ever start billing the pool, the fallback is to
+  create the template on first use and reap it when idle.
 
 ### 13.2 Feature survey: what carries over, what changes, what is lost
 
@@ -1040,9 +1040,16 @@ release with these notes in the CHANGELOG; other teams update when it merges. Wh
   (a memory-only charge for about one pool container per template would roughly fit). Inside, an idle
   pool container is a gVisor pod (`sbx-tmpl-<instance>-<template>-<suffix>`, Kubernetes env, 4 vCPU with
   no CFS quota, MemTotal = the template's memory) using 37 MB RSS and 7 CPU-seconds in 34 h — cheap for
-  Google to keep, so the risk is a pricing decision, not physics. To settle: enable the BigQuery billing
-  export (resource-level line items) or compare one day's GiB-h with the sandbox-hours our own mirror
-  records; and ask Google whether the pool bills and whether its size is tunable.
+  Google to keep, so the risk is a pricing decision, not physics. *Settled 2026-09-18*: ten templates
+  `ratk-billing-probe-01..10` (4 CPU / 4 GiB, no sandbox ever created from them) were kept from 09-16
+  19:30Z through 09-17 and deleted on 09-18. The 09-17 bill: 54.71 vCPU-h / 144.64 GiB-h at list rates,
+  *lower* than the two previous days and below the allocation of the ready-pool sandboxes alive that day,
+  where billed pools would have added ~960 GiB-h (one container per template) or ~1900 (two). The pool is
+  free to us; sandbox billing itself comes out at or below allocation (the earlier 2.8× GiB-h:vCPU-h ratio
+  was never the pool). Side result on provisioning: the ten 4 CPU creates took 78–241 s each (mean 148 s,
+  none stalled) with 7 other templates ACTIVE, versus 8–77 s earlier the same day — capacity contention
+  that varies minute to minute, not a wall; hundreds of templates would need parallel creates measured.
+  Still worth asking Google whether the pool size is tunable.
 - **Observability**: Cloud Logging and Cloud Trace are dropped (accepted). *Resolved 2026-09-16*: the
   platform exposes nothing about a sandbox's CPU/memory from outside (363 `aiplatform` metric types, none
   for sandboxes; the `reasoning_engine/*/allocation_time` series report only for Agent Runtime engines), but

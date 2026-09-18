@@ -29,14 +29,20 @@ def test_client_preserves_expiry_and_writes_initial_refresh_before_thread(monkey
 
 
 def test_worker_refreshes_before_transport_expiry(monkeypatch):
+    # One fake clock for google-auth and for the worker's own horizon arithmetic.
+    clock = {"now": dt.datetime(2026, 9, 18, 8, 0)}
+    monkeypatch.setattr(_helpers, "utcnow", lambda: clock["now"])
+    monkeypatch.setattr(scoped_gcs, "_now", lambda: clock["now"])
     initial = dt.datetime(2099, 1, 1, 1)
     fetched = []
     creds = scoped_gcs.worker_credentials(
         "AUDIT_OLD", "gs://audit-bucket", "audit", expiry=initial,
         fetch=lambda url, bearer: fetched.append(bearer) or {"token": "AUDIT_FRESH", "expiry": "2099-01-01T02:00:00"},
     )
-    assert creds.expiry == initial
-    monkeypatch.setattr(_helpers, "utcnow", lambda: initial - dt.timedelta(minutes=1))
+    # A far-future expiry is clamped to the refresh horizon (#87): the replacement can only be
+    # fetched WITH a live token, so the worker never parks on one token for that long.
+    assert creds.expiry == clock["now"] + scoped_gcs.REFRESH_HORIZON
+    clock["now"] = creds.expiry - dt.timedelta(minutes=1)
     headers = {}
     creds.before_request(None, "GET", "https://audit.invalid", headers)
     assert fetched == ["AUDIT_OLD"]

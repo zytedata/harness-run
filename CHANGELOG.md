@@ -147,6 +147,19 @@ for the tag with this file's section as the notes.
 
 ### Fixed
 
+- **The worker's run-scoped GCS token is refreshed while it is still alive, and its death is
+  reported once** (ported from #87 to the sandbox worker). The worker fetches its replacement
+  token WITH the current one, so the swap has to happen before the current token expires: the
+  credential's expiry is now clamped to a ten-minute refresh horizon on top of the expiry the
+  client sends with the turn (a token object reporting a far-future expiry can no longer park
+  the worker on one token past the client's next re-mint). A refresh failure is logged once,
+  with the reason, instead of on every retry, and after three consecutive failures the token
+  is reported dead with a single error; the turn keeps running and a client on the live
+  `/events` channel still gets its result, but the durable mirror stops there, so a session
+  re-attached later would find no record of the rest of the turn. The other half of #87
+  (`history(require_result=)` skipping a record without a terminal result) has no counterpart
+  here: the sandbox `history()` has the mirror layer only, and a turn's outcome comes from the
+  worker's `/events` channel, then the mirror tail, then a synthetic error after a grace period.
 - **`engine.delete()` no longer deletes the ready sandboxes of an engine whose name extends
   this one's** (#84 field report). The orphan sweep matched sandboxes by display-name *prefix*, and
   `ratk-x-` is a prefix of `ratk-x-b040d27-…` — so tearing down `x` next to the revision-suffixed

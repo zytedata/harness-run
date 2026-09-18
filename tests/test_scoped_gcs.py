@@ -8,6 +8,7 @@ fake storage client.
 from __future__ import annotations
 
 import datetime as dt
+import logging
 import json
 
 from remote_agent_toolkit import AgentSpec
@@ -77,11 +78,45 @@ def test_worker_credentials_refresh_from_the_run_token_object():
     assert creds.token == "tok-1"
     creds.refresh(None)
     assert creds.token == "tok-2"
-    assert creds.expiry == dt.datetime(2099, 1, 1, 12, 0, 0)   # naive UTC, google-auth style
+    # The object's far-future expiry is CLAMPED to the refresh horizon: the replacement can
+    # only be fetched with a live token, so the worker must never park on one that long.
+    assert creds.expiry < dt.datetime.now(dt.timezone.utc).replace(tzinfo=None) + scoped_gcs.REFRESH_HORIZON + dt.timedelta(seconds=5)
+    assert creds.expiry > dt.datetime.now(dt.timezone.utc).replace(tzinfo=None) + scoped_gcs.REFRESH_HORIZON - dt.timedelta(minutes=1)
     url, bearer = calls[0]
     assert bearer == "tok-1"                                    # the old token reads the new one
     assert url.startswith("https://storage.googleapis.com/storage/v1/b/out/o/")
     assert "invocation-secrets%2Fsid-1-gcs-token.json" in url and url.endswith("?alt=media")
+
+
+def test_worker_credentials_expire_within_the_horizon_even_without_a_known_expiry():
+    """The worker is handed a bare token string. With expiry=None google-auth would treat
+    it as never expiring and only refresh after a call had already failed with 401 — by
+    which point the token cannot fetch its own replacement."""
+    creds = scoped_gcs.worker_credentials("tok-1", "gs://out", "sid-1", fetch=lambda u, b: {})
+    assert creds.expiry is not None
+    assert creds.expiry <= dt.datetime.now(dt.timezone.utc).replace(tzinfo=None) + scoped_gcs.REFRESH_HORIZON + dt.timedelta(seconds=5)
+
+
+def test_worker_credentials_keep_an_expiry_sooner_than_the_horizon():
+    soon = dt.datetime.now(dt.timezone.utc).replace(tzinfo=None) + dt.timedelta(minutes=2)
+    creds = scoped_gcs.worker_credentials(
+        "tok-1", "gs://out", "sid-1", expiry=soon, fetch=lambda u, b: {}
+    )
+    assert creds.expiry == soon
+
+
+def test_worker_credentials_report_a_dead_token_once(caplog):
+    def fetch(url, bearer):
+        raise OSError("401 expired")
+
+    creds = scoped_gcs.worker_credentials("tok-1", "gs://out", "sid-1", fetch=fetch)
+    with caplog.at_level(logging.ERROR, logger=scoped_gcs.logger.name):
+        for _ in range(scoped_gcs.DEAD_TOKEN_AFTER + 4):
+            creds.refresh(None)
+    dead = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert len(dead) == 1                      # once, not once per retry
+    assert "presumed dead" in dead[0].getMessage()
+    assert creds.token == "tok-1"              # and the turn is never taken down
 
 
 def test_worker_credentials_keep_the_current_token_when_refresh_fails():

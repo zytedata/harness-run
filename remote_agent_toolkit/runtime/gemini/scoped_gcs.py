@@ -1,22 +1,14 @@
-"""Run-scoped GCS access for gemini workers.
+"""Run-scoped GCS access for sandbox workers.
 
-Why this exists (found and verified 2026-09-02, see README "Secrets & security"): the
-worker container runs the agent's shell as the same user as the worker, and that
-container authenticates as the Agent Runtime service agent through the metadata server.
-So a shell command inside the agent can mint that identity's token. With the identity
-holding ``objectAdmin`` on the output bucket, one run could list and read every other
-run's staged secrets, transcripts and configs, across every engine sharing the bucket.
+The sandbox has no Google identity that could open the output bucket (DESIGN.md §13.1),
+so the **client** mints one short-lived, downscoped token per turn (a Credential Access
+Boundary: this bucket, only this run's object prefixes) and the **worker** does all of the
+turn's GCS work with it — the event mirror, checkpoints, transcripts, artifacts. The
+agent's shell can read the token (it is in the worker's process), which is why it opens
+only the run's own objects: nothing another run wrote, nothing under another prefix.
 
-The fix: the **client** mints one short-lived, downscoped token per turn (a Credential
-Access Boundary: this bucket, only this run's object prefixes) and the **worker** does
-all of the turn's GCS work with it instead of the runtime identity. The runtime identity
-can then lose its bucket-wide role (the migration step in the README): a token minted
-from the metadata server no longer opens the bucket, and the run's own token opens only
-the run's own objects.
-
-The token rides the invocation like the other pointers do (a directive line on the cold
-path, a payload field on the warm path). It is a bearer token, so treat it as one: it is
-worth this run's own objects for at most an hour, and nothing else.
+The token rides the ``/turn`` body. It is a bearer token, so treat it as one: it is worth
+this run's own objects for at most an hour, and nothing else.
 
 Long turns: a downscoped token lives as long as its source token (at most an hour). The
 client refreshes it while the run is live by overwriting one object under the run's own
@@ -48,11 +40,11 @@ REFRESH_EVERY_S = 25 * 60
 
 # Worker side: never ride a token closer than this to its death. The worker fetches its
 # replacement WITH the current token, so an expired one can never fetch anything — the
-# refresh must happen while the current token still works. google-auth only refreshes a
-# credential it believes is near expiry, and the worker is handed a bare token string with
-# no expiry attached, so without a horizon it believes the token never expires and refreshes
-# only after a call has already failed with 401 — too late to recover. (AT-2971/AT-2972: two
-# runs past 60 min lost their event mirror for exactly this reason.)
+# refresh must happen while the current token still works. The client sends the token's
+# real expiry in the turn body, so the horizon is a clamp on top of that, not the only
+# schedule: it also covers a token object that reports an expiry far in the future (which
+# would park the worker on one token past the client's next re-mint) and a payload that
+# carries no expiry at all. Same constant as on the query-job runtime (#87).
 REFRESH_HORIZON = _dt.timedelta(minutes=10)
 
 # Consecutive refresh failures after which the token is presumed dead for good. Below this
@@ -61,6 +53,11 @@ REFRESH_HORIZON = _dt.timedelta(minutes=10)
 DEAD_TOKEN_AFTER = 3
 
 _CLOUD_PLATFORM = "https://www.googleapis.com/auth/cloud-platform"
+
+
+def _now() -> _dt.datetime:
+    """Naive UTC now, the shape google-auth keeps credential expiries in (patched in tests)."""
+    return _dt.datetime.now(_dt.timezone.utc).replace(tzinfo=None)
 
 
 def token_key(base: str, session_id: str) -> str:
@@ -74,9 +71,7 @@ def run_object_prefixes(output_bucket: str, session_id: str) -> tuple[str, str, 
     ``output_bucket`` is the engine's ``gs://bucket[/prefix]``. The list is the whole GCS
     surface of a turn (handoff objects, the events mirror, checkpoints, artifacts); the
     checkpoint keys use the Claude session id the worker derives from the toolkit session
-    id (``session_store._claude_session_id``), so the mapping is done here too. The
-    control inbox is here because the worker polls it with these credentials: without
-    its prefix every list would 403 and ``send()`` / ``interrupt()`` would never arrive.
+    id (``session_store._claude_session_id``), so the mapping is done here too.
 
     Every writer of run objects must appear here: ``tests/test_scoped_gcs.py`` drives the
     checkpoint code (Codex thread persist + resume, transcript store, workspace snapshot)
@@ -95,20 +90,17 @@ def run_object_prefixes(output_bucket: str, session_id: str) -> tuple[str, str, 
         f"{base}checkpoints/workspace/{csid}.tar.gz",     # workspace snapshot
         f"{base}checkpoints/codex-threads/{csid}/",       # Codex conversation (harness/codex.py)
         f"{base}artifacts/{session_id}/",                 # produced files
-        f"{base}control/{session_id}/",                   # the turn's control inbox (control.py)
-        f"{base}control-delivered/{session_id}/",         # its delivered-message markers
     ]
     return bucket, base, prefixes
 
 
-# Prefixes the worker LISTS with the run token: the control inbox (control.py polls it) and
-# the checkpoint transcript directory (session_store.load enumerates batches on resume).
-# Every other object of a turn is read or written by exact name. Kept to the minimum on
-# purpose: STS caps the minted token at ~10.7k chars INCLUDING the caller's own token, and
-# a list clause adds ~500 chars per rule. Nine list clauses fit under a ~250-char user token
-# and overflow a ~1,100-char service-account token with "invalid_request" (measured
-# 2026-09-08, zapi-workflow-bot); two fit either with room to spare.
-_LISTED_PREFIXES = ("checkpoints/sessions/", "control/")
+# Prefixes the worker LISTS with the run token: the checkpoint transcript directory
+# (session_store.load enumerates batches on resume). Every other object of a turn is read
+# or written by exact name. Kept to the minimum on purpose: STS caps the minted token at
+# ~10.7k chars INCLUDING the caller's own token, and a list clause adds ~500 chars per
+# rule. Nine list clauses overflowed a ~1,100-char service-account token with
+# "invalid_request" (measured 2026-09-08); one fits with room to spare.
+_LISTED_PREFIXES = ("checkpoints/sessions/",)
 
 
 def access_boundary(bucket: str, prefixes: list[str], base: str = "") -> Any:
@@ -124,11 +116,14 @@ def access_boundary(bucket: str, prefixes: list[str], base: str = "") -> Any:
     rules = []
     for p in prefixes:
         obj = f"projects/_/buckets/{bucket}/objects/{p}"
-        expression = f'resource.name.startsWith("{obj}")'
+        # CEL accepts JSON string escapes. Keep caller-controlled names inside
+        # literals without restoring list clauses for exact-name-only objects:
+        # those extra clauses overflow STS tokens for service-account callers.
+        expression = f'resource.name.startsWith({json.dumps(obj, ensure_ascii=False)})'
         if p[len(base):].startswith(_LISTED_PREFIXES):
             expression += (
                 ' || api.getAttribute("storage.googleapis.com/objectListPrefix", "")'
-                f'.startsWith("{p}")'
+                f'.startsWith({json.dumps(p, ensure_ascii=False)})'
             )
         rules.append(
             downscoped.AccessBoundaryRule(
@@ -217,12 +212,12 @@ def worker_credentials(
     The refresh handler reads the run's token object with the token that is about to
     expire and swaps in the new one. That read only works while the current token is alive,
     so the credential is always given an expiry no further out than ``REFRESH_HORIZON`` —
-    including when the caller knows no expiry at all (the worker is handed a bare token
-    string) and when the token object reports one far in the future. google-auth refreshes a
+    including when the token object reports one far in the future. google-auth refreshes a
     little before the expiry it is shown, so this keeps the swap happening on a live token.
     When there is no bucket to read from or the read fails, the current token is kept and
-    the failure is logged; the turn then keeps working until the token really expires.
-    ``fetch`` is injectable for tests (``(url, bearer) -> dict``).
+    the failure is logged once (and escalated once more, as an error, when it keeps failing
+    and the token is presumed dead); the turn then keeps working until the token really
+    expires. ``fetch`` is injectable for tests (``(url, bearer) -> dict``).
     """
     from google.oauth2 import credentials as oauth2_credentials
 
@@ -236,12 +231,12 @@ def worker_credentials(
     def retry_soon() -> _dt.datetime:
         # google-auth needs a datetime back; a few minutes ahead makes it ask again soon
         # while the current token, which may still be valid, keeps being used.
-        return _dt.datetime.utcnow() + _dt.timedelta(minutes=5)
+        return _now() + _dt.timedelta(minutes=5)
 
     def within_horizon(when: _dt.datetime | None) -> _dt.datetime:
         # Refresh no later than the horizon, whatever the token object claims. A real expiry
         # further out would park the worker on one token past the client's next re-mint.
-        horizon = _dt.datetime.utcnow() + REFRESH_HORIZON
+        horizon = _now() + REFRESH_HORIZON
         return min(when, horizon) if when else horizon
 
     def refresh_handler(_request: Any, scopes: Any = None) -> tuple[str, _dt.datetime]:
@@ -258,12 +253,12 @@ def worker_credentials(
             if fresh:
                 state["failures"], state["escalated"] = 0, False
                 state["token"] = fresh
-                return fresh, within_horizon(_parse_expiry(data.get("expiry")))
+                return fresh, within_horizon(_parse_expiry(data.get("expiry")) or retry_soon())
         except Exception as exc:  # noqa: BLE001 — keep the current token; never crash the turn
-            # Never raise: the turn keeps working and still delivers its result through the
-            # platform job output, so a dead token must not take a healthy run down with it.
-            # But say so ONCE, loudly, with the reason — the old code logged the same line on
-            # every retry (hundreds per run) and never said the token was gone for good.
+            # Never raise: the turn keeps working and a client on the live ``/events`` channel
+            # still gets its result, so a dead token must not take a healthy run down with it.
+            # But say so ONCE, loudly, with the reason — logging the same line on every retry
+            # (hundreds per run) buries it, and nothing ever said the token was gone for good.
             state["failures"] += 1
             if state["failures"] == 1:
                 logger.warning(
@@ -276,21 +271,18 @@ def worker_credentials(
                     "run-scoped GCS token for %s could not be renewed %d times running and is "
                     "presumed dead; the replacement can only be fetched WITH a live token, so "
                     "every GCS write from this worker will now fail silently. The run itself "
-                    "continues and its result still reaches the platform job output, but the "
-                    "live event mirror stops here (%s: %s)",
+                    "continues and a client on the live /events channel still gets its result, "
+                    "but the durable mirror stops here: a session re-attached later will find "
+                    "no record of the rest of this turn (%s: %s)",
                     session_id, state["failures"], type(exc).__name__, str(exc)[:200],
                 )
         return state["token"], retry_soon()
 
     return oauth2_credentials.Credentials(
-        token=token, expiry=within_horizon(expiry), refresh_handler=refresh_handler
+        # Payloads without expiry get a conservative retry schedule, not google-auth's
+        # expiry=None (non-expiring) semantics; a known expiry is clamped to the horizon.
+        # This cannot recover an already expired bearer; never fall back to ambient
+        # credentials.
+        token=token, expiry=within_horizon(expiry or retry_soon()), refresh_handler=refresh_handler
     )
 
-
-def output_bucket_from_env(events_uri: str | None) -> str | None:
-    """The engine's ``gs://bucket[/prefix]`` from its ``AGENT_EVENTS_GCS`` (``.../events``)."""
-    if not events_uri:
-        return None
-    if events_uri.endswith("/events"):
-        return events_uri[: -len("/events")]
-    return events_uri

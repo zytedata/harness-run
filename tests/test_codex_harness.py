@@ -170,10 +170,10 @@ def test_build_options_permission_and_prompt_mapping(tmp_path):
     assert opts2.thread_args["base_instructions"] == "Full replace."
 
 
-def test_build_options_tool_lists_warn(tmp_path):
+def test_build_options_tool_lists_are_rejected(tmp_path):
     spec = AgentSpec(name="a", model="gpt-5.6-luna", harness="codex", allowed_tools=("Bash",))
-    opts = CodexHarness().build_options(spec, _ctx(tmp_path, spec))
-    assert any("allowed_tools" in w for w in opts.warnings)
+    with pytest.raises(ValueError, match="allowed_tools"):
+        CodexHarness().build_options(spec, _ctx(tmp_path, spec))
 
 
 def test_build_options_transcript_only_warns(tmp_path):
@@ -893,8 +893,9 @@ def test_codex_blanks_unrelated_ambient_model_credentials(tmp_path, monkeypatch)
     assert env["ANTHROPIC_API_KEY"] == ""
     assert env["ANTHROPIC_AUTH_TOKEN"] == ""
 
-    spec = _or_spec(env={"ANTHROPIC_API_KEY": "agent-owned"})
-    ctx = _ctx(tmp_path, spec, secrets={"OPENROUTER_API_KEY": "k"})
+    spec = _or_spec()
+    ctx = _ctx(tmp_path, spec, secrets={"OPENROUTER_API_KEY": "k",
+                                      "ANTHROPIC_API_KEY": "agent-owned"})
     assert CodexHarness().build_options(spec, ctx).codex_config.env["ANTHROPIC_API_KEY"] == (
         "agent-owned"
     )

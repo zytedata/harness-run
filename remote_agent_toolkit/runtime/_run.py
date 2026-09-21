@@ -72,8 +72,18 @@ def build_result(result_ev: AgentEvent, session_id: str, spec: AgentSpec) -> tup
         cost_usd=result_ev.cost_usd,
         usage=result_ev.usage,
         session_id=raw.get("session_id") or session_id,
+        resources=_resources(raw),
     )
     return result, stop_reason_for(raw, spec.checkpoint)
+
+
+_RESOURCE_KEYS = ("memory_peak_bytes", "memory_limit_bytes", "cpu_usec")
+
+
+def _resources(raw: dict) -> dict[str, int] | None:
+    """The worker-sampled high-water marks on a result event's ``raw`` (``None`` if none)."""
+    found = {k: int(raw[k]) for k in _RESOURCE_KEYS if isinstance(raw.get(k), int) and not isinstance(raw.get(k), bool)}
+    return found or None
 
 
 class DrivenRun:
@@ -95,6 +105,7 @@ class DrivenRun:
         # marker) without consuming it; called before the event is queued.
         self._on_event = on_event
         self._cancel_note: str | None = None
+        self._cancelled = False
         self._queue: asyncio.Queue = asyncio.Queue()
         self._task: asyncio.Task | None = None
         self._status = RunStatus.PENDING
@@ -118,6 +129,7 @@ class DrivenRun:
                     self._on_event(event)
                 await self._queue.put(event)
         except asyncio.CancelledError:
+            self._cancelled = True
             self._finalize(result_ev, error="interrupted")
             await self._queue.put(_SENTINEL)
             raise
@@ -161,6 +173,16 @@ class DrivenRun:
             self._stop_reason = StopReason.ERROR
         self._status = RunStatus.IDLE
         self._on_complete(self._result, self._stop_reason)
+
+    @property
+    def cancelled(self) -> bool:
+        """Whether the driver task was cancelled (``cancel()``, or the event loop shutting down)."""
+        return self._cancelled
+
+    @property
+    def cancel_note(self) -> str | None:
+        """The reason a caller gave ``cancel()``; None for a cancellation nobody asked for."""
+        return self._cancel_note
 
     def cancel(self, note: str | None = None) -> None:
         """Cancel the driver task (the fallback when the harness cannot be stopped cleanly).

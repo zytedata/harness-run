@@ -39,6 +39,7 @@ from .spec import (
     RepoSource,
     SkillSource,
     SystemPrompt,
+    _assert_non_secret_env,
     _output_schema_to_dict,
 )
 
@@ -68,9 +69,8 @@ INHERIT: Any = _Inherit()
 def _assert_repos_credential_free(repos: Sequence[RepoSource]) -> None:
     """Reject a ``RepoSource`` whose URL embeds ``user:token@`` credentials.
 
-    Configs are staged as GCS objects referenced from persisted payloads (the platform
-    keeps a job's input verbatim; a Pub/Sub message is retained until acked) and are kept
-    for post-mortem debugging — so they must never carry secret values.
+    The worker gets configs in the turn body, and the client also writes them to GCS as
+    the 30-day post-mortem record — so they must never carry secret values.
     """
     from urllib.parse import urlsplit
 
@@ -135,6 +135,7 @@ def _encode_field(name: str, value: Any) -> Any:
     if name == "output_schema" and value is not None:
         return _output_schema_to_dict(value)
     if name == "extra_env" and value is not None:
+        _assert_non_secret_env(value)
         return dict(value)
     return value
 
@@ -250,6 +251,7 @@ class SessionConfig(_ConfigBase):
         if self.repos is not INHERIT and self.repos is not None:
             _assert_repos_credential_free(self.repos)
         if self.extra_env is not INHERIT and self.extra_env is not None:
+            _assert_non_secret_env(self.extra_env)
             object.__setattr__(self, "extra_env", dict(self.extra_env))
 
 

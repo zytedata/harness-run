@@ -1,27 +1,32 @@
-"""Worker self-monitoring: CPU/RAM sampled from inside the job container (OOM forensics).
+"""Worker self-monitoring: CPU/RAM sampled from inside the sandbox (OOM forensics).
 
-Why self-sampling: query jobs execute as Cloud Run jobs in a Google TENANT project, so their
-container metrics (``run.googleapis.com/container/*``) and kill events are invisible from the
-user project (verified live 2026-07-30: zero time series there). The worker itself is the
-only vantage point with access to its own usage — via its cgroup. Samples are shipped to
-Cloud Logging in the user project, so the record SURVIVES a mid-turn kill: the last sample
-lands at most one interval before death, which is exactly what an OOM post-mortem needs.
+Why self-sampling: the platform exposes **nothing** about a sandbox's resources from outside
+(checked 2026-09-16: no Cloud Monitoring metric type mentions sandboxes, the
+``reasoning_engine/*/allocation_time`` series report only for Agent Runtime engines, the
+sandbox resource carries no usage fields, Cloud Logging holds only the audit entries). The
+worker itself is the only vantage point — and gVisor does mount cgroup **v1** accounting
+(``cpuacct.usage``, ``memory/memory.usage_in_bytes``; probed live on a running turn) and
+reports the template's memory limit as ``/proc/meminfo`` ``MemTotal``.
 
-Three outputs, three destinations:
+Three outputs, three destinations, none of which needs a Google identity:
 
-1. **Periodic samples** → a side log (:data:`RESOURCES_LOG`, labelled ``session_id``) —
-   deliberately NOT the event stream clients tail; a ~20s cadence would drown the turn
-   history. Query it per session, or chart it with a log-based metric.
-2. **One visible "memory pressure" status event** on the main event stream the first time
-   usage crosses :data:`PRESSURE_FRACTION` of the limit — someone watching the run sees the
-   warning before a kill, and it lands in the durable history next to the death.
-3. **Peak/limit stamped into the terminal result** (``memory_peak_bytes`` etc. in the result
-   event's ``raw``, via :meth:`ResourceSampler.enrich_result`) — every completed turn
-   reports its high-water mark for free.
+1. **Periodic samples** → the turn's GCS **event mirror only** (``event: resource_sample``;
+   default every 20 s). Not the live ``/events`` stream a ``Run`` consumes — a sample every
+   20 s would drown the turn for a watcher — so the record is durable and survives a
+   mid-turn kill (the last sample lands at most one interval before death, which is what an
+   OOM post-mortem needs). ``Session.resource_samples()`` reads them back; ``history()``
+   skips them unless asked.
+2. **One visible "memory pressure" status event** on the main stream the first time usage
+   crosses :data:`PRESSURE_FRACTION` of the limit — someone watching the run sees the
+   warning before the kill, and it lands in the durable history next to the death.
+3. **Peak / limit / CPU stamped into the terminal result** (``memory_peak_bytes``,
+   ``memory_limit_bytes``, ``cpu_usec`` on the result event's ``raw``) — every finished
+   turn, failed ones included, reports its high-water mark for free.
 
-Reads cgroup v2 first (``/sys/fs/cgroup/memory.current`` / ``memory.peak`` / ``memory.max``,
-``cpu.stat``), falling back to cgroup v1; anything missing just drops that key — never an
-exception, and on an unlimited cgroup the limit key is absent (no pressure events).
+Reads cgroup v2 first (``memory.current`` / ``memory.peak`` / ``memory.max``, ``cpu.stat``),
+then v1 (``memory/memory.usage_in_bytes`` …, ``cpuacct/cpuacct.usage``); a missing or
+"unlimited" cgroup memory limit falls back to ``MemTotal`` (what gVisor sets it to). Anything
+unreadable just drops that key — never an exception.
 
 Sampling is a daemon THREAD (not an asyncio task): emits are sync/best-effort, and the
 thread keeps sampling while the event loop is busy driving the harness.
@@ -29,6 +34,7 @@ thread keeps sampling while the event loop is busy driving the harness.
 
 from __future__ import annotations
 
+import datetime as _dt
 import os
 import threading
 from pathlib import Path
@@ -36,18 +42,22 @@ from typing import Any, Callable
 
 from ...events import AgentEvent
 
-#: Side log for periodic samples (same Cloud Logging plumbing as the steps log).
-RESOURCES_LOG = "remote_agent_toolkit_resources"
-
 #: First crossing of this fraction of the memory limit emits the visible pressure event.
 PRESSURE_FRACTION = 0.85
 
-#: Sampling cadence (seconds); the ``AGENT_RESOURCE_SAMPLE_S`` env overrides, ``0`` disables.
+#: Sampling cadence (seconds); ``RATK_RESOURCE_SAMPLE_S`` in the worker's env overrides, ``0`` disables.
 DEFAULT_SAMPLE_S = 20.0
+SAMPLE_S_ENV = "RATK_RESOURCE_SAMPLE_S"
+
+SAMPLE_EVENT = "resource_sample"
+PRESSURE_EVENT = "memory_pressure"
 
 # cgroup v1 reports "unlimited" as a huge page-rounded number; treat anything this large
 # (>= 1 EiB) as no limit at all.
 _V1_UNLIMITED = 1 << 60
+
+DEFAULT_CGROUP_ROOT = Path("/sys/fs/cgroup")
+DEFAULT_MEMINFO = Path("/proc/meminfo")
 
 
 def _read_text(path: Path) -> str | None:
@@ -66,10 +76,20 @@ def _read_bytes_value(path: Path) -> int | None:
     return None if value >= _V1_UNLIMITED else value
 
 
-def read_usage(root: Path = Path("/sys/fs/cgroup")) -> dict[str, int]:
-    """This container's memory/CPU usage from its cgroup; missing data → missing keys.
+def _meminfo_total(meminfo: Path) -> int | None:
+    text = _read_text(meminfo) or ""
+    for line in text.splitlines():
+        if line.startswith("MemTotal:"):
+            parts = line.split()
+            if len(parts) >= 2 and parts[1].isdigit():
+                return int(parts[1]) * 1024  # kB
+    return None
 
-    Keys (all optional): ``memory_current_bytes``, ``memory_peak_bytes`` (kernel
+
+def read_usage(root: Path = DEFAULT_CGROUP_ROOT, meminfo: Path = DEFAULT_MEMINFO) -> dict[str, int]:
+    """This container's memory/CPU usage; missing data → missing keys.
+
+    Keys (all optional): ``memory_current_bytes``, ``memory_peak_bytes`` (the kernel's
     high-water mark where available), ``memory_limit_bytes``, ``cpu_usec`` (cumulative).
     """
     usage: dict[str, int] = {}
@@ -79,12 +99,11 @@ def read_usage(root: Path = Path("/sys/fs/cgroup")) -> dict[str, int]:
             "memory_peak_bytes": root / "memory.peak",  # kernel >= 5.19
             "memory_limit_bytes": root / "memory.max",
         }
-        cpu_stat = _read_text(root / "cpu.stat") or ""
-        for line in cpu_stat.splitlines():
+        for line in (_read_text(root / "cpu.stat") or "").splitlines():
             if line.startswith("usage_usec "):
                 usage["cpu_usec"] = int(line.split()[1])
                 break
-    else:  # cgroup v1 (split hierarchies)
+    else:  # cgroup v1 (split hierarchies; what gVisor mounts)
         pairs = {
             "memory_current_bytes": root / "memory" / "memory.usage_in_bytes",
             "memory_peak_bytes": root / "memory" / "memory.max_usage_in_bytes",
@@ -97,6 +116,10 @@ def read_usage(root: Path = Path("/sys/fs/cgroup")) -> dict[str, int]:
         value = _read_bytes_value(path)
         if value is not None:
             usage[key] = value
+    if "memory_limit_bytes" not in usage:
+        total = _meminfo_total(meminfo)
+        if total is not None:
+            usage["memory_limit_bytes"] = total
     return usage
 
 
@@ -107,50 +130,57 @@ def _mib(n: int) -> str:
 class ResourceSampler:
     """Daemon thread sampling :func:`read_usage` every ``sample_s`` for one turn.
 
-    ``side_emit`` receives the periodic sample events (→ the :data:`RESOURCES_LOG` side
-    log); ``on_event`` receives the single memory-pressure event (→ the main stream: sink +
-    mirror). Both are called from the sampler THREAD and must be thread-safe — the Cloud
-    Logging emit and a list append both are. Everything is best-effort: a sampling or emit
-    crash kills only the sampler, never the turn.
+    ``sample_emit`` receives the periodic sample events (→ the mirror); ``on_event`` the
+    single memory-pressure event (→ the main stream). Both are called from the sampler
+    THREAD and must be thread-safe — the mirror stream's ``append`` and the turn record's
+    ``append`` both are. Everything is best-effort: a sampling or emit crash kills only the
+    sampler, never the turn.
     """
 
     def __init__(
         self,
         session_id: str,
-        side_emit: Callable[[AgentEvent], None],
+        sample_emit: Callable[[AgentEvent], None],
         on_event: Callable[[AgentEvent], None],
         sample_s: float = DEFAULT_SAMPLE_S,
-        root: Path = Path("/sys/fs/cgroup"),
+        root: Path = DEFAULT_CGROUP_ROOT,
+        meminfo: Path = DEFAULT_MEMINFO,
     ) -> None:
         self._session_id = session_id
-        self._side_emit = side_emit
+        self._sample_emit = sample_emit
         self._on_event = on_event
         self._sample_s = sample_s
         self._root = root
+        self._meminfo = meminfo
         self._stop = threading.Event()
         self._pressure_fired = False
         self._peak_bytes: int | None = None
         self._limit_bytes: int | None = None
         self._cpu_usec: int | None = None
+        self.samples = 0
         self._thread = threading.Thread(
             target=self._run, name=f"ratk-resources-{session_id[:8]}", daemon=True
         )
 
     def start(self) -> ResourceSampler:
+        # The first sample is taken synchronously: a turn that dies at once still reports
+        # its baseline, and the result's peak never depends on the thread's timing.
+        try:
+            self._sample()
+        except Exception:  # noqa: BLE001 — monitoring must never take the turn down
+            pass
         self._thread.start()
         return self
 
     def _run(self) -> None:
-        while True:
+        while not self._stop.wait(self._sample_s):
             try:
                 self._sample()
             except Exception:  # noqa: BLE001 — monitoring must never take the turn down
                 pass
-            if self._stop.wait(self._sample_s):
-                return
 
     def _sample(self) -> None:
-        usage = read_usage(self._root)
+        usage = read_usage(self._root, self._meminfo)
         if not usage:
             return
         current = usage.get("memory_current_bytes")
@@ -166,8 +196,10 @@ class ResourceSampler:
         summary = "resource sample"
         if current is not None:
             summary += f": mem {_mib(current)}" + (f"/{_mib(limit)}" if limit else "")
-        self._side_emit(AgentEvent(
-            kind="status", summary=summary, raw={"event": "resource_sample", **usage},
+        self.samples += 1
+        self._sample_emit(AgentEvent(
+            kind="status", summary=summary,
+            raw={"event": SAMPLE_EVENT, "at": _dt.datetime.now(_dt.UTC).isoformat(), **usage},
         ))
         if (
             not self._pressure_fired
@@ -179,14 +211,23 @@ class ResourceSampler:
                 kind="status",
                 summary=(
                     f"memory pressure: {_mib(current)} of {_mib(limit)} "
-                    f"({current / limit:.0%}) — the platform OOM-kills the worker at the "
+                    f"({current / limit:.0%}) — the platform kills the sandbox at the "
                     "limit; consider deploying with higher resource_limits"
                 ),
-                raw={"event": "memory_pressure", **usage},
+                raw={"event": PRESSURE_EVENT, **usage},
             ))
 
     def enrich_result(self, raw: dict) -> None:
-        """Stamp the observed peak/limit/CPU into a terminal result event's ``raw``."""
+        """Stamp the observed peak/limit/CPU into a terminal result event's ``raw``.
+
+        Samples once more first: a turn shorter than the cadence would otherwise report
+        only its start-of-turn baseline (the worker before the harness started), and the
+        CPU total is cumulative, so the last reading is the one that counts.
+        """
+        try:
+            self._sample()
+        except Exception:  # noqa: BLE001 — best-effort, like every sample
+            pass
         if self._peak_bytes is not None:
             raw.setdefault("memory_peak_bytes", self._peak_bytes)
         if self._limit_bytes is not None:
@@ -202,68 +243,50 @@ class ResourceSampler:
 def start_sampler(
     session_id: str,
     on_event: Callable[[AgentEvent], None],
-    side_sink: Any | None = None,
-    root: Path = Path("/sys/fs/cgroup"),
+    sample_emit: Callable[[AgentEvent], None] | None,
+    *,
+    sample_s: float | None = None,
+    root: Path = DEFAULT_CGROUP_ROOT,
+    meminfo: Path = DEFAULT_MEMINFO,
 ) -> ResourceSampler | None:
     """Start the per-turn sampler (``None`` when disabled or nothing is readable).
 
-    Cadence comes from ``AGENT_RESOURCE_SAMPLE_S`` (default ``20``; ``0``/negative or a
-    non-number disables). ``side_sink`` overrides the sample destination for tests; by
-    default samples go to :data:`RESOURCES_LOG` via a dedicated ``CloudLoggingSink``.
-    A first read that yields nothing (no cgroup mounted) disables sampling for the turn.
+    ``sample_s`` ``None`` reads :data:`SAMPLE_S_ENV` (default 20; ``0``/negative or a
+    non-number disables). ``sample_emit`` ``None`` (no mirror) keeps the pressure event and
+    the result's peak but drops the periodic samples. A first read that yields nothing (no
+    cgroup, no meminfo) disables sampling for the turn.
     """
-    try:
-        sample_s = float(os.environ.get("AGENT_RESOURCE_SAMPLE_S", DEFAULT_SAMPLE_S))
-    except ValueError:
+    if sample_s is None:
+        try:
+            sample_s = float(os.environ.get(SAMPLE_S_ENV, DEFAULT_SAMPLE_S))
+        except ValueError:
+            return None
+    if sample_s <= 0 or not read_usage(root, meminfo):
         return None
-    if sample_s <= 0 or not read_usage(root):
-        return None
-    if side_sink is None:
-        from ...ports.eventsink import CloudLoggingSink
-
-        side_sink = CloudLoggingSink(session_id=session_id, log_name=RESOURCES_LOG)
     return ResourceSampler(
-        session_id, side_emit=side_sink.emit, on_event=on_event, sample_s=sample_s, root=root
+        session_id, sample_emit=sample_emit or (lambda ev: None), on_event=on_event,
+        sample_s=sample_s, root=root, meminfo=meminfo,
     ).start()
 
 
-def _sample_rows(entries: Any) -> list[dict]:
-    """Map raw Cloud Logging entries to sample rows (pure; separated for offline tests).
+def is_sample(event: AgentEvent) -> bool:
+    return event.kind == "status" and (event.raw or {}).get("event") == SAMPLE_EVENT
 
-    Each row: ``{"time": <datetime>, **usage keys}`` — e.g. ``memory_current_bytes``,
-    ``memory_limit_bytes``, ``cpu_usec``. Malformed entries are skipped.
-    """
-    rows: list[dict] = []
-    for entry in entries:
-        payload = entry.payload if isinstance(entry.payload, dict) else {}
-        raw = payload.get("raw") or {}
-        if raw.get("event") != "resource_sample":
+
+def sample_rows(events: list[AgentEvent]) -> list[dict[str, Any]]:
+    """The ``resource_sample`` events among ``events`` as rows: ``time`` (aware datetime,
+    the worker's clock) + the usage keys; input order kept."""
+    rows: list[dict[str, Any]] = []
+    for ev in events:
+        if not is_sample(ev):
             continue
-        rows.append({"time": entry.timestamp,
-                     **{k: v for k, v in raw.items() if k != "event"}})
+        raw = dict(ev.raw or {})
+        at = raw.pop("at", None)
+        try:
+            when = _dt.datetime.fromisoformat(at) if isinstance(at, str) else None
+        except ValueError:
+            when = None
+        row: dict[str, Any] = {"time": when}
+        row.update({k: v for k, v in raw.items() if k.startswith(("memory_", "cpu_"))})
+        rows.append(row)
     return rows
-
-
-def read_samples(
-    session_id: str,
-    project: str | None = None,
-    credentials: Any | None = None,
-) -> list[dict]:
-    """All persisted resource samples for ``session_id``, oldest first.
-
-    Reads the :data:`RESOURCES_LOG` side log (bounded by log retention, ~30 days default),
-    so it works long after the run — including for a worker the platform killed mid-turn,
-    whose last sample landed at most one interval before death. Each row carries ``time``
-    (an aware datetime) plus the usage keys of :func:`read_usage`.
-    """
-    import google.cloud.logging  # lazy: client-side helper, engine never calls this
-
-    client = google.cloud.logging.Client(project=project, credentials=credentials)
-    filter_str = (
-        f'logName="projects/{client.project}/logs/{RESOURCES_LOG}" '
-        f'AND labels.session_id="{session_id}"'
-    )
-    entries = client.list_entries(
-        filter_=filter_str, order_by=google.cloud.logging.ASCENDING, page_size=1000
-    )
-    return _sample_rows(entries)

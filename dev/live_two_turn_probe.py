@@ -54,7 +54,7 @@ async def main() -> int:
     print(f"{time.strftime('%H:%M:%S')} deploying {NAME} ...", flush=True)
     engine = gemini.deploy(spec, PROJECT, LOCATION)
     try:
-        looked_up = gemini.get_engine(NAME, project=PROJECT, location=LOCATION, spec=spec)
+        looked_up = gemini.get_engine(NAME, project=PROJECT, location=LOCATION)
         check("get_engine resolves the engine", looked_up.resource == engine.resource)
 
         session = looked_up.start_session()

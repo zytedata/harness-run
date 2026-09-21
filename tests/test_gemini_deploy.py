@@ -1,17 +1,20 @@
-"""Offline tests for the Gemini deploy/packaging builder (no GCP, no network).
+"""Offline tests for the sandbox deploy path: the image builder and ``deploy`` / ``get_engine``.
 
-Covers the pure builders (build_requirements / build_env / build_engine_config) and the
-local-only skill staging path. stage_agent is intentionally NOT exercised here — it
-copytrees the whole installed package, which is slow and irrelevant to these contracts.
+No Docker, no GCP: the registry check is stubbed, the platform is ``FakeSandboxProvider``,
+the deploy record goes to a ``LocalBlobStore``.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
+import time
 
-from remote_agent_toolkit.runtime.gemini import _deploy as deploy
+import pytest
+from sandbox_fakes import FakeSandboxProvider
+
+from remote_agent_toolkit.ports.blobstore import LocalBlobStore
+from remote_agent_toolkit.runtime.gemini import _image, backend, handoff
 from remote_agent_toolkit.spec import AgentSpec, SkillSource
 
 
@@ -21,428 +24,305 @@ def _spec(**overrides) -> AgentSpec:
     return AgentSpec(**base)
 
 
+# -- the image ---------------------------------------------------------------------------
+
+
 def test_build_requirements_includes_base_and_spec_packages() -> None:
-    reqs = deploy.build_requirements(_spec(packages=["pandas==2.2.*"]))
-
-    # Base deps are present (a representative sampling).
+    reqs = _image.build_requirements(_spec(packages=["pandas==2.2.*"]))
     assert "claude-agent-sdk==0.2.130" in reqs
-    assert any(r.startswith("google-adk") for r in reqs)
-    assert any(r.startswith("a2a-sdk") for r in reqs)
-    assert "uv>=0.5" in reqs
-    # Spec-declared baked dep is appended.
+    assert "uv>=0.5" in reqs and "google-cloud-storage" in reqs
     assert "pandas==2.2.*" in reqs
-    # The toolkit ships via extra_packages, never as a requirement.
-    assert "remote-agent-toolkit" not in reqs
-    assert not any("remote-agent-toolkit" in r for r in reqs)
-
-
-def test_constraints_file_parses_and_pins_platform_layer() -> None:
-    cons = deploy.load_constraints()
-    # Every pickle-coupled package must carry a pin (verify_deploy_env relies on it).
-    for name in deploy._PICKLE_COUPLED:
-        assert name in cons
-    # Representative platform pins.
-    assert "google-adk" in cons
-    assert "opentelemetry-sdk" in cons
-
-
-def test_build_requirements_merges_constraints() -> None:
-    reqs = deploy.build_requirements(_spec())
-
-    aip = next(r for r in reqs if r.startswith("google-cloud-aiplatform"))
-    assert "[adk,agent_engines]" in aip  # extras survive the merge
-    assert "==" in aip and ">=1.154" in aip  # base floor and constraint pin intersect
-    assert "<2" in aip  # aiplatform 2.0 (2026-08) is excluded until validated
-    # Constrained packages nothing requires directly are appended as pinned requirements.
-    assert any(r.startswith("google-auth==") for r in reqs)
-    # Unconstrained base deps stay untouched.
-    assert "uv>=0.5" in reqs
+    assert not any("remote-agent-toolkit" in r for r in reqs)  # the toolkit is COPYed, not installed
+    assert not any(r.startswith(("google-adk", "google-cloud-aiplatform", "a2a-sdk", "cloudpickle")) for r in reqs)
 
 
 def test_build_requirements_spec_repin_merges_into_one_line() -> None:
-    # pip rejects duplicate requirement names — a spec re-pin must merge, not duplicate.
-    reqs = deploy.build_requirements(_spec(packages=["jsonschema>=4"]))
-    js = [r for r in reqs if r.startswith("jsonschema")]
-    assert js == ["jsonschema>=4"]
+    reqs = _image.build_requirements(_spec(packages=["jsonschema>=4"]))
+    assert [r for r in reqs if r.startswith("jsonschema")] == ["jsonschema>=4"]
 
 
 def test_build_requirements_conflicting_spec_pin_raises() -> None:
-    import pytest
-
     with pytest.raises(ValueError, match="unsatisfiable"):
-        deploy.build_requirements(_spec(packages=["pydantic==2.0.0"]))
+        _image.build_requirements(_spec(packages=["claude-agent-sdk==0.1.0"]))
 
 
 def test_build_requirements_url_requirement_passes_through() -> None:
     url = "mypkg @ https://example.com/mypkg-1.0-py3-none-any.whl"
-    reqs = deploy.build_requirements(_spec(packages=[url]))
-    assert url in reqs
+    assert url in _image.build_requirements(_spec(packages=[url]))
 
 
-def test_verify_deploy_env_accepts_this_venv() -> None:
-    # The dev venv is held to the same contract as an operator's deploy venv.
-    deploy.verify_deploy_env()
+def test_build_requirements_codex_bakes_the_sdk_only_when_baked() -> None:
+    assert _image.CODEX_REQUIREMENT not in _image.build_requirements(_spec())
+    assert _image.CODEX_REQUIREMENT in _image.build_requirements(_spec(harness="codex"))
+    assert _image.CODEX_REQUIREMENT in _image.build_requirements(_spec(harnesses=("claude-code", "codex")))
 
 
-def test_verify_deploy_env_raises_on_pickle_coupled_skew(monkeypatch) -> None:
-    import importlib.metadata
-
-    import pytest
-
-    real = importlib.metadata.version
-    monkeypatch.setattr(
-        importlib.metadata,
-        "version",
-        lambda name: "0.0.1" if name == "cloudpickle" else real(name),
-    )
-    with pytest.raises(RuntimeError, match="cloudpickle"):
-        deploy.verify_deploy_env()
-
-
-def test_build_env_no_baked_secrets_and_buckets() -> None:
-    spec = _spec(checkpoint=True, env={"FEATURE_FLAG": "on"})
-
-    # No output_bucket, model override None -> uses spec.model, no GCS env.
-    env = deploy.build_env(spec, model=None)
-    assert env["IS_SANDBOX"] == "1"
-    assert env["AGENT_JOBS_ROOT"]  # set (non-empty)
-    assert env["CLAUDE_AGENT_MODEL"] == spec.model
-    # One uvicorn worker process in the platform harness: the default (cpu_count + 1) costs
-    # ~3 GiB of private memory per job container before the agent runs.
-    assert env["NUM_WORKERS"] == "1"
-
-    # No secrets are baked into the engine: every value is a plain str (non-secret machinery),
-    # never a Secret Manager secret_ref dict. Secrets travel per-invocation instead.
-    assert all(isinstance(v, str) for v in env.values())
-
-    # Without a bucket, checkpoint has nowhere to write -> no checkpoint/artifact env.
-    assert "AGENT_CHECKPOINT_GCS" not in env
-    assert "AGENT_ARTIFACTS_GCS" not in env
-
-    # With a bucket, both land under it.
-    env2 = deploy.build_env(spec, output_bucket="gs://bkt")
-    assert env2["AGENT_CHECKPOINT_GCS"] == "gs://bkt/checkpoints"
-    assert env2["AGENT_ARTIFACTS_GCS"] == "gs://bkt/artifacts"
-
-
-def test_build_env_model_override() -> None:
-    spec = _spec(model="claude-sonnet-4-6")
-    env = deploy.build_env(spec, model="claude-haiku-4-5")
-    assert env["CLAUDE_AGENT_MODEL"] == "claude-haiku-4-5"
-
-
-def test_build_env_vertex_routing_default_and_api_key_opt_out() -> None:
-    # Default (use_vertex=True) + a project => route Claude through Vertex (no key in env).
-    env = deploy.build_env(_spec(), project="proj", vertex_region="global")
-    assert env["CLAUDE_CODE_USE_VERTEX"] == "1"
-    assert env["ANTHROPIC_VERTEX_PROJECT_ID"] == "proj"
-    assert env["CLOUD_ML_REGION"] == "global"
-
-    # use_vertex=False opts out (API-key mode): the key is supplied per-invocation, never baked.
-    env2 = deploy.build_env(_spec(), project="proj", use_vertex=False)
-    assert "CLAUDE_CODE_USE_VERTEX" not in env2
-    assert "ANTHROPIC_API_KEY" not in env2  # never baked into the engine
-
-    # No project => no Vertex routing env (e.g. a unit context).
-    assert "CLAUDE_CODE_USE_VERTEX" not in deploy.build_env(_spec())
-
-
-def test_build_env_pool_max_wait() -> None:
-    """pool_max_wait_s must reach the worker env: the wait loop reads AGENT_POOL_MAX_WAIT_S
-    from the WORKER process, and before this knob nothing plumbed it there (the var was
-    unreachable — callers resorted to monkeypatching build_env)."""
-    import pytest
-
-    pool_kw = dict(warm_pool=True, pool_topic="projects/p/topics/ratk-w-gen-dispatch")
-
-    env = deploy.build_env(_spec(), **pool_kw, pool_max_wait_s=7200)
-    # The pool's TOPIC is baked; a worker's own subscription rides its job input instead
-    # (per-worker dispatch), so no subscription is ever in the shared env.
-    assert env["AGENT_POOL_TOPIC"] == "projects/p/topics/ratk-w-gen-dispatch"
-    assert "AGENT_POOL_SUBSCRIPTION" not in env
-    assert env["AGENT_POOL_MAX_WAIT_S"] == "7200"
-
-    # Unset -> absent from the env, so the worker-side default (pool.DEFAULT_MAX_WAIT_S)
-    # stays authoritative.
-    assert "AGENT_POOL_MAX_WAIT_S" not in deploy.build_env(_spec(), **pool_kw)
-    # Not a pool worker -> the knob is meaningless; never baked.
-    assert "AGENT_POOL_MAX_WAIT_S" not in deploy.build_env(_spec(), pool_max_wait_s=7200)
-
-    for bad in (0, -1.0, float("nan"), float("inf")):
-        with pytest.raises(ValueError, match="pool_max_wait_s"):
-            deploy.build_env(_spec(), **pool_kw, pool_max_wait_s=bad)
+def test_render_dockerfile_contract() -> None:
+    text = _image.render_dockerfile(_spec(), has_skills=True)
+    assert text.startswith("# Generated")
+    assert "FROM python:3.12-slim-bookworm" in text
+    assert "COPY skills /opt/toolkit/skills" in text
+    assert "USER agent" in text and "EXPOSE 8080" in text
+    assert 'CMD ["python", "-m", "remote_agent_toolkit.runtime.gemini.worker"]' in text
+    assert "RATK_BAKED_SPEC=/opt/toolkit/spec.json" in text
+    assert "COPY skills" not in _image.render_dockerfile(_spec(), has_skills=False)
 
 
 def test_stage_skills_local(tmp_path: Path) -> None:
-    # Fake local skill dir: one folder with a SKILL.md.
     src = tmp_path / "src"
-    skill = src / "my-skill"
-    skill.mkdir(parents=True)
-    (skill / "SKILL.md").write_text("hello skill")
-
-    spec = _spec(skills=(SkillSource.local(str(src)),))
-    dest = tmp_path / "dest"
-
-    names = deploy.stage_skills(spec, str(dest))
-
+    (src / "my-skill").mkdir(parents=True)
+    (src / "my-skill" / "SKILL.md").write_text("hello skill")
+    names = _image.stage_skills(_spec(skills=(SkillSource.local(str(src)),)), str(tmp_path / "dest"))
     assert names == ["my-skill"]
-    staged = dest / "my-skill" / "SKILL.md"
-    assert staged.is_file()
-    assert staged.read_text() == "hello skill"
+    assert (tmp_path / "dest" / "my-skill" / "SKILL.md").read_text() == "hello skill"
 
 
-def test_build_engine_config_shape() -> None:
-    spec = _spec()
-    cfg = deploy.build_engine_config(
-        spec,
-        project="proj",
-        location="us-central1",
-        staging_bucket="gs://staging",
-        extra_packages=["remote_agent_toolkit"],
-        service_account="rt@proj.iam.gserviceaccount.com",
-    )
-
-    assert cfg["agent_framework"] == "google-adk"
-    assert cfg["python_version"] == "3.12"
-    assert cfg["display_name"] == spec.name
-    assert isinstance(cfg["requirements"], list) and cfg["requirements"]
-    assert isinstance(cfg["env_vars"], dict)
-    assert cfg["extra_packages"] == ["remote_agent_toolkit"]
-    # Async-only toolkit: no standing container (an idle engine must not bill for compute).
-    assert cfg["min_instances"] == 0
-
-
-def test_build_engine_config_resource_limits() -> None:
-    """resource_limits passthrough (2026-07-29 OOM mitigation): set → forwarded verbatim;
-    omitted → absent from the config so the platform default (4 cpu / 4Gi) stays
-    authoritative."""
-    kw = dict(project="proj", location="us-central1", staging_bucket="gs://staging",
-              extra_packages=[], service_account="rt@proj.iam.gserviceaccount.com")
-    cfg = deploy.build_engine_config(_spec(), **kw)
-    assert "resource_limits" not in cfg
-
-    limits = {"cpu": "8", "memory": "16Gi"}
-    cfg = deploy.build_engine_config(_spec(), resource_limits=limits, **kw)
-    assert cfg["resource_limits"] == {"cpu": "8", "memory": "16Gi"}
-    assert cfg["resource_limits"] is not limits  # defensive copy
+def test_stage_build_context_is_complete_and_content_addressed(tmp_path: Path) -> None:
+    src = tmp_path / "src"
+    (src / "sk").mkdir(parents=True)
+    (src / "sk" / "SKILL.md").write_text("s")
+    spec = _spec(skills=(SkillSource.local(str(src)),), packages=("httpx",))
+    ctx, digest = _image.stage_build_context(spec)
+    assert (ctx / "Dockerfile").is_file() and (ctx / "requirements.txt").is_file()
+    assert (ctx / "remote_agent_toolkit" / "runtime" / "gemini" / "worker.py").is_file()
+    assert (ctx / "skills" / "sk" / "SKILL.md").is_file()
+    import json
+    assert json.loads((ctx / "spec.json").read_text())["name"] == "test-agent"
+    assert "httpx" in (ctx / "requirements.txt").read_text()
+    assert len(digest) == 16
+    # Deterministic: the same spec from the same toolkit hashes the same; a change does not.
+    _, again = _image.stage_build_context(spec)
+    assert again == digest
+    _, other = _image.stage_build_context(_spec(packages=("httpx", "rich")))
+    assert other != digest
+    # No skills: no skills/ dir in the context and no COPY line.
+    ctx2, _ = _image.stage_build_context(_spec())
+    assert not (ctx2 / "skills").exists() and "COPY skills" not in (ctx2 / "Dockerfile").read_text()
 
 
-def test_build_engine_config_always_names_the_runtime_service_account() -> None:
-    """The config never omits service_account: omitted means the platform default (the Agent
-    Runtime service agent, the identity behind the README security finding)."""
-    kw = dict(project="proj", location="us-central1", staging_bucket="gs://staging",
-              extra_packages=[])
-    sa = "ratk-runtime@proj.iam.gserviceaccount.com"
-    cfg = deploy.build_engine_config(_spec(), service_account=sa, **kw)
-    assert cfg["service_account"] == sa
-
-    with pytest.raises(ValueError, match="never deployed as the platform default"):
-        deploy.build_engine_config(_spec(), service_account="", **kw)
-    with pytest.raises(TypeError):  # keyword-only and required
-        deploy.build_engine_config(_spec(), **kw)
-
-
-def test_resolve_runtime_service_account_defaults_to_the_projects_ratk_runtime() -> None:
-    """None → ratk-runtime@<project> (what ratk-gcp-setup creates); a given email passes
-    through; an empty string is a bug (the SDK would read it as "platform default")."""
-    assert deploy.default_runtime_service_account("proj") == (
-        "ratk-runtime@proj.iam.gserviceaccount.com"
-    )
-    assert deploy.resolve_runtime_service_account("proj", None) == (
-        "ratk-runtime@proj.iam.gserviceaccount.com"
-    )
-    own = "mine@proj.iam.gserviceaccount.com"
-    assert deploy.resolve_runtime_service_account("proj", own) == own
-    assert deploy.resolve_runtime_service_account("proj", f"  {own} ") == own
-    for bad in ("", "   "):
-        with pytest.raises(ValueError, match="service account email"):
-            deploy.resolve_runtime_service_account("proj", bad)
-
-
-def test_check_runtime_service_account_exists(monkeypatch) -> None:
-    """404 from the IAM API → RuntimeServiceAccountMissing naming ratk-gcp-setup; any other
-    failure only warns (the deploy then fails by itself if the account is unusable)."""
-    import warnings
-
-    class _Resp:
-        def __init__(self, status: int) -> None:
-            self.status_code = status
-
-    class _Session:
-        status = 200
-
-        def __init__(self, creds) -> None:
-            pass
-
-        def get(self, url, timeout):
-            assert url == (
-                "https://iam.googleapis.com/v1/projects/proj/serviceAccounts/"
-                "ratk-runtime@proj.iam.gserviceaccount.com"
-            )
-            return _Resp(_Session.status)
-
-    import google.auth.transport.requests as gatr
-
-    monkeypatch.setattr(gatr, "AuthorizedSession", _Session)
-    sa = "ratk-runtime@proj.iam.gserviceaccount.com"
-    creds = object()  # given credentials are used as-is, no ADC lookup
-
-    deploy.check_runtime_service_account_exists("proj", sa, credentials=creds)  # 200: silent
-
-    _Session.status = 404
-    with pytest.raises(deploy.RuntimeServiceAccountMissing, match="ratk-gcp-setup --project proj"):
-        deploy.check_runtime_service_account_exists("proj", sa, credentials=creds)
-
-    _Session.status = 403
-    with warnings.catch_warnings(record=True) as w:
-        warnings.simplefilter("always")
-        deploy.check_runtime_service_account_exists("proj", sa, credentials=creds)
-    assert any("could not verify" in str(x.message) for x in w)
-
-
-def test_build_engine_config_pool_max_wait_passthrough() -> None:
-    cfg = deploy.build_engine_config(
-        _spec(),
-        project="proj",
-        location="us-central1",
-        staging_bucket="gs://staging",
-        extra_packages=[],
-        service_account="rt@proj.iam.gserviceaccount.com",
-        warm_pool=True,
-        pool_topic="projects/p/topics/ratk-w-gen-dispatch",
-        pool_max_wait_s=3600,
-    )
-    assert cfg["env_vars"]["AGENT_POOL_MAX_WAIT_S"] == "3600"
+def test_image_uri_and_default_repo() -> None:
+    assert _image.default_image_repo("proj", "us-central1") == "us-central1-docker.pkg.dev/proj/ratk"
+    assert _image.image_uri("r/repo/", "My Agent_1", "abc") == "r/repo/ratk-my-agent_1:abc"
+    assert _image.image_uri("r/repo", "ratk-smoke", "abc") == "r/repo/ratk-smoke:abc"  # no double prefix
 
 
 def test_validate_resource_limits_rejects_malformed() -> None:
-    import pytest
-
-    deploy.validate_resource_limits({"cpu": "4", "memory": "32Gi"})  # max memory OK
-    for bad in (
-        {"cpu": "4"},  # missing memory
-        {"cpu": "4", "memory": "16Gi", "gpu": "1"},  # unknown key
-        {"cpu": "3", "memory": "16Gi"},  # unsupported cpu value
-        {"cpu": "4", "memory": "16G"},  # not Gi syntax
-        {"cpu": "4", "memory": "64Gi"},  # above the 32Gi cap
-        {"cpu": "4", "memory": "4096Mi"},  # Mi not supported by the platform contract
-    ):
+    _image.validate_resource_limits({"cpu": "8", "memory": "16Gi"})
+    for bad in ({"cpu": "4"}, {"cpu": "16", "memory": "8Gi"}, {"cpu": "4", "memory": "8G"},
+                {"cpu": "4", "memory": "8Gi", "gpu": "1"}, {"cpu": "0", "memory": "8Gi"}):
         with pytest.raises(ValueError):
-            deploy.validate_resource_limits(bad)
+            _image.validate_resource_limits(bad)
 
 
-def test_build_requirements_codex_bakes_sdk() -> None:
-    reqs = deploy.build_requirements(_spec(model="gpt-5.6-luna", harness="codex"))
-    assert "openai-codex==0.147.0" in reqs
-    # A claude-harness engine doesn't carry the codex CLI binary.
-    assert not any(r.startswith("openai-codex") for r in deploy.build_requirements(_spec()))
+def test_build_and_push_needs_docker(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(_image.shutil, "which", lambda name: None)
+    assert _image.image_exists("r/x:1") is False
+    with pytest.raises(RuntimeError, match="Docker CLI"):
+        _image.build_and_push(tmp_path, "r/x:1")
 
 
-def test_build_env_codex_skips_vertex_routing() -> None:
-    env = deploy.build_env(
-        _spec(model="gpt-5.6-luna", harness="codex"), project="p", use_vertex=True
-    )
-    # OpenAI models have no Vertex path; the key travels per-invocation instead.
-    assert "CLAUDE_CODE_USE_VERTEX" not in env
-    assert "ANTHROPIC_VERTEX_PROJECT_ID" not in env
-    assert "OPENAI_API_KEY" not in env  # never baked
+# -- deploy / get_engine / list_engines -------------------------------------------------------
 
 
-def test_build_env_openrouter_bakes_no_credentials() -> None:
-    """An OpenRouter model changes nothing at deploy time: the key travels per-invocation."""
-    spec = _spec(model="openrouter/moonshotai/kimi-k3", harness="codex")
-    env = deploy.build_env(spec, project="p", use_vertex=True)
-
-    assert "OPENROUTER_API_KEY" not in env  # never baked into the engine
-    assert "CLAUDE_CODE_USE_VERTEX" not in env  # no Vertex path for a codex engine
-    # The model id reaches the worker through the pickled spec; this env var is the
-    # informational copy, and it must carry the caller's full id (prefix included).
-    assert env["CLAUDE_AGENT_MODEL"] == "openrouter/moonshotai/kimi-k3"
+@pytest.fixture
+def records(tmp_path, monkeypatch):
+    store = LocalBlobStore(str(tmp_path / "blobs"))
+    monkeypatch.setattr(handoff, "GcsBlobStore", lambda bucket, *a, **kw: store)
+    monkeypatch.setattr(handoff, "ensure_handoff_lifecycle", lambda *a, **kw: True)
+    return store
 
 
-def test_build_requirements_openrouter_needs_only_the_codex_sdk() -> None:
-    """OpenRouter is reached through codex's config, so no extra wheel is baked."""
-    reqs = deploy.build_requirements(
-        _spec(model="openrouter/z-ai/glm-5.3", harness="codex")
-    )
-    assert any(r.startswith("openai-codex") for r in reqs)
-    assert not any("openrouter" in r.lower() for r in reqs)
+@pytest.fixture
+def no_docker(monkeypatch):
+    """The image is 'already in the registry', so deploy never shells out."""
+    built = []
+    monkeypatch.setattr(_image, "image_exists", lambda uri: True)
+    monkeypatch.setattr(_image, "build_and_push", lambda ctx, uri, log=None: built.append(uri) or uri)
+    return built
 
 
-def test_claude_openrouter_engine_bakes_vertex_but_the_harness_blanks_it(tmp_path) -> None:
-    """The risky interaction on the remote runtime, pinned.
-
-    A claude-code engine bakes `CLAUDE_CODE_USE_VERTEX=1`, and that switch outranks
-    `ANTHROPIC_AUTH_TOKEN` in the CLI's auth order. So an OpenRouter turn on a deployed
-    engine only works because the harness blanks it in the subprocess env.
-    """
-    from remote_agent_toolkit.harness.claude_code import ClaudeCodeHarness
-    from remote_agent_toolkit.harness.context import RunContext
-
-    spec = _spec(model="openrouter/moonshotai/kimi-k3")  # claude-code, the default
-    baked = deploy.build_env(spec, project="p", use_vertex=True)
-    assert baked["CLAUDE_CODE_USE_VERTEX"] == "1"  # deploy still bakes it
-    assert "OPENROUTER_API_KEY" not in baked  # and never the key
-
-    ctx = RunContext(
-        spec=spec, prompt="hi", job_dir=tmp_path / "job", session_id="sid",
-        secrets={"OPENROUTER_API_KEY": "k"}, env=baked,
-    )
-    env = ClaudeCodeHarness().build_options(spec, ctx).env
-    assert env["CLAUDE_CODE_USE_VERTEX"] == ""  # blanked for the turn
-    assert env["ANTHROPIC_AUTH_TOKEN"] == "k"
+def test_deploy_creates_a_template_writes_the_record_and_returns_a_handle(records, no_docker):
+    provider = FakeSandboxProvider()
+    spec = _spec(packages=("httpx",))
+    log = []
+    engine = backend.deploy(spec, "proj", "us-central1", output_bucket="gs://out", provider=provider,
+                            resource_limits={"cpu": "8", "memory": "16Gi"}, log=log.append)
+    assert no_docker == []  # image existed: no build
+    (tpl,) = provider.list_templates()
+    assert tpl["display_name"] == "test-agent" and tpl["cpu"] == "8" and tpl["memory"] == "16Gi"
+    assert tpl["image_uri"].startswith("us-central1-docker.pkg.dev/proj/ratk/ratk-test-agent:")
+    assert engine.resource == tpl["name"] and engine.version == "t1" and engine.name == "test-agent"
+    assert engine.spec == spec and engine._spec_known and engine._use_vertex
+    assert engine._model_service_account == "ratk-model@proj.iam.gserviceaccount.com"
+    record = handoff.load_deploy_record("gs://out", "test-agent", "t1", store=records)
+    assert record["spec"] == spec.to_dict() and record["image"] == tpl["image_uri"]
+    assert record["resource_limits"] == {"cpu": "8", "memory": "16Gi"} and record["warm_pool"] is False
+    assert any("creating template" in line for line in log)
 
 
-def test_openrouter_model_round_trips_through_the_baked_spec() -> None:
-    """The worker rebuilds the spec from a dict; the prefix must survive that trip."""
-    from remote_agent_toolkit import AgentSpec
-
-    spec = _spec(model="openrouter/deepseek/deepseek-v4-pro", harness="codex")
-    assert AgentSpec.from_dict(spec.to_dict()).model == "openrouter/deepseek/deepseek-v4-pro"
-
-
-def test_deploy_submodule_import_does_not_shadow_the_deploy_function() -> None:
-    """``gemini.deploy`` must stay callable after any submodule import.
-
-    Importing a submodule binds it as an attribute of its parent package, so a module
-    named ``gemini/deploy.py`` would overwrite the ``deploy`` *function* that
-    ``gemini/__init__.py`` re-exports — making the second ``gemini.deploy(...)`` call
-    (the first triggers the packaging module's lazy import) fail with
-    ``TypeError: 'module' object is not callable``. Hence ``_deploy``.
-    """
-    import pkgutil
-
-    from remote_agent_toolkit import gemini
-
-    # Name check, not an import check: the submodules pull in google-adk/agentplatform, which
-    # these offline tests deliberately don't have. A collision is decidable from names alone.
-    submodules = {m.name for m in pkgutil.iter_modules(gemini.__path__)}
-    assert not submodules & set(gemini.__all__), (
-        f"submodule(s) {sorted(submodules & set(gemini.__all__))} collide with gemini.__all__"
-    )
-    assert callable(gemini.deploy)
+def test_deploy_builds_when_the_image_is_missing_and_reuses_a_matching_template(records, no_docker, monkeypatch):
+    provider = FakeSandboxProvider()
+    monkeypatch.setattr(_image, "image_exists", lambda uri: False)
+    first = backend.deploy(_spec(), "proj", "us-central1", output_bucket="gs://out", provider=provider)
+    assert len(no_docker) == 1 and no_docker[0].startswith("us-central1-docker.pkg.dev/proj/ratk/")
+    # Same spec, same toolkit: same image, and the newest template already serves it.
+    second = backend.deploy(_spec(), "proj", "us-central1", output_bucket="gs://out", provider=provider)
+    assert second.resource == first.resource and len(provider.list_templates()) == 1
+    # A different image (a new spec) mints a new version; the previous one is retired.
+    third = backend.deploy(_spec(packages=("rich",)), "proj", "us-central1", output_bucket="gs://out",
+                           provider=provider)
+    third._join_background()
+    assert third.resource != first.resource
+    assert provider.deleted_templates == [first.resource]
+    assert [t["name"] for t in provider.list_templates()] == [third.resource]
 
 
-def test_build_adk_app_pins_deploy_project() -> None:
-    """The pickled AdkApp must carry the DEPLOY target, not the deployer's local default.
+def test_deploy_rejects_removed_and_unknown_kwargs_before_any_side_effect(records, no_docker):
+    # PR #84 review, E2: deploy() swallowed **kwargs while get_engine() rejected them, so a
+    # migrated deploy script passing service_account= or new_engine= believed it set something.
+    provider = FakeSandboxProvider()
+    with pytest.raises(TypeError, match=r"service_account=.*removed with the sandbox runtime"):
+        backend.deploy(_spec(), "proj", "l", image="img:1", provider=provider, service_account="x@p.iam")
+    with pytest.raises(TypeError, match=r"new_engine=.*removed"):
+        backend.deploy(_spec(), "proj", "l", image="img:1", provider=provider, new_engine=True)
+    with pytest.raises(TypeError, match=r"unexpected keyword argument\(s\) \['pool_sizee'\]"):
+        backend.deploy(_spec(), "proj", "l", image="img:1", provider=provider, pool_sizee=3)
+    assert provider.list_templates() == [] and no_docker == []
 
-    AdkApp snapshots the aiplatform global config at construction and the engine worker
-    exports all telemetry to the snapshotted project — a stray local default (gcloud's
-    ``other-project``) baked into the pickle gave every span/metric export a persistent
-    403 (2026-08-03→06 incident). build_adk_app must override whatever the environment
-    left in the global config, and refuse to ship a mismatch.
-    """
-    import pytest
 
-    pytest.importorskip("agentplatform")
-    import google.cloud.aiplatform as aiplatform
+def test_deploy_reuses_a_template_only_when_its_egress_flag_matches(records, no_docker):
+    # PR #84 review, C: redeploying the same image with internet_access=False used to return
+    # the existing template with egress on and report a no-op.
+    provider = FakeSandboxProvider()
+    on = backend.deploy(_spec(), "proj", "l", image="img:1", output_bucket="gs://out", provider=provider,
+                        internet_access=True)
+    off = backend.deploy(_spec(), "proj", "l", image="img:1", output_bucket="gs://out", provider=provider,
+                         internet_access=False)
+    off._join_background()
+    assert off.resource != on.resource
+    assert provider.templates[off.resource]["internet_access"] is False
+    record = handoff.load_deploy_record("gs://out", "test-agent", off.version, store=records)
+    assert record["internet_access"] is False  # the deploy record says what was asked
+    again = backend.deploy(_spec(), "proj", "l", image="img:1", output_bucket="gs://out", provider=provider,
+                           internet_access=False)
+    assert again.resource == off.resource  # a matching flag is a no-op again
+    # A listing that does not report the flag is trusted for the default (on) only.
+    provider.templates[again.resource]["internet_access"] = None
+    assert backend.deploy(_spec(), "proj", "l", image="img:1", output_bucket="gs://out", provider=provider,
+                          internet_access=False).resource != again.resource
 
-    from remote_agent_toolkit.runtime.gemini.backend import build_adk_app
 
-    # Simulate the incident: some earlier code path left an unrelated default behind.
-    aiplatform.init(project="stray-local-default", location="europe-west1")
+def test_deploy_with_image_skips_the_build_and_fills_the_pool(records, no_docker, monkeypatch):
+    from remote_agent_toolkit.runtime.gemini import roster as roster_mod
 
-    app = build_adk_app(_spec(), project="deploy-target", location="us-central1")
+    monkeypatch.setattr(_image, "image_exists", lambda uri: pytest.fail("no registry check with image="))
+    monkeypatch.setattr(roster_mod, "GcsRosterStore",
+                        lambda bucket, credentials=None: roster_mod.InMemoryRosterStore())
+    provider = FakeSandboxProvider()
+    engine = backend.deploy(_spec(), "proj", "l", warm_pool=True, pool_size=2, pool_max_wait_s=600,
+                            output_bucket="gs://out", provider=provider, image="r/ratk-x:custom")
+    assert provider.list_templates()[0]["image_uri"] == "r/ratk-x:custom"
+    assert len(provider.live()) == 2 and engine.wait_until_warm(timeout=1)
+    for sb in provider.list():
+        assert sb["ttl_s"] == 600 + backend.DEFAULT_MAX_TURN_S  # idle life + room for a turn
+    assert handoff.load_deploy_record("gs://out", "test-agent", "t1", store=records)["pool_max_wait_s"] == 600
 
-    assert app._tmpl_attrs["project"] == "deploy-target"
-    assert app._tmpl_attrs["location"] == "us-central1"
+
+def test_deploy_validation_happens_before_any_side_effect(records, no_docker):
+    provider = FakeSandboxProvider()
+    with pytest.raises(ValueError, match="warm_pool=True"):
+        backend.deploy(_spec(), "p", "l", pool_max_wait_s=10, provider=provider)
+    with pytest.raises(ValueError, match="positive, finite"):
+        backend.deploy(_spec(), "p", "l", warm_pool=True, pool_max_wait_s=float("nan"), provider=provider)
+    with pytest.raises(ValueError, match="resource_limits"):
+        backend.deploy(_spec(), "p", "l", resource_limits={"cpu": "32", "memory": "8Gi"}, provider=provider)
+    assert provider.list_templates() == [] and no_docker == []
+
+
+def test_deploy_api_key_mode_records_no_model_account(records, no_docker):
+    provider = FakeSandboxProvider()
+    engine = backend.deploy(_spec(), "proj", "l", output_bucket="gs://out", provider=provider, use_vertex=False)
+    assert engine._use_vertex is False and engine._model_service_account is None
+    assert handoff.load_deploy_record("gs://out", "test-agent", "t1", store=records)["model_service_account"] is None
+
+
+def test_get_engine_resolves_the_newest_template_and_reads_the_record(records, no_docker):
+    provider = FakeSandboxProvider()
+    backend.deploy(_spec(max_turns=7), "proj", "l", output_bucket="gs://out", provider=provider,
+                   warm_pool=True, pool_size=0, model_service_account="custom@proj.iam.gserviceaccount.com")
+    engine = backend.get_engine("test-agent", "proj", "l", output_bucket="gs://out", provider=provider)
+    assert engine._spec_known and engine.spec.max_turns == 7 and engine.version == "t1"
+    assert engine._warm is True and engine._model_service_account == "custom@proj.iam.gserviceaccount.com"
+    assert backend.get_engine("test-agent", "proj", "l", output_bucket="gs://out", provider=provider,
+                              warm_pool=False)._warm is False
+
+
+def test_get_engine_without_a_record_is_addressing_only(no_docker, monkeypatch):
+    monkeypatch.setattr(handoff, "load_deploy_record", lambda *a, **kw: None)
+    provider = FakeSandboxProvider()
+    old = provider.add_template("test-agent", create_time=1.0)
+    new = provider.add_template("test-agent", create_time=2.0)
+    # The gap is announced at lookup, where the operator looks (field report on #84: a deploy
+    # interrupted mid-poll left an ACTIVE template with no record; turns failed days later).
+    with pytest.warns(UserWarning, match="version t2 has no deploy record under gs://proj-agent-output.*re-run gemini.deploy"):
+        engine = backend.get_engine("test-agent", "proj", "l", provider=provider)
+    assert engine.resource == new and not engine._spec_known and engine.spec.model == ""
+    assert engine.versions() == ["t2", "t1"]
+    assert [r["current"] for r in engine.revisions()] == [True, False]
+    with pytest.warns(UserWarning, match="version t1 has no deploy record"):
+        pinned = backend.get_engine("test-agent", "proj", "l", version="t1", provider=provider)
+    assert pinned.resource == old and pinned.version == "t1"
+    with pytest.raises(LookupError, match="no version"):
+        backend.get_engine("test-agent", "proj", "l", version="t9", provider=provider)
+    import warnings
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")  # no bucket to look in: nothing to warn about
+        backend.get_engine("test-agent", provider=provider)
+    with pytest.raises(LookupError, match="no deployed engine"):
+        backend.get_engine("other", "proj", "l", provider=provider)
+
+
+def test_get_engine_rejects_removed_kwargs():
+    with pytest.raises(TypeError, match="SessionConfig"):
+        backend.get_engine("n", "p", "l", spec=_spec())
+    with pytest.raises(TypeError, match="deploy-time"):
+        backend.get_engine("n", "p", "l", scoped_gcs=False)
+    with pytest.raises(TypeError, match="unexpected"):
+        backend.get_engine("n", "p", "l", bogus=1)
+
+
+def test_list_engines_groups_templates_by_name():
+    provider = FakeSandboxProvider()
+    provider.add_template("a", create_time=1.0)
+    newest = provider.add_template("a", create_time=2.0)
+    provider.add_template("b")
+    rows = {r["name"]: r for r in backend.list_engines("p", "l", provider=provider)}
+    assert rows["a"]["versions"] == 2 and rows["a"]["resource"] == newest and rows["b"]["versions"] == 1
+
+
+def test_get_engine_skips_failed_and_provisioning_templates(records, no_docker):
+    # A deploy whose template ended FAILED (field note on #84) must not become "the newest version".
+    provider = FakeSandboxProvider()
+    backend.deploy(_spec(), "proj", "l", output_bucket="gs://out", provider=provider)
+    failed = provider.add_template("test-agent", image="img:2", create_time=time.time() + 100)
+    provider.templates[failed]["state"] = "FAILED"
+    with pytest.warns(UserWarning, match="not ACTIVE; resolving to t1"):
+        engine = backend.get_engine("test-agent", "proj", "l", output_bucket="gs://out", provider=provider)
+    assert engine.version == "t1" and engine._spec_known
+    assert [r["state"] for r in engine.revisions()] == ["FAILED", "ACTIVE"]
+    provider.templates[engine.resource]["state"] = "FAILED"
+    with pytest.raises(LookupError, match="no ACTIVE version: t2 is FAILED, t1 is FAILED"):
+        backend.get_engine("test-agent", "proj", "l", output_bucket="gs://out", provider=provider)
+
+
+def test_deploy_reports_template_progress_and_retires_failed_versions(records, no_docker, monkeypatch):
+    provider = FakeSandboxProvider()
+    failed = provider.add_template("test-agent", image="img:0", create_time=1.0)
+    provider.templates[failed]["state"] = "FAILED"
+    lines = []
+    monkeypatch.setattr(backend.time, "sleep", lambda s: None)
+    engine = backend.deploy(_spec(), "proj", "l", output_bucket="gs://out", provider=provider, log=lines.append)
+    engine._join_background()
+    assert any("PROVISIONING" in line for line in lines) and any("is ACTIVE" in line for line in lines)
+    assert failed in provider.deleted_templates  # the failed attempt is retired with the previous versions

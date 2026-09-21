@@ -7,9 +7,9 @@ can only break in ways the earlier rungs can't see.
 |---|---|---|---|
 | Offline tests | `make test` | logic, event plumbing, contracts we encode | ~40 s (parallel), free |
 | Install parity | `make parity-build` / `-check` | dependency/install/glibc breakage | ~1 min, free |
-| **Live validation** | `make live-smoke` | **platform-contract breakage** | ~10 min, ~$0.10 + build |
+| **Live validation** | `make live-smoke` | **platform-contract breakage** | ~5 min incl. the image build, ~$0.15 |
 | Model-provider check | `make live-openrouter` | provider-contract breakage (OpenRouter) | ~4 min, ~$0.75 |
-| Model-provider check, remote | `make live-openrouter-remote` | the same models + remote visibility on Agent Runtime | ~8-15 min, ~$0.56 + build |
+| Model-provider check, remote | `make live-openrouter-remote` | the same models + remote visibility on the sandbox runtime | ~5-10 min, ~$0.56 + build |
 | Model attribution | `make live-attribution` | did the turn run the model we asked for — both harnesses | ~10 s, ~$0.06 |
 | Usage accounting | `make live-usage` | usage/cost accounting drift — esp. the Codex subagent rollout recovery (non-public details) | ~5 min, well under $1 |
 | Turn control | `make live-interactive` | steer / interrupt+continue / stop / resume on both harnesses, against the real CLIs (their mid-turn behavior is what the harness loops encode) | ~2 min, a few cents |
@@ -46,13 +46,13 @@ runtime (Haiku 4.5 on claude-code, gpt-5.6-luna on codex, both PASS), from the
 after `awaiting_tasks` reports it pending, and verifies that the next prompt is answered
 from the saved workspace. This catches a resumed CLI's stale notification and empty
 zero-turn result, which an ordinary foreground-command stop does not exercise. It is
-a paid manual test (Haiku, a few cents). `ENGINE=<throwaway resource>` targets a warm
-Gemini engine; the caller must arrange its deployment and teardown.
+a paid manual test (Haiku, a few cents). `ENGINE=<engine name>` targets a deployed sandbox
+engine with a ready pool; the caller must arrange its deployment and teardown.
 
 The control channel adds nothing measurable on `local`; the time is the model's. A steer
 waits for the running tool call to finish (here a `sleep 8`), because the model reads the
-message at its next step. On `gemini` add the inbox poll (every 1.5 s) plus GCS latency;
-not measured live yet.
+message at its next step. On `gemini` a steer is one HTTPS call into the sandbox (~0.3 s);
+`make live-smoke` exercises it on every run.
 
 ## 1. Offline tests (`make test`)
 
@@ -63,98 +63,119 @@ deliberate poll-cadence tests; the slowest takes about 15 seconds. Expect about 
 overall.
 
 The pytest suite makes **no network calls**: no GCP, no model, no subprocesses talking to
-real services. Backends are exercised against the fakes in [`tests/fakes.py`](tests/fakes.py) /
-[`tests/codex_fakes.py`](tests/codex_fakes.py), storage against `LocalBlobStore`, logging
-against `InMemorySink`. Useful conventions when adding tests:
+real services. Harnesses are exercised against the fakes in [`tests/fakes.py`](tests/fakes.py) /
+[`tests/codex_fakes.py`](tests/codex_fakes.py), storage against `LocalBlobStore`, and the sandbox
+platform against [`tests/sandbox_fakes.py`](tests/sandbox_fakes.py): `FakeSandboxProvider` keeps
+templates and sandboxes in memory and routes every call to a worker — the REAL `Worker` class
+driven in-process with its harness faked (a client turn then runs client → provider → worker →
+harness fake → events → client), or a `ScriptedWorker` a test feeds events to. `make_engine`
+builds a `GeminiEngine` over it with an in-memory roster. Useful conventions when adding tests:
 
 - **Patch the seam, not the internals** — e.g. monkeypatch `handoff.GcsBlobStore` to
-  `LocalBlobStore`, or `eventsink.CloudLoggingSink` to `InMemorySink`, and drive the real
-  code path above it.
+  `LocalBlobStore`, inject a `FakeSandboxProvider`, and drive the real code path above it.
 - **Re-attach sessions by id** — `GeminiSession(engine, "sid")` constructs a handle without
-  any platform call; `engine.start_session()` would call the live sessions API.
+  any platform call.
+- The client's `/events` long-poll is shortened by an autouse fixture (`asyncio.run` waits for
+  executor threads at shutdown, so a cancelled run would otherwise hold a test for the hold time).
 - Ruff must pass too: `make lint`.
 
 ## 2. Install parity (`dev/` image)
 
-Catches install-time breakage (wheels, glibc, uv resolution) locally in seconds instead of
-through ~10-minute cloud rebuilds. See [`dev/README.md`](dev/README.md).
+Catches install-time breakage (wheels, glibc, uv resolution) locally, with a shell at hand,
+before a deploy builds the real image. See [`dev/README.md`](dev/README.md).
 
-## 3. Live validation on Gemini Agent Runtime
+## 3. Live validation on the sandbox platform
 
 ### Why offline green isn't enough
 
 The platform's behavior changes **server-side, with zero client changes** — the offline
-suite stays green through it. Measured example (2026-07-28): new engines' job workers
-stopped resolving a default `class_method` and stopped exporting the managed-session env
-var, and the job runner started kill-and-retrying workers — all discovered live, none
-visible to any local test. The §6 contracts in [`DESIGN.md`](DESIGN.md) exist because of
-such findings; live validation is how we keep them true.
+suite stays green through it. Agent Sandbox is a v1beta1 surface whose SDK renamed
+`agent_engines` → `runtimes` between 1.x and 2.x and whose proxy limits (call ceiling,
+body caps) are undocumented and were measured, not read. The §6/§13 contracts in
+[`DESIGN.md`](DESIGN.md) exist because of such findings; live validation is how we keep
+them true.
 
-**Run a live check when your change touches:** deploy packaging or `_deploy.py` contracts,
-the pickled ADK app template or a Google SDK migration, `class_method` dispatch, the
-secrets handoff lifecycle, warm-pool dispatch, or the event-sink/Cloud Logging plumbing.
-Prose-only / pure-logic changes with solid offline coverage don't need it.
+**Run a live check when your change touches:** the image (`_image.py`), the provider
+adapter (`provider.py`), the worker (`worker.py`) or the turn body it reads, the dispatch and
+streaming paths in `backend.py`, the run-scoped token or the model token, or the
+`google-cloud-agentplatform` pin. Prose-only / pure-logic changes with solid offline coverage
+don't need it.
 
 ### The standard smoke test
 
 ```bash
-make live-smoke                    # both paths; or MODE=cold / MODE=warm
+make live-smoke
 PROJECT=my-proj LOCATION=us-central1 make live-smoke   # non-default project
+LONG_MINUTES=70 make live-smoke                        # + a turn whose one Bash call sleeps 70 min
 ```
 
-[`dev/live_smoke.py`](dev/live_smoke.py) deploys **throwaway engines from your checkout**
-(named `ratk-smoke-{cold,warm}-<you>`), runs one tool-using Haiku turn through each dispatch
-path, and tears everything down in `finally`:
+[`dev/live_smoke.py`](dev/live_smoke.py) deploys **a throwaway engine from your checkout**
+(named `ratk-smoke-<you>`: image build + push with your Docker, a template, a ready pool of
+one), runs Haiku turns against it, and tears everything down in `finally`:
 
-- **cold** — `run_query_job`, the production default: every job provisions its own worker
-  (~2.5 min startup before the turn runs).
-- **warm** — pub/sub dispatch to a pre-warmed pool worker (~4 s to first observed event).
+- **pool-turn** — a turn on the ready sandbox: `turn_started` must say `warm=True`, the first
+  event must arrive within 4 s (measured 1.3 s), the result must be `42`.
+- **session-config / turn-config** — `get_engine` (pure addressing) + a `SessionConfig`
+  planting a marker in the system prompt: the reply must carry it (the worker ran the
+  session's config over the baked spec), then a second turn on the SAME session — a checkpoint
+  resume on a fresh sandbox (`workspace_ready.restored` must be true) — with a
+  `TurnConfig(output_schema=...)`: the client parses `structured_output`, and the worker's
+  `effective_spec` echo must still carry the marker. The second turn re-attaches by session id
+  the way an application does.
+- **steer** — `session.send()` into a running turn (the model is inside a `sleep 25`): the
+  `user` event must acknowledge the message id and the reply must reflect it.
+- **isolation** — a fixed read-only script run through the worker's `/exec` on a fresh
+  sandbox (no model involved): the metadata server's identity must not be one of ours, its
+  token must be 403 on the project's storage and Vertex, and no credential-like env var is
+  set outside a turn. Prints statuses and names, never a token.
+- **long-turn** (`LONG_MINUTES`) — one Bash call that long; what it exercises is the model
+  token's lifetime (an hour unless the org policy extends it), the sandbox TTL and the
+  `/events` long-poll over hours.
 
-Pass criteria per engine: terminal result with `error=False`, `turns > 0`, and the expected
-answer in the text. The `*-session-config` / `*-turn-config` checks additionally exercise the
-config transport on a second session per mode: the session-config turn must carry the
-run-time system prompt's marker (the worker ran the session's config, not the deploy-baked
-spec), the turn-config turn must return `structured_output` parsed via a per-turn
-`output_schema` **and** still carry the marker (the session config persists across turns),
-and both turns must stream the worker's `effective_spec` echo with the config pointers.
-Typical numbers: deploy ~3.5–4 min (the two run in parallel), cold turn ~3 min end-to-end,
-warm ~1 min, a few cents of model spend. Exit code is non-zero on any FAIL, so you can gate
-on it.
-
-Events stream via the **GCS mirror** (no read quota, no ingestion lag — see DESIGN §6), so
-concurrent tests don't contend. Against an engine deployed *before* event streaming, all of
-a turn's events arrive in one batch with the result (its mirror was written at end-of-turn)
-— redeploy it for live streaming.
+Typical numbers (2026-09-11): deploy 81 s (build 32 s on a warm cache, push 13 s, template
+18 s, pool fill 15 s), pool turn 6.6 s to the result, fresh-sandbox turns 22–28 s, a few cents
+of model spend. Exit code is non-zero on any FAIL, so you can gate on it.
 
 Prerequisites: the GCP setup from the
 [README "GCP setup & required permissions"](README.md#gcp-setup--required-permissions)
-(ADC login, IAM grants, Haiku enabled in Vertex Model Garden). Defaults target the shared
-`my-project` test project.
+(ADC that can impersonate the model service account, Haiku enabled in Vertex Model Garden)
+and the Docker CLI logged into the registry (`docker login -u oauth2accesstoken
+--password-stdin us-central1-docker.pkg.dev` with an access token). Defaults target the shared
+`my-project` test project and its `ratk-sandbox` repo; `MODEL_SA` overrides the model
+service account (default: the toolkit's `ratk-model@<project>`, the predict-only account
+`ratk-gcp-setup` creates — the operator account would hand the agent the whole project, and
+the smoke's **model-token** check fails on any account whose token reaches more than the
+model).
 
-### The revision probe (`make live-revisions`)
+### The limits probe (`dev/live_limits_probe.py`)
 
-[`dev/live_revisions.py`](dev/live_revisions.py) covers what the smoke test can't: the
-**control plane's versioning**. It deploys one throwaway engine (`ratk-rev-<you>`) twice and
-asserts that the second deploy *updates* it into a new runtime revision rather than creating
-a second engine, that traffic follows the newest revision, that `set_traffic` rolls back and
-a turn still runs, that `get_engine(version=…)` accepts the serving revision and rejects a
-non-serving one, and that `delete_version` prunes. Run it when you touch deploy, versioning,
-or traffic config. ~10 min: the two builds are **sequential** (the second is the update under
-test), so it costs about the same wall-clock as the smoke test's parallel pair.
+Not part of the regular ladder: it measures the platform's undocumented ceilings (TTL, CPU and
+memory, disk, proxy body sizes, the per-call ceiling, call rate, concurrent creates) and takes
+~15 min plus the optional long-running-process check. It runs against any image `gemini.deploy`
+built (`--image`, from a deploy record or `engine.revisions()`), needs only the worker's `/health`
+and `/exec`, creates its own templates and sandboxes and deletes them in `finally`. Re-run it when
+the platform announces changes to Agent Sandbox or when a limit in `backend.py` / `worker.py`
+(`EVENTS_WAIT_S`, `EVENTS_PAGE_BYTES`, the `exec()` timeout cap) needs re-grounding.
 
-### The pool cutover probe (`make live-pool-cutover`)
+```bash
+.venv/bin/python dev/live_limits_probe.py --image us-central1-docker.pkg.dev/<project>/ratk-sandbox/<image>:<tag> [--long-minutes 25]
+```
 
-[`dev/live_pool_cutover_probe.py`](dev/live_pool_cutover_probe.py) covers the **warm-pool
-redeploy cutover** (issue #38). It deploys one throwaway warm engine (`ratk-cutover-<you>`)
-twice — each deploy's system prompt carries a distinct revision marker — and asserts that
-the dispatch topic is generation-scoped and changes across deploys, that the old generation
-(its topic and per-worker subscriptions) is retired and the old idle worker **exits within
-minutes** (instead of claiming post-redeploy turns for up to `pool_max_wait_s`), that
-`get_engine(warm_pool=True)` discovers the new topic from the deployed env, and that a turn
-dispatched through
-that handle replies with the NEW deploy's marker — the exact regression #38 reported. Run
-it when you touch the pool/dispatch plumbing (`pool.py`, the warm paths in `backend.py`,
-`adk_agent._pool_worker`). ~20 min: two **sequential** builds plus two pool fills.
+Findings of 2026-09-11 (my-project / us-central1, 4 CPU / 8 GiB unless noted):
+
+| Limit | Measured |
+|---|---|
+| sandbox TTL | 1 h, 1 d, 7 d, 14 d and 30 d all accepted (`expire_time` set accordingly) |
+| resources | 8 CPU / 16 GiB template works (a 13 GiB allocation succeeds; template create 118 s); 16 CPU refused: "Request CPU exceeds maximum allowed: 8.0 vCPU" |
+| disk | `/tmp` 63 GB; `/` and `/workspace` overlay; a 2 GiB write takes 1.2 s |
+| proxied request body | 100 KB fine (0.5 s), 1 MB fine (4.2 s), 4 MB / 10 MB / 32 MB fail (`Execution Failed. Error: UNAVAILABLE`) |
+| proxied response body | 100 KB and 1 MB fine (0.3 s); 4 MB+ fail: "Response size too large. Received at least 2016214 bytes" → the worker pages `/events` under 1 MB |
+| one proxied call's duration | 30 / 60 / 120 / 300 s fine; 600 s → 502 Bad Gateway at 600 s (the sandbox stays healthy) → the client's long-poll holds 20 s, `exec()` is capped at 240 s |
+| call rate | 100 sequential `/health` calls in 18.5 s (5.4/s); 200 calls on 10 threads in 4.0 s (50/s); no 429 |
+| concurrent creates | 10 sandboxes created in parallel in 7.5 s wall (2.7–7.5 s each), all listed RUNNING; first answers 0.7–32 s later |
+| long-running process | a background ticker ran 25 min untouched across 5-minute `/exec` polls |
+| exec resets the TTL? | **no**: a 480 s-TTL sandbox was gone at 540 s despite an exec at 420 s (so a pool sandbox's TTL is set at creation to its whole intended life) |
+| idle sandbox after 60 min | answers the first call in 0.9 s, same process |
 
 ### The OpenRouter model check
 
@@ -214,35 +235,31 @@ run it **by hand, sparingly, locally**. It must never run in CI: `pytest -q` sta
 (see §1 and `.github/workflows/ci.yml`) — the offline tests pin the config the harness
 emits, and that is what CI checks.
 
-### The OpenRouter model check on Agent Runtime
+### The OpenRouter model check on the sandbox runtime
 
 ```bash
 OPENROUTER_API_KEY=... make live-openrouter-remote
 ```
 
-This paid remote test repeats the local checks on Gemini Agent Runtime. One engine contains both
+This paid remote test repeats the local checks on the sandbox runtime. One engine contains both
 CLIs and serves every model through per-turn overrides. Every model runs a structured-output turn
 on both harnesses. Resume, direct provider selection, routing objects, and budget caps also run on
 both harnesses. The two routing rows are the same closed/open pair the local test runs, which is
 where a routing object is proven to survive the trip to a deployed worker.
 
-It also checks the remote-only surface: the worker's `effective_spec` echo names the model,
-`session.resource_samples()` returns worker CPU/RAM, `memory_peak_bytes` is stamped on the
-terminal result, `session.history()` replays the events, and **that session's** Cloud Trace
-root span carries the model and its cost. It needs `uv pip install google-cloud-trace`
-(dev-only, not a toolkit dependency). The trace check reports SKIP when the package is missing.
+It also checks the remote-only surface: the worker's `effective_spec` echo names the model and
+`session.history()` replays the events with a terminal result.
 
-The engine is deleted in `finally`; a failed teardown prints loudly, because an engine
-bills while it exists. `KEEP=1` leaves it up for debugging and hands you the cleanup.
+The engine is deleted in `finally`; a failed teardown prints loudly, because a ready pool's
+sandboxes bill while they exist. `KEEP=1` leaves it up for debugging and hands you the cleanup.
 
 `MODELS=` narrows the model list here too. The deployment knobs are `PROJECT`, `LOCATION`,
-`SUFFIX` (the engine name's suffix), `MAX_INSTANCES` and `IMPERSONATE_SA`; each falls back to
-the same default the other live probes use.
+`SUFFIX` (the engine name's suffix) and `IMPERSONATE_SA`; each falls back to the same default
+the other live probes use.
 
-**Costs real money** (mostly the build; the summary table above has the current figures).
-Checks run concurrently; build time varies widely. Give it a generous timeout. Teardown
-also runs on SIGTERM/SIGINT, because a `timeout` that fires mid-run would otherwise leave an
-engine billing.
+**Costs real money** (the summary table above has the current figures). Checks run
+concurrently. Teardown also runs on SIGTERM/SIGINT, because a `timeout` that fires mid-run
+would otherwise leave sandboxes billing.
 
 DeepSeek v4 sometimes returns no final message under Claude Code (the README has the details).
 The test retries one soft failure and reports when the retry was used. It stays failed when the
@@ -269,28 +286,18 @@ check always runs, so it needs whatever Claude auth your shell already uses — 
 `ANTHROPIC_API_KEY` or a logged-in `claude` CLI. `CLAUDE_MODEL` and `OPENAI_MODEL` change the
 native models it checks alongside the OpenRouter ones.
 
-### The isolation probe and the run-scoped GCS check
+### Isolation and the run-scoped GCS token
 
-`dev/live_isolation_probe.py` deploys a throwaway cold engine, runs one Haiku turn whose task is a
-fixed read-only script, prints the script's output and deletes the engine. The script prints only
-statuses, counts, lengths and key names: the shell's user, whether the metadata server hands out the
-runtime identity's token, and what that token can list and read in the output bucket. It is the
-record of the 2026-09-02 finding (README "The runtime identity is reachable by the agent") and the
-check to repeat after the bucket-role migration, when every list must come back 403.
-
-`dev/live_scoped_gcs.py` proves the fix without touching the shared bucket: it creates a fresh
-bucket where the engine's runtime identity may only create objects under `jobs/` and read them by
-name, deploys a throwaway engine on it, runs a turn with a secret and checkpointing (must succeed:
-the worker used the run-scoped token for everything), then runs the probe script (metadata token
-still 200, every bucket list and read with it 403), and deletes the engine and the bucket. With
-`RUNTIME_SA=<email>` the engine is deployed with `service_account=` set to that account (create it
-first with the README's gcloud sketch) and the bucket lives in the engine project; the probe also
-checks the metadata server hands out that account, and prints the status of listing Vertex operations
-with its token (403 with the README's custom role). With `RUNTIME_SA` unset the engine runs as the
-default service agent and the bucket is created in `OUTPUT_PROJECT` (a project where that identity
-has no project role). `KEEP=1` leaves the engine and bucket for inspection. Run it for any change to
-`scoped_gcs.py`, `GcsBlobStore`, the handoff module, the directive/payload shape or the deploy
-config's identity fields.
+The sandbox has no Google identity of its own, so the two questions the earlier runtime needed
+separate probes for — what can the agent's shell reach, and did the worker do its GCS work on the
+run-scoped token — are answered by `make live-smoke` on every run: the **isolation** check prints
+what the shell reaches (a tenant identity that is 403 on the project), the **model-token** check
+fetches the token the agent's CLI actually uses — from the worker's loopback metadata server,
+mid-turn, through `session.exec()` — and shows it refused (401/403) on listing the project's
+reasoning engines, the output bucket and its service accounts, and every turn's
+`workspace_ready` event carries `scoped_gcs: true` while the mirror it streams to was written with
+that token (the worker has no other credential that could open the bucket). Run the smoke for any
+change to `scoped_gcs.py`, `GcsBlobStore`, the worker's turn body or the model-token path.
 
 ### Writing a bespoke live probe
 
@@ -298,35 +305,39 @@ When the smoke test doesn't cover your change (e.g. validating crash/retry behav
 new event field), follow the same pattern — it's what keeps live testing safe and cheap.
 Worked examples in [`dev/`](dev): `live_two_turn_probe.py` (two turns on one session over
 the event stream — the probe that caught the stale-result replay bug) and
-`live_warm_latency_probe.py` (wait_until_warm + measured dispatch→first-event latency):
+`live_limits_probe.py` (the platform's ceilings, measured):
 
 - **Throwaway, named engines**: suffix with something identifying (`-itest`, your name) so
   leftovers are attributable; never point a probe at someone's standing engine.
 - **Cheap model, tight caps**: Haiku, low `max_turns` / `max_budget_usd` — the platform
   round-trip is the subject, not the model's work.
-- **Teardown in `finally`**, warm pools with `delete_pool_resources=True` (idle pool
-  workers are long-running billed jobs; `engine.delete()` cancels them first).
-- **Check for leftovers** after any failed run — engines bill while they exist:
+- **Teardown in `finally`** with `engine.delete()` (a ready pool's sandboxes bill while
+  they exist; the templates go with them).
+- **Check for leftovers** after any failed run — sandboxes bill while they exist:
 
   ```python
   from remote_agent_toolkit import gemini
+  from remote_agent_toolkit.runtime.gemini.provider import AgentSandboxProvider
   for e in gemini.list_engines("my-project", "us-central1"):
       print(e)
+  for sb in AgentSandboxProvider("my-project", "us-central1").list():
+      print(sb["display_name"], sb["state"], sb["expire_time"])
   ```
 
 ### Debugging a live run
 
-- **Server-side truth is the steps log**, not the client tail. Every worker event lands in
-  Cloud Logging as `remote_agent_toolkit_steps`, filter
-  `labels.session_id="<adk session id>"`. The client's streamed events are the same records
-  *after* ingestion.
-- **Never infer server timing from client event arrival** — Cloud Logging ingestion lags by
-  minutes under load. For timing claims, compare wall-clock at the client against the
-  timestamps *inside* the step-log entries.
-- **Job containers run in a Google tenant project**: their Cloud Run logs/metrics and kill
-  events are invisible from our project. The worker's cgroup self-sampling
-  (`remote_agent_toolkit_resources` log, `session.resource_samples()`, and the
-  `memory_peak_bytes` stamped into the terminal result) is the only usage record — see the
-  [README monitoring section](README.md#monitoring-job-cpuram-oom-forensics).
-- A session is also inspectable in the console playground:
-  `https://console.cloud.google.com/vertex-ai/agents/agent-engines` → engine → session.
+- **The events are the truth**, live and after the fact: `session.history()` reads the same
+  mirror objects the client streamed (plus whatever a dying worker flushed before the client's
+  last poll). There is no Cloud Logging step log any more.
+- **A turn that ends with `sandbox_unreachable`** means the sandbox went away mid-turn (an OOM
+  is the usual reason — raise `resource_limits`) or the proxy stopped routing to it; the last
+  events before it say where the agent was. `dispatch_failed` means no sandbox took the turn
+  (the message names the platform error); `dispatch_uncertain` means a `/turn` call lost its
+  answer and the sandbox could not be asked whether it had started the turn — the sandbox was
+  deleted and the turn was not replayed (the message names the sandbox).
+- **Poke a live sandbox by hand**: `AgentSandboxProvider(...).call(sandbox, "/exec",
+  {"command": "..."})` runs a shell command in it (the same contract as Google's shell image);
+  `/health` reports uptime and the running turn. Sandbox ids appear in `turn_started.worker`.
+- **The container's own logs** (the worker's stderr) are not exposed by the platform; the
+  worker therefore surfaces every failure it can as an event (`harness_error`, `config_error`,
+  `late_harness_error`) rather than logging it.

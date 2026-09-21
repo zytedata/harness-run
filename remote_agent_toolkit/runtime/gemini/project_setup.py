@@ -1,4 +1,4 @@
-"""One-command GCP project setup for the Gemini Agent Runtime backend.
+"""One-command GCP project setup for the sandbox runtime (the ``gemini`` backend).
 
 ``ratk-gcp-setup --project <id>`` makes a GCP project ready to run this toolkit's
 ``gemini`` backend: it audits the project against everything the README's "GCP setup &
@@ -15,29 +15,26 @@ with the *target* project as the quota project, whatever the ambient ADC default
 What it manages (the README section explains the *why* of each piece):
 
 * the required APIs (enabled additively);
-* the staging + output buckets (created in ``--location`` with uniform bucket-level
-  access and public-access prevention; the handoff lifecycle rules on the output bucket);
-* the operator service account, its project roles, and **bucket-scoped** storage grants
-  (not project-wide ``storage.admin`` — least privilege for shared projects);
-* ``roles/iam.serviceAccountTokenCreator`` on the operator SA for the principals that
-  will impersonate it (defaults to the ADC principal running this tool);
-* the **runtime service account** the engines run as (``gemini.deploy(...,
-  service_account=<its email>)``): the account itself, a custom role holding only
-  ``aiplatform.endpoints.predict`` (never ``roles/aiplatform.user``), its project roles,
-  ``objectViewer`` on the staging bucket, the two *conditional* output-bucket bindings
-  (create + read-by-name under ``jobs/`` and ``events/ratk-`` only — nothing under
-  ``pool/``, where the warm pool's roster lives), and ``serviceAccountUser`` on it for
-  the operator SA. The default Agent Runtime service agent gets **nothing**: its
-  Google-managed project role already reads every bucket in the project, which is why
-  the engine must run as an account you own (README "The runtime identity is reachable
-  by the agent"). Grants that agent still holds from the earlier identity model are
-  reported as a NOTE to remove by hand once no engine runs as it;
+* the output bucket (created in ``--location`` with uniform bucket-level access and
+  public-access prevention; the record lifecycle rules on it);
+* the Artifact Registry Docker repo the sandbox images are pushed to, and the read grant
+  on it for the **Agent Sandbox service agent** (``service-<number>@gcp-sa-vertex-sandbox``),
+  which pulls the image when a sandbox starts;
+* the operator service account (the identity that deploys and drives turns — the whole
+  control plane), its project role, and **bucket- and repo-scoped** storage/registry
+  grants (least privilege for shared projects);
+* ``roles/iam.serviceAccountTokenCreator`` on the operator SA for the principals that will
+  impersonate it (defaults to the ADC principal running this tool);
+* the **model service account** (``ratk-model@``): the identity whose one-hour tokens the
+  client mints and hands to each sandbox for Vertex model calls (the sandbox has no
+  identity of its own). It holds a custom role with only ``aiplatform.endpoints.predict``;
+  the operator SA and the impersonators get ``serviceAccountTokenCreator`` on it;
 * a live check that the Claude model is enabled in Vertex Model Garden (accepting the
   Anthropic terms is a one-time console action this tool cannot perform for you).
 
-``--verify`` proves the end state with a real throwaway warm-pool deploy **as the runtime
-service account** + one Haiku turn + teardown (a few cents, ~10 min) — it exercises every
-grant above end-to-end.
+``--verify`` proves the end state with a real throwaway deploy (image build + push with the
+local Docker, a template, a pool of one) + one Haiku turn + teardown — it exercises every
+grant above end-to-end. Needs Docker logged into the registry.
 
 Stdlib-only at import time (repo convention); ``google-auth`` is imported lazily.
 """
@@ -53,13 +50,14 @@ from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from ._deploy import DEFAULT_RUNTIME_SA_ID  # engines run as it: deploy(service_account=) default
 from .handoff import handoff_lifecycle_rules
+from .model_token import DEFAULT_MODEL_SA_ID
 
 DEFAULT_LOCATION = "us-central1"
 DEFAULT_OPERATOR_SA_ID = "agent-runtime"
+DEFAULT_REPO_ID = "ratk"  # must mirror _image.DEFAULT_REPO_ID (deploy's default image_repo)
 # The models checked in Vertex Model Garden. Each check costs a handful of input tokens
-# + 1 output token. `translate.py` defaults CLOUD_ML_REGION to `global`, so that's the
+# + 1 output token. The client defaults CLOUD_ML_REGION to `global`, so that's the
 # location whose enablement actually matters for deployed runs. The FIRST required model
 # is also what `--verify`'s throwaway turn runs on — keep the cheapest one first.
 DEFAULT_CHECK_MODELS: tuple[str, ...] = ("claude-haiku-4-5", "claude-sonnet-5", "claude-opus-5")
@@ -67,70 +65,40 @@ DEFAULT_CHECK_MODELS: tuple[str, ...] = ("claude-haiku-4-5", "claude-sonnet-5", 
 DEFAULT_OPTIONAL_MODELS: tuple[str, ...] = ("claude-fable-5",)
 MODEL_CHECK_LOCATION = "global"
 
-# Every API a gemini-backend project needs (README "GCP setup & required permissions").
+# Every API a sandbox-runtime project needs (README "GCP setup & required permissions").
 # Additive: already-enabled extras are never touched.
 REQUIRED_SERVICES: tuple[str, ...] = (
     "serviceusage.googleapis.com",  # bootstrap — everything below is managed through it
     "cloudresourcemanager.googleapis.com",  # project IAM policy reads/writes
-    "iam.googleapis.com",  # the operator service account
-    "iamcredentials.googleapis.com",  # impersonating the operator SA
-    "aiplatform.googleapis.com",  # Agent Engine control plane + Vertex Claude
-    "storage.googleapis.com",  # staging/output buckets
-    "logging.googleapis.com",  # structured step logs + client tailing
-    "cloudbuild.googleapis.com",  # deploy builds the engine image...
-    "artifactregistry.googleapis.com",  # ...and stores it
-    "pubsub.googleapis.com",  # warm-pool dispatch
-    "telemetry.googleapis.com",  # OTel trace export (README "Tracing")
-    "cloudtrace.googleapis.com",
-    "monitoring.googleapis.com",
+    "iam.googleapis.com",  # the service accounts and the custom role
+    "iamcredentials.googleapis.com",  # impersonating the operator SA; minting model tokens
+    "aiplatform.googleapis.com",  # Agent Sandbox (templates, sandboxes) + Vertex Claude
+    "storage.googleapis.com",  # the output bucket
+    "artifactregistry.googleapis.com",  # the sandbox images
 )
 
-# Project roles for the operator SA (control plane: deploy / get_engine / run / tail).
-OPERATOR_PROJECT_ROLES: tuple[str, ...] = (
-    "roles/aiplatform.user",
-    "roles/logging.viewer",
-    "roles/cloudbuild.builds.editor",
-    "roles/pubsub.editor",  # create/retire the per-deploy dispatch pair + publish turns
-)
-# Storage is granted on the two toolkit buckets, NOT project-wide: bucket-scoped
-# roles/storage.admin covers staging the deploy bundle, reading job output, and the
-# lifecycle-rule update deploy() performs — without touching anyone else's buckets.
+# Project roles for the operator SA (the control plane: deploy / get_engine / run).
+# ``roles/aiplatform.user`` carries the sandbox and template permissions
+# (``aiplatform.sandboxEnvironments.*``, ``aiplatform.sandboxEnvironmentTemplates.*``) and the
+# ``reasoningEngines.*`` the host instance needs. A narrower custom role is possible once the
+# exact permission names are pinned down live.
+OPERATOR_PROJECT_ROLES: tuple[str, ...] = ("roles/aiplatform.user",)
+# Storage is granted on the output bucket, NOT project-wide: bucket-scoped
+# roles/storage.admin covers the records, the roster, the lifecycle-rule update deploy()
+# performs and minting the run-scoped tokens — without touching anyone else's buckets.
 OPERATOR_BUCKET_ROLE = "roles/storage.admin"
+# The deploy pushes the agent image to the repo.
+OPERATOR_REPO_ROLE = "roles/artifactregistry.writer"
+# The Agent Sandbox service agent pulls the image when a sandbox starts.
+SANDBOX_AGENT_REPO_ROLE = "roles/artifactregistry.reader"
 
-# The engine's runtime identity: a service account you own, which every deploy names as
-# ``service_account=``. ALL runtime resource access (Vertex, GCS, Pub/Sub, Logging)
-# authorizes against it — and the agent's shell can obtain its token, so it holds only
-# what a turn needs (README "The runtime identity is reachable by the agent").
-RUNTIME_PREDICT_ROLE_ID = "ratkRuntimePredict"  # custom role: model calls only
-RUNTIME_PREDICT_PERMISSIONS: tuple[str, ...] = ("aiplatform.endpoints.predict",)
-RUNTIME_SA_PROJECT_ROLES: tuple[str, ...] = (
-    "roles/logging.logWriter",  # the agent emits structured step logs
-    # the platform's job runner downloads the job input with a quota project on the
-    # request; without this the job dies before any worker event
-    "roles/serviceusage.serviceUsageConsumer",
-    "roles/telemetry.metricsWriter",  # OTel export (README "Tracing")
-    "roles/telemetry.tracesWriter",
-    "roles/pubsub.subscriber",  # warm-pool workers pull their own subscription (by name)
-)
-RUNTIME_SA_STAGING_ROLE = "roles/storage.objectViewer"  # the platform pulls the deploy bundle
-# On the output bucket: create the platform's job output + read the job input by exact
-# name (jobs/), and write the warm pool's readiness marker (events/ratk-). Conditional, so
-# the identity has no read or list right on anything else — everything a turn touches is
-# done with its run-scoped token, and pool/ (the roster that decides where turns go) must
-# never be reachable by it.
-RUNTIME_SA_OUTPUT_ROLES: tuple[str, ...] = (
-    "roles/storage.objectCreator",
-    "roles/storage.legacyObjectReader",  # objects.get by name, no objects.list
-)
-RUNTIME_SA_OUTPUT_PREFIXES: tuple[str, ...] = ("jobs/", "events/ratk-")
-RUNTIME_SA_OUTPUT_CONDITION_TITLE = "ratk: platform job files and pool readiness markers only"
-# The operator deploys AS the runtime identity.
-OPERATOR_ON_RUNTIME_SA_ROLE = "roles/iam.serviceAccountUser"
-
-# What the DEFAULT Agent Runtime service agent held under the earlier identity model.
-# This tool never removes anything; it reports these as a NOTE (README "Migration").
-LEGACY_AGENT_PROJECT_ROLE = "roles/aiplatform.user"
-LEGACY_AGENT_BUCKET_ROLE = "roles/storage.objectAdmin"
+# The model identity: the account whose access tokens the client mints per turn and hands
+# to the sandbox for Vertex model calls. It holds only what a model call needs — the agent's
+# shell inside the sandbox can read the token, so it must be worth nothing else.
+MODEL_PREDICT_ROLE_ID = "ratkRuntimePredict"  # custom role: model calls only (kept from the earlier model)
+MODEL_PREDICT_PERMISSIONS: tuple[str, ...] = ("aiplatform.endpoints.predict",)
+# Whoever drives turns mints the model tokens: tokenCreator on the model SA.
+TOKEN_CREATOR_ROLE = "roles/iam.serviceAccountTokenCreator"
 
 # Report statuses.
 OK = "OK"
@@ -148,71 +116,32 @@ class GcpError(RuntimeError):
         self.status = status
 
 
-def runtime_agent_email(project_number: str | int) -> str:
-    """The DEFAULT Agent Runtime service agent for a project (auto-created by Google).
+def sandbox_agent_email(project_number: str | int) -> str:
+    """The Agent Sandbox service agent of a project (auto-created by Google).
 
-    Only engines deployed before the toolkit named a runtime service account still run as
-    it; this tool checks it for leftover grants from that identity model, and grants it
-    nothing.
+    It pulls the sandbox image from Artifact Registry when a sandbox starts, so it needs
+    read access to the image repo — the one grant the platform side needs from us.
     """
-    return f"service-{project_number}@gcp-sa-aiplatform-re.iam.gserviceaccount.com"
+    return f"service-{project_number}@gcp-sa-vertex-sandbox.iam.gserviceaccount.com"
 
 
 def predict_role_name(project: str) -> str:
     """Full resource name of the project's ``ratkRuntimePredict`` custom role."""
-    return f"projects/{project}/roles/{RUNTIME_PREDICT_ROLE_ID}"
+    return f"projects/{project}/roles/{MODEL_PREDICT_ROLE_ID}"
 
 
-def output_bucket_condition(bucket: str) -> dict:
-    """The IAM condition limiting the runtime identity to the platform's own object prefixes."""
-    expression = " || ".join(
-        f'resource.name.startsWith("projects/_/buckets/{bucket}/objects/{prefix}")'
-        for prefix in RUNTIME_SA_OUTPUT_PREFIXES
-    )
-    return {"title": RUNTIME_SA_OUTPUT_CONDITION_TITLE, "expression": expression}
+def repo_resource(project: str, location: str, repo_id: str) -> str:
+    return f"projects/{project}/locations/{location}/repositories/{repo_id}"
 
 
-def _normalized(expression: str) -> str:
-    return " ".join(expression.split())
+def image_repo_uri(project: str, location: str, repo_id: str) -> str:
+    """The Docker host path of the repo — what ``gemini.deploy(image_repo=)`` takes."""
+    return f"{location}-docker.pkg.dev/{project}/{repo_id}"
 
 
-def conditional_binding_present(policy: dict, role: str, member: str, condition: dict) -> bool:
-    """Does ``member`` hold ``role`` under exactly ``condition`` (or unconditionally, which is
-    broader) in ``policy``? Other conditions on the same role do not count."""
-    wanted = _normalized(condition["expression"])
-    for b in policy.get("bindings", []) or []:
-        if b.get("role") != role or member not in (b.get("members", []) or []):
-            continue
-        cond = b.get("condition")
-        if not cond or _normalized(cond.get("expression", "")) == wanted:
-            return True
-    return False
-
-
-def add_conditional_binding(policy: dict, role: str, member: str, condition: dict) -> bool:
-    """Merge one conditional (role, member) grant into ``policy`` in place; ``True`` if added.
-
-    Joins an existing binding with the same role and condition, else appends a new one.
-    Conditional bindings require policy version 3, which is set here.
-    """
-    if conditional_binding_present(policy, role, member, condition):
-        return False
-    wanted = _normalized(condition["expression"])
-    bindings = policy.setdefault("bindings", [])
-    for b in bindings:
-        cond = b.get("condition")
-        if b.get("role") == role and cond and _normalized(cond.get("expression", "")) == wanted:
-            b.setdefault("members", []).append(member)
-            break
-    else:
-        bindings.append({"role": role, "members": [member], "condition": dict(condition)})
-    policy["version"] = 3
-    return True
-
-
-def default_buckets(project: str) -> tuple[str, str]:
-    """(staging, output) bucket URIs — must mirror ``backend.deploy``'s defaults."""
-    return f"gs://{project}-agent-staging", f"gs://{project}-agent-output"
+def default_output_bucket(project: str) -> str:
+    """The output bucket URI — must mirror ``backend.deploy``'s default."""
+    return f"gs://{project}-agent-output"
 
 
 def normalize_bucket_uri(value: str) -> str:
@@ -485,8 +414,7 @@ class GcpApi:
         )
 
     def get_bucket_policy(self, name: str) -> dict:
-        # Version 3: the runtime identity's grants are conditional, and GCS refuses to
-        # return a policy that has conditions at a lower version.
+        # Version 3 so a bucket that already carries conditional bindings reads back whole.
         return self.request(
             "GET",
             f"https://storage.googleapis.com/storage/v1/b/{name}/iam"
@@ -496,6 +424,39 @@ class GcpApi:
     def set_bucket_policy(self, name: str, policy: dict) -> None:
         self.request(
             "PUT", f"https://storage.googleapis.com/storage/v1/b/{name}/iam", json_body=policy
+        )
+
+    # -- Artifact Registry ----------------------------------------------------------
+
+    def get_repository(self, location: str, repo_id: str) -> dict | None:
+        return self.request(
+            "GET",
+            f"https://artifactregistry.googleapis.com/v1/{repo_resource(self.project, location, repo_id)}",
+            ok404=True,
+        )
+
+    def create_repository(self, location: str, repo_id: str) -> None:
+        op = self.request(
+            "POST",
+            f"https://artifactregistry.googleapis.com/v1/projects/{self.project}/locations/{location}"
+            f"/repositories?repositoryId={repo_id}",
+            json_body={"format": "DOCKER", "description": "remote-agent-toolkit sandbox images"},
+        )
+        self._wait_operation("https://artifactregistry.googleapis.com/v1", op or {})
+
+    def get_repository_policy(self, location: str, repo_id: str) -> dict:
+        return self.request(
+            "GET",
+            f"https://artifactregistry.googleapis.com/v1/{repo_resource(self.project, location, repo_id)}"
+            ":getIamPolicy",
+        ) or {}
+
+    def set_repository_policy(self, location: str, repo_id: str, policy: dict) -> None:
+        self.request(
+            "POST",
+            f"https://artifactregistry.googleapis.com/v1/{repo_resource(self.project, location, repo_id)}"
+            ":setIamPolicy",
+            json_body={"policy": policy},
         )
 
     # -- Vertex model access ---------------------------------------------------------
@@ -536,13 +497,34 @@ class GcpApi:
     # -- who am I -----------------------------------------------------------------
 
     def adc_email(self) -> str | None:
-        """The ADC principal's email, when discoverable (for the default impersonation grant)."""
+        """The ADC principal's email, when discoverable (for the default impersonation grant).
+
+        A service-account credential names itself. A user credential (``gcloud auth
+        application-default login``) is asked at Google's userinfo endpoint with a bare
+        bearer token — NOT through the authorized session, whose ``x-goog-user-project``
+        quota header makes that endpoint answer 403 for a user without
+        ``serviceusage.serviceUsageConsumer`` on the project — with tokeninfo as the fallback.
+        """
         self._http()
         email = getattr(self._credentials, "service_account_email", None)
         if email and email != "default":
             return email
         try:
-            r = self._http().get("https://openidconnect.googleapis.com/v1/userinfo")
+            import requests
+            from google.auth.transport.requests import Request
+
+            creds = self._credentials
+            if not getattr(creds, "valid", False):
+                creds.refresh(Request())
+            token = creds.token
+            r = requests.get(
+                "https://openidconnect.googleapis.com/v1/userinfo",
+                headers={"Authorization": f"Bearer {token}"}, timeout=15,
+            )
+            if r.ok and r.json().get("email"):
+                return r.json()["email"]
+            r = requests.get("https://oauth2.googleapis.com/tokeninfo",
+                             params={"access_token": token}, timeout=15)
             if r.ok:
                 return r.json().get("email")
         except Exception:  # noqa: BLE001 — absence of an email is handled by the caller
@@ -557,25 +539,27 @@ class Settings:
     project: str
     location: str = DEFAULT_LOCATION
     operator_sa_id: str | None = DEFAULT_OPERATOR_SA_ID  # None = don't manage an operator SA
-    runtime_sa_id: str = DEFAULT_RUNTIME_SA_ID  # what deploy(service_account=) defaults to
-    impersonators: tuple[str, ...] = ()  # IAM members granted tokenCreator on the operator SA
-    staging_bucket: str | None = None  # gs:// URI; None = the backend.deploy default
-    output_bucket: str | None = None
+    model_sa_id: str = DEFAULT_MODEL_SA_ID  # what deploy(model_service_account=) defaults to
+    impersonators: tuple[str, ...] = ()  # IAM members granted tokenCreator on the operator + model SAs
+    output_bucket: str | None = None  # gs:// URI; None = the backend.deploy default
+    repo_id: str = DEFAULT_REPO_ID  # the Artifact Registry Docker repo for the images
     models: tuple[str, ...] = DEFAULT_CHECK_MODELS  # required; () = skip the model checks
     optional_models: tuple[str, ...] = DEFAULT_OPTIONAL_MODELS  # absence doesn't fail readiness
 
-    def buckets(self) -> tuple[str, str]:
-        staging, output = default_buckets(self.project)
-        return (self.staging_bucket or staging, self.output_bucket or output)
+    def bucket(self) -> str:
+        return self.output_bucket or default_output_bucket(self.project)
 
     def operator_email(self) -> str | None:
         return self._sa_email(self.operator_sa_id)
 
-    def runtime_email(self) -> str:
-        """The runtime service account's email — what ``gemini.deploy`` runs engines as."""
-        email = self._sa_email(self.runtime_sa_id)
-        assert email is not None  # runtime_sa_id is never empty (there is no opt-out)
+    def model_email(self) -> str:
+        """The model service account's email — what the client impersonates for model tokens."""
+        email = self._sa_email(self.model_sa_id)
+        assert email is not None  # model_sa_id is never empty (there is no opt-out)
         return email
+
+    def image_repo(self) -> str:
+        return image_repo_uri(self.project, self.location, self.repo_id)
 
     def _sa_email(self, sa_id: str | None) -> str | None:
         if not sa_id:
@@ -610,26 +594,18 @@ def _grant(
     set_policy: Callable[[dict], None],
     additions: Sequence[tuple[str, str]],
     *,
-    condition: dict | None = None,
     retry_missing_s: float = 0.0,
 ) -> None:
     """Read-modify-write an IAM policy to include ``additions`` (idempotent).
 
-    With ``condition`` the grants are conditional bindings (the runtime identity's bucket
-    access). Retries etag conflicts, and — for ``retry_missing_s`` — "member does not
-    exist" failures, which a *freshly created* service account produces for a short window.
+    Retries etag conflicts, and — for ``retry_missing_s`` — "member does not exist"
+    failures, which a *freshly created* service account (or service agent) produces for a
+    short window.
     """
     deadline = time.monotonic() + retry_missing_s
     while True:
         policy = get_policy()
-        if condition is None:
-            added = bool(add_bindings(policy, additions))
-        else:
-            added = any(
-                add_conditional_binding(policy, role, member, condition)
-                for role, member in additions
-            )
-        if not added:
+        if not add_bindings(policy, additions):
             return  # someone else (or an earlier round) already granted it
         try:
             set_policy(policy)
@@ -730,74 +706,184 @@ def audit(api: GcpApi, cfg: Settings) -> list[Item]:
         )
         return items
 
-    staging_uri, output_uri = cfg.buckets()
+    output_uri = cfg.bucket()
+    out_name = bucket_name_of(output_uri)
 
-    # 3. Buckets (uniform access + public-access prevention; lifecycle on the output one).
-    for label, uri in (("staging bucket", staging_uri), ("output bucket", output_uri)):
-        name = bucket_name_of(uri)
-        wanted_rules: list[dict] = []
-        if label == "output bucket":
-            _, wanted_rules = handoff_lifecycle_rules(uri)
-        bucket = api.get_bucket(name)
-        if bucket is None:
-            items.append(
-                Item(
-                    label,
-                    FIX,
-                    f"create gs://{name} in {cfg.location} "
-                    "(uniform bucket-level access, public access prevented)",
-                    fix=lambda n=name, r=tuple(wanted_rules): api.create_bucket(
-                        n, cfg.location, list(r)
-                    ),
-                    key=f"bucket:{name}",
-                )
+    # 3. The output bucket (uniform access + public-access prevention; the record lifecycle).
+    _, wanted_rules = handoff_lifecycle_rules(output_uri)
+    bucket = api.get_bucket(out_name)
+    if bucket is None:
+        items.append(
+            Item(
+                "output bucket",
+                FIX,
+                f"create gs://{out_name} in {cfg.location} "
+                "(uniform bucket-level access, public access prevented)",
+                fix=lambda n=out_name, r=tuple(wanted_rules): api.create_bucket(n, cfg.location, list(r)),
+                key=f"bucket:{out_name}",
             )
-            continue
-        note = f"gs://{name} exists"
+        )
+    else:
+        note = f"gs://{out_name} exists"
         loc = str(bucket.get("location", "")).lower()
         if loc and loc != cfg.location.lower():
             note += f" (location {loc}, not {cfg.location} — works, but adds cross-region traffic)"
-        items.append(Item(label, OK, note, key=f"bucket:{name}"))
-        if wanted_rules:
-            existing = list((bucket.get("lifecycle") or {}).get("rule") or [])
-            gap = lifecycle_missing(existing, wanted_rules)
-            if gap:
-                items.append(
-                    Item(
-                        "output lifecycle",
-                        FIX,
-                        f"append {len(gap)} handoff lifecycle rule(s) to gs://{name} "
-                        "(reap staged secrets/configs; never touches other prefixes)",
-                        fix=lambda n=name, e=tuple(existing), g=tuple(gap): (
-                            api.set_bucket_lifecycle(n, [*e, *g])
-                        ),
-                    )
+        items.append(Item("output bucket", OK, note, key=f"bucket:{out_name}"))
+        existing = list((bucket.get("lifecycle") or {}).get("rule") or [])
+        gap = lifecycle_missing(existing, wanted_rules)
+        if gap:
+            items.append(
+                Item(
+                    "output lifecycle",
+                    FIX,
+                    f"append {len(gap)} record lifecycle rule(s) to gs://{out_name} "
+                    "(reap token objects / old configs; never touches other prefixes)",
+                    fix=lambda n=out_name, e=tuple(existing), g=tuple(gap): (
+                        api.set_bucket_lifecycle(n, [*e, *g])
+                    ),
                 )
-            else:
-                items.append(Item("output lifecycle", OK, "handoff reaper rules present"))
+            )
+        else:
+            items.append(Item("output lifecycle", OK, "record reaper rules present"))
 
-    # 4. Operator service account + its grants.
+    # 4. The image repo, and the sandbox service agent's read on it.
+    repo = api.get_repository(cfg.location, cfg.repo_id)
+    if repo is None:
+        items.append(
+            Item(
+                "image repo",
+                FIX,
+                f"create Docker repo {cfg.image_repo()} (the sandbox images)",
+                fix=lambda: api.create_repository(cfg.location, cfg.repo_id),
+            )
+        )
+        items.append(
+            Item(
+                "sandbox agent reads images", BLOCKED,
+                "granted right after the repo exists",
+            )
+        )
+    else:
+        items.append(Item("image repo", OK, f"{cfg.image_repo()} exists"))
+        agent_member = f"serviceAccount:{sandbox_agent_email(number)}"
+        addition = (SANDBOX_AGENT_REPO_ROLE, agent_member)
+        if missing_bindings(api.get_repository_policy(cfg.location, cfg.repo_id), [addition]):
+            items.append(
+                Item(
+                    "sandbox agent reads images",
+                    FIX,
+                    f"grant {SANDBOX_AGENT_REPO_ROLE} on the repo to {sandbox_agent_email(number)} "
+                    "(it pulls the image when a sandbox starts)",
+                    # The service agent may not exist until the API has been used once:
+                    # retry the "member does not exist" window.
+                    fix=lambda a=addition: _grant(
+                        lambda: api.get_repository_policy(cfg.location, cfg.repo_id),
+                        lambda p_: api.set_repository_policy(cfg.location, cfg.repo_id, p_),
+                        [a], retry_missing_s=120,
+                    ),
+                )
+            )
+        else:
+            items.append(
+                Item("sandbox agent reads images", OK, f"{SANDBOX_AGENT_REPO_ROLE} held by the service agent")
+            )
+
+    # 5. The model service account and its predict-only role.
+    model_email = cfg.model_email()
+    model_member = f"serviceAccount:{model_email}"
+    model_sa_exists = api.get_service_account(model_email) is not None
+    if model_sa_exists:
+        items.append(Item("model SA", OK, f"{model_email} exists"))
+    else:
+        items.append(
+            Item(
+                "model SA",
+                FIX,
+                f"create {model_email} (its tokens carry the sandboxes' model calls: "
+                "gemini.deploy(model_service_account=...))",
+                fix=lambda i=model_email.split("@")[0]: api.create_service_account(
+                    i, "remote-agent-toolkit model identity (Vertex model calls only)"
+                ),
+            )
+        )
+    role = api.get_role(MODEL_PREDICT_ROLE_ID)
+    role_name = predict_role_name(cfg.project)
+    if role is None:
+        items.append(
+            Item(
+                "model role",
+                FIX,
+                f"create custom role {MODEL_PREDICT_ROLE_ID} with " + ", ".join(MODEL_PREDICT_PERMISSIONS),
+                fix=lambda: api.create_role(
+                    MODEL_PREDICT_ROLE_ID, "ratk model identity: model calls only", MODEL_PREDICT_PERMISSIONS
+                ),
+            )
+        )
+    elif role.get("deleted"):
+        items.append(
+            Item(
+                "model role",
+                MANUAL,
+                f"custom role {MODEL_PREDICT_ROLE_ID} is soft-deleted; undelete it "
+                f"(gcloud iam roles undelete {MODEL_PREDICT_ROLE_ID} --project {cfg.project}) "
+                "or wait for it to expire and re-run",
+            )
+        )
+    else:
+        have = set(role.get("includedPermissions") or [])
+        lacking = [p_ for p_ in MODEL_PREDICT_PERMISSIONS if p_ not in have]
+        if lacking:
+            items.append(
+                Item(
+                    "model role",
+                    FIX,
+                    f"add {', '.join(lacking)} to custom role {MODEL_PREDICT_ROLE_ID}",
+                    fix=lambda h=tuple(sorted(have)), l_=tuple(lacking): (
+                        api.add_role_permissions(MODEL_PREDICT_ROLE_ID, [*h, *l_])
+                    ),
+                )
+            )
+        else:
+            items.append(Item("model role", OK, f"{MODEL_PREDICT_ROLE_ID} present"))
+    if role is None or role.get("deleted"):
+        items.append(Item("model roles", BLOCKED, "granted right after the custom role exists"))
+    else:
+        gap = missing_bindings(api.get_project_policy(), [(role_name, model_member)])
+        if gap:
+            items.append(
+                Item(
+                    "model roles",
+                    FIX,
+                    f"grant {role_name} on the project to {model_email} (and nothing else)",
+                    fix=lambda g=tuple(gap): _grant(
+                        api.get_project_policy, api.set_project_policy, g, retry_missing_s=120,
+                    ),
+                )
+            )
+        else:
+            items.append(Item("model roles", OK, "predict-only custom role present"))
+
+    # 6. Operator service account + its grants.
     op_email = cfg.operator_email()
+    sa_exists = False
     if op_email:
         member = f"serviceAccount:{op_email}"
-        sa = api.get_service_account(op_email)
-        sa_exists = sa is not None
+        sa_exists = api.get_service_account(op_email) is not None
         if sa_exists:
             items.append(Item("operator SA", OK, f"{op_email} exists"))
         else:
-            sa_id = op_email.split("@")[0]
             items.append(
                 Item(
                     "operator SA",
                     FIX,
                     f"create {op_email}",
-                    fix=lambda i=sa_id: api.create_service_account(
+                    fix=lambda i=op_email.split("@")[0]: api.create_service_account(
                         i, "remote-agent-toolkit operator (control plane)"
                     ),
                 )
             )
 
-        needed = [(role, member) for role in OPERATOR_PROJECT_ROLES]
+        needed = [(r, member) for r in OPERATOR_PROJECT_ROLES]
         gap = missing_bindings(api.get_project_policy(), needed)
         if gap:
             items.append(
@@ -805,335 +891,131 @@ def audit(api: GcpApi, cfg: Settings) -> list[Item]:
                     "operator roles",
                     FIX,
                     "grant on the project: " + ", ".join(sorted({r for r, _ in gap})),
-                    # A just-created SA can take a moment to be grantable — retry briefly.
                     fix=lambda g=tuple(gap): _grant(
                         api.get_project_policy, api.set_project_policy, g, retry_missing_s=120
                     ),
                 )
             )
         else:
-            items.append(
-                Item("operator roles", OK, f"{len(OPERATOR_PROJECT_ROLES)} project roles present")
-            )
+            items.append(Item("operator roles", OK, f"{len(OPERATOR_PROJECT_ROLES)} project role(s) present"))
 
-        for uri in (staging_uri, output_uri):
-            name = bucket_name_of(uri)
-            if api.get_bucket(name) is None:
-                items.append(
-                    Item(
-                        f"operator on gs://{name}",
-                        BLOCKED,
-                        "bucket doesn't exist yet — granted right after it is created",
-                        key=f"operator-bucket:{name}",
-                    )
+        if api.get_bucket(out_name) is None:
+            items.append(
+                Item(
+                    f"operator on gs://{out_name}", BLOCKED,
+                    "bucket doesn't exist yet — granted right after it is created",
+                    key=f"operator-bucket:{out_name}",
                 )
-                continue
+            )
+        else:
             addition = (OPERATOR_BUCKET_ROLE, member)
-            if missing_bindings(api.get_bucket_policy(name), [addition]):
+            if missing_bindings(api.get_bucket_policy(out_name), [addition]):
                 items.append(
                     Item(
-                        f"operator on gs://{name}",
+                        f"operator on gs://{out_name}",
                         FIX,
                         f"grant {OPERATOR_BUCKET_ROLE} (bucket-scoped, not project-wide)",
-                        fix=lambda n=name, a=addition: _grant(
-                            lambda: api.get_bucket_policy(n),
-                            lambda p: api.set_bucket_policy(n, p),
-                            [a],
-                            retry_missing_s=120,
-                        ),
-                        key=f"operator-bucket:{name}",
-                    )
-                )
-            else:
-                items.append(
-                    Item(
-                        f"operator on gs://{name}",
-                        OK,
-                        f"{OPERATOR_BUCKET_ROLE} present",
-                        key=f"operator-bucket:{name}",
-                    )
-                )
-
-        # 5. Who may impersonate the operator SA.
-        members = [principal(m) for m in cfg.impersonators]
-        if not members:
-            adc = api.adc_email()
-            if adc:
-                members = [principal(adc)]
-        if not members:
-            items.append(
-                Item(
-                    "impersonation",
-                    MANUAL,
-                    "could not discover the ADC principal — pass --impersonator "
-                    "user:you@example.com (repeatable) to grant tokenCreator on the operator SA",
-                )
-            )
-        elif not sa_exists:
-            items.append(
-                Item(
-                    "impersonation",
-                    BLOCKED,
-                    f"granted to {', '.join(members)} right after the operator SA is created",
-                )
-            )
-        else:
-            needed = [("roles/iam.serviceAccountTokenCreator", m) for m in members]
-            gap = missing_bindings(api.get_sa_policy(op_email), needed)
-            if gap:
-                items.append(
-                    Item(
-                        "impersonation",
-                        FIX,
-                        "grant roles/iam.serviceAccountTokenCreator on the operator SA to "
-                        + ", ".join(m for _, m in gap),
-                        fix=lambda e=op_email, g=tuple(gap): _grant(
-                            lambda: api.get_sa_policy(e),
-                            lambda p: api.set_sa_policy(e, p),
-                            g,
-                            retry_missing_s=120,
-                        ),
-                    )
-                )
-            else:
-                items.append(
-                    Item("impersonation", OK, f"tokenCreator held by {', '.join(members)}")
-                )
-
-    # 6. The runtime identity: a service account you own that every deploy names as
-    #    service_account=. It holds only what a turn needs (the agent's shell can use it).
-    rt_email = cfg.runtime_email()
-    if rt_email:
-        rt_member = f"serviceAccount:{rt_email}"
-        rt_sa = api.get_service_account(rt_email)
-        rt_exists = rt_sa is not None
-        if rt_exists:
-            items.append(Item("runtime SA", OK, f"{rt_email} exists"))
-        else:
-            rt_id = rt_email.split("@")[0]
-            items.append(
-                Item(
-                    "runtime SA",
-                    FIX,
-                    f"create {rt_email} (engines run as it: gemini.deploy(service_account=...))",
-                    fix=lambda i=rt_id: api.create_service_account(
-                        i, "remote-agent-toolkit runtime identity (engines run as this)"
-                    ),
-                )
-            )
-
-        # 6a. The predict-only custom role (never roles/aiplatform.user, which would hand
-        #     the agent's shell every run's job id and engine admin).
-        role = api.get_role(RUNTIME_PREDICT_ROLE_ID)
-        role_name = predict_role_name(cfg.project)
-        if role is None:
-            items.append(
-                Item(
-                    "runtime role",
-                    FIX,
-                    f"create custom role {RUNTIME_PREDICT_ROLE_ID} with "
-                    + ", ".join(RUNTIME_PREDICT_PERMISSIONS),
-                    fix=lambda: api.create_role(
-                        RUNTIME_PREDICT_ROLE_ID,
-                        "ratk runtime: model calls only",
-                        RUNTIME_PREDICT_PERMISSIONS,
-                    ),
-                )
-            )
-        elif role.get("deleted"):
-            items.append(
-                Item(
-                    "runtime role",
-                    MANUAL,
-                    f"custom role {RUNTIME_PREDICT_ROLE_ID} is soft-deleted; undelete it "
-                    f"(gcloud iam roles undelete {RUNTIME_PREDICT_ROLE_ID} "
-                    f"--project {cfg.project}) or wait for it to expire and re-run",
-                )
-            )
-        else:
-            have = set(role.get("includedPermissions") or [])
-            lacking = [p_ for p_ in RUNTIME_PREDICT_PERMISSIONS if p_ not in have]
-            if lacking:
-                items.append(
-                    Item(
-                        "runtime role",
-                        FIX,
-                        f"add {', '.join(lacking)} to custom role {RUNTIME_PREDICT_ROLE_ID}",
-                        fix=lambda h=tuple(sorted(have)), l_=tuple(lacking): (
-                            api.add_role_permissions(RUNTIME_PREDICT_ROLE_ID, [*h, *l_])
-                        ),
-                    )
-                )
-            else:
-                items.append(Item("runtime role", OK, f"{RUNTIME_PREDICT_ROLE_ID} present"))
-
-        # 6b. Project roles.
-        rt_roles = (role_name, *RUNTIME_SA_PROJECT_ROLES)
-        needed = [(r, rt_member) for r in rt_roles]
-        if role is None or role.get("deleted"):
-            items.append(
-                Item(
-                    "runtime roles",
-                    BLOCKED,
-                    "granted right after the custom role exists",
-                )
-            )
-        else:
-            gap = missing_bindings(api.get_project_policy(), needed)
-            if gap:
-                items.append(
-                    Item(
-                        "runtime roles",
-                        FIX,
-                        "grant on the project: " + ", ".join(sorted({r for r, _ in gap})),
-                        fix=lambda g=tuple(gap): _grant(
-                            api.get_project_policy, api.set_project_policy, g,
-                            retry_missing_s=120,
-                        ),
-                    )
-                )
-            else:
-                items.append(
-                    Item("runtime roles", OK, f"{len(rt_roles)} project roles present")
-                )
-
-        # 6c. Buckets: read the deploy bundle; create + read-by-name under jobs/ and
-        #     events/ratk- only. Nothing under pool/ (the roster), nothing to list.
-        staging_name, out_name = bucket_name_of(staging_uri), bucket_name_of(output_uri)
-        if api.get_bucket(staging_name) is None:
-            items.append(
-                Item(
-                    f"runtime on gs://{staging_name}", BLOCKED,
-                    "bucket doesn't exist yet — granted right after it is created",
-                    key=f"runtime-bucket:{staging_name}",
-                )
-            )
-        else:
-            addition = (RUNTIME_SA_STAGING_ROLE, rt_member)
-            if missing_bindings(api.get_bucket_policy(staging_name), [addition]):
-                items.append(
-                    Item(
-                        f"runtime on gs://{staging_name}", FIX,
-                        f"grant {RUNTIME_SA_STAGING_ROLE} (the platform pulls the deploy bundle)",
-                        fix=lambda n=staging_name, a=addition: _grant(
+                        fix=lambda n=out_name, a=addition: _grant(
                             lambda: api.get_bucket_policy(n),
                             lambda p_: api.set_bucket_policy(n, p_),
                             [a], retry_missing_s=120,
                         ),
-                        key=f"runtime-bucket:{staging_name}",
+                        key=f"operator-bucket:{out_name}",
                     )
                 )
             else:
                 items.append(
+                    Item(f"operator on gs://{out_name}", OK, f"{OPERATOR_BUCKET_ROLE} present",
+                         key=f"operator-bucket:{out_name}")
+                )
+
+        if repo is None:
+            items.append(Item("operator pushes images", BLOCKED, "granted right after the repo exists"))
+        else:
+            addition = (OPERATOR_REPO_ROLE, member)
+            if missing_bindings(api.get_repository_policy(cfg.location, cfg.repo_id), [addition]):
+                items.append(
                     Item(
-                        f"runtime on gs://{staging_name}", OK,
-                        f"{RUNTIME_SA_STAGING_ROLE} present",
-                        key=f"runtime-bucket:{staging_name}",
+                        "operator pushes images",
+                        FIX,
+                        f"grant {OPERATOR_REPO_ROLE} on {cfg.image_repo()} (repo-scoped)",
+                        fix=lambda a=addition: _grant(
+                            lambda: api.get_repository_policy(cfg.location, cfg.repo_id),
+                            lambda p_: api.set_repository_policy(cfg.location, cfg.repo_id, p_),
+                            [a], retry_missing_s=120,
+                        ),
                     )
                 )
-        if api.get_bucket(out_name) is None:
+            else:
+                items.append(Item("operator pushes images", OK, f"{OPERATOR_REPO_ROLE} present"))
+
+    # 7. Who may impersonate the operator SA, and who may mint model tokens.
+    members = [principal(m) for m in cfg.impersonators]
+    if not members:
+        adc = api.adc_email()
+        if adc:
+            members = [principal(adc)]
+    if op_email and not members:
+        items.append(
+            Item(
+                "impersonation",
+                MANUAL,
+                "could not discover the ADC principal — pass --impersonator "
+                "user:you@example.com (repeatable) to grant tokenCreator on the operator SA",
+            )
+        )
+    elif op_email and not sa_exists:
+        items.append(
+            Item("impersonation", BLOCKED, f"granted to {', '.join(members)} right after the operator SA is created")
+        )
+    elif op_email:
+        needed = [(TOKEN_CREATOR_ROLE, m) for m in members]
+        gap = missing_bindings(api.get_sa_policy(op_email), needed)
+        if gap:
             items.append(
                 Item(
-                    f"runtime on gs://{out_name}", BLOCKED,
-                    "bucket doesn't exist yet — granted right after it is created",
-                    key=f"runtime-bucket:{out_name}",
+                    "impersonation",
+                    FIX,
+                    f"grant {TOKEN_CREATOR_ROLE} on the operator SA to " + ", ".join(m for _, m in gap),
+                    fix=lambda e=op_email, g=tuple(gap): _grant(
+                        lambda: api.get_sa_policy(e), lambda p_: api.set_sa_policy(e, p_), g,
+                        retry_missing_s=120,
+                    ),
                 )
             )
         else:
-            condition = output_bucket_condition(out_name)
-            out_policy = api.get_bucket_policy(out_name)
-            gap = [
-                r for r in RUNTIME_SA_OUTPUT_ROLES
-                if not conditional_binding_present(out_policy, r, rt_member, condition)
-            ]
-            if gap:
-                items.append(
-                    Item(
-                        f"runtime on gs://{out_name}", FIX,
-                        "grant " + ", ".join(gap) + " conditioned on "
-                        + " and ".join(f"objects/{p_}" for p_ in RUNTIME_SA_OUTPUT_PREFIXES)
-                        + " (platform job files + pool readiness markers; no list, nothing else)",
-                        fix=lambda n=out_name, g=tuple(gap), c=condition: _grant(
-                            lambda: api.get_bucket_policy(n),
-                            lambda p_: api.set_bucket_policy(n, p_),
-                            [(r, rt_member) for r in g], condition=c, retry_missing_s=120,
-                        ),
-                        key=f"runtime-bucket:{out_name}",
-                    )
-                )
-            else:
-                items.append(
-                    Item(
-                        f"runtime on gs://{out_name}", OK,
-                        "conditional " + " + ".join(RUNTIME_SA_OUTPUT_ROLES) + " present",
-                        key=f"runtime-bucket:{out_name}",
-                    )
-                )
+            items.append(Item("impersonation", OK, f"tokenCreator held by {', '.join(members)}"))
 
-        # 6d. The operator deploys AS the runtime identity.
-        if op_email:
-            op_member = f"serviceAccount:{op_email}"
-            if not rt_exists or not sa_exists:
-                items.append(
-                    Item(
-                        "operator acts as runtime SA", BLOCKED,
-                        "granted right after both service accounts exist",
-                    )
-                )
-            else:
-                needed = [(OPERATOR_ON_RUNTIME_SA_ROLE, op_member)]
-                if missing_bindings(api.get_sa_policy(rt_email), needed):
-                    items.append(
-                        Item(
-                            "operator acts as runtime SA", FIX,
-                            f"grant {OPERATOR_ON_RUNTIME_SA_ROLE} on {rt_email} to {op_email} "
-                            "(deploy(service_account=) acts as it)",
-                            fix=lambda e=rt_email, g=tuple(needed): _grant(
-                                lambda: api.get_sa_policy(e),
-                                lambda p_: api.set_sa_policy(e, p_),
-                                g, retry_missing_s=120,
-                            ),
-                        )
-                    )
-                else:
-                    items.append(
-                        Item(
-                            "operator acts as runtime SA", OK,
-                            f"{OPERATOR_ON_RUNTIME_SA_ROLE} held by {op_email}",
-                        )
-                    )
-
-    # 7. The DEFAULT service agent: nothing is granted to it. Grants left from the earlier
-    #    identity model are reported (the agent's shell can use them, README "Migration");
-    #    this tool never removes anything, so the removal is a manual step.
-    agent_member = f"serviceAccount:{runtime_agent_email(number)}"
-    leftovers: list[str] = []
-    if not missing_bindings(api.get_project_policy(), [(LEGACY_AGENT_PROJECT_ROLE, agent_member)]):
-        leftovers.append(f"{LEGACY_AGENT_PROJECT_ROLE} on the project")
-    out_name = bucket_name_of(output_uri)
-    if api.get_bucket(out_name) is not None and not missing_bindings(
-        api.get_bucket_policy(out_name), [(LEGACY_AGENT_BUCKET_ROLE, agent_member)]
-    ):
-        leftovers.append(f"{LEGACY_AGENT_BUCKET_ROLE} on gs://{out_name}")
-    if leftovers:
+    # Model tokens: the operator SA (when managed) and the impersonators (who may drive turns
+    # as themselves) mint them.
+    minters = ([f"serviceAccount:{op_email}"] if op_email else []) + members
+    if not minters:
         items.append(
             Item(
-                "default service agent",
-                NOTE,
-                f"{runtime_agent_email(number)} still holds " + " and ".join(leftovers)
-                + " — from the earlier identity model, where engines ran as it. Once every "
-                "engine in this project has been redeployed (the deploy names the runtime "
-                "service account by default), remove them by hand (this tool never removes "
-                "grants); see README, \"Migration\"",
+                "model tokens", MANUAL,
+                "could not discover who drives turns — pass --impersonator to grant tokenCreator on the model SA",
             )
         )
+    elif not model_sa_exists or (op_email and not sa_exists):
+        items.append(Item("model tokens", BLOCKED, "granted right after the service accounts exist"))
     else:
-        items.append(
-            Item(
-                "default service agent", OK,
-                f"{runtime_agent_email(number)} holds no toolkit grants",
+        needed = [(TOKEN_CREATOR_ROLE, m) for m in minters]
+        gap = missing_bindings(api.get_sa_policy(model_email), needed)
+        if gap:
+            items.append(
+                Item(
+                    "model tokens",
+                    FIX,
+                    f"grant {TOKEN_CREATOR_ROLE} on {model_email} to " + ", ".join(m for _, m in gap)
+                    + " (the client mints each turn's model token)",
+                    fix=lambda e=model_email, g=tuple(gap): _grant(
+                        lambda: api.get_sa_policy(e), lambda p_: api.set_sa_policy(e, p_), g,
+                        retry_missing_s=120,
+                    ),
+                )
             )
-        )
+        else:
+            items.append(Item("model tokens", OK, f"tokenCreator on the model SA held by {', '.join(minters)}"))
 
     return items
 
@@ -1200,21 +1082,21 @@ def verify_blockers(items: Sequence[Item]) -> list[Item]:
     """The report rows that make a paid verify pointless — deploy anyway and the build
     or the turn fails minutes in (a failed model check is the expensive classic).
 
-    One row may legitimately be non-OK and still verify: the impersonation grant
-    (control-plane convenience for *other* principals; it does not affect whether the
-    engine deploys and runs).
+    Two rows may legitimately be non-OK and still verify: the impersonation grants
+    (control-plane convenience for *other* principals; the verify runs as the ADC
+    principal, whose own tokenCreator on the model SA the audit cannot always express).
     """
-    allowed = {"impersonation"}
+    allowed = {"impersonation", "model tokens"}
     return [i for i in items if i.status not in (OK, NOTE) and i.step not in allowed]
 
 
 def verify(api: GcpApi, cfg: Settings, items: Sequence[Item]) -> tuple[bool, list[Item]]:
-    """Deploy a throwaway warm-pool engine AS the runtime service account, run one Haiku
-    turn, tear down.
+    """Deploy a throwaway engine (image build + template + a pool of one), run one Haiku
+    turn on it, tear down.
 
-    Exercises every grant end-to-end (build, staging, dispatch, logging, the model, the
-    runtime identity's conditional bucket access). Refuses to spend on the deploy while
-    `verify_blockers` remain (``items`` is the latest audit).
+    Exercises every grant end-to-end (the registry push and pull, the template, the
+    sandbox, the model token, the run-scoped bucket access). Refuses to spend on the
+    deploy while `verify_blockers` remain (``items`` is the latest audit). Needs Docker.
     """
     blockers = verify_blockers(items)
     if blockers:
@@ -1232,8 +1114,6 @@ def verify(api: GcpApi, cfg: Settings, items: Sequence[Item]) -> tuple[bool, lis
     from ...spec import AgentSpec
     from . import backend
 
-    # The deploy path builds its own clients from ambient ADC; point their quota at the
-    # target project so a stray ADC default can't misroute (or 403) those calls.
     os.environ.setdefault("GOOGLE_CLOUD_QUOTA_PROJECT", cfg.project)
 
     user = re.sub(r"[^a-z0-9-]", "-", getpass.getuser().lower()) or "user"
@@ -1243,12 +1123,9 @@ def verify(api: GcpApi, cfg: Settings, items: Sequence[Item]) -> tuple[bool, lis
         max_turns=8,
         max_budget_usd=1.0,
     )
-    staging_uri, output_uri = cfg.buckets()
-    runtime_sa = cfg.runtime_email()
     print(
-        f"\nverify: deploying throwaway engine {spec.name!r} (warm pool of 1"
-        + (f", running as {runtime_sa}" if runtime_sa else "")
-        + ") — several minutes, a few cents ...",
+        f"\nverify: deploying throwaway engine {spec.name!r} (image build + push, a pool of 1, "
+        f"model tokens from {cfg.model_email()}) — several minutes, a few cents ...",
         flush=True,
     )
     ok = False
@@ -1258,14 +1135,15 @@ def verify(api: GcpApi, cfg: Settings, items: Sequence[Item]) -> tuple[bool, lis
         cfg.location,
         warm_pool=True,
         pool_size=1,
-        staging_bucket=staging_uri,
-        output_bucket=output_uri,
-        service_account=runtime_sa,
+        output_bucket=cfg.bucket(),
+        image_repo=cfg.image_repo(),
+        model_service_account=cfg.model_email(),
+        log=lambda m: print(f"verify: {m}", flush=True),
     )
     items = list(items)
     try:
-        print("verify: waiting for the warm worker ...", flush=True)
-        warm = engine.wait_until_warm(timeout=900)
+        print("verify: waiting for the ready sandbox ...", flush=True)
+        warm = engine.wait_until_warm(timeout=300)
         print(f"verify: warm={warm}; running one turn ...", flush=True)
 
         async def _turn() -> tuple[bool, str]:
@@ -1282,7 +1160,7 @@ def verify(api: GcpApi, cfg: Settings, items: Sequence[Item]) -> tuple[bool, lis
         ok = turn_ok and warm
     finally:
         print("verify: deleting the throwaway engine ...", flush=True)
-        engine.delete(delete_pool_resources=True)
+        engine.delete()
     return ok, items
 
 
@@ -1303,7 +1181,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--location",
         default=DEFAULT_LOCATION,
-        help=f"Agent Engine + bucket location (default {DEFAULT_LOCATION})",
+        help=f"sandbox, image repo and bucket location (default {DEFAULT_LOCATION})",
     )
     p.add_argument(
         "--operator-sa",
@@ -1319,14 +1197,19 @@ def build_parser() -> argparse.ArgumentParser:
         help="don't manage an operator SA (you run the control plane as your own identity)",
     )
     p.add_argument(
-        "--runtime-sa",
-        default=DEFAULT_RUNTIME_SA_ID,
+        "--model-sa",
+        default=DEFAULT_MODEL_SA_ID,
         help=(
-            "runtime service account the engines run as — an account id in the target project "
-            f"or a full email (default {DEFAULT_RUNTIME_SA_ID!r}, which is also what "
-            "gemini.deploy uses when service_account= is omitted; name another one here and "
+            "model service account whose tokens the sandboxes call Vertex with — an account id in "
+            f"the target project or a full email (default {DEFAULT_MODEL_SA_ID!r}, which is also what "
+            "gemini.deploy uses when model_service_account= is omitted; name another one here and "
             "pass it to every deploy)"
         ),
+    )
+    p.add_argument(
+        "--repo",
+        default=DEFAULT_REPO_ID,
+        help=f"Artifact Registry Docker repo id for the sandbox images (default {DEFAULT_REPO_ID!r})",
     )
     p.add_argument(
         "--impersonator",
@@ -1335,10 +1218,9 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="MEMBER",
         help=(
             "IAM member (user:..., group:..., serviceAccount:..., or a bare email) granted "
-            "tokenCreator on the operator SA; repeatable (default: the ADC principal)"
+            "tokenCreator on the operator SA and the model SA; repeatable (default: the ADC principal)"
         ),
     )
-    p.add_argument("--staging-bucket", help="override gs://<project>-agent-staging")
     p.add_argument("--output-bucket", help="override gs://<project>-agent-output")
     p.add_argument(
         "--model",
@@ -1374,9 +1256,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--verify",
         action="store_true",
         help=(
-            "after setup, prove the end state: deploy a throwaway warm-pool engine as the "
-            "runtime service account, run one Haiku turn, tear down (COSTS a few cents and "
-            "~10 min)"
+            "after setup, prove the end state: build and push a throwaway image (Docker), deploy "
+            "it with a pool of one, run one Haiku turn, tear down (COSTS a few cents and ~5-10 min)"
         ),
     )
     return p
@@ -1388,10 +1269,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         project=args.project,
         location=args.location,
         operator_sa_id=None if args.no_operator_sa else args.operator_sa,
-        runtime_sa_id=args.runtime_sa,
+        model_sa_id=args.model_sa,
         impersonators=tuple(args.impersonator),
-        staging_bucket=normalize_bucket_uri(args.staging_bucket) if args.staging_bucket else None,
         output_bucket=normalize_bucket_uri(args.output_bucket) if args.output_bucket else None,
+        repo_id=args.repo,
         models=()
         if args.skip_model_check
         else tuple(args.model) if args.model else DEFAULT_CHECK_MODELS,
@@ -1457,11 +1338,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     code = exit_code(items)
     if code == 0:
         print(f"\n{cfg.project} is ready.", flush=True)
-        if cfg.runtime_email():
-            print(
-                f"deploy with gemini.deploy(..., service_account={cfg.runtime_email()!r}).",
-                flush=True,
-            )
+        print(
+            f"deploy with gemini.deploy(..., image_repo={cfg.image_repo()!r}, "
+            f"model_service_account={cfg.model_email()!r}) — both are the defaults for "
+            "this project/location when the tool's defaults were kept.",
+            flush=True,
+        )
     else:
         left = [i for i in items if i.status not in (OK, NOTE)]
         print(

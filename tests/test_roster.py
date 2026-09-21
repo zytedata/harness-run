@@ -1,7 +1,7 @@
-"""Offline tests for the warm pool's idle-worker roster (per-worker dispatch).
+"""Offline tests for the ready pool's idle-sandbox roster.
 
-The roster is the shared, client-owned record of which pool workers are idle; a turn is
-dispatched to the worker whose entry the client managed to delete under a generation
+The roster is the shared, client-owned record of which sandboxes are ready and idle; a
+turn goes to the sandbox whose entry the client managed to delete under a generation
 precondition. These tests pin the ordering, expiry and atomic-claim contract over the
 in-memory store, and the GCS store's precondition mapping over a fake storage client.
 """
@@ -12,18 +12,17 @@ from remote_agent_toolkit.runtime.gemini.roster import (
     GcsRosterStore,
     InMemoryRosterStore,
     PoolRoster,
-    WorkerEntry,
+    SandboxEntry,
 )
 
-TOPIC = "projects/p/topics/ratk-w-gen00001-dispatch"
+TOPIC = "projects/p/locations/l/reasoningEngines/h/sandboxEnvironmentTemplates/tpl1"
 
 
-def _entry(i: int, submitted: float, expires: float) -> WorkerEntry:
-    return WorkerEntry(
-        worker=f"w{i}",
-        subscription=f"projects/p/subscriptions/ratk-w-gen00001-w-w{i}",
-        job_name=f"op{i}",
-        submitted_at=submitted,
+def _entry(i: int, submitted: float, expires: float) -> SandboxEntry:
+    return SandboxEntry(
+        sandbox=f"projects/p/locations/l/reasoningEngines/h/sandboxEnvironments/w{i}",
+        template=TOPIC,
+        created_at=submitted,
         expires_at=expires,
     )
 
@@ -32,9 +31,8 @@ def test_roster_keys_live_under_the_pool_prefix_and_round_trip():
     store = InMemoryRosterStore()
     roster = PoolRoster("gs://out/base", TOPIC, store=store)
     roster.add(_entry(1, 10.0, 100.0))
-    # SECURITY: pool/ is a prefix the runtime identity has no binding on (README IAM table),
-    # so only the client can write here — the roster decides where a turn is sent.
-    assert [name for name, _, _ in store.list("")] == ["base/pool/ratk-w-gen00001/idle/w1.json"]
+    # One object per idle sandbox under the template's pool prefix, keyed by the sandbox id.
+    assert [name for name, _, _ in store.list("")] == ["base/pool/tpl1/idle/w1.json"]
     assert roster.entries() == [_entry(1, 10.0, 100.0)]
     roster.remove("w1")
     assert roster.entries() == []
@@ -46,18 +44,22 @@ def test_claim_is_oldest_first_and_skips_expired_entries():
     roster.add(_entry(1, 10.0, 15.0))  # oldest, but its worker idled out at t=15
     roster.add(_entry(3, 30.0, 300.0))
 
-    # Oldest LIVE worker (most likely booted); the expired one met on the way is pruned in
-    # the same listing and handed back so its channel can be dropped.
+    # Oldest LIVE sandbox; the expired one met on the way is pruned in the same listing and
+    # handed back so it can be deleted.
     claimed, pruned = roster.claim(now=50.0)
-    assert claimed.worker == "w2" and pruned == [_entry(1, 10.0, 15.0)]
+    assert claimed.id == "w2" and pruned == [_entry(1, 10.0, 15.0)]
+    # A margin treats an entry expiring within it as expired.
+    roster.add(_entry(4, 40.0, 60.0))
+    assert roster.claim(now=50.0, margin_s=15.0) == (_entry(3, 30.0, 300.0), [_entry(4, 40.0, 60.0)])
+    roster.add(_entry(3, 30.0, 300.0))
     assert roster.prune_expired(now=50.0) == []
     assert roster.claim(now=50.0) == (_entry(3, 30.0, 300.0), [])
-    assert roster.claim(now=50.0) == (None, [])  # empty: the caller spawns a worker
+    assert roster.claim(now=50.0) == (None, [])  # empty: the caller creates a sandbox
     assert roster.entries() == []
 
 
 def test_claim_is_atomic_across_clients():
-    """Two clients racing for the same worker: the precondition delete lets exactly one
+    """Two clients racing for the same sandbox: the precondition delete lets exactly one
     win, and the loser moves on to the next entry instead of double-dispatching."""
 
     class Racy(InMemoryRosterStore):
@@ -81,8 +83,8 @@ def test_claim_is_atomic_across_clients():
     won: dict = {}
     store.hook = lambda: won.setdefault("a", a.claim(now=50.0)[0])
     got_b, _ = b.claim(now=50.0)
-    assert won["a"].worker == "w1"
-    assert got_b.worker == "w2"
+    assert won["a"].id == "w1"
+    assert got_b.id == "w2"
     assert b.claim(now=50.0) == (None, [])
 
 
@@ -90,12 +92,12 @@ def test_clear_returns_what_was_recorded_and_corrupt_entries_are_ignored():
     store = InMemoryRosterStore()
     roster = PoolRoster("gs://out", TOPIC, store=store)
     roster.add(_entry(1, 10.0, 100.0))
-    store.put("pool/ratk-w-gen00001/idle/junk.json", b"not json")  # never dispatch on it
+    store.put("pool/tpl1/idle/junk.json", b"not json")  # never dispatch on it
     assert roster.entries() == [_entry(1, 10.0, 100.0)]
     assert roster.clear() == [_entry(1, 10.0, 100.0)]
     assert roster.entries() == []
     # Another pool's roster is untouched by prefix.
-    other = PoolRoster("gs://out", "projects/p/topics/ratk-w-gen00002-dispatch", store=store)
+    other = PoolRoster("gs://out", TOPIC.replace("tpl1", "tpl2"), store=store)
     other.add(_entry(9, 1.0, 2.0))
     assert roster.entries() == [] and len(other.entries()) == 1
 

@@ -8,23 +8,6 @@ from remote_agent_toolkit.harness import pricing
 
 
 @pytest.fixture(autouse=True)
-def _no_host_resource_sampler(monkeypatch):
-    """Keep the worker's CPU/RAM self-sampler off the HOST's cgroups: sampler off by default.
-
-    On a machine whose /sys/fs/cgroup is readable (any cgroup-v2 Linux), ``_run_turn``
-    otherwise starts a REAL daemon sampler thread whose first sample races the turn's own
-    events — and because these tests monkeypatch the ``CloudLoggingSink`` class, the
-    sampler's side-log emits land in the same ``InMemorySink`` the test asserts on, so
-    "the last sink event is the result" fails whenever the thread loses the race (the
-    long-standing ~50% flake in ``test_run_turn_maps_session_id_and_surfaces_harness_crash``).
-    Host cgroup reads are also machine-dependent state the offline suite must not touch.
-    Sampler tests opt back in explicitly (their own ``AGENT_RESOURCE_SAMPLE_S`` +
-    a fake cgroup ``root``), which overrides this default.
-    """
-    monkeypatch.setenv("AGENT_RESOURCE_SAMPLE_S", "0")
-
-
-@pytest.fixture(autouse=True)
 def _no_pricing_network(monkeypatch):
     """Keep the LiteLLM pricing fetch off the network: tests price via the baked table.
 
@@ -38,14 +21,16 @@ def _no_pricing_network(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def _no_gcs_token_minting(monkeypatch):
-    """Keep run-scoped GCS token minting off the network (it calls the STS token service).
+def _no_token_minting(monkeypatch):
+    """Keep the run's token minting off the network (STS for the GCS token, IAM for the model token).
 
-    ``GeminiSession._submit`` mints a token per turn (``scoped_gcs.mint_run_token``); the
-    offline suite gets a fixed fake instead, and the client-side refresh writer/deleter
-    become no-ops. ``test_scoped_gcs.py`` covers the real functions against fakes.
+    ``GeminiSession._submit`` mints both per turn; the offline suite gets fixed fakes
+    instead, and the client-side refresh writer/deleter become no-ops. ``test_scoped_gcs.py``
+    covers the real functions against fakes.
     """
-    from remote_agent_toolkit.runtime.gemini import scoped_gcs
+    from remote_agent_toolkit.runtime.gemini import model_token, scoped_gcs
+
+    monkeypatch.setattr(model_token, "mint_model_token", lambda *a, **kw: ("fake-model-token", None))
 
     real_write, real_delete = scoped_gcs.write_run_token, scoped_gcs.delete_run_token
 
@@ -59,3 +44,16 @@ def _no_gcs_token_minting(monkeypatch):
     monkeypatch.setattr(scoped_gcs, "mint_run_token", lambda *a, **kw: ("fake-run-token", None))
     monkeypatch.setattr(scoped_gcs, "write_run_token", offline(real_write))
     monkeypatch.setattr(scoped_gcs, "delete_run_token", offline(real_delete))
+
+
+@pytest.fixture(autouse=True)
+def _short_long_polls(monkeypatch):
+    """Keep the client's /events long-poll short: ``asyncio.run`` waits for executor threads
+    at shutdown, so a cancelled run would otherwise hold a test for the full hold time."""
+    from remote_agent_toolkit.runtime.gemini import backend
+
+    monkeypatch.setattr(backend, "EVENTS_WAIT_S", 0.2)
+    monkeypatch.setattr(backend, "EVENTS_CALL_TIMEOUT_S", 5.0)
+    # A lost /turn answer is re-asked of the same sandbox for a while; keep that short too.
+    monkeypatch.setattr(backend, "DISPATCH_RECONCILE_S", 0.5)
+    monkeypatch.setattr(backend, "DISPATCH_RETRY_SLEEP_S", 0.02)

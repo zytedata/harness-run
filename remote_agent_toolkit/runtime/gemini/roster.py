@@ -1,27 +1,19 @@
-"""The warm pool's idle-worker roster (per-worker dispatch; ``pool.py``).
+"""The ready pool's roster: which idle sandboxes are waiting for a turn (DESIGN.md §13.1).
 
-With one subscription per worker, the control plane has to know *which* idle worker to
-address a turn to — across every client process that drives the engine. The roster is
-that shared state: one small GCS object per idle worker under the pool's
-``pool/<generation>/idle/`` prefix (``pool.roster_prefix``), written by the client that
-submitted the worker in ``fill_pool`` and **removed atomically by the client that
-dispatches to it** (a delete with a generation precondition: of two clients racing for the
-same worker exactly one succeeds, the other moves on to the next entry).
+A turn wants a sandbox that already answers — creating one takes ~2 s plus 12–31 s until
+the proxy routes to it (measured). So the control plane keeps a **ready pool**: sandboxes
+created ahead of time, health-checked, and recorded here, one small GCS object per idle
+sandbox under ``pool/<template-id>/idle/``, written by the client that created it and
+**removed atomically by the client that dispatches to it** (a delete with a generation
+precondition: of two clients racing for the same sandbox exactly one succeeds, the other
+moves on to the next entry). Any client process driving the engine shares the roster.
 
-Entries are ordered by submission time and picked oldest first — the worker most likely
-to have finished its boot. The claim is on every warm turn's critical path, so it is one
-listing plus one delete: the entry rides the object's custom metadata (returned by the
-listing), and the object body is only a fallback. Readiness is not tracked here on
-purpose: a worker that has not booted yet still receives its turn (the message waits on
-its subscription), and a worker that never boots is caught by the client's pickup
-watchdog, which re-dispatches. Entries past their idle expiry (the worker exited without
-a turn) are pruned on the way.
-
-SECURITY: the roster decides where a turn — its pointers and run-scoped token — is sent,
-so it must be writable by the client identity only. The runtime identity's bucket
-bindings (README IAM table) cover ``jobs/`` and ``events/ratk-``, never ``pool/``; a
-worker that could re-add itself here could receive another run's turn. The roster is the
-one piece of pool state the worker never reads or writes.
+Entries are ordered by creation time and picked oldest first. ``expires_at`` is the
+sandbox's TTL (set at creation; the platform enforces it and an exec does not extend it —
+measured), so an expired entry is pruned without asking the platform. The roster is a
+coordination device, not a security boundary: with no per-sandbox IAM, whoever can
+execute on the host instance can drive any sandbox, so the client identity is the trust
+boundary either way.
 
 ``google.cloud.storage`` is imported lazily by :class:`GcsRosterStore`; an injected store
 keeps the logic testable offline (:class:`InMemoryRosterStore`).
@@ -35,30 +27,36 @@ from dataclasses import asdict, dataclass
 from typing import Any, Protocol
 
 from ...ports.blobstore import parse_gcs_uri
-from .pool import roster_prefix
+
+
+def roster_prefix(template: str) -> str:
+    """Bucket-relative key prefix of a template's idle-sandbox roster."""
+    return f"pool/{template.rsplit('/', 1)[-1]}/idle/"
 
 
 @dataclass(frozen=True)
-class WorkerEntry:
-    """One idle pool worker, as the client that submitted it recorded it."""
+class SandboxEntry:
+    """One idle, ready sandbox, as the client that created it recorded it."""
 
-    worker: str  # the random worker id (pool.new_worker_id)
-    subscription: str  # its own dispatch subscription path
-    job_name: str | None  # the platform operation of its query job (cancel on teardown)
-    submitted_at: float  # epoch seconds the job was submitted
-    expires_at: float  # epoch seconds after which the worker has surely idle-expired
+    sandbox: str  # full resource name
+    template: str  # the template it was created from
+    created_at: float  # epoch seconds
+    expires_at: float  # epoch seconds: the TTL the platform enforces
+
+    @property
+    def id(self) -> str:
+        return self.sandbox.rsplit("/", 1)[-1]
 
     def to_json(self) -> bytes:
         return json.dumps(asdict(self)).encode("utf-8")
 
     @classmethod
-    def from_json(cls, data: bytes) -> WorkerEntry:
+    def from_json(cls, data: bytes) -> SandboxEntry:
         d = json.loads(data.decode("utf-8"))
         return cls(
-            worker=str(d["worker"]),
-            subscription=str(d["subscription"]),
-            job_name=d.get("job_name"),
-            submitted_at=float(d["submitted_at"]),
+            sandbox=str(d["sandbox"]),
+            template=str(d["template"]),
+            created_at=float(d["created_at"]),
             expires_at=float(d["expires_at"]),
         )
 
@@ -67,15 +65,10 @@ class RosterStore(Protocol):
     """The generation-aware object operations the roster needs (a thin GCS subset)."""
 
     def list(self, prefix: str) -> list[tuple[str, int, str | None]]:
-        """``(object_name, generation, inline_entry)`` for every object under ``prefix``.
-
-        ``inline_entry`` is the entry JSON carried in the object's metadata (``None`` when
-        the object has none, e.g. written by an older client), so a claim needs no read.
-        """
+        """``(object_name, generation, inline_entry)`` for every object under ``prefix``."""
         ...
 
     def get(self, name: str) -> bytes | None:
-        """The object's bytes, or ``None`` when it is gone."""
         ...
 
     def put(self, name: str, data: bytes) -> None:
@@ -163,51 +156,51 @@ class InMemoryRosterStore:
 
 
 class PoolRoster:
-    """The idle-worker roster of one pool generation (see the module docstring)."""
+    """The idle-sandbox roster of one template (see the module docstring)."""
 
     def __init__(
         self,
         output_bucket: str,
-        topic: str,
+        template: str,
         credentials: Any | None = None,
         store: RosterStore | None = None,
     ) -> None:
         bucket, base = parse_gcs_uri(output_bucket)
-        self._prefix = f"{base + '/' if base else ''}{roster_prefix(topic)}"
+        self._prefix = f"{base + '/' if base else ''}{roster_prefix(template)}"
         self._store: RosterStore = store if store is not None else GcsRosterStore(bucket, credentials)
 
-    def _key(self, worker_id: str) -> str:
-        return f"{self._prefix}{worker_id}.json"
+    def _key(self, sandbox_id: str) -> str:
+        return f"{self._prefix}{sandbox_id}.json"
 
-    def add(self, entry: WorkerEntry) -> None:
-        """Record ``entry`` as idle (called by the client that just submitted the worker)."""
-        self._store.put(self._key(entry.worker), entry.to_json())
+    def add(self, entry: SandboxEntry) -> None:
+        """Record ``entry`` as idle and ready (called by the client that created it)."""
+        self._store.put(self._key(entry.id), entry.to_json())
 
-    def remove(self, worker_id: str) -> None:
-        """Drop ``worker_id`` whatever its state (teardown; no precondition)."""
-        for name, generation, _ in self._store.list(self._key(worker_id)):
+    def remove(self, sandbox_id: str) -> None:
+        """Drop ``sandbox_id`` whatever its state (teardown; no precondition)."""
+        for name, generation, _ in self._store.list(self._key(sandbox_id)):
             self._store.delete_if(name, generation)
 
-    def _read(self) -> list[tuple[str, int, WorkerEntry]]:
+    def _read(self) -> list[tuple[str, int, SandboxEntry]]:
         rows = []
         for name, generation, inline in self._store.list(self._prefix):
             data = inline.encode("utf-8") if inline else self._store.get(name)
             if data is None:
                 continue  # claimed by someone else between list and read
             try:
-                entry = WorkerEntry.from_json(data)
+                entry = SandboxEntry.from_json(data)
             except (ValueError, KeyError, TypeError):
                 continue  # not ours / corrupt: never dispatch on it
             rows.append((name, generation, entry))
-        rows.sort(key=lambda row: row[2].submitted_at)
+        rows.sort(key=lambda row: row[2].created_at)
         return rows
 
-    def entries(self) -> list[WorkerEntry]:
-        """Every recorded idle worker, oldest first (expired ones included)."""
+    def entries(self) -> list[SandboxEntry]:
+        """Every recorded idle sandbox, oldest first (expired ones included)."""
         return [entry for _, _, entry in self._read()]
 
-    def prune_expired(self, now: float | None = None) -> list[WorkerEntry]:
-        """Remove entries whose worker has surely idle-expired; return the ones removed."""
+    def prune_expired(self, now: float | None = None) -> list[SandboxEntry]:
+        """Remove entries whose sandbox has surely expired; return the ones removed."""
         now = time.time() if now is None else now
         pruned = []
         for name, generation, entry in self._read():
@@ -215,19 +208,19 @@ class PoolRoster:
                 pruned.append(entry)
         return pruned
 
-    def claim(self, now: float | None = None) -> tuple[WorkerEntry | None, list[WorkerEntry]]:
-        """Atomically take the oldest idle worker: ``(entry_or_None, expired_entries_pruned)``.
+    def claim(self, now: float | None = None, margin_s: float = 0.0) -> tuple[SandboxEntry | None, list[SandboxEntry]]:
+        """Atomically take the oldest idle sandbox: ``(entry_or_None, expired_entries_pruned)``.
 
-        One listing: expired entries met on the way (their worker idled out) are deleted
-        and returned so the caller can drop their channels; entries another client won the
-        race for (the precondition delete fails) are skipped. ``None`` means the roster had
-        no live worker.
+        One listing: expired entries met on the way are deleted and returned so the caller
+        can drop the sandboxes; entries another client won (the precondition delete fails)
+        are skipped. ``margin_s`` treats an entry expiring within that many seconds as
+        expired — a turn must not start on a sandbox about to be deleted under it.
         """
         now = time.time() if now is None else now
-        pruned: list[WorkerEntry] = []
-        claimed: WorkerEntry | None = None
+        pruned: list[SandboxEntry] = []
+        claimed: SandboxEntry | None = None
         for name, generation, entry in self._read():
-            if entry.expires_at <= now:
+            if entry.expires_at <= now + margin_s:
                 if self._store.delete_if(name, generation):
                     pruned.append(entry)
                 continue
@@ -235,7 +228,7 @@ class PoolRoster:
                 claimed = entry
         return claimed, pruned
 
-    def clear(self) -> list[WorkerEntry]:
+    def clear(self) -> list[SandboxEntry]:
         """Remove every entry (the pool is being retired); return what was recorded."""
         cleared = []
         for name, generation, entry in self._read():

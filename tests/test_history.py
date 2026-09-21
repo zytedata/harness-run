@@ -1,17 +1,17 @@
-"""Session history: mirror round-trip, ADK job-output parsing, layered reads, enumeration.
+"""Session history: mirror round-trip, turn-scoped reads, enumeration, re-attach results.
 
 Everything runs offline against LocalBlobStore; the live GCS path is validated separately.
 """
 
 from __future__ import annotations
 
-import asyncio
 import json
 
-from remote_agent_toolkit import AgentSpec
+from sandbox_fakes import FakeSandboxProvider, make_engine
+
 from remote_agent_toolkit.events import AgentEvent, RunStatus, StopReason
 from remote_agent_toolkit.ports.blobstore import LocalBlobStore
-from remote_agent_toolkit.runtime.gemini import adk_agent, backend, history
+from remote_agent_toolkit.runtime.gemini import backend, history
 
 
 def _result_event(text="done"):
@@ -22,157 +22,68 @@ def _result_event(text="done"):
 def test_mirror_round_trip():
     ev = _result_event()
     line = history.mirror_line(ev)
-    back = history.event_from_mirror(json.loads(json.dumps(line)))  # via real JSON
+    back = history.event_from_mirror(json.loads(json.dumps(line)))
     assert back == ev
 
 
-def test_adk_line_parsing_real_shape():
-    # The exact shape the platform writes to jobs/<sid>.jsonl (from a live job output).
-    line = {
-        "content": {"parts": [{"text": "workspace ready (restored=False, ...)"}], "role": "model"},
-        "partial": True,
-        "custom_metadata": {"kind": "status", "raw": {"event": "workspace_ready", "repos": ["r"]}},
-        "author": "agent", "id": "x", "timestamp": 1784053119.1,
-    }
-    ev = history.event_from_adk_line(line)
-    assert ev.kind == "status" and ev.summary.startswith("workspace ready")
-    assert ev.raw == {"event": "workspace_ready", "repos": ["r"]}
-    # Foreign ADK events (no toolkit metadata) are skipped.
-    assert history.event_from_adk_line({"content": {"parts": [{"text": "hi"}]}}) is None
+def test_mirror_line_is_json_safe_for_odd_raw_payloads():
+    ev = AgentEvent(kind="status", summary="s", raw={"when": object()})
+    line = history.mirror_line(ev)
+    json.dumps(line)  # no raise
+    assert isinstance(line["raw"]["when"], str)
 
 
-def test_read_history_prefers_mirror_and_keeps_turn_order(tmp_path):
+def test_read_history_keeps_turn_order_and_write_turn_mirror_is_best_effort(tmp_path):
     store = LocalBlobStore(str(tmp_path))
-    sid = "warm-sid"
-    # Two mirrored turns (older + newer) — and a platform jobs file that must NOT win.
-    history.write_turn_mirror("gs://bkt/events", sid,
-                              [history.mirror_line(AgentEvent(kind="message", summary="turn1"))],
+    history.write_turn_mirror("gs://bkt/events", "sid", [history.mirror_line(_result_event("first"))],
                               now_ms=1000, store=store)
-    history.write_turn_mirror("gs://bkt/events", sid,
-                              [history.mirror_line(_result_event("turn2-done"))],
-                              now_ms=2000, store=store)
-    store.put_bytes(f"jobs/{sid}.jsonl", b'{"custom_metadata": {"kind": "status"}, "content": null}')
+    history.write_turn_mirror("gs://bkt/events", "sid", [history.mirror_line(_result_event("second"))],
+                              now_ms=2000, turn_id="t" * 32, store=store)
+    history.write_turn_mirror("gs://bkt/events", "sid", [], now_ms=3000, store=store)  # nothing written
+    assert [e.summary for e in history.read_history("gs://bkt", "sid", store=store)] == ["first", "second"]
+    assert history.read_history("gs://bkt", "other", store=store) == []
+    assert history.read_history(None, "sid") == []
 
-    events = history.read_history("gs://bkt", sid, store=store)
-    assert [e.summary for e in events] == ["turn1", "turn2-done"]  # all turns, in order
+    class Broken:
+        def put_bytes(self, key, data):
+            raise OSError("bucket gone")
+
+    history.write_turn_mirror("gs://bkt/events", "sid", [{"kind": "status"}], now_ms=1, store=Broken())
 
 
-def test_read_history_require_result_skips_a_truncated_mirror(tmp_path):
-    """A worker that loses its GCS credentials mid-turn stops adding to the mirror but still
-    gets its result into the job output. Without require_result the long, recent, resultless
-    mirror wins and the run reads as dead."""
+def test_list_sessions_reads_the_mirror_newest_first(tmp_path):
     store = LocalBlobStore(str(tmp_path))
-    sid = "truncated-sid"
-    history.write_turn_mirror("gs://bkt/events", sid,
-                              [history.mirror_line(AgentEvent(kind="message", summary="mid"))],
-                              now_ms=1000, store=store)
-    store.put_bytes(f"jobs/{sid}.jsonl", json.dumps(
-        {"content": {"parts": [{"text": "done"}]},
-         "custom_metadata": {"kind": "result", "raw": {"is_error": False}}}).encode())
-
-    assert [e.summary for e in history.read_history("gs://bkt", sid, store=store)] == ["mid"]
-    recovered = history.read_history("gs://bkt", sid, store=store, require_result=True)
-    assert [e.kind for e in recovered] == ["result"]
+    store.put_bytes("events/older/000000000001000.jsonl", b"{}")
+    store.put_bytes("events/newer/000000000002000.jsonl", b"{}")
+    store.put_bytes("events/newer/000000000003000-x.jsonl", b"{}")
+    got = history.list_sessions(output_bucket="gs://bkt", store=store)
+    assert [s["session_id"] for s in got] == ["newer", "older"]
+    assert got[0] == {"session_id": "newer", "sources": ["events"],
+                      "last_file": "events/newer/000000000003000-x.jsonl"}
+    assert history.list_sessions(output_bucket=None) == []
 
 
-def test_read_history_require_result_falls_back_when_nothing_is_complete(tmp_path):
+def test_engine_list_sessions_and_history_use_the_mirror(tmp_path, monkeypatch):
     store = LocalBlobStore(str(tmp_path))
-    sid = "still-running"
-    history.write_turn_mirror("gs://bkt/events", sid,
-                              [history.mirror_line(AgentEvent(kind="message", summary="mid"))],
-                              now_ms=1000, store=store)
-    events = history.read_history("gs://bkt", sid, store=store, require_result=True)
-    assert [e.summary for e in events] == ["mid"]  # partial beats nothing
-
-
-def test_read_history_falls_back_to_platform_job_output(tmp_path):
-    store = LocalBlobStore(str(tmp_path))
-    line = {"content": {"parts": [{"text": "done"}]},
-            "custom_metadata": {"kind": "result", "raw": {"is_error": False}, "cost_usd": 0.2}}
-    store.put_bytes("jobs/cold-sid.jsonl", json.dumps(line).encode())
-    events = history.read_history("gs://bkt", "cold-sid", store=store)
-    assert len(events) == 1 and events[0].kind == "result" and events[0].cost_usd == 0.2
-
-
-def test_list_sessions_merges_sources(tmp_path):
-    store = LocalBlobStore(str(tmp_path))
-    store.put_bytes("events/warm-1/000000000001000.jsonl", b"{}")
-    store.put_bytes("jobs/cold-2.jsonl", b"{}")
-    store.put_bytes("jobs/cold-2_input.jsonl", b"{}")  # inputs are not sessions
-
-    class FakeAdkSessions:
-        def list(self, name):
-            assert name == "projects/p/locations/l/reasoningEngines/1"
-            return [type("S", (), {"name": "projects/p/.../sessions/cold-2"})(),
-                    type("S", (), {"name": "projects/p/.../sessions/adk-only-3"})()]
-
-    got = history.list_sessions(
-        output_bucket="gs://bkt",
-        resource="projects/p/locations/l/reasoningEngines/1",
-        adk_sessions=FakeAdkSessions(),
-        store=store,
-    )
-    by_id = {s["session_id"]: s for s in got}
-    assert set(by_id) == {"warm-1", "cold-2", "adk-only-3"}
-    assert by_id["cold-2"]["sources"] == ["jobs", "adk"]
-    assert by_id["warm-1"]["sources"] == ["events"]
-
-
-def test_run_turn_writes_turn_mirror(tmp_path, monkeypatch):
-    # The worker streams every surfaced event into session-keyed mirror files AS THE TURN
-    # RUNS (stream.MirrorStream) — the durable record Session.history() reads (warm turns
-    # have no session-keyed job output) and the live channel the client tails.
-    from remote_agent_toolkit.runtime.gemini import stream as stream_mod
-
-    monkeypatch.setenv("AGENT_JOBS_ROOT", str(tmp_path / "jobs"))
-    monkeypatch.setenv("AGENT_EVENTS_GCS", "gs://bkt/events")
-    monkeypatch.chdir(tmp_path)
-    store = LocalBlobStore(str(tmp_path / "blobs"))
-    monkeypatch.setattr(stream_mod, "GcsBlobStore", lambda bucket: store)
-
-    class OneEventHarness:
-        async def run(self, spec, rc):
-            yield _result_event("mirrored")
-
-    import remote_agent_toolkit.harness.claude_code as harness_mod
-    import remote_agent_toolkit.ports.eventsink as eventsink_mod
-    from remote_agent_toolkit.ports.eventsink import InMemorySink
-    monkeypatch.setattr(harness_mod, "ClaudeCodeHarness", OneEventHarness)
-    monkeypatch.setattr(eventsink_mod, "CloudLoggingSink", lambda **kw: InMemorySink(session_id="77"))
-
-    spec = AgentSpec(name="w", model="m")
-    agent = adk_agent.build_agent(spec)
-
-    async def drive():
-        return [ev async for ev in agent._run_turn(spec, "77", "go", None)]
-
-    asyncio.run(drive())
-
-    assert store.list("events/77/")  # streamed incrementally; file count is timing-dependent
-    events = history.read_history("gs://bkt", "77", store=store)
-    # turn_started + workspace_ready + the result
-    assert [e.kind for e in events] == ["status", "status", "result"]
-    assert events[-1].summary == "mirrored"
+    store.put_bytes("events/s1/000000000001000.jsonl", json.dumps(history.mirror_line(_result_event("x"))).encode())
+    monkeypatch.setattr(history, "GcsBlobStore", lambda bucket, *a, **kw: store)
+    engine = make_engine(FakeSandboxProvider())
+    assert [s["session_id"] for s in engine.list_sessions()] == ["s1"]
+    assert [e.summary for e in engine.get_session("s1").history()] == ["x"]
 
 
 def test_reattached_session_reconstructs_last_result(monkeypatch):
-    spec = AgentSpec(name="g", model="m")
-    engine = backend.GeminiEngine(resource="r/reasoningEngines/1", spec=spec,
-                                  project="p", location="l", output_bucket="gs://out")
-    session = backend.GeminiSession(engine, "old-sid")  # re-attached: no run in this process
-    monkeypatch.setattr(
-        backend.GeminiSession, "history",
-        lambda self: [AgentEvent(kind="message", summary="hi"), _result_event("final answer")],
-    )
+    engine = make_engine(FakeSandboxProvider())
+    session = backend.GeminiSession(engine, "old-sid")
+    monkeypatch.setattr(backend.GeminiSession, "history",
+                        lambda self: [AgentEvent(kind="message", summary="hi"), _result_event("final answer")])
     result = session.last_result
     assert result is not None and result.text == "final answer" and result.num_turns == 2
     assert session.stop_reason == StopReason.END_TURN and session.status == RunStatus.IDLE
 
 
 def test_reattached_session_without_history_has_no_result(monkeypatch):
-    spec = AgentSpec(name="g", model="m")
-    engine = backend.GeminiEngine(resource="r/reasoningEngines/1", spec=spec,
-                                  project="p", location="l", output_bucket="gs://out")
+    engine = make_engine(FakeSandboxProvider())
     session = backend.GeminiSession(engine, "old-sid")
     monkeypatch.setattr(backend.GeminiSession, "history", lambda self: [])
     assert session.last_result is None and session.status == RunStatus.PENDING

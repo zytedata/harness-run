@@ -12,12 +12,19 @@ interactive loop needs two more things while a turn is RUNNING:
 Both travel as a :class:`ControlMessage` over a :class:`ControlChannel` the runtime hands
 the harness in ``RunContext.control``. The harness reads the channel while the harness
 stream runs (:class:`ControlledStream`) and acts on each message. ``local`` uses the
-in-process :class:`LocalControlChannel`; ``gemini`` uses a GCS inbox the worker polls
-(``runtime/gemini/control.py``), so a message can come from any process that holds the
-session id.
+in-process :class:`LocalControlChannel`; ``gemini`` posts the message to the sandbox
+worker's ``/control`` endpoint, which feeds the same kind of queue on the worker's loop
+(``runtime/gemini/worker.py``).
 
 Every delivered message is surfaced as a ``user`` event whose ``raw["message_id"]`` is the
 caller's id — that event is the acknowledgement that the model has the message.
+
+A third operator action LOOKS at the running turn instead of talking to it: ``Session.exec()``
+runs a shell command in the turn's workspace and returns an :class:`ExecResult` — the
+read-only probe an application uses to show the agent's work while it is still working (a
+``git diff`` of the workspace, a file listing). Both runtimes run it through :func:`run_shell`
+here (``local`` on the host, ``gemini`` inside the sandbox via the worker's ``/exec``), so
+the output cap and the timeout semantics are the same everywhere.
 
 Stdlib-only.
 """
@@ -25,6 +32,10 @@ Stdlib-only.
 from __future__ import annotations
 
 import asyncio
+import os
+import signal
+import subprocess
+import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Literal, Protocol, runtime_checkable
@@ -87,6 +98,99 @@ class ControlMessage:
                 "interrupt": self.op == "interrupt",
             },
         )
+
+
+# -- exec: a read-only probe of the running turn's workspace ----------------------------
+
+# Longest ``exec`` runs when the caller gives no timeout. Bounded so a probe can never pin a
+# worker (or the gemini proxy call, which the platform cuts at ~300 s) indefinitely.
+EXEC_DEFAULT_TIMEOUT_S = 60.0
+# Kept per stream (characters, head of the output). The sandbox proxy rejects answers past
+# ~2 MB serialized; two streams under this cap fit with JSON escaping to spare.
+EXEC_OUTPUT_CAP = 500_000
+# Exit code reported when the command hit the timeout (the shell convention of ``timeout(1)``).
+EXEC_TIMEOUT_RC = 124
+
+
+@dataclass
+class ExecResult:
+    """What one :meth:`Session.exec` returned: the command's output and exit code.
+
+    ``stdout`` / ``stderr`` are text (invalid UTF-8 replaced), each cut to
+    :data:`EXEC_OUTPUT_CAP` characters from the head with ``truncated`` set when either was
+    cut — a probe never fails for producing too much. ``returncode`` is the command's, or
+    :data:`EXEC_TIMEOUT_RC` (124) when it was killed at the timeout, with a note in
+    ``stderr``. ``duration_ms`` is the wall time of the command itself (the transport is on
+    top of it).
+    """
+
+    stdout: str
+    stderr: str
+    returncode: int
+    truncated: bool = False
+    duration_ms: int = 0
+
+    @property
+    def ok(self) -> bool:
+        """``returncode == 0``."""
+        return self.returncode == 0
+
+    def to_dict(self) -> dict:
+        return {
+            "stdout": self.stdout, "stderr": self.stderr, "returncode": self.returncode,
+            "truncated": self.truncated, "duration_ms": self.duration_ms,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> ExecResult:
+        return cls(
+            stdout=str(d.get("stdout") or ""), stderr=str(d.get("stderr") or ""),
+            returncode=int(d.get("returncode", -1)), truncated=bool(d.get("truncated", False)),
+            duration_ms=int(d.get("duration_ms") or 0),
+        )
+
+
+def _cap(text: str) -> tuple[str, bool]:
+    if len(text) <= EXEC_OUTPUT_CAP:
+        return text, False
+    return text[:EXEC_OUTPUT_CAP], True
+
+
+def run_shell(command: str, *, cwd: str | os.PathLike | None, timeout: float | None) -> ExecResult:
+    """Run ``command`` under ``/bin/bash -c`` in ``cwd``; the one implementation behind ``exec``.
+
+    Sync and blocking (callers on an event loop wrap it in ``asyncio.to_thread``). ``timeout``
+    ``None`` means :data:`EXEC_DEFAULT_TIMEOUT_S`; at the timeout the command's whole process
+    group is killed (a ``sleep`` forked by the shell included, so the pipes close) and the
+    result carries what was captured so far with ``returncode`` 124. A missing ``cwd`` is
+    reported as a failed command (exit 127 with a note), not as an exception — probing a
+    workspace that is not there yet is a normal thing to ask.
+    """
+    limit = EXEC_DEFAULT_TIMEOUT_S if timeout is None else float(timeout)
+    if cwd is not None and not os.path.isdir(cwd):
+        return ExecResult(stdout="", stderr=f"cwd does not exist: {cwd}", returncode=127)
+    t0 = time.monotonic()
+    proc = subprocess.Popen(
+        ["/bin/bash", "-c", command], cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+    try:
+        out, err = proc.communicate(timeout=limit)
+        rc = proc.returncode
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        out, err = proc.communicate()
+        note = f"command exceeded {limit:g}s and was killed".encode()
+        err = (err.rstrip(b"\n") + b"\n" + note) if err else note
+        rc = EXEC_TIMEOUT_RC
+    duration_ms = int((time.monotonic() - t0) * 1000)
+    stdout, cut_out = _cap(out.decode("utf-8", errors="replace"))
+    stderr, cut_err = _cap(err.decode("utf-8", errors="replace"))
+    return ExecResult(stdout=stdout, stderr=stderr, returncode=rc,
+                      truncated=cut_out or cut_err, duration_ms=duration_ms)
 
 
 @runtime_checkable

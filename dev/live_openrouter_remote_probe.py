@@ -1,4 +1,4 @@
-"""Paid Gemini Agent Runtime check for OpenRouter on both harnesses.
+"""Paid remote (Agent Sandbox) check for OpenRouter on both harnesses.
 
 One throwaway engine contains both CLIs. It checks every model's basic and structured-output
 turns on both harnesses. It also checks resume, budgets, provider selection, whole routing
@@ -11,7 +11,7 @@ checks and on SIGTERM/SIGINT, including an interrupt during the deploy itself (t
 engine object yet in that window, so it is deleted by name). ``KEEP=1`` leaves it running
 for debugging.
 
-Set ``PROJECT``, ``LOCATION``, ``SUFFIX``, ``IMPERSONATE_SA``, ``MAX_INSTANCES``, or
+Set ``PROJECT``, ``LOCATION``, ``SUFFIX``, ``IMPERSONATE_SA``, or
 ``SERIAL=1`` as needed. ``OPENROUTER_PROVIDER`` overrides the provider used by the checks;
 this is mainly useful when ``MODELS`` contains one model.
 ``OPENROUTER_ALTERNATE_PROVIDER`` overrides the second provider in the routing checks.
@@ -53,7 +53,6 @@ BAKED_MODEL = "openrouter/deepseek/deepseek-v4-flash"
 RESUME_MODEL = "openrouter/z-ai/glm-5.3"
 TOKEN = "BANANA-77"
 # Room for the concurrent checks; the default of 1 would serialize them.
-MAX_INSTANCES = int(os.environ.get("MAX_INSTANCES", "8"))
 # Both harnesses are checked remotely. claude-code matters most here: a deployed engine
 # bakes CLAUDE_CODE_USE_VERTEX, which outranks the OpenRouter token, so this is where the
 # harness blanking that switch is proven on real infrastructure.
@@ -430,70 +429,13 @@ async def _check_budget(engine, key: str, harness: str) -> None:
 
 
 async def _check_visibility(session, final_raw: dict, expect_model: str, harness: str) -> None:
-    """The remote-only surface: resource samples, memory peak, history, traces."""
-    samples = await asyncio.to_thread(session.resource_samples)
-    check(
-        f"resource_samples returns worker CPU/RAM [{harness}]",
-        bool(samples),
-        f"{len(samples)} sample(s)" + (f", keys={sorted(samples[-1])[:4]}" if samples else ""),
-    )
-    # Stamped onto the terminal event's raw by the worker's cgroup sampler.
-    peak = final_raw.get("memory_peak_bytes")
-    check(f"memory_peak_bytes stamped on the result [{harness}]", peak is not None, f"peak={peak}")
-
+    """The remote-only surface: the durable history the mirror keeps."""
     history = await asyncio.to_thread(session.history)
     check(
         f"history replays the turn's events [{harness}]",
-        bool(history),
+        bool(history) and any(e.kind == "result" for e in history),
         f"{len(history)} event(s)",
     )
-
-    ok, note = await asyncio.to_thread(_trace_check, session.session_id, expect_model)
-    if ok is None:
-        skip(f"Cloud Trace root span carries the model and cost [{harness}]", note)
-    else:
-        check(f"Cloud Trace root span carries the model and cost [{harness}]", ok, note)
-
-
-def _trace_check(session_id: str, expect_model: str) -> tuple[bool | None, str]:
-    """Find THIS session's root span and confirm what it reports.
-
-    The project is shared, so the lookup uses this session id. The root span must name the
-    OpenRouter model and carry a cost (``runtime/gemini/tracing.py``).
-
-    Returns ``(None, reason)`` when the optional reader library isn't installed — a
-    missing dev-only dependency is not a parity failure. Install it with
-    ``uv pip install google-cloud-trace`` to turn this into a real check.
-    """
-    try:
-        from google.cloud import trace_v1
-    except ImportError:
-        return None, "google-cloud-trace not installed (console: engine → Traces tab)"
-    try:
-        client = trace_v1.TraceServiceClient()
-        deadline = time.time() + 120  # spans land a little after the turn
-        while True:
-            for tr in client.list_traces(
-                request={
-                    "project_id": PROJECT,
-                    "filter": "span:invoke_agent",
-                    "view": trace_v1.ListTracesRequest.ViewType.COMPLETE,
-                    "page_size": 50,
-                }
-            ):
-                for span in tr.spans:
-                    labels = dict(span.labels)
-                    if labels.get("gen_ai.conversation.id") != str(session_id):
-                        continue
-                    model = labels.get("gen_ai.request.model")
-                    cost = labels.get("rat.cost_usd")
-                    note = f"model={model} cost={cost} turns={labels.get('rat.num_turns')}"
-                    return (model == expect_model and cost is not None), note
-            if time.time() > deadline:
-                return False, f"no root span for session {session_id} within 120s"
-            time.sleep(15)
-    except Exception as exc:  # noqa: BLE001 — a read failure is worth reporting, not raising
-        return False, f"Cloud Trace read failed: {type(exc).__name__}: {str(exc)[:120]}"
 
 
 _TORN_DOWN = False
@@ -564,7 +506,8 @@ def _install_signal_teardown() -> None:
     """On SIGTERM/SIGINT: delete the engine, then exit non-zero.
 
     Installed BEFORE ``gemini.deploy``, because that call is the longest part of the run
-    (5-10 min) and the process is routinely wrapped in a ``timeout`` or interrupted. An
+    (the image build, then a template create the platform has taken up to 30 min over) and
+    the process is routinely wrapped in a ``timeout`` or interrupted. An
     interrupt during the deploy would otherwise leave a billing engine behind with nothing
     printed. There is no engine object yet in that window, so ``_teardown`` falls back to
     deleting by name.
@@ -623,10 +566,6 @@ async def main() -> int:
             PROJECT,
             LOCATION,
             credentials=credentials,
-            # The checks run concurrently, so the engine needs room to serve them in
-            # parallel; with the default max_instances=1 they queue and the probe is back
-            # to ~40 min.
-            max_instances=MAX_INSTANCES,
         )
         print(f"{time.strftime('%H:%M:%S')} deployed in {time.time() - t0:.0f}s", flush=True)
         # Every check uses an independent session. Resume remains sequential inside its

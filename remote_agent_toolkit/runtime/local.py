@@ -23,7 +23,7 @@ import uuid
 from pathlib import Path
 from typing import Any, AsyncIterator, TYPE_CHECKING
 
-from ..control import ControlMessage, LocalControlChannel
+from ..control import ControlMessage, ControlUnavailable, ExecResult, LocalControlChannel, run_shell
 from ..events import AgentEvent, RunResult, RunStatus, StopReason
 from ._run import DrivenRun
 
@@ -218,6 +218,12 @@ class LocalSession:
         """Whether a turn of this session is running (or started and not yet finished)."""
         return self._current_run is not None and not self._current_run.done
 
+    @property
+    def current_run(self) -> DrivenRun | None:
+        """The running turn's run, or None (``runtime.base.Session``; one process on ``local``)."""
+        run = self._current_run
+        return run if run is not None and not run.done else None
+
     def _send_into_running_turn(
         self,
         message: str,
@@ -304,6 +310,27 @@ class LocalSession:
         self._last_result = result
         self._stop_reason = stop_reason
         self._status = RunStatus.IDLE
+
+    async def exec(
+        self, command: str, *, cwd: str | None = None, timeout: float | None = None
+    ) -> ExecResult:
+        """Run a shell command in the running turn's workspace (``Session.exec``).
+
+        Runs on the host under ``/bin/bash -c`` in :attr:`workspace` (or ``cwd`` under it),
+        off the event loop. Same rule as ``gemini``: only while a turn runs — otherwise it
+        raises :class:`~remote_agent_toolkit.control.ControlUnavailable`, so code written
+        against ``local`` behaves the same way remotely (on the host you can always read
+        :attr:`workspace` directly).
+        """
+        if not isinstance(command, str) or not command:
+            raise ValueError("exec() needs a non-empty command string")
+        if not self.busy:
+            raise ControlUnavailable(
+                "no turn is running on this session: exec() probes the running turn's workspace "
+                "(read session.workspace directly between turns)"
+            )
+        target = self.workspace if cwd is None else self.workspace / cwd  # absolute cwd stays absolute
+        return await asyncio.to_thread(run_shell, command, cwd=str(target), timeout=timeout)
 
     async def interrupt(self, *, timeout: float = 60.0) -> None:
         """Interrupt the running turn and leave the session idle and resumable.

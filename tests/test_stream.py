@@ -216,13 +216,11 @@ def test_tail_times_out_wedged_list_and_retries(tmp_path, monkeypatch):
 
 
 def test_submit_requires_an_output_bucket():
-    from remote_agent_toolkit.runtime.gemini import backend
-    from remote_agent_toolkit.spec import AgentSpec
+    from sandbox_fakes import FakeSandboxProvider, make_engine
 
-    engine = backend.GeminiEngine(
-        resource="projects/p/locations/l/reasoningEngines/1",
-        spec=AgentSpec(name="a", model="m"), project=None, location=None,
-    )
+    from remote_agent_toolkit.runtime.gemini import backend
+
+    engine = make_engine(FakeSandboxProvider(), output_bucket=None)
     with pytest.raises(ValueError, match="output bucket"):
         backend.GeminiSession(engine, "sid").run("go")
 

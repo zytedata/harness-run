@@ -167,7 +167,15 @@ def test_busy_and_last_result_adopt_a_running_turn_like_current_run(tmp_path, mo
     """PR #84 review, E4: a poller that only asks ``busy`` / ``last_result`` (self-healing's
     re-attach path) must keep the turn's tokens fresh and own its sandbox too."""
     bucket = _Bucket(tmp_path, monkeypatch)
-    provider = FakeSandboxProvider(lambda n: ScriptedWorker())
+
+    class LingeringDelete(FakeSandboxProvider):
+        # The platform tears a sandbox down asynchronously, so the worker still answers the
+        # adopters' last /events poll after the owner's delete; the plain fake vanishes at
+        # once, which would send a slower adopter to the mirror tail instead.
+        def delete(self, sandbox):
+            self.deleted.append(sandbox)
+
+    provider = LingeringDelete(lambda n: ScriptedWorker())
     owner, session, other, adopter = _two_processes(provider)
     third_engine = make_engine(provider)
 
@@ -191,7 +199,7 @@ def test_busy_and_last_result_adopt_a_running_turn_like_current_run(tmp_path, mo
         engine._join_background()
     assert adopter.last_result.text == "done" and third.last_result.text == "done"
     assert not adopter.busy and adopter._refresh_stop is None and third._refresh_stop is None
-    assert provider.deleted and set(provider.deleted) == {sandbox}  # the owner and both adopters release it
+    assert provider.deleted == [sandbox] * 3  # the owner at its result, both adopters after their delay
 
 
 def test_last_result_without_an_event_loop_polls_the_record_and_stops_refreshing_at_the_end(tmp_path, monkeypatch):

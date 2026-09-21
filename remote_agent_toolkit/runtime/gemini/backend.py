@@ -7,7 +7,14 @@ sandbox **template** (a template is a version); app code addresses engines by na
 ready sandbox off the roster (``roster.py``) or creates one, ``POST``\\s the turn to the
 worker (``worker.py``) through the platform's authenticated proxy, long-polls the worker's
 ``/events`` for the live stream, and deletes the sandbox at the terminal event. The GCS
-event mirror the worker writes is the durable record and the fallback stream.
+event mirror the worker writes is the durable record and the fallback stream; the worker
+serves a terminal result only after mirroring it, so what the client deletes at is already
+on record (or flagged as not, and this client writes it).
+
+Hand-over ownership: the worker's acceptance is idempotent per turn id, so a ``/turn`` call
+whose answer was lost is settled with the same sandbox before anything else — a turn is
+never replayed on a second sandbox while the first may be running it — and a run cancelled
+mid-dispatch deletes whatever sandbox the dispatch lands on (:class:`_Dispatch`).
 
 The run plane mirrors ``local`` exactly via the shared :class:`DrivenRun`: **stream** =
 iterate, **await** = wait for the terminal ``result`` event, **poll** = read the latest
@@ -70,8 +77,17 @@ DIRECT_RETRY_SLEEP_S = 1.0
 # When the sandbox is gone, how long the mirror is given to show a terminal result the
 # worker may have flushed just before dying.
 GONE_GRACE_S = 30.0
-# Attempts to hand a turn to a sandbox (each failure deletes that sandbox and claims another).
+# Attempts to hand a turn to a sandbox: a sandbox that definitely never accepted the turn
+# (gone, or refusing) is dropped and another claimed. A ``/turn`` call whose answer was lost
+# is instead settled with THAT sandbox (``GeminiSession._reconcile``): the worker's acceptance
+# is idempotent per turn id, so asking again tells whether the turn runs there — never a
+# replay elsewhere while the first sandbox may be running the agent.
 DISPATCH_ATTEMPTS = 3
+TURN_CALL_TIMEOUT_S = 60.0
+# How long a lost ``/turn`` answer is re-asked of the same sandbox before the dispatch fails
+# with the uncertainty stated (and the sandbox deleted, which stops whatever it started).
+DISPATCH_RECONCILE_S = 120.0
+DISPATCH_RETRY_SLEEP_S = 2.0
 # A pool entry expiring within this many seconds is not dispatched to.
 CLAIM_MARGIN_S = 120.0
 # Session.exec(): the platform proxy cuts a sandbox call at ~300 s (measured: 300 s answered,
@@ -94,6 +110,33 @@ TOKEN_REFRESH_RETRY_S = 60.0
 
 
 _SANDBOX_NAME_RE = re.compile(r"[0-9a-f]{8}")  # the suffix ``_create_sandbox`` appends
+
+
+class DispatchUncertain(SandboxError):
+    """A ``/turn`` hand-over ended in an unknown state: the sandbox may be running the turn.
+
+    Raised by :meth:`GeminiSession._dispatch` when the sandbox that may have accepted the
+    turn cannot be asked any more (it vanished, or stopped answering). The run ends with an
+    error result saying so and the sandbox is deleted, which stops any run it started; the
+    turn is never replayed on another sandbox.
+    """
+
+
+class _Dispatch:
+    """One turn's hand-over, tracked so a run cancelled mid-dispatch can clean up after it.
+
+    ``_dispatch`` runs on a thread that cannot be cancelled. ``interrupt()`` before the
+    worker is reachable cancels the run; ``_on_complete`` then marks the slot abandoned and
+    a background job waits for the dispatch to land and deletes whatever sandbox it holds —
+    claimed, or already running the turn — instead of leaving it running unowned until the
+    platform TTL.
+    """
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.sandbox: str | None = None  # the sandbox held right now (claimed or accepted)
+        self.abandoned = False
+        self.finished = threading.Event()
 
 
 def _slug(name: str) -> str:
@@ -321,8 +364,14 @@ def deploy(
     provider = provider or _default_provider(project, location, credentials)
     existing = provider.list_templates(display_name=spec.name)
     newest = existing[0] if existing else None
+    # The newest version is reused only when everything the template pins matches — including
+    # the egress flag: a listing that does not report it is trusted for the default (on) only,
+    # so a redeploy asking for no internet access always gets a template known to have none.
+    reported_egress = newest.get("internet_access") if newest else None
+    same_egress = reported_egress == internet_access or (reported_egress is None and internet_access)
     if (newest and newest.get("image_uri") == image and newest.get("state") in (None, "ACTIVE")
-            and str(newest.get("cpu")) == limits["cpu"] and newest.get("memory") == limits["memory"]):
+            and str(newest.get("cpu")) == limits["cpu"] and newest.get("memory") == limits["memory"]
+            and same_egress):
         template = newest["name"]
         say(f"template {template_id(template)} already serves this image; no new version")
     else:
@@ -337,6 +386,7 @@ def deploy(
         "spec": spec.to_dict(),
         "image": image,
         "resource_limits": limits,
+        "internet_access": internet_access,
         "use_vertex": use_vertex,
         "model_service_account": model_sa,
         "vertex_region": vertex_region,
@@ -564,6 +614,10 @@ class GeminiSession:
         self._current_run: DrivenRun | None = None
         self._turn_id: str | None = None
         self._sandbox: str | None = None  # the sandbox the running turn was handed to
+        self._dispatch_slot: _Dispatch | None = None  # the running turn's hand-over, while in flight
+        # A terminal result the worker could not write to the mirror (``raw.mirror == "failed"``):
+        # this client writes it before the sandbox goes (``_on_complete``).
+        self._unmirrored_result: AgentEvent | None = None
         # A session re-attached by id (``engine.get_session``) may have a turn running under
         # another process: the first run()/send()/interrupt()/exec() here reads the mirror once
         # and adopts that turn (``_attach``). Never set for a session started in this process.
@@ -724,6 +778,8 @@ class GeminiSession:
             raise ControlUnavailable(f"the worker refused the message: {resp.get('error')}")
 
     def _observe(self, event: AgentEvent) -> None:
+        if event.kind == "result" and (event.raw or {}).get("mirror") == "failed":
+            self._unmirrored_result = event
         if event.kind == "status" and (event.raw or {}).get("event") == "control_ready":
             with self._control_lock:
                 self._control_ready = True
@@ -986,20 +1042,33 @@ class GeminiSession:
         }
         self._turn_id = turn_id
         self._sandbox = None
+        self._unmirrored_result = None
         self._control_ready = False
         self._drop_pending_control()
+        slot = self._dispatch_slot = _Dispatch()
         events_uri = f"{engine._output_bucket}/events"
         store_kwargs = engine._gcs_store_kwargs()
 
         async def source() -> AsyncIterator[AgentEvent]:
             try:
-                sandbox = await asyncio.to_thread(self._dispatch, body)
+                sandbox = await asyncio.to_thread(self._dispatch, body, slot)
+            except DispatchUncertain as exc:
+                yield _synthetic_result(
+                    f"the turn's hand-over ended in an unknown state: {str(exc)[:400]}. The "
+                    "sandbox is deleted (which stops any run it started); side effects the "
+                    "agent performed before that are not undone, and the turn was not "
+                    "replayed elsewhere.",
+                    sid, "dispatch_uncertain",
+                )
+                return
             except Exception as exc:  # noqa: BLE001 — an explained error result, never a hang
                 yield _synthetic_result(
                     f"could not hand the turn to a sandbox: {type(exc).__name__}: {str(exc)[:300]}",
                     sid, "dispatch_failed",
                 )
                 return
+            if sandbox is None:
+                return  # abandoned: the run was cancelled while dispatching
             async for event in _stream_turn(
                 engine._provider(), sandbox, turn_id, sid,
                 events_uri=events_uri, store_kwargs=store_kwargs,
@@ -1017,8 +1086,17 @@ class GeminiSession:
             pass
         return run
 
-    def _dispatch(self, body: dict) -> str:
+    def _dispatch(self, body: dict, slot: _Dispatch) -> str | None:
         """Claim (or create) a sandbox and hand it the turn; return the sandbox name. Sync.
+
+        A sandbox that definitely never accepted the turn (gone before the call reached it,
+        or refusing) is released and another claimed, up to :data:`DISPATCH_ATTEMPTS`. A
+        ``/turn`` call whose answer was lost is settled with the same sandbox first
+        (:meth:`_hand_over`); when that is impossible the dispatch fails with
+        :class:`DispatchUncertain` and the sandbox stays referenced, so ``_on_complete``
+        deletes it. ``slot`` tracks the sandbox held at every step for a run cancelled while
+        this is in flight (:class:`_Dispatch`); once abandoned, nothing more is posted and
+        ``None`` is returned.
 
         Every ready-pool entry consumed on the way — the one that took the turn, and any
         that turned out dead (deleted under the roster, OOM, TTL) — is replaced by a refill
@@ -1026,29 +1104,123 @@ class GeminiSession:
         on a turn that never used it.
         """
         engine = self._engine
-        last: Exception | None = None
+        last: str | None = None
         consumed = 0  # pool entries taken off the roster by this dispatch
         try:
             for _attempt in range(DISPATCH_ATTEMPTS):
+                if slot.abandoned:
+                    return None
                 sandbox, warm = engine._claim_sandbox()
                 consumed += int(warm)
+                with slot.lock:
+                    slot.sandbox = sandbox
+                    if slot.abandoned:
+                        return None  # cancelled while claiming: the cleanup deletes it, no turn is posted
                 body["sandbox"] = sandbox.rsplit("/", 1)[-1]
                 body["warm"] = warm
                 try:
-                    resp = engine._provider().call(sandbox, "/turn", body, timeout_s=60)
-                    if not resp.get("ok"):
-                        raise SandboxError(f"the worker refused the turn: {resp.get('error')}")
-                except Exception as exc:  # noqa: BLE001 — drop this sandbox, try another
-                    last = exc
-                    logger.warning("dispatch to %s failed: %s", sandbox, exc)
+                    accepted = self._hand_over(sandbox, body)
+                except DispatchUncertain:
+                    with slot.lock:
+                        if not slot.abandoned:
+                            self._sandbox = sandbox  # so the failed run's completion deletes it
+                    raise
+                if accepted:
+                    with slot.lock:
+                        if not slot.abandoned:
+                            self._sandbox = sandbox
+                    return sandbox
+                last = f"{sandbox.rsplit('/', 1)[-1]} did not take the turn"
+                with slot.lock:
+                    slot.sandbox = None
+                if not self._runs_another_turn(sandbox):
                     engine._release_sandbox(sandbox)
-                    continue
-                self._sandbox = sandbox
-                return sandbox
             raise RuntimeError(f"no sandbox took the turn after {DISPATCH_ATTEMPTS} attempts: {last}")
         finally:
+            slot.finished.set()
             if consumed and engine._warm:
                 engine._in_background(engine.fill_pool, consumed, name="pool-refill")
+
+    def _hand_over(self, sandbox: str, body: dict) -> bool:
+        """POST the turn to ``sandbox``: ``True`` when that sandbox owns the turn, ``False``
+        when it definitely never accepted it. Raises :class:`DispatchUncertain` otherwise.
+
+        The platform answering "no such sandbox" (:class:`SandboxGone`) means the request was
+        never delivered — a pool entry that died before the claim. Any other failure (a
+        proxy timeout, a 5xx) may hide an acceptance: the worker answers as soon as it has
+        started the turn's thread, so the agent may already be running. The same body is
+        then re-asked of the same sandbox (:meth:`_reconcile`): the worker re-acknowledges a
+        turn id it knows, so the answer settles ownership without a second start anywhere.
+        """
+        provider = self._engine._provider()
+        try:
+            resp = provider.call(sandbox, "/turn", body, timeout_s=TURN_CALL_TIMEOUT_S)
+        except SandboxGone as exc:
+            logger.warning("dispatch: sandbox %s is gone, claiming another (%s)", sandbox, exc)
+            return False
+        except Exception as exc:  # noqa: BLE001 — acceptance unknown: settle it with this sandbox
+            logger.warning(
+                "dispatch: the /turn call to %s failed (%s: %s); asking that sandbox whether it "
+                "took the turn before doing anything else", sandbox, type(exc).__name__, exc,
+            )
+            return self._reconcile(sandbox, body, exc)
+        return self._accepted(sandbox, body, resp)
+
+    def _reconcile(self, sandbox: str, body: dict, first: Exception) -> bool:
+        deadline = time.monotonic() + DISPATCH_RECONCILE_S
+        short = sandbox.rsplit("/", 1)[-1]
+        while True:
+            try:
+                resp = self._engine._provider().call(sandbox, "/turn", body, timeout_s=TURN_CALL_TIMEOUT_S)
+            except SandboxGone as exc:
+                raise DispatchUncertain(
+                    f"sandbox {short} vanished after a /turn call whose answer was lost "
+                    f"({type(first).__name__}: {str(first)[:120]}); whether its worker had "
+                    "started the turn before it disappeared is unknown"
+                ) from exc
+            except Exception as exc:  # noqa: BLE001 — keep asking until the deadline
+                if time.monotonic() >= deadline:
+                    raise DispatchUncertain(
+                        f"sandbox {short} did not say whether it took the turn within "
+                        f"{DISPATCH_RECONCILE_S:g}s of a /turn call whose answer was lost "
+                        f"({type(first).__name__}: {str(first)[:120]}; last: "
+                        f"{type(exc).__name__}: {str(exc)[:120]})"
+                    ) from exc
+                time.sleep(DISPATCH_RETRY_SLEEP_S)
+                continue
+            return self._accepted(sandbox, body, resp)
+
+    @staticmethod
+    def _accepted(sandbox: str, body: dict, resp: dict) -> bool:
+        """Read a ``/turn`` answer: does ``sandbox`` own this turn?
+
+        Besides a plain acceptance, a worker that already knows the turn id says so
+        (``already_accepted``; an image predating that answer refuses with "turn_id already
+        used" or names it among ``running``) — the lost first answer was an acceptance.
+        Any other refusal means the turn never started there.
+        """
+        turn_id = body.get("turn_id")
+        if resp.get("ok"):
+            if resp.get("already_accepted"):
+                logger.info("dispatch: %s had already accepted turn %s (its first answer was lost)",
+                            sandbox, turn_id)
+            return True
+        error = str(resp.get("error") or "")
+        if "already used" in error or turn_id in (resp.get("running") or ()):
+            logger.info("dispatch: %s reports turn %s as its own (its first answer was lost)",
+                        sandbox, turn_id)
+            return True
+        logger.warning("dispatch: %s refused the turn: %s", sandbox, error)
+        return False
+
+    def _runs_another_turn(self, sandbox: str) -> bool:
+        """Whether ``sandbox`` refused because a different turn runs there (then it is not ours to delete)."""
+        try:
+            health = self._engine._provider().call(sandbox, "/health", {}, timeout_s=30)
+        except Exception:  # noqa: BLE001 — unreachable: treat as ours to release
+            return False
+        running = health.get("running_turn")
+        return bool(running) and running != self._turn_id
 
     def _on_complete(self, result: RunResult, stop_reason: StopReason) -> None:
         self._last_result = result
@@ -1070,19 +1242,64 @@ class GeminiSession:
             result.warning = f"{result.warning}; {note}" if result.warning else note
             logger.warning("session %s: %s", self._session_id, note)
         sandbox, self._sandbox = self._sandbox, None
+        dispatch, self._dispatch_slot = self._dispatch_slot, None
+        unmirrored, self._unmirrored_result = self._unmirrored_result, None
+        turn_id = self._turn_id
+        if dispatch is not None and not dispatch.finished.is_set():
+            # Cancelled while the hand-over is in flight (its thread cannot be stopped): once
+            # it lands, whatever sandbox it holds — claimed, or running the turn — is deleted.
+            with dispatch.lock:
+                dispatch.abandoned = True
+            self._engine._in_background(self._release_after_dispatch, dispatch, name="sandbox-release")
+            return
         if sandbox is None or walked_away:
             return
-        if adopted:
-            # The process that started the turn may still be draining its last events.
-            self._engine._in_background(self._release_later, sandbox, name="sandbox-release")
-        else:
+
+        def release() -> None:
+            if unmirrored is not None:
+                self._mirror_result(unmirrored, turn_id)  # the record, before the sandbox goes
+            if adopted:
+                # The process that started the turn may still be draining its last events.
+                time.sleep(ADOPTED_RELEASE_DELAY_S)
             # A sandbox bills while it exists; the turn is over, so it goes. Multi-turn
             # continuity rides the checkpoint tar (DESIGN.md §13.1).
-            self._engine._in_background(self._engine._release_sandbox, sandbox, name="sandbox-release")
+            self._engine._release_sandbox(sandbox)
 
-    def _release_later(self, sandbox: str) -> None:
-        time.sleep(ADOPTED_RELEASE_DELAY_S)
-        self._engine._release_sandbox(sandbox)
+        self._engine._in_background(release, name="sandbox-release")
+
+    def _release_after_dispatch(self, dispatch: _Dispatch) -> None:
+        dispatch.finished.wait()
+        if dispatch.sandbox is not None:
+            logger.info("session %s: deleting sandbox %s, dispatched to after the run was cancelled",
+                        self._session_id, dispatch.sandbox)
+            self._engine._release_sandbox(dispatch.sandbox)
+
+    def _mirror_result(self, event: AgentEvent, turn_id: str | None) -> None:
+        """Write a terminal result the worker could not mirror, with this client's identity.
+
+        The worker serves a result on ``/events`` only after writing it to the mirror; when
+        that write failed (its run-scoped token dead, storage down) the live copy says
+        ``raw.mirror == "failed"`` and the record would show the turn as never ended —
+        ``history()`` / ``last_result`` of a re-attached reader, and ``_find_running_turn``
+        would adopt a deleted sandbox. This client holds the operator's credentials, so it
+        writes the line itself before the sandbox is released.
+        """
+        from .history import mirror_line, write_turn_mirror
+
+        engine = self._engine
+        line = mirror_line(event)
+        line["raw"] = {**(line.get("raw") or {}), "mirror": "client"}
+        events_uri = f"{engine._output_bucket}/events"
+        if write_turn_mirror(events_uri, self._session_id, [line], now_ms=int(time.time() * 1000),
+                             turn_id=turn_id, **engine._gcs_store_kwargs()):
+            logger.warning("session %s: the worker could not mirror the result of turn %s; "
+                           "this client wrote it", self._session_id, turn_id)
+        else:
+            logger.error(
+                "session %s: the terminal result of turn %s is in neither the worker's nor this "
+                "client's mirror write; history()/last_result will show the turn as unfinished",
+                self._session_id, turn_id,
+            )
 
     def _attach(self) -> DrivenRun | None:
         """Adopt this session's turn running under **another** process, if the mirror records one.
@@ -1224,7 +1441,9 @@ class GeminiSession:
         Fallback: when the worker is not reachable yet (the turn is still being dispatched)
         or does not end the turn within ``timeout`` seconds, the run is cancelled — it ends
         as an error result with no checkpoint, ``RunResult.warning`` says so — and the
-        sandbox is deleted (which stops the agent and its billing).
+        sandbox is deleted (which stops the agent and its billing). A dispatch still in
+        flight cannot be stopped: its sandbox is deleted the moment it lands, whether the
+        worker had accepted the turn by then or not.
         """
         run = self._current_run
         if run is None and self._foreign_check:

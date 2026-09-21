@@ -54,3 +54,6 @@ def _short_long_polls(monkeypatch):
 
     monkeypatch.setattr(backend, "EVENTS_WAIT_S", 0.2)
     monkeypatch.setattr(backend, "EVENTS_CALL_TIMEOUT_S", 5.0)
+    # A lost /turn answer is re-asked of the same sandbox for a while; keep that short too.
+    monkeypatch.setattr(backend, "DISPATCH_RECONCILE_S", 0.5)
+    monkeypatch.setattr(backend, "DISPATCH_RETRY_SLEEP_S", 0.02)

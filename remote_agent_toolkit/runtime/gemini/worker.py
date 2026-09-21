@@ -73,6 +73,9 @@ EVENT_SUMMARY_CAP = 200_000
 # Longest a /events call is held open. The proxy allowed 120 s calls (measured); the client
 # asks for less, this only bounds a misbehaving caller.
 MAX_WAIT_S = 90.0
+# How long the worker waits for the terminal result's mirror write before serving the result
+# on /events anyway (flagged ``raw.mirror == "failed"``, so the client writes the record).
+RESULT_MIRROR_WAIT_S = 30.0
 
 
 
@@ -373,10 +376,12 @@ class Worker:
                 raw={"event": "config_error", "is_error": True, "subtype": "error",
                      "session_id": session_id},
             ))
+            if events_uri:  # durable before visible, as for every terminal result (``surface``)
+                ev.raw["mirror"] = "worker"
+                if not write_turn_mirror(events_uri, session_id, [mirror_line(ev)],
+                                         now_ms=int(time.time() * 1000), turn_id=turn_id):
+                    ev.raw["mirror"] = "failed"
             record.append(_line(ev))
-            if events_uri:
-                write_turn_mirror(events_uri, session_id, [mirror_line(ev)],
-                                  now_ms=int(time.time() * 1000), turn_id=turn_id)
 
         # Effective spec: baked ← session config ← turn config (the worker's merge is the
         # ground truth; the client keeps its own view only for result parsing).
@@ -440,6 +445,17 @@ class Worker:
 
         def surface(event: AgentEvent) -> None:
             identify(event)
+            if event.kind == "result" and stream is not None:
+                # Durable before visible: the client deletes the sandbox at the result it
+                # sees on /events, and a re-attached reader (``history()``, ``last_result``)
+                # must find the turn ended. The mirror copy says the worker wrote it; when
+                # the write fails (dead run-scoped token, storage outage, timeout) the live
+                # copy says so and the client writes the record itself (``backend``).
+                event.raw["mirror"] = "worker"
+                if not stream.append(event, wait_s=RESULT_MIRROR_WAIT_S):
+                    event.raw["mirror"] = "failed"
+                record.append(_line(event))
+                return
             record.append(_line(event))
             if stream is not None:
                 stream.append(event)
@@ -561,15 +577,23 @@ class Worker:
         return _exec(body, workspace or self.workspace_root, turn_id)
 
     def start_turn(self, body: dict) -> dict:
+        """``/turn``: accept the turn, or re-acknowledge one this worker already took.
+
+        Acceptance is idempotent per ``turn_id``: a client whose first call lost its answer
+        (proxy timeout) asks again with the same body and learns that the turn is running
+        here (or already finished) instead of starting it a second time elsewhere.
+        """
         turn_id = str(body.get("turn_id") or "")
         if not turn_id or not body.get("session_id"):
             return {"ok": False, "error": "turn_id and session_id are required"}
         with self._lock:
+            known = self._turns.get(turn_id)
+            if known is not None:
+                return {"ok": True, "turn_id": turn_id, "accepted_at": known.started_at,
+                        "already_accepted": True, "done": known.done}
             running = [t for t, r in self._turns.items() if not r.done]
             if running:
                 return {"ok": False, "error": "a turn is running", "running": running}
-            if turn_id in self._turns:
-                return {"ok": False, "error": "turn_id already used on this sandbox"}
             record = TurnRecord(turn_id, self._lock)
             self._turns[turn_id] = record
         threading.Thread(target=self._turn_thread, args=(record, body),

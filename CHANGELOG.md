@@ -147,6 +147,46 @@ for the tag with this file's section as the notes.
 
 ### Fixed
 
+- **A `/turn` call whose answer was lost no longer re-dispatches the turn to a second sandbox**
+  (PR #84 review, A1). The worker accepts a turn by starting its thread and answering at once,
+  so a proxy timeout or 5xx on the call may hide an acceptance — and the dispatch replayed the
+  same body (same `turn_id`, prompt and secrets) on another sandbox while the first was running
+  the agent, repeating its side effects. Acceptance is now idempotent per turn id on the worker
+  (`/turn` re-acknowledges a turn it knows, running or finished, with `already_accepted`), and
+  a lost answer is settled with the **same** sandbox before anything else: the dispatch moves
+  on only from a sandbox that definitely never accepted the turn (gone before the call reached
+  it, or refusing). When the sandbox cannot be asked any more (it vanished, or stayed silent for
+  `DISPATCH_RECONCILE_S`, 2 min) the run ends with a `dispatch_uncertain` error result naming
+  the sandbox, which is deleted — stopping whatever it started — instead of a silent replay.
+  A worker from an image predating the idempotent answer is understood too (its "turn_id
+  already used" refusal names the turn as its own).
+- **`interrupt()` while the turn is still being dispatched no longer leaves the sandbox running
+  the turn unowned** (PR #84 review, A2). The hand-over runs on a thread that cannot be
+  cancelled; the cancelled run's completion saw no sandbox yet and deleted nothing, so the
+  worker accepted the turn afterwards and ran it — with the turn's secrets, on a sandbox no
+  session owned, billing until the platform TTL. The dispatch now records the sandbox it holds
+  at every step; a run cancelled meanwhile marks the hand-over abandoned, nothing more is
+  posted, and the sandbox the dispatch lands on (claimed, or already running the turn) is
+  deleted the moment it lands.
+- **The terminal result is in the mirror before the client can see it — and before the sandbox
+  is deleted** (PR #84 review, B). The worker appended the result to its live record first and
+  queued the mirror write behind it, while the client deleted the sandbox at the result it saw;
+  a reader other than the running process (`history()`, a re-attached `last_result`,
+  `_find_running_turn`) could find a turn that started and never ended, adopt a deleted
+  sandbox and synthesize a `sandbox_unreachable` error for a turn that succeeded. The worker
+  now writes the result to the mirror and waits for the write (bounded, 30 s) before serving it
+  on `/events`; the mirror copy carries `raw.mirror = "worker"`. When the write fails (a dead
+  run-scoped token, a storage outage, the timeout) the live copy says `raw.mirror = "failed"`
+  and the client writes the line itself with its own credentials (`raw.mirror = "client"`)
+  before releasing the sandbox; only if that fails too is the gap logged as an error.
+  `MirrorStream.append(event, wait_s=)` and `write_turn_mirror` now report the write's outcome.
+- **`deploy(..., internet_access=False)` on the image the newest template already serves no
+  longer reuses that template silently** (PR #84 review, C). The "no new version" check compared
+  image, state, CPU and memory only, so a redeploy asking for no internet access returned the
+  existing template with egress on and reported a no-op. The template listing now carries the
+  platform's `internet_access` flag, the check compares it (a listing that does not report the
+  flag is trusted for the default, on, only — asking for no egress then always creates a
+  template known to have none), and the deploy record stores what was asked.
 - **The worker's run-scoped GCS token is refreshed while it is still alive, and its death is
   reported once** (ported from #87 to the sandbox worker). The worker fetches its replacement
   token WITH the current one, so the swap has to happen before the current token expires: the

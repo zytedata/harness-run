@@ -16,6 +16,7 @@ from sandbox_fakes import FakeSandboxProvider, ScriptedWorker, make_engine
 
 from remote_agent_toolkit import TurnConfig
 from remote_agent_toolkit.runtime.gemini import backend, handoff, scoped_gcs
+from remote_agent_toolkit.runtime.gemini.provider import SandboxGone
 
 
 async def _await(run):
@@ -49,7 +50,9 @@ def test_pre_dispatch_failure_leaves_no_refresher_and_never_dispatches(monkeypat
 
 def test_dispatch_failure_releases_every_sandbox_tried_and_stops_the_refresher(monkeypatch):
     provider = FakeSandboxProvider()
-    provider.fail_next["/turn"] = [TimeoutError("acceptance unknown")] * backend.DISPATCH_ATTEMPTS
+    # Every claimed sandbox is gone before the call reaches it: a definitive non-acceptance
+    # (a lost answer is settled with the same sandbox instead; test_dispatch_ownership.py).
+    provider.fail_next["/turn"] = [SandboxGone("expired")] * backend.DISPATCH_ATTEMPTS
     engine = make_engine(provider)
     session = engine.start_session()
     stops = []

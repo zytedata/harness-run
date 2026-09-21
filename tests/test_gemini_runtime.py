@@ -18,6 +18,7 @@ from remote_agent_toolkit import AgentSpec, SessionConfig, TurnConfig
 from remote_agent_toolkit.events import AgentEvent, RunStatus, StopReason
 from remote_agent_toolkit.ports.blobstore import LocalBlobStore
 from remote_agent_toolkit.runtime.gemini import backend, worker as worker_mod
+from remote_agent_toolkit.runtime.gemini.provider import SandboxGone
 from remote_agent_toolkit.runtime.gemini.worker import Worker
 
 
@@ -37,8 +38,8 @@ def _real_worker_factory(tmp_path, spec, blobs=None):
 
 
 class _NullMirror:
-    def append(self, event):
-        pass
+    def append(self, event, *, wait_s=None):
+        return True if wait_s is not None else None
 
     def close(self, timeout=None):
         pass
@@ -105,8 +106,9 @@ class _RecordingMirror:
     def __init__(self):
         self.events = []
 
-    def append(self, event):
+    def append(self, event, *, wait_s=None):
         self.events.append(event)
+        return True if wait_s is not None else None
 
     def close(self, timeout=None):
         pass
@@ -500,18 +502,31 @@ def test_session_send_resumes_on_a_fresh_sandbox_with_the_resume_flag():
     assert session.stop_reason == StopReason.NEEDS_INPUT  # checkpoint spec: awaiting the operator
 
 
-def test_dispatch_failure_moves_to_another_sandbox_then_gives_up():
-    provider = FakeSandboxProvider()
-    provider.fail_next["/turn"] = [RuntimeError("proxy 502"), RuntimeError("proxy 502")]
+def test_dispatch_moves_to_another_sandbox_only_on_definitive_non_acceptance_then_gives_up():
+    # A sandbox gone before the call reached it, and a worker refusing the turn, never
+    # started it: the next sandbox is claimed. (A lost answer is settled with the same
+    # sandbox instead: test_dispatch_ownership.py.)
+    class Refusing(ScriptedWorker):
+        def handle(self, path, body):
+            if path == "/turn":
+                return {"ok": False, "error": "a turn is running", "running": ["someone-else"]}
+            return super().handle(path, body)
+
+    # The first sandbox is gone before its call is delivered (whatever worker it had).
+    workers = iter([ScriptedWorker(), Refusing(), ScriptedWorker(auto=[result_event()])])
+    provider = FakeSandboxProvider(lambda n: next(workers))
+    provider.fail_next["/turn"] = [SandboxGone("expired")]
     engine = make_engine(provider)
     session = engine.start_session()
     result = asyncio.run(_await(session.run("go")))
     engine._join_background()
     assert result.text == "done"
-    assert len(provider.deleted) == 3  # two sandboxes that refused the turn + the one that ran it
+    assert [c[1] for c in provider.calls if c[1] == "/turn"] == ["/turn"] * 3
+    assert len(provider.deleted) == 3  # the gone one, the refusing one + the one that ran it
     assert provider.live() == []
 
-    provider.fail_next["/turn"] = [RuntimeError("proxy 502")] * backend.DISPATCH_ATTEMPTS
+    provider.worker_factory = lambda n: ScriptedWorker(auto=[result_event()])
+    provider.fail_next["/turn"] = [SandboxGone("expired")] * backend.DISPATCH_ATTEMPTS
     result = asyncio.run(_await(engine.start_session().run("go")))
     assert result.is_error and "could not hand the turn to a sandbox" in result.text
 
@@ -632,7 +647,7 @@ def test_queued_messages_are_dropped_with_a_warning_when_the_turn_ends_before_th
 
 def test_queued_messages_when_the_dispatch_fails_land_on_the_dispatch_failed_result():
     provider = FakeSandboxProvider(lambda n: ScriptedWorker())
-    provider.fail_next["/turn"] = [RuntimeError("proxy down")] * backend.DISPATCH_ATTEMPTS
+    provider.fail_next["/turn"] = [SandboxGone("expired")] * backend.DISPATCH_ATTEMPTS
     session = make_engine(provider).start_session()
 
     async def go():

@@ -326,7 +326,9 @@ the event stream — the probe that caught the stale-result replay bug) and
 - **A turn that ends with `sandbox_unreachable`** means the sandbox went away mid-turn (an OOM
   is the usual reason — raise `resource_limits`) or the proxy stopped routing to it; the last
   events before it say where the agent was. `dispatch_failed` means no sandbox took the turn
-  (the message names the platform error).
+  (the message names the platform error); `dispatch_uncertain` means a `/turn` call lost its
+  answer and the sandbox could not be asked whether it had started the turn — the sandbox was
+  deleted and the turn was not replayed (the message names the sandbox).
 - **Poke a live sandbox by hand**: `AgentSandboxProvider(...).call(sandbox, "/exec",
   {"command": "..."})` runs a shell command in it (the same contract as Google's shell image);
   `/health` reports uptime and the running turn. Sandbox ids appear in `turn_started.worker`.

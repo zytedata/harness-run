@@ -35,7 +35,8 @@ def result_event(text="done", subtype="success", is_error=False, num_turns=2, co
 class ScriptedWorker:
     """A worker whose events a test emits by hand (``emit`` / ``finish``).
 
-    ``/turn`` accepts once and records the body; ``/events`` answers like the real worker
+    ``/turn`` accepts once and records the body (re-acknowledging a turn id it knows, like
+    the real worker); ``/events`` answers like the real worker
     (blocks up to ``wait`` for news, pages everything past ``since``); ``/control`` records
     the message and calls ``on_control`` (a test hook that may emit the reaction); ``/exec``
     really runs the command (``control.run_shell``) in ``workspace`` and records the body.
@@ -72,8 +73,10 @@ class ScriptedWorker:
         if path == "/health":
             return {"ok": True, "uptime_s": 1.0}
         if path == "/turn":
+            if any(t["turn_id"] == body.get("turn_id") for t in self.turns):
+                return {"ok": True, "turn_id": body["turn_id"], "already_accepted": True, "done": self.done}
             if self.turns and not self.done:
-                return {"ok": False, "error": "a turn is running"}
+                return {"ok": False, "error": "a turn is running", "running": [self.turns[-1]["turn_id"]]}
             self.turns.append(dict(body))
             if self.auto is not None:
                 self.emit(*self.auto)
@@ -128,13 +131,14 @@ class FakeSandboxProvider:
     # -- helpers for tests ------------------------------------------------------------
 
     def add_template(self, display_name: str, image: str = "img:1", cpu="4", memory="8Gi",
-                     create_time: float | None = None) -> str:
+                     create_time: float | None = None, internet_access: bool | None = True) -> str:
         with self.lock:
             self._n += 1
             name = f"{INSTANCE}/sandboxEnvironmentTemplates/t{self._n}"
             self.templates[name] = {
                 "name": name, "display_name": display_name, "image_uri": image, "cpu": cpu,
-                "memory": memory, "create_time": create_time or time.time() + self._n, "state": "ACTIVE",
+                "memory": memory, "internet_access": internet_access,
+                "create_time": create_time or time.time() + self._n, "state": "ACTIVE",
             }
         return name
 
@@ -187,7 +191,7 @@ class FakeSandboxProvider:
                         internet_access: bool = True, log=None) -> str:
         if log is not None:
             log(f"template {display_name}: PROVISIONING for 0s")
-        return self.add_template(display_name, image_uri, cpu, memory)
+        return self.add_template(display_name, image_uri, cpu, memory, internet_access=internet_access)
 
     def list_templates(self, *, display_name: str | None = None) -> list[dict]:
         rows = [dict(t) for t in self.templates.values()

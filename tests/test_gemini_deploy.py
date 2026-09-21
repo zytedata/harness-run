@@ -177,6 +177,28 @@ def test_deploy_builds_when_the_image_is_missing_and_reuses_a_matching_template(
     assert [t["name"] for t in provider.list_templates()] == [third.resource]
 
 
+def test_deploy_reuses_a_template_only_when_its_egress_flag_matches(records, no_docker):
+    # PR #84 review, C: redeploying the same image with internet_access=False used to return
+    # the existing template with egress on and report a no-op.
+    provider = FakeSandboxProvider()
+    on = backend.deploy(_spec(), "proj", "l", image="img:1", output_bucket="gs://out", provider=provider,
+                        internet_access=True)
+    off = backend.deploy(_spec(), "proj", "l", image="img:1", output_bucket="gs://out", provider=provider,
+                         internet_access=False)
+    off._join_background()
+    assert off.resource != on.resource
+    assert provider.templates[off.resource]["internet_access"] is False
+    record = handoff.load_deploy_record("gs://out", "test-agent", off.version, store=records)
+    assert record["internet_access"] is False  # the deploy record says what was asked
+    again = backend.deploy(_spec(), "proj", "l", image="img:1", output_bucket="gs://out", provider=provider,
+                           internet_access=False)
+    assert again.resource == off.resource  # a matching flag is a no-op again
+    # A listing that does not report the flag is trusted for the default (on) only.
+    provider.templates[again.resource]["internet_access"] = None
+    assert backend.deploy(_spec(), "proj", "l", image="img:1", output_bucket="gs://out", provider=provider,
+                          internet_access=False).resource != again.resource
+
+
 def test_deploy_with_image_skips_the_build_and_fills_the_pool(records, no_docker, monkeypatch):
     from remote_agent_toolkit.runtime.gemini import roster as roster_mod
 

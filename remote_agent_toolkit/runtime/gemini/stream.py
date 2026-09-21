@@ -14,9 +14,12 @@ With the sandbox runtime the client streams a turn **directly** from the worker
 (``/events`` long-poll, ``backend.py``) and this tail is the fallback when the sandbox is
 unreachable — and the mirror stays the durable record either way. Object names include
 the worker clock, turn id, writer id and per-writer counter; turn readers select by
-identity. Writes are batched (~0.5 s or 50 events, terminal ``result`` immediately) on a
-background thread and are best-effort like every telemetry path in the worker: a storage
-failure never fails a run.
+identity. Writes are batched (~0.5 s or 50 events) on a background thread and are
+best-effort like every telemetry path in the worker: a storage failure never fails a run.
+The one write the worker waits for is the terminal ``result``: it must be in the mirror
+before the live channel shows it (``MirrorStream.append(wait_s=...)``), because the client
+deletes the sandbox at the result it sees; a failed write is stated on the live copy
+(``raw.mirror == "failed"``) and the client then writes the record itself.
 """
 
 from __future__ import annotations
@@ -42,6 +45,16 @@ _MAX_POLL_FAILURES = 10
 _MAX_WAIT_S = 3600.0
 
 _STOP = object()
+
+
+class _Ack:
+    """The outcome of one awaited write (``MirrorStream.append(wait_s=...)``)."""
+
+    __slots__ = ("done", "ok")
+
+    def __init__(self) -> None:
+        self.done = threading.Event()
+        self.ok = False
 
 
 def _blobs_and_prefix(events_uri: str, store: Any | None) -> tuple[Any, str]:
@@ -78,13 +91,25 @@ class MirrorStream:
         )
         self._thread.start()
 
-    def append(self, event: AgentEvent) -> None:
+    def append(self, event: AgentEvent, *, wait_s: float | None = None) -> bool | None:
+        """Queue ``event`` for the writer; never blocks on storage unless asked to.
+
+        With ``wait_s`` the call blocks until the batch holding this line has been written
+        and returns whether the write succeeded (``False`` on a storage error, a bad URI or
+        the timeout). The worker appends the terminal ``result`` this way, so the result is
+        in the durable record before the live channel can show it — the client deletes
+        the sandbox at the result it sees. Without ``wait_s`` the answer is ``None``.
+        """
         from .history import mirror_line
 
+        ack = _Ack() if wait_s is not None else None
         try:
-            self._queue.put((mirror_line(event), event.kind == "result"))
+            self._queue.put((mirror_line(event), event.kind == "result", ack))
         except Exception:  # noqa: BLE001 — never raise into the worker loop
-            pass
+            return False if ack is not None else None
+        if ack is None:
+            return None
+        return ack.done.wait(wait_s) and ack.ok
 
     def close(self, timeout: float = _CLOSE_TIMEOUT_S) -> None:
         """Flush the remainder and stop the writer thread (sync, bounded)."""
@@ -96,25 +121,38 @@ class MirrorStream:
 
     def _drain(self) -> None:
         buffered: list[dict] = []
+        acks: list[_Ack] = []
+
+        def flush() -> None:
+            nonlocal buffered, acks
+            ok = self._flush(buffered)
+            for ack in acks:
+                ack.ok = ok
+                ack.done.set()
+            buffered, acks = [], []
+
         while True:
             try:
                 item = self._queue.get(timeout=_FLUSH_INTERVAL_S if buffered else None)
             except queue.Empty:
-                self._flush(buffered)
-                buffered = []
+                flush()
                 continue
             if item is _STOP:
-                self._flush(buffered)
+                flush()
                 return
-            line, urgent = item
+            line, urgent, ack = item
             buffered.append(line)
+            if ack is not None:
+                acks.append(ack)
             if urgent or len(buffered) >= _FLUSH_MAX_EVENTS:
-                self._flush(buffered)
-                buffered = []
+                flush()
 
-    def _flush(self, lines: list[dict]) -> None:
-        if not lines or self._blobs is None:
-            return
+    def _flush(self, lines: list[dict]) -> bool:
+        """Write ``lines`` as one batch object; ``True`` when the store took it."""
+        if not lines:
+            return True
+        if self._blobs is None:
+            return False
         self._seq += 1
         key = (
             f"{self._prefix}{self._session_id}/"
@@ -126,7 +164,8 @@ class MirrorStream:
             data = "\n".join(json.dumps(line) for line in lines).encode("utf-8")
             self._blobs.put_bytes(key, data)
         except Exception:  # noqa: BLE001 — best-effort; the run must not fail for telemetry
-            pass
+            return False
+        return True
 
 
 async def tail_stream(

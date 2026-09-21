@@ -204,7 +204,7 @@ def test_gemini_exec_validates_its_arguments():
 
 def test_gemini_exec_when_dispatch_fails_raises_instead_of_waiting_forever():
     provider = FakeSandboxProvider(lambda n: ScriptedWorker())
-    provider.fail_next["/turn"] = [RuntimeError("proxy down")] * backend.DISPATCH_ATTEMPTS
+    provider.fail_next["/turn"] = [SandboxGone("expired")] * backend.DISPATCH_ATTEMPTS
     engine = make_engine(provider)
     session = engine.start_session()
 

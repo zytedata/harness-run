@@ -91,7 +91,8 @@ class SandboxProvider(Protocol):
 
     def list_templates(self, *, display_name: str | None = None) -> list[dict]:
         """Live templates under the host instance, newest first: ``{name, display_name,
-        image_uri, cpu, memory, create_time, state}`` (deleted ones are not listed)."""
+        image_uri, cpu, memory, internet_access, create_time, state}`` (deleted ones are not
+        listed; ``internet_access`` is ``None`` when the platform does not report it)."""
         ...
 
     def delete_template(self, name: str) -> None:
@@ -444,12 +445,14 @@ class AgentSandboxProvider:
             env = getattr(tpl, "custom_container_environment", None)
             spec = getattr(env, "custom_container_spec", None)
             limits = getattr(getattr(env, "resources", None), "limits", None) or {}
+            egress = getattr(getattr(tpl, "egress_control_config", None), "internet_access", None)
             rows.append({
                 "name": tpl.name,
                 "display_name": display,
                 "image_uri": getattr(spec, "image_uri", None),
                 "cpu": limits.get("cpu") if isinstance(limits, dict) else None,
                 "memory": limits.get("memory") if isinstance(limits, dict) else None,
+                "internet_access": bool(egress) if egress is not None else None,
                 "create_time": _ts(getattr(tpl, "create_time", None)),
                 "state": state_name,
             })

@@ -53,15 +53,16 @@ def event_from_mirror(d: dict) -> AgentEvent:
 def write_turn_mirror(
     events_uri: str, session_id: str, events: list[dict], *, now_ms: int, store: Any | None = None,
     turn_id: str | None = None,
-) -> None:
-    """Write one batch of mirrored events as a file; best-effort (never fails a run).
+) -> bool:
+    """Write one batch of mirrored events as a file; best-effort (never raises).
 
     ``events_uri`` is ``<output_bucket>/events``; the file lands at
     ``<base>/<sid>/<epoch_ms>[-<turn>-<writer>-0000].jsonl`` so lexical order == chronological.
-    Used for one-shot markers and pre-``MirrorStream`` failures.
+    Used for one-shot markers, pre-``MirrorStream`` failures and the client's own copy of a
+    terminal result the worker could not persist. Returns whether the store took it.
     """
     if not events:
-        return
+        return True
     try:
         bucket, prefix = parse_gcs_uri(events_uri)
         blobs = store if store is not None else GcsBlobStore(bucket)
@@ -70,7 +71,8 @@ def write_turn_mirror(
         data = "\n".join(json.dumps(line) for line in events).encode("utf-8")
         blobs.put_bytes(key, data)
     except Exception:  # noqa: BLE001 — mirroring is best-effort by design
-        pass
+        return False
+    return True
 
 
 def _parse_jsonl(data: bytes, parse) -> list[AgentEvent]:

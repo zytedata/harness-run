@@ -370,11 +370,23 @@ These are facts measured live. The library encodes them so consumers inherit the
 - **A sandbox that stops answering** — the proxy fails `DIRECT_MAX_FAILURES` polls in a row, or the
   platform says it is gone (TTL, OOM, deleted elsewhere) — switches the stream to the mirror tail; a gone
   sandbox that left no terminal record ends the run with an explained `sandbox_unreachable` error result
-  after a 30 s grace. **A dispatch that no sandbox takes** (three attempts, each deleting the sandbox that
-  refused) ends the run with `dispatch_failed`. Neither hangs, neither replays the turn silently.
+  after a 30 s grace. **A dispatch that no sandbox takes** (three attempts, moving on only from a sandbox
+  that definitely never accepted the turn — gone before the call reached it, or refusing — and deleting it)
+  ends the run with `dispatch_failed`. **A `/turn` call whose answer was lost** (proxy timeout, 5xx) may
+  hide an acceptance — the worker answers as soon as the turn's thread runs — so it is settled with the
+  *same* sandbox first: acceptance is idempotent per turn id, the worker re-acknowledges a turn it knows,
+  and only a definitive refusal moves on. When that sandbox cannot be asked any more (vanished, or silent
+  for `DISPATCH_RECONCILE_S`), the run ends with `dispatch_uncertain` naming the sandbox, which is deleted
+  (stopping whatever it started). Neither hangs, and a turn is never replayed on a second sandbox while the
+  first may be running it. **The terminal result is durable before it is visible**: the worker writes it
+  to the mirror (awaited, bounded) before serving it on `/events`, so the client deletes the sandbox only
+  once the record holds the result; when that write fails (dead run-scoped token, storage outage) the
+  live copy carries `mirror: "failed"` and the client writes the line itself, before the delete.
 - **`interrupt()`** posts `stop` to `/control` and waits for the harness's normal end of turn (checkpoint,
   `INTERRUPTED` result); the fallback — no `control_ready` yet, or no answer within the timeout — cancels the
-  driver and **deletes the sandbox**, which is the cancel (and stops the billing).
+  driver and **deletes the sandbox**, which is the cancel (and stops the billing). A hand-over still in
+  flight cannot be stopped (the dispatch thread claims, then POSTs): the run is marked abandoned and the
+  sandbox the dispatch lands on — claimed, or already running the turn — is deleted the moment it lands.
 - **The client dying** leaves the sandbox to its TTL (`max_turn_s` for an on-demand sandbox,
   `pool_max_wait_s + max_turn_s` for a pool one): the platform's backstop.
 - The in-sandbox **Bash tool default timeout is 120 s** (Claude Code's own) — long commands need an explicit

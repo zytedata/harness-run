@@ -16,7 +16,7 @@ from sandbox_fakes import INSTANCE, FakeSandboxProvider, ScriptedWorker, make_en
 from remote_agent_toolkit import ControlUnavailable
 from remote_agent_toolkit.events import AgentEvent, RunStatus, StopReason
 from remote_agent_toolkit.ports.blobstore import LocalBlobStore
-from remote_agent_toolkit.runtime.gemini import backend, handoff, history
+from remote_agent_toolkit.runtime.gemini import backend, handoff, history, stream
 
 
 def _started(turn_id, worker):
@@ -52,11 +52,22 @@ class _Bucket:
         self.store.list = counting
         monkeypatch.setattr(history, "GcsBlobStore", lambda bucket, *a, **kw: self.store)
         monkeypatch.setattr(handoff, "GcsBlobStore", lambda bucket, *a, **kw: self.store)
+        monkeypatch.setattr(stream, "GcsBlobStore", lambda bucket, *a, **kw: self.store)  # the tail fallback
         monkeypatch.setattr(backend, "ADOPTED_RELEASE_DELAY_S", 0.0)
 
     def write(self, sid, turn_id, *events, ms=1000):
         history.write_turn_mirror("gs://out/events", sid, [history.mirror_line(e) for e in events],
                                   now_ms=ms, turn_id=turn_id, store=self.store)
+
+
+class _LingeringProvider(FakeSandboxProvider):
+    """The platform tears a sandbox down asynchronously, so a worker still answers an adopter's
+    last ``/events`` poll after the owner's delete; the plain fake vanishes at once, which would
+    race a slower adopter onto the mirror tail. Two-process tests use this one unless the test
+    is about the sandbox being gone."""
+
+    def delete(self, sandbox):
+        self.deleted.append(sandbox)
 
 
 def _two_processes(provider):
@@ -90,7 +101,7 @@ def _turn_calls(provider):
 
 def test_send_from_a_reattached_session_steers_the_turn_running_elsewhere(tmp_path, monkeypatch):
     bucket = _Bucket(tmp_path, monkeypatch)
-    provider = FakeSandboxProvider(lambda n: ScriptedWorker())
+    provider = _LingeringProvider(lambda n: ScriptedWorker())
     owner, session, other, adopter = _two_processes(provider)
 
     async def go():
@@ -129,7 +140,7 @@ def test_send_from_a_reattached_session_steers_the_turn_running_elsewhere(tmp_pa
 def test_current_run_hands_a_reattached_session_the_adopted_run(tmp_path, monkeypatch):
     """The public handle: an adopter consumes the run's events as the owner would."""
     bucket = _Bucket(tmp_path, monkeypatch)
-    provider = FakeSandboxProvider(lambda n: ScriptedWorker())
+    provider = _LingeringProvider(lambda n: ScriptedWorker())
     owner, session, other, adopter = _two_processes(provider)
 
     async def go():
@@ -168,14 +179,7 @@ def test_busy_and_last_result_adopt_a_running_turn_like_current_run(tmp_path, mo
     re-attach path) must keep the turn's tokens fresh and own its sandbox too."""
     bucket = _Bucket(tmp_path, monkeypatch)
 
-    class LingeringDelete(FakeSandboxProvider):
-        # The platform tears a sandbox down asynchronously, so the worker still answers the
-        # adopters' last /events poll after the owner's delete; the plain fake vanishes at
-        # once, which would send a slower adopter to the mirror tail instead.
-        def delete(self, sandbox):
-            self.deleted.append(sandbox)
-
-    provider = LingeringDelete(lambda n: ScriptedWorker())
+    provider = _LingeringProvider(lambda n: ScriptedWorker())
     owner, session, other, adopter = _two_processes(provider)
     third_engine = make_engine(provider)
 
@@ -235,7 +239,7 @@ def test_interrupt_from_a_reattached_session_stops_the_turn_running_elsewhere(tm
             w.emit(result_event("stopped", subtype="interrupted"))
             w.finish()
 
-    provider = FakeSandboxProvider(lambda n: ScriptedWorker(on_control=on_control))
+    provider = _LingeringProvider(lambda n: ScriptedWorker(on_control=on_control))
     owner, session, other, adopter = _two_processes(provider)
 
     async def go():
@@ -261,7 +265,7 @@ def test_interrupt_waits_for_a_replayed_control_ready_when_the_mirror_has_none_y
             w.emit(result_event("stopped", subtype="interrupted"))
             w.finish()
 
-    provider = FakeSandboxProvider(lambda n: ScriptedWorker(on_control=on_control))
+    provider = _LingeringProvider(lambda n: ScriptedWorker(on_control=on_control))
     owner, session, other, adopter = _two_processes(provider)
 
     async def go():
@@ -281,7 +285,7 @@ def test_interrupt_waits_for_a_replayed_control_ready_when_the_mirror_has_none_y
 
 def test_run_on_a_reattached_session_refuses_while_the_turn_runs_elsewhere(tmp_path, monkeypatch):
     bucket = _Bucket(tmp_path, monkeypatch)
-    provider = FakeSandboxProvider(lambda n: ScriptedWorker())
+    provider = _LingeringProvider(lambda n: ScriptedWorker())
     owner, session, other, adopter = _two_processes(provider)
 
     async def go():
@@ -302,7 +306,7 @@ def test_run_on_a_reattached_session_refuses_while_the_turn_runs_elsewhere(tmp_p
 
 def test_exec_from_a_reattached_session_probes_the_adopted_turn_then_refuses(tmp_path, monkeypatch):
     bucket = _Bucket(tmp_path, monkeypatch)
-    provider = FakeSandboxProvider(lambda n: ScriptedWorker())
+    provider = _LingeringProvider(lambda n: ScriptedWorker())
     owner, session, other, adopter = _two_processes(provider)
 
     async def go():
@@ -365,7 +369,7 @@ def test_a_session_started_here_never_looks_for_a_foreign_turn(tmp_path, monkeyp
 
 def test_an_adopter_whose_loop_shuts_down_leaves_the_turn_to_its_owner(tmp_path, monkeypatch):
     bucket = _Bucket(tmp_path, monkeypatch)
-    provider = FakeSandboxProvider(lambda n: ScriptedWorker())
+    provider = _LingeringProvider(lambda n: ScriptedWorker())
     owner, session, other, adopter = _two_processes(provider)
 
     async def go():

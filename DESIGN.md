@@ -1,5 +1,8 @@
 # agent-run — Design
 
+> Terminology: this document, and comments in the code, often say "the toolkit". That is this
+> library, `agent-run`, under the name it had while it was being designed.
+
 A Python library for **defining and running remote/background AI agents**. It distills the
 experience of two proofs-of-concept (self-healing spiders, interactive spider creation) built on
 `sandbox-agent-runtime` into reusable building blocks, so any team can stand up a Claude-Code-based

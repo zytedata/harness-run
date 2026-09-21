@@ -1,10 +1,10 @@
 # agent-run
 
-`agent-run` is a Python library for running **coding agents** locally and in remote sandbox environments through a common API.
+`agent-run` is a Python library for running coding agents locally and in remote sandbox environments through a common API.
 
-It provides an abstraction over agent harnesses such as **Claude Code** and **Codex**, with support for multiple model providers. Your application can switch harnesses or models without being tightly coupled to one vendor's agent runtime.
+It provides an abstraction over agent harnesses such as Claude Code and Codex, with support for multiple model providers. Your application can switch harnesses or models without being tightly coupled to one vendor's agent runtime.
 
-The same `Engine` → `Session` → `Run` API works locally for development and remotely on **GCP Agent Sandbox** for production. With a warm sandbox pool, remote agents can start and complete small tasks in just a few seconds.
+The same `Engine` → `Session` → `Run` API works locally for development and remotely on GCP Agent Sandbox for production. With a warm sandbox pool, remote agents can start and complete small tasks in just a few seconds.
 
 ## Install
 
@@ -65,7 +65,7 @@ result = await session.send(
 
 ### Run remotely
 
-The same agent can run remotely on **GCP Agent Sandbox**. `agent-run` handles building and deploying the agent environment and running each turn inside an isolated sandbox. Credentials are passed to each run rather than baked into the deployed agent:
+The same agent can run remotely on GCP Agent Sandbox. `agent-run` handles building and deploying the agent environment and running each turn inside an isolated sandbox. Credentials are passed to each run rather than baked into the deployed agent:
 
 ```python
 import os
@@ -132,17 +132,17 @@ The model can also be overridden per session or per turn, and an engine deployed
 
 Beyond the basic example, `agent-run` supports:
 
-- **Multiple agent harnesses and models** — Claude Code with Claude models, Codex with OpenAI models, and either harness with models served through OpenRouter.
-- **Local and remote execution** through the same API, with remote runs on GCP Agent Sandbox.
-- **Low-latency remote runs** using warm sandbox pools.
-- **Multi-turn sessions** with checkpoint/resume and durable remote history.
-- **Per-session and per-turn configuration** for models, prompts, budgets, tools, output schemas, and more.
-- **Streaming and polling** as alternatives to awaiting a completed run.
-- **Structured output** with Pydantic models or JSON Schema.
-- **Repository and workspace setup**, MCP servers, and agent skills.
-- **Per-run secrets** without baking credentials into deployed agents.
-- **Steering, interruption, and shell access** (`exec()`) while an agent is running.
-- **Usage, cost, and resource reporting** for production workloads.
+- Multiple agent harnesses and models — Claude Code with Claude models, Codex with OpenAI models, and either harness with models served through OpenRouter.
+- Local and remote execution through the same API, with remote runs on GCP Agent Sandbox.
+- Low-latency remote runs using warm sandbox pools.
+- Multi-turn sessions with checkpoint/resume and durable remote history.
+- Per-session and per-turn configuration for models, prompts, budgets, tools, output schemas, and more.
+- Streaming and polling as alternatives to awaiting a completed run.
+- Structured output with Pydantic models or JSON Schema.
+- Repository and workspace setup, MCP servers, and agent skills.
+- Per-run secrets without baking credentials into deployed agents.
+- Steering, interruption, and shell access (`exec()`) while an agent is running.
+- Usage, cost, and resource reporting for production workloads.
 
 ## Documentation
 

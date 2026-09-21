@@ -40,7 +40,7 @@ money, so they run by hand, never in CI. See [`TESTING.md`](../TESTING.md) for w
 
 | Script | Make target | What it covers |
 |---|---|---|
-| [`live_smoke.py`](live_smoke.py) | `make live-smoke` | the standard live validation: a throwaway engine from your checkout (image build + push + template + a ready pool), a pool turn with its latency, session/turn configs with a checkpoint resume, a steer into a running turn, the shell's isolation, teardown in `finally` |
+| [`live_smoke.py`](live_smoke.py) | `make live-smoke` | the standard live validation: a throwaway engine from your checkout (image build + push + template + a ready pool), a pool turn with its latency, session/turn configs with a checkpoint resume, a steer into a running turn, the shell's isolation, the model token's reach (refused on everything but the model), teardown in `finally` |
 | [`live_openrouter_probe.py`](live_openrouter_probe.py) | `make live-openrouter` | the OpenRouter models on both harnesses, locally |
 | [`live_openrouter_remote_probe.py`](live_openrouter_remote_probe.py) | `make live-openrouter-remote` | the same models on the sandbox runtime, plus the remote-only visibility surface (history) |
 | [`live_model_attribution.py`](live_model_attribution.py) | `make live-attribution` | did the turn run the model we asked for, from evidence the CLI and provider return |

@@ -142,7 +142,10 @@ Prerequisites: the GCP setup from the
 and the Docker CLI logged into the registry (`docker login -u oauth2accesstoken
 --password-stdin us-central1-docker.pkg.dev` with an access token). Defaults target the shared
 `my-project` test project and its `ratk-sandbox` repo; `MODEL_SA` overrides the model
-service account (default: the spike's `agent-runtime@`).
+service account (default: the toolkit's `ratk-model@<project>`, the predict-only account
+`ratk-gcp-setup` creates — the operator account would hand the agent the whole project, and
+the smoke's **model-token** check fails on any account whose token reaches more than the
+model).
 
 ### The limits probe (`dev/live_limits_probe.py`)
 
@@ -288,7 +291,10 @@ native models it checks alongside the OpenRouter ones.
 The sandbox has no Google identity of its own, so the two questions the earlier runtime needed
 separate probes for — what can the agent's shell reach, and did the worker do its GCS work on the
 run-scoped token — are answered by `make live-smoke` on every run: the **isolation** check prints
-what the shell reaches (a tenant identity that is 403 on the project), and every turn's
+what the shell reaches (a tenant identity that is 403 on the project), the **model-token** check
+fetches the token the agent's CLI actually uses — from the worker's loopback metadata server,
+mid-turn, through `session.exec()` — and shows it refused (401/403) on listing the project's
+reasoning engines, the output bucket and its service accounts, and every turn's
 `workspace_ready` event carries `scoped_gcs: true` while the mirror it streams to was written with
 that token (the worker has no other credential that could open the bucket). Run the smoke for any
 change to `scoped_gcs.py`, `GcsBlobStore`, the worker's turn body or the model-token path.

@@ -187,6 +187,15 @@ for the tag with this file's section as the notes.
   platform's `internet_access` flag, the check compares it (a listing that does not report the
   flag is trusted for the default, on, only — asking for no egress then always creates a
   template known to have none), and the deploy record stores what was asked.
+- **`make live-smoke` mints the model token from the toolkit's predict-only account and
+  checks what that token can reach** (PR #84 review, D). `MODEL_SA` defaulted to the
+  operator account, whose impersonated token — served to the agent by the worker's loopback
+  metadata server — carried that account's full project permissions, and the isolation check
+  probed only the platform's metadata server, so it could not notice. The default is now
+  `ratk-model@<project>` (`default_model_service_account`), and a new **model-token** check
+  fetches the loopback token mid-turn through `session.exec()` and requires it refused on
+  listing the project's reasoning engines, the output bucket and its service accounts (the
+  turn answering proves it is good for the model). `OUTPUT_BUCKET` is configurable too.
 - **The worker's run-scoped GCS token is refreshed while it is still alive, and its death is
   reported once** (ported from #87 to the sandbox worker). The worker fetches its replacement
   token WITH the current one, so the swap has to happen before the current token expires: the

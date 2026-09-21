@@ -30,6 +30,13 @@ branch that touches any deploy/runtime contract — it validates, on real infras
     what the agent's shell can reach — the metadata server's identity must be a tenant one
     that is 403 on our project's storage and Vertex (the sandbox has no usable Google
     identity); only statuses and names are printed, never tokens
+  * **model-token**: during a turn, ``session.exec()`` fetches the model token from the
+    worker's loopback metadata server (the one the agent's CLI is pointed at) and tries it on
+    non-predict calls — listing the project's reasoning engines, the output bucket and its
+    service accounts must all be refused (401/403) — while the turn itself answering proves
+    the token is good for the model; a token that can list any of those is a MODEL_SA with
+    more than the predict-only role, and the check fails. Only statuses and lengths are
+    printed, never the token
   * optional ``LONG_MINUTES=n``: a turn whose one Bash call sleeps that long (the model
     token, the sandbox TTL and the /events long-poll all have to hold). While it sleeps the
     check probes the container's ``/proc`` and cgroup files through ``session.exec()`` and
@@ -45,8 +52,10 @@ answer in the text (plus the check's own assertions). The engine (templates + sa
 is deleted in ``finally``; exit code is non-zero if any check fails.
 
 Configure via env (defaults are the shared my-project test setup):
-  PROJECT, LOCATION, IMAGE_REPO, MODEL_SA, SUFFIX (engine-name suffix; defaults to your
-  username), CPU / MEMORY (the template's size, default the runtime's 4 / 4Gi — a 4 CPU
+  PROJECT, LOCATION, IMAGE_REPO, MODEL_SA (the account whose token the agent's model calls
+  carry; default the toolkit's own ``ratk-model@<project>``, the predict-only account
+  ``ratk-gcp-setup`` creates — never the operator account, whose token would hand the
+  agent the project), SUFFIX (engine-name suffix; defaults to your username), CPU / MEMORY (the template's size, default the runtime's 4 / 4Gi — a 4 CPU
   template took the platform up to its 30-minute deadline on 2026-09-14/15; CPU=1 MEMORY=1Gi
   provisions in seconds), LONG_MINUTES, TOKEN_LIFETIME_S, KEEP=1 (skip teardown), IMPERSONATE=<service account email>
   (drive everything but the Docker push as that account — to prove a role is sufficient;
@@ -72,11 +81,13 @@ import time
 import traceback
 
 from remote_agent_toolkit import AgentSpec, SessionConfig, StopReason, SystemPrompt, TurnConfig, gemini
+from remote_agent_toolkit.runtime.gemini.model_token import default_model_service_account
 
 PROJECT = os.environ.get("PROJECT", "my-project")
 LOCATION = os.environ.get("LOCATION", "us-central1")
 IMAGE_REPO = os.environ.get("IMAGE_REPO") or f"{LOCATION}-docker.pkg.dev/{PROJECT}/ratk-sandbox"
-MODEL_SA = os.environ.get("MODEL_SA", "agent-runtime@my-project.iam.gserviceaccount.com")
+MODEL_SA = os.environ.get("MODEL_SA") or default_model_service_account(PROJECT)
+OUTPUT_BUCKET = os.environ.get("OUTPUT_BUCKET") or f"gs://{PROJECT}-agent-output"
 SUFFIX = re.sub(r"[^a-z0-9-]", "-", (os.environ.get("SUFFIX") or getpass.getuser()).lower())
 LONG_MINUTES = float(os.environ.get("LONG_MINUTES", "0") or 0)
 TOKEN_LIFETIME_S = int(os.environ.get("TOKEN_LIFETIME_S", "0") or 0)
@@ -171,31 +182,74 @@ STEER_TASK = (
     "or NONE if you received none."
 )
 ANSWER_SCHEMA = {"type": "object", "properties": {"answer": {"type": "integer"}}, "required": ["answer"]}
-ISOLATION_SCRIPT = r"""
-python3 - <<'PY'
-import json, urllib.request as u
+# What a token can reach in OUR project: every one of these is outside the model account's
+# predict-only role, so the answer must be 401/403 for the loopback model token and for
+# whatever the platform's own metadata server hands out. Statuses only, never tokens.
+_PROBE_PRELUDE = r"""
+import json, os, urllib.request as u
 def get(url, hdr=None):
     try:
         r = u.urlopen(u.Request(url, headers=hdr or {}), timeout=6)
         return r.status, r.read().decode()
     except Exception as e:
         return getattr(e, "code", type(e).__name__), ""
+def reach(tok):
+    h = {"Authorization": f"Bearer {tok}"}
+    return {
+        "gcs_list": str(get("https://storage.googleapis.com/storage/v1/b/%(bucket)s/o?maxResults=1", h)[0]),
+        "vertex_engines": str(get("https://%(location)s-aiplatform.googleapis.com/v1/projects/%(project)s/locations/%(location)s/reasoningEngines", h)[0]),
+        "iam_accounts": str(get("https://iam.googleapis.com/v1/projects/%(project)s/serviceAccounts", h)[0]),
+    }
+def token_from(host):
+    mds = f"http://{host}/computeMetadata/v1/instance/service-accounts/default/"
+    st, body = get(mds + "token", {"Metadata-Flavor": "Google"})
+    tok = json.loads(body).get("access_token", "") if st == 200 and body.startswith("{") else ""
+    return st, tok
+"""
+
+ISOLATION_SCRIPT = r"""
+python3 - <<'PY'
+%(prelude)s
 out = {}
 mds = "http://169.254.169.254/computeMetadata/v1/instance/service-accounts/default/"
 st, email = get(mds + "email", {"Metadata-Flavor": "Google"})
 out["mds_identity"] = f"{st} {email.strip()[-40:]}" if st == 200 else str(st)
-st, body = get(mds + "token", {"Metadata-Flavor": "Google"})
-tok = json.loads(body).get("access_token", "") if st == 200 and body.startswith("{") else ""
+st, tok = token_from("169.254.169.254")
 out["mds_token"] = f"{st} len={len(tok)}"
 if tok:
-    h = {"Authorization": f"Bearer {tok}"}
-    out["gcs_list"] = str(get("https://storage.googleapis.com/storage/v1/b/my-project-agent-output/o?maxResults=1", h)[0])
-    out["vertex"] = str(get("https://aiplatform.googleapis.com/v1/projects/my-project/locations/us-central1/reasoningEngines", h)[0])
-import os
+    out.update(reach(tok))
 out["env_token_names"] = sorted(k for k in os.environ if "TOKEN" in k or "KEY" in k)
 print("ISOLATION " + json.dumps(out))
 PY
 """.strip()
+
+# Run through ``session.exec()`` while a turn runs: the loopback metadata server's token is
+# the one the agent's CLI uses for its model calls (``%(host)s`` from the worker's /health).
+MODEL_TOKEN_SCRIPT = r"""
+python3 - <<'PY'
+%(prelude)s
+out = {}
+st, tok = token_from("%(host)s")
+out["loopback_token"] = f"{st} len={len(tok)}"
+if tok:
+    out.update(reach(tok))
+    st, body = get("https://oauth2.googleapis.com/tokeninfo?access_token=" + tok)
+    info = json.loads(body) if st == 200 and body.startswith("{") else {}
+    out["token_email"] = str(info.get("email") or "-")
+    out["token_expires_in_s"] = str(info.get("expires_in") or "-")
+print("MODEL-TOKEN " + json.dumps(out))
+PY
+""".strip()
+
+
+def _probe_script(template: str, **fields: str) -> str:
+    prelude = _PROBE_PRELUDE % {"bucket": OUTPUT_BUCKET.removeprefix("gs://"), "project": PROJECT, "location": LOCATION}
+    return template % {"prelude": prelude, **fields}
+
+
+def _refused(facts: dict) -> bool:
+    """Every non-predict probe in ``facts`` was refused (or, for a probe that could not run, absent)."""
+    return all(facts.get(k) in ("401", "403", None) for k in ("gcs_list", "vertex_engines", "iam_accounts"))
 MARKER = "SESSION-CONFIG-OK"
 
 
@@ -435,7 +489,8 @@ async def check_isolation(engine, verdicts) -> None:
         handle = await asyncio.to_thread(engine._create_sandbox, 600)
         sandbox = handle.name
         out = await asyncio.to_thread(
-            engine._provider().call, sandbox, "/exec", {"command": ISOLATION_SCRIPT, "timeout": 60}, timeout_s=90)
+            engine._provider().call, sandbox, "/exec",
+            {"command": _probe_script(ISOLATION_SCRIPT), "timeout": 60}, timeout_s=90)
         line = next((ln for ln in (out.get("stdout") or "").splitlines() if ln.startswith("ISOLATION ")), "")
         facts = _json.loads(line[len("ISOLATION "):]) if line else {}
         log(label, f"rc={out.get('returncode')} facts={facts} stderr={(out.get('stderr') or '')[-120:]!r}")
@@ -443,7 +498,7 @@ async def check_isolation(engine, verdicts) -> None:
         verdicts[label] = (
             bool(facts)
             and "gserviceaccount.com" not in identity  # a tenant identity, not one of ours
-            and facts.get("gcs_list") in ("403", "401", None) and facts.get("vertex") in ("403", "401", None)
+            and _refused(facts)
             and "ANTHROPIC_AUTH_TOKEN" not in facts.get("env_token_names", [])  # nothing outside a turn
         )
     except Exception:
@@ -452,6 +507,42 @@ async def check_isolation(engine, verdicts) -> None:
     finally:
         if sandbox is not None:
             await asyncio.to_thread(engine._release_sandbox, sandbox)
+
+
+async def check_model_token(engine, verdicts) -> None:
+    """The token the agent's model calls carry (the worker's loopback metadata server) is
+    good for the model — the turn answers — and for nothing else in the project."""
+    label = "model-token"
+    import json as _json
+
+    try:
+        session = engine.start_session()
+        run = session.run("Run `sleep 20` in the shell (a single Bash call; do not skip it), then run "
+                          '`python3 -c "print(6 * 7)"` and reply with just the number it prints.')
+        await session.exec("true", timeout=30)  # waits for the dispatch: the worker is reachable now
+        host = None
+        for _ in range(20):  # the worker binds its metadata server as the turn starts
+            health = await asyncio.to_thread(engine._provider().call, session._sandbox, "/health", {}, timeout_s=30)
+            host = health.get("metadata_host")
+            if host or run.done:
+                break
+            await asyncio.sleep(0.5)
+        log(label, f"worker metadata server at {host!r} (running turn {str(health.get('running_turn'))[:8]})")
+        facts = {}
+        if host:
+            probe = await session.exec(_probe_script(MODEL_TOKEN_SCRIPT, host=host), timeout=60)
+            line = next((ln for ln in probe.stdout.splitlines() if ln.startswith("MODEL-TOKEN ")), "")
+            facts = _json.loads(line[len("MODEL-TOKEN "):]) if line else {}
+            log(label, f"rc={probe.returncode} facts={facts} stderr={probe.stderr[-120:]!r}")
+        r, _events, _ = await _drive(label, run)
+        fetched = str(facts.get("loopback_token", "")).startswith("200 len=") and facts.get("loopback_token") != "200 len=0"
+        verdicts[label] = _ok(r) and fetched and _refused(facts)
+        if fetched and not _refused(facts):
+            log(label, f"the model token reaches more than the model — {MODEL_SA} holds more than the "
+                       "predict-only role (run `ratk-gcp-setup --check`)")
+    except Exception:
+        log(label, "FAILED:\n" + traceback.format_exc())
+        verdicts[label] = False
 
 
 PROC_PROBE = (
@@ -504,7 +595,7 @@ async def main() -> int:
     engine = None
     try:
         log("deploy", f"deploying {NAME} (warm_pool=True, pool_size=1) as "
-                      f"{IMPERSONATE or 'the ADC principal'} ...")
+                      f"{IMPERSONATE or 'the ADC principal'}; model token from {MODEL_SA} ...")
         t0 = time.time()
         spec = _spec()
         if LONG_MINUTES:
@@ -512,8 +603,8 @@ async def main() -> int:
                                                        "BASH_MAX_TIMEOUT_MS": str(int(LONG_MINUTES * 60 * 1000) + 120_000)}})
         engine = await asyncio.to_thread(
             gemini.deploy, spec, PROJECT, LOCATION, warm_pool=True, pool_size=1,
-            image_repo=IMAGE_REPO, model_service_account=MODEL_SA, log=lambda m: log("deploy", m),
-            credentials=CREDS, resource_limits=RESOURCE_LIMITS,
+            image_repo=IMAGE_REPO, model_service_account=MODEL_SA, output_bucket=OUTPUT_BUCKET,
+            log=lambda m: log("deploy", m), credentials=CREDS, resource_limits=RESOURCE_LIMITS,
         )
         log("deploy", f"deployed in {time.time() - t0:.0f}s: version={engine.version} image={engine.revisions()[0]['image']}")
         verdicts["deploy"] = True
@@ -522,7 +613,8 @@ async def main() -> int:
         await check_pool_turn(engine, verdicts)
         await asyncio.gather(check_configs(verdicts), check_steer(engine, verdicts),
                              check_early_steer(engine, verdicts), check_exec(engine, verdicts),
-                             check_reattach_control(engine, verdicts), check_isolation(engine, verdicts))
+                             check_reattach_control(engine, verdicts), check_isolation(engine, verdicts),
+                             check_model_token(engine, verdicts))
         if LONG_MINUTES:
             await check_long(engine, verdicts)
     except Exception:

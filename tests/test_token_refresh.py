@@ -1,4 +1,4 @@
-"""Run-scoped token expiry/renewal with fake clocks, stores and thread startup (B02)."""
+"""Run-scoped token expiry/renewal with fake clocks, stores and thread startup."""
 import datetime as dt
 from types import SimpleNamespace
 

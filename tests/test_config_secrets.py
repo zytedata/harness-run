@@ -1,4 +1,4 @@
-"""Secret references, not values, belong in durable configuration (S11-B)."""
+"""Secret references, not values, belong in durable configuration."""
 import json
 
 import pytest

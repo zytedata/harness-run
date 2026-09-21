@@ -1,4 +1,4 @@
-"""A failed credential scrub must never create a credential-bearing snapshot (S11)."""
+"""A failed credential scrub must never create a credential-bearing snapshot."""
 from pathlib import Path
 
 import pytest

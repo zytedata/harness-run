@@ -1,4 +1,4 @@
-"""A failed config read must not turn a reattached session into an unconfigured one (S13)."""
+"""A failed config read must not turn a reattached session into an unconfigured one."""
 import json
 
 import pytest

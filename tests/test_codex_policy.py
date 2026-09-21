@@ -1,4 +1,4 @@
-"""Unsupported security restrictions must not produce runnable Codex options (S10)."""
+"""Unsupported security restrictions must not produce runnable Codex options."""
 import pytest
 
 from agent_run import AgentSpec

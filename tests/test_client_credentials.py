@@ -1,4 +1,4 @@
-"""Client-side GCS operations must honor the engine's explicit identity (S14)."""
+"""Client-side GCS operations must honor the engine's explicit identity."""
 import json
 from types import SimpleNamespace
 

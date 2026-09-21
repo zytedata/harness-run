@@ -1,5 +1,10 @@
 # agent-run
 
+[![PyPI](https://img.shields.io/pypi/v/agent-run.svg)](https://pypi.org/project/agent-run/)
+[![Python versions](https://img.shields.io/pypi/pyversions/agent-run.svg)](https://pypi.org/project/agent-run/)
+[![CI](https://github.com/zytedata/remote-agent-toolkit/actions/workflows/ci.yml/badge.svg)](https://github.com/zytedata/remote-agent-toolkit/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+
 `agent-run` is a Python library for running coding agents locally and in remote sandbox environments through a common API.
 
 It provides an abstraction over agent harnesses such as Claude Code and Codex, with support for multiple model providers. Your application can switch harnesses or models without being tightly coupled to one vendor's agent runtime.
@@ -21,8 +26,8 @@ pip install "agent-run[local]"
 ## Requirements
 
 - Python 3.12 or newer.
-- Credentials for the model the agent uses. Codex needs `OPENAI_API_KEY`, passed to each run as a secret (locally it also picks up the environment variable). Claude Code needs `ANTHROPIC_API_KEY` in the environment or a logged-in `claude` CLI locally; on GCP Agent Sandbox, Claude models are routed through Vertex AI by default, so no Anthropic key is needed there.
-- For remote runs, a GCP project prepared with `agent-run-gcp-setup --project <your-project>` (installed with the library). See [GCP setup](docs/gcp-setup.md).
+- Credentials for the model the agent uses: an Anthropic, OpenAI or OpenRouter API key, or Vertex AI on the sandbox. See [Getting started](docs/getting-started.md#credentials).
+- For remote runs, a GCP project prepared with `agent-run-gcp-setup --project <your-project>`. See [GCP setup](docs/gcp-setup.md).
 
 ## Example
 

@@ -72,7 +72,7 @@ class RunContext:
             ``workspace``; the directory is the caller's, other sessions may be running
             in it, and it outlives the session, so a checkpoint neither snapshots nor
             credential-scrubs it — only the conversation is checkpointed.
-        control: A :class:`~remote_agent_toolkit.control.ControlChannel` the harness reads
+        control: A :class:`~agent_run.control.ControlChannel` the harness reads
             while the turn runs, or ``None``. Carries the operator's steer / interrupt /
             stop messages (``Session.send()`` on a running session, ``Session.interrupt()``);
             the runtime owns the transport (in-process queue on ``local``, a GCS inbox the

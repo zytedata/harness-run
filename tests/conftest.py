@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from remote_agent_toolkit.harness import pricing
+from agent_run.harness import pricing
 
 
 @pytest.fixture(autouse=True)
@@ -28,7 +28,7 @@ def _no_token_minting(monkeypatch):
     instead, and the client-side refresh writer/deleter become no-ops. ``test_scoped_gcs.py``
     covers the real functions against fakes.
     """
-    from remote_agent_toolkit.runtime.gemini import model_token, scoped_gcs
+    from agent_run.runtime.gemini import model_token, scoped_gcs
 
     monkeypatch.setattr(model_token, "mint_model_token", lambda *a, **kw: ("fake-model-token", None))
 
@@ -50,7 +50,7 @@ def _no_token_minting(monkeypatch):
 def _short_long_polls(monkeypatch):
     """Keep the client's /events long-poll short: ``asyncio.run`` waits for executor threads
     at shutdown, so a cancelled run would otherwise hold a test for the full hold time."""
-    from remote_agent_toolkit.runtime.gemini import backend
+    from agent_run.runtime.gemini import backend
 
     monkeypatch.setattr(backend, "EVENTS_WAIT_S", 0.2)
     monkeypatch.setattr(backend, "EVENTS_CALL_TIMEOUT_S", 5.0)

@@ -13,8 +13,8 @@ from typing import AsyncIterator
 
 import pytest
 
-from remote_agent_toolkit import AgentSpec, SkillSource, local
-from remote_agent_toolkit.events import AgentEvent, RunStatus, StopReason
+from agent_run import AgentSpec, SkillSource, local
+from agent_run.events import AgentEvent, RunStatus, StopReason
 
 
 def _result_ev(text="done", subtype="success", is_error=False, num_turns=3):
@@ -110,7 +110,7 @@ def test_run_hooks_reach_the_harness(tmp_path):
 
 
 def test_sync_run_forwards_config_and_hooks(tmp_path, monkeypatch):
-    from remote_agent_toolkit.config import TurnConfig
+    from agent_run.config import TurnConfig
 
     seen = {}
     spec = AgentSpec(name="demo", model="m")
@@ -170,8 +170,8 @@ def test_resume_restores_workspace(tmp_path):
     engine = local.deploy(spec, workdir=str(tmp_path / "wd"))
 
     # Pre-seed a checkpoint snapshot for a fixed session id, as a prior turn would have.
-    from remote_agent_toolkit.checkpoint.workspace import snapshot
-    from remote_agent_toolkit.ports.blobstore import LocalBlobStore
+    from agent_run.checkpoint.workspace import snapshot
+    from agent_run.ports.blobstore import LocalBlobStore
 
     seed = tmp_path / "seed"
     seed.mkdir()
@@ -190,8 +190,8 @@ def test_resume_restores_workspace(tmp_path):
 
 
 def _seed_snapshot(engine, sid, populate):
-    from remote_agent_toolkit.checkpoint.workspace import snapshot
-    from remote_agent_toolkit.ports.blobstore import LocalBlobStore
+    from agent_run.checkpoint.workspace import snapshot
+    from agent_run.ports.blobstore import LocalBlobStore
 
     seed = engine._blob_root.parent / f"seed-{sid}"
     seed.mkdir(parents=True)
@@ -312,7 +312,7 @@ def test_deploy_workspace_is_shared_by_every_session(tmp_path):
 def test_run_forwards_the_chosen_workspace(tmp_path, monkeypatch):
     # local.run() is deploy + start_session + await in one call, so it has to forward the
     # cwd choice; absorbing it would run the agent somewhere the caller never named.
-    import remote_agent_toolkit.harness as harness_mod
+    import agent_run.harness as harness_mod
 
     shared = tmp_path / "shared"
     seen = {}
@@ -330,8 +330,8 @@ def test_chosen_workspace_rejects_repos(tmp_path):
     # Repo provisioning clones to a fixed <cwd>/<repo name>, so sharing one cwd across
     # sessions can only work for the first: refuse the combination up front, at deploy and
     # at the session bind that could still introduce repos via its config.
-    from remote_agent_toolkit import RepoSource
-    from remote_agent_toolkit.config import SessionConfig
+    from agent_run import RepoSource
+    from agent_run.config import SessionConfig
 
     repos = [RepoSource.git("https://github.com/o/r")]
     shared = str(tmp_path / "shared")
@@ -354,8 +354,8 @@ def test_chosen_workspace_is_never_restored_over(tmp_path):
     spec = AgentSpec(name="demo", model="m", checkpoint=True)
     engine = local.deploy(spec, workdir=str(tmp_path / "wd"), workspace=str(shared))
 
-    from remote_agent_toolkit.checkpoint.workspace import snapshot
-    from remote_agent_toolkit.ports.blobstore import LocalBlobStore
+    from agent_run.checkpoint.workspace import snapshot
+    from agent_run.ports.blobstore import LocalBlobStore
 
     stale = tmp_path / "stale"
     stale.mkdir()
@@ -497,7 +497,7 @@ def test_interactive_decoupled_from_checkpoint(tmp_path):
 def test_checkpoint_blobstore_gcs_env_selection(tmp_path, monkeypatch):
     # AGENT_CHECKPOINT_GCS points the local engine's checkpoint blobs at GCS (same env
     # hook as the gemini runtime); without it the store is the pod-local <workdir>/blobs.
-    from remote_agent_toolkit.ports import blobstore as bs
+    from agent_run.ports import blobstore as bs
 
     created = {}
 
@@ -520,7 +520,7 @@ def test_checkpoint_blobstore_gcs_env_selection(tmp_path, monkeypatch):
 def test_transcript_wires_the_session_store_without_snapshotting(tmp_path):
     # transcript=True alone gives a session store to mirror the transcript to — and the
     # workspace snapshot stays off, so a huge working directory is not archived per turn.
-    from remote_agent_toolkit.harness._shared import finalize_checkpoint
+    from agent_run.harness._shared import finalize_checkpoint
 
     spec = AgentSpec(name="demo", model="m", transcript=True)
     engine = local.deploy(spec, workdir=str(tmp_path / "wd"))

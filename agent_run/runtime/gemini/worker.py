@@ -20,7 +20,7 @@ container, so the whole worker contract is a handful of JSON-over-POST endpoints
   the running turn (the ``ControlChannel`` the harness reads; replaces the GCS inbox).
 * ``/token``   — ``{turn_id, model_token: {access_token, expires_at}}``: replaces the model
   token the worker's **metadata server** serves. That server (loopback only, the port in
-  ``RATK_METADATA_PORT``) speaks the GCE metadata protocol for exactly one thing — the running
+  ``AGENT_RUN_METADATA_PORT``) speaks the GCE metadata protocol for exactly one thing — the running
   turn's model token — and the agent env points Claude Code at it (``GCE_METADATA_HOST``), so
   the CLI fetches the token itself and fetches it again before it expires. The client pushes
   a fresh hourly token here for as long as the turn runs (``model_token.py``).
@@ -59,11 +59,11 @@ from ...control import ControlMessage, run_shell
 from ...events import AgentEvent
 
 BOOT = time.time()
-WORKSPACE_ROOT = os.environ.get("RATK_WORKSPACE_ROOT", "/workspace")
+WORKSPACE_ROOT = os.environ.get("AGENT_RUN_WORKSPACE_ROOT", "/workspace")
 # The model-token metadata server (loopback). Not a template port: never proxied.
 DEFAULT_METADATA_PORT = 8081
 DEFAULT_TOKEN_EXPIRES_IN_S = 3600  # reported when the client sent no expiry
-BAKED_SPEC_PATH = os.environ.get("RATK_BAKED_SPEC", "/opt/toolkit/spec.json")
+BAKED_SPEC_PATH = os.environ.get("AGENT_RUN_BAKED_SPEC", "/opt/toolkit/spec.json")
 
 # /events paging: the proxy rejects answers past ~2 MB ("Response size too large", measured
 # at 2,002,042 bytes), so a page stops once its serialized events pass this budget. A single
@@ -149,7 +149,7 @@ def _exec(body: dict, workspace: str | Path, running: str | None) -> dict:
 
 
 def load_baked_spec(path: str = BAKED_SPEC_PATH) -> Any:
-    """The spec baked into this image at deploy (``RATK_BAKED_SPEC``)."""
+    """The spec baked into this image at deploy (``AGENT_RUN_BAKED_SPEC``)."""
     from ...spec import AgentSpec
 
     with open(path, encoding="utf-8") as fh:
@@ -158,9 +158,9 @@ def load_baked_spec(path: str = BAKED_SPEC_PATH) -> Any:
 
 def find_baked_skills(spec_path: str = BAKED_SPEC_PATH) -> Path | None:
     """The ``skills/`` dir baked next to the spec (and the toolkit package) at deploy, else ``None``."""
-    import remote_agent_toolkit
+    import agent_run
 
-    pkg = Path(remote_agent_toolkit.__file__).resolve().parent
+    pkg = Path(agent_run.__file__).resolve().parent
     for cand in (Path(spec_path).parent / "skills", pkg.parent / "skills"):
         if cand.is_dir():
             return cand
@@ -240,11 +240,11 @@ class Worker:
         self._lock = threading.Lock()
         self._turns: dict[str, TurnRecord] = {}
         # The metadata server binds lazily, on the first turn that carries a model token
-        # (``0`` → an ephemeral port; tests). ``None`` → ``RATK_METADATA_PORT`` or 8081.
+        # (``0`` → an ephemeral port; tests). ``None`` → ``AGENT_RUN_METADATA_PORT`` or 8081.
         self._metadata_port = metadata_port
         self._metadata: _MetadataServer | None = None
         # CPU/RAM self-sampling (resources.py): where to read (tests point at fake trees)
-        # and how often (``None`` → the RATK_RESOURCE_SAMPLE_S env / 20 s).
+        # and how often (``None`` → the AGENT_RUN_RESOURCE_SAMPLE_S env / 20 s).
         self._resource_root = resource_root
         self._resource_meminfo = resource_meminfo
         self._resource_sample_s = resource_sample_s
@@ -261,7 +261,7 @@ class Worker:
             if self._metadata is None:
                 port = self._metadata_port
                 if port is None:
-                    port = int(os.environ.get("RATK_METADATA_PORT", str(DEFAULT_METADATA_PORT)))
+                    port = int(os.environ.get("AGENT_RUN_METADATA_PORT", str(DEFAULT_METADATA_PORT)))
                 self._metadata = _MetadataServer(self, port)
             return self._metadata.host
 
@@ -695,7 +695,7 @@ class _MetadataHandler(BaseHTTPRequestHandler):
     the account) — the client libraries read those around the token call.
     """
 
-    server_version = "ratk-metadata/1"
+    server_version = "agent-run-metadata/1"
 
     def _send(self, code: int, body: str, ctype: str = "text/plain") -> None:
         data = body.encode("utf-8")
@@ -751,11 +751,11 @@ class _MetadataServer(ThreadingHTTPServer):
         super().__init__(("127.0.0.1", port), _MetadataHandler)
         self.worker = worker
         self.host = f"127.0.0.1:{self.server_address[1]}"
-        threading.Thread(target=self.serve_forever, name="ratk-metadata", daemon=True).start()
+        threading.Thread(target=self.serve_forever, name="agent-run-metadata", daemon=True).start()
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "ratk-sandbox-worker/1"
+    server_version = "agent-run-sandbox-worker/1"
 
     def _reply(self, payload: dict) -> None:
         data = json.dumps(payload).encode("utf-8")
@@ -798,7 +798,7 @@ def main() -> None:
     os.makedirs(WORKSPACE_ROOT, exist_ok=True)
     WORKER = Worker()
     srv = ThreadingHTTPServer(("0.0.0.0", port), Handler)
-    sys.stderr.write(f"ratk sandbox worker on :{port} (uid {os.getuid()})\n")
+    sys.stderr.write(f"agent-run sandbox worker on :{port} (uid {os.getuid()})\n")
     srv.serve_forever()
 
 

@@ -5,7 +5,7 @@ backend (`local` → `gemini`) changes. This is the prod path the top-level READ
 section describes, as a runnable template.
 
 Prerequisites (see the top-level README "GCP setup & required permissions"):
-  * `ratk-gcp-setup` done for the project (image repo, model service account, bucket), the Claude
+  * `agent-run-gcp-setup` done for the project (image repo, model service account, bucket), the Claude
     model enabled in Vertex Model Garden, and Docker logged into the registry (the deploy builds
     and pushes the agent's image).
 Configure via env (defaults are the shared my-project test setup):
@@ -27,7 +27,7 @@ import os
 
 import pydantic
 
-from remote_agent_toolkit import AgentSpec, SystemPrompt, gemini
+from agent_run import AgentSpec, SystemPrompt, gemini
 
 PROJECT = os.environ.get("PROJECT", "my-project")
 LOCATION = os.environ.get("LOCATION", "us-central1")
@@ -54,7 +54,7 @@ class Answer(pydantic.BaseModel):
 
 
 SPEC = AgentSpec(
-    name="ratk-example",
+    name="agent-run-example",
     # A family alias enabled in your Vertex Model Garden (see the README model-access note).
     model="claude-haiku-4-5",
     system_prompt=SystemPrompt.inherit(append="Be concise. Verify your work by running code."),

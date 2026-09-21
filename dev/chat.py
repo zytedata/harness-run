@@ -28,8 +28,8 @@ import time
 import uuid
 from dataclasses import asdict, is_dataclass
 
-from remote_agent_toolkit import AgentSpec, local
-from remote_agent_toolkit.events import RunStatus
+from agent_run import AgentSpec, local
+from agent_run.events import RunStatus
 
 try:
     import uvicorn
@@ -50,7 +50,7 @@ parser.add_argument("--max-budget", type=float, default=2.0)
 args = parser.parse_args()
 
 MODEL = args.model or DEFAULT_MODELS[args.harness]
-WORKDIR = args.workdir or tempfile.mkdtemp(prefix="ratk-chat-")
+WORKDIR = args.workdir or tempfile.mkdtemp(prefix="agent-run-chat-")
 SPEC = AgentSpec(
     name=f"chat-{args.harness}", model=MODEL, harness=args.harness, checkpoint=True,
     max_turns=60, max_budget_usd=args.max_budget,
@@ -219,7 +219,7 @@ async def index():
 
 
 HTML = r"""<!doctype html>
-<html><head><meta charset="utf-8"><title>ratk chat</title>
+<html><head><meta charset="utf-8"><title>agent-run chat</title>
 <style>
   :root { --bg:#0f1115; --panel:#171a21; --line:#2a2f3a; --fg:#e6e6e6; --muted:#8b93a7;
           --user:#2b4c7e; --steer:#5b3f8c; --assist:#1f2a37; --ok:#2f9e44; --warn:#e8a33d; --err:#d9480f; }
@@ -250,7 +250,7 @@ HTML = r"""<!doctype html>
 </style></head>
 <body>
 <header>
-  <strong>ratk chat</strong>
+  <strong>agent-run chat</strong>
   <span id="pill" class="pill pending">no session</span>
   <span class="muted" id="meta"></span>
   <span class="muted" id="cost"></span>
@@ -349,6 +349,6 @@ newSession();
 """
 
 if __name__ == "__main__":
-    print(f"ratk chat: harness={args.harness} model={MODEL} workdir={WORKDIR}", flush=True)
+    print(f"agent-run chat: harness={args.harness} model={MODEL} workdir={WORKDIR}", flush=True)
     print(f"open http://127.0.0.1:{args.port}", flush=True)
     uvicorn.run(app, host="127.0.0.1", port=args.port, log_level="warning")

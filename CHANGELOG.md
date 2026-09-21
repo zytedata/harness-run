@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to `remote-agent-toolkit` are documented here.
+All notable changes to `agent-run` are documented here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning is [SemVer](https://semver.org/)-style with the usual 0.x caveat:
@@ -14,8 +14,8 @@ internal PyPI (https://pypi.internal.example/simple/) by `.github/workflows/publ
 install a specific release with
 
 ```
-uv pip install "remote-agent-toolkit==X.Y.Z" --extra-index-url "https://<user>:<password>@pypi.internal.example/simple/"
-uv pip install "remote-agent-toolkit @ git+https://github.com/zytedata/remote-agent-toolkit@vX.Y.Z"
+uv pip install "agent-run==X.Y.Z" --extra-index-url "https://<user>:<password>@pypi.internal.example/simple/"
+uv pip install "agent-run @ git+https://github.com/zytedata/remote-agent-toolkit@vX.Y.Z"
 ```
 
 Release checklist: update this file (move the `Unreleased` section into a new
@@ -27,6 +27,35 @@ for the tag with this file's section as the notes.
 ## Unreleased
 
 ### Backwards-incompatible
+
+- **The library is renamed `remote-agent-toolkit` -> `agent-run`**, ahead of the open-source
+  release. The distribution is `agent-run`, the import root is `agent_run`, the console script
+  is `agent-run-gcp-setup`, and the `RATK_*` environment variables are now `AGENT_RUN_*`
+  (`AGENT_RUN_RESOURCE_SAMPLE_S`, `AGENT_RUN_GITHUB_MCP_TOKEN`, `AGENT_RUN_OPENROUTER_PROXY_TOKEN`,
+  `AGENT_RUN_MCP_HEADER_*`, `AGENT_RUN_METADATA_PORT`, `AGENT_RUN_WORKSPACE_ROOT`,
+  `AGENT_RUN_BAKED_SPEC`). **Update note**: change your imports (`import remote_agent_toolkit`
+  -> `import agent_run`), rename any `RATK_*` variable you set, and re-run
+  `agent-run-gcp-setup --project <id>` once per project — the GCP resources the tool creates are
+  renamed with it and the new ones do not exist yet:
+  - the Artifact Registry Docker repo `ratk` -> `agent-run` (deploy's default `image_repo`),
+  - the model service account `ratk-model@` -> `agent-run-model@`,
+  - its custom role `ratkRuntimePredict` -> `agentRunPredict`.
+
+  The old repo, account and role are left in place; delete them once nothing deploys against
+  them. Images already pushed to the `ratk` repo stay valid — pass `gemini.deploy(image=...)`
+  or `image_repo=...` to keep using them.
+
+  Sandbox display names now start with `agent-run-<agent>-` instead of `ratk-<agent>-`, and the
+  sandbox host is `agent-run-sandbox-host`. The display-name prefix is how a client finds and
+  sweeps its own sandboxes, so sandboxes created by an older version are not swept by this one:
+  they are not adopted, and they expire on their own TTL (`max_turn_s`, default 8 h) instead.
+  Drain or delete them before upgrading if you would rather not pay for the overlap.
+
+  One identifier is deliberately **not** renamed: the `ratk-session:` uuid5 salt in
+  `agent_run/checkpoint/session_store.py`. It is a hash input, never displayed, and its output
+  keys both the transcript blob prefix and the run-scoped GCS credential's scope, so renaming it
+  would silently orphan every stored session (uuid5 is one-way — they could not be found again).
+  See the note in that function if it ever has to change.
 
 - **The `gemini` backend runs on Agent Sandbox instead of Agent Runtime query jobs** (#84,
   DESIGN.md §13). `gemini.deploy` now builds the agent's container image with Docker, pushes it
@@ -43,8 +72,8 @@ for the tag with this file's section as the notes.
   looks an engine up and runs turns keeps working. What breaks:
   - `gemini.deploy` drops `service_account`, `scoped_gcs`, `min_instances`, `max_instances`,
     `staging_bucket`, `new_engine`; adds `image_repo` (Artifact Registry Docker repo; default
-    `<location>-docker.pkg.dev/<project>/ratk`), `image` (skip the build, use a pushed image),
-    `model_service_account` (default `ratk-model@<project>`), `max_turn_s` (a turn's ceiling on
+    `<location>-docker.pkg.dev/<project>/agent-run`), `image` (skip the build, use a pushed image),
+    `model_service_account` (default `agent-run-model@<project>`), `max_turn_s` (a turn's ceiling on
     a sandbox, default 8 h), `internet_access`, `log`. `use_vertex`, `resource_limits`
     (`cpu` now 1–8), `warm_pool` / `pool_size` / `pool_max_wait_s`, `output_bucket`,
     `credentials` stay. Deploying needs the Docker CLI logged into the registry.
@@ -60,15 +89,15 @@ for the tag with this file's section as the notes.
   - Session ids are always client-minted UUIDs; `list_sessions()` reads the event mirror only;
     `history()` has the mirror layer only (no platform job output, no Cloud Logging).
   - CPU/RAM self-sampling stays but moves: the worker samples its cgroup (gVisor mounts v1
-    accounting) every 20 s (`RATK_RESOURCE_SAMPLE_S` replaces `AGENT_RESOURCE_SAMPLE_S`) and
+    accounting) every 20 s (`AGENT_RUN_RESOURCE_SAMPLE_S` replaces `AGENT_RESOURCE_SAMPLE_S`) and
     writes the samples to the session's **event mirror only** instead of the
-    `remote_agent_toolkit_resources` Cloud Logging log — `session.resource_samples()` reads
+    `agent_run_resources` Cloud Logging log — `session.resource_samples()` reads
     them from there (rows as before: `time` + `memory_current_bytes` / `memory_limit_bytes` /
     `memory_peak_bytes` / `cpu_usec`), `session.history()` leaves them out unless
     `include_samples=True`. The memory-pressure status event and the `memory_peak_bytes` /
     `memory_limit_bytes` / `cpu_usec` keys on the result's `raw` are unchanged, and the same
     three now come as `RunResult.resources` (`None` when nothing was sampled, e.g. `local`).
-    Cloud Trace spans and the `remote_agent_toolkit_steps` Cloud Logging log stop;
+    Cloud Trace spans and the `agent_run_steps` Cloud Logging log stop;
     `session.history()` is the record.
   - Events: `turn_started` carries the sandbox id as `worker` and `warm` (from the ready pool);
     `control_ready` reports the HTTP channel; `workspace_ready.scoped_gcs` is always true. A
@@ -84,7 +113,7 @@ for the tag with this file's section as the notes.
     permissions), storage on the output bucket, `artifactregistry.writer` on the image repo and
     `iam.serviceAccountTokenCreator` on the model service account; the Agent Sandbox service
     agent (`service-<number>@gcp-sa-vertex-sandbox`) needs `artifactregistry.reader` on the
-    repo. `ratk-gcp-setup` sets exactly this up (`--model-sa`, `--repo` replace
+    repo. `agent-run-gcp-setup` sets exactly this up (`--model-sa`, `--repo` replace
     `--runtime-sa`, `--staging-bucket`). The `ports.dispatch` and `ports.eventsink` modules are
     removed.
   - **Turns longer than an hour keep model access, with no setup.** The model token is not
@@ -101,9 +130,9 @@ for the tag with this file's section as the notes.
   - **Update notes for adopters (at the pin bump):**
     1. *Deploy prerequisites:* the Docker CLI logged into Artifact Registry
        (`docker login -u oauth2accesstoken --password-stdin <region>-docker.pkg.dev`); rerun
-       `ratk-gcp-setup --model-sa ... --repo ...` (it creates `ratk-model@` with the predict-only
+       `agent-run-gcp-setup --model-sa ... --repo ...` (it creates `agent-run-model@` with the predict-only
        role and grants the sandbox service agent read on the repo); `roles/iam.serviceAccountTokenCreator`
-       on `ratk-model@` for the deployer **and every identity that runs turns** (each client mints
+       on `agent-run-model@` for the deployer **and every identity that runs turns** (each client mints
        the model token). The platform caps a template at 8 vCPU; 16 GiB is verified.
     2. *Removed `deploy()` arguments now raise* (`service_account`, `scoped_gcs`, `min_instances`,
        `max_instances`, `staging_bucket`, `new_engine`), as do unknown ones — a deploy script that
@@ -230,7 +259,7 @@ for the tag with this file's section as the notes.
   operator account, whose impersonated token — served to the agent by the worker's loopback
   metadata server — carried that account's full project permissions, and the isolation check
   probed only the platform's metadata server, so it could not notice. The default is now
-  `ratk-model@<project>` (`default_model_service_account`), and a new **model-token** check
+  `agent-run-model@<project>` (`default_model_service_account`), and a new **model-token** check
   fetches the loopback token mid-turn through `session.exec()` and requires it refused on
   listing the project's reasoning engines, the output bucket and its service accounts (the
   turn answering proves it is good for the model). `OUTPUT_BUCKET` is configurable too.
@@ -249,7 +278,7 @@ for the tag with this file's section as the notes.
   worker's `/events` channel, then the mirror tail, then a synthetic error after a grace period.
 - **`engine.delete()` no longer deletes the ready sandboxes of an engine whose name extends
   this one's** (#84 field report). The orphan sweep matched sandboxes by display-name *prefix*, and
-  `ratk-x-` is a prefix of `ratk-x-b040d27-…` — so tearing down `x` next to the revision-suffixed
+  `agent-run-x-` is a prefix of `agent-run-x-b040d27-…` — so tearing down `x` next to the revision-suffixed
   `x-b040d27` (the naming the README recommends for side-by-side toolkit revisions) emptied the
   latter's pool, whose next turn then hit `FAILED_PRECONDITION` on each stale entry and fell back
   to a cold sandbox. The sweep now matches on the sandbox's **template** (one of this engine's
@@ -263,7 +292,7 @@ for the tag with this file's section as the notes.
 - **`wait_until_warm()` verifies the sandboxes it reports as ready.** Rostered entries that no
   longer answer `/health` (deleted by another action, OOM, reclaimed) are dropped from the roster
   and deleted, so `deploy --warm N` cannot print `ready` for a pool another action has emptied.
-- **`ratk-gcp-setup` discovers the ADC principal on a plain `gcloud auth application-default
+- **`agent-run-gcp-setup` discovers the ADC principal on a plain `gcloud auth application-default
   login`.** It asked Google's userinfo endpoint through the project-quota session, whose
   `x-goog-user-project` header made the endpoint answer 403 for a user without
   `serviceusage.serviceUsageConsumer` on the project, so the audit demanded `--impersonator` for
@@ -343,7 +372,7 @@ for the tag with this file's section as the notes.
   (the handle then only addresses the template and a Vertex-routed turn fails at dispatch). The
   usual cause is a `deploy` interrupted while waiting for the template to be created; the warning
   says to re-run `deploy`, which is idempotent (image and template reused, record written).
-- `remote_agent_toolkit.checkpoint.restore()` returns a `RestoreResult` (truthy iff a snapshot
+- `agent_run.checkpoint.restore()` returns a `RestoreResult` (truthy iff a snapshot
   existed; `.found`, `.skipped`) instead of a bare `bool`, and `BlobStore.get_tree()` returns the
   list of skipped member names instead of `None`. Truthiness checks keep working; `is True`
   comparisons do not.
@@ -386,12 +415,12 @@ for the tag with this file's section as the notes.
 
 - **`gemini.deploy` always runs the engine as a service account you own.** With
   `service_account=` omitted (or `None`) the engine now runs as
-  `ratk-runtime@<project>.iam.gserviceaccount.com`, the account `ratk-gcp-setup` creates
+  `agent-run-runtime@<project>.iam.gserviceaccount.com`, the account `agent-run-gcp-setup` creates
   with the README role set. There is no way to deploy as the platform default (the Agent
   Runtime service agent, the identity behind the security finding below), and the deploy
   checks the account exists before any side effect, failing with the fix
-  (`ratk-gcp-setup --project <id>`) when it does not. `ratk-gcp-setup --no-runtime-sa` is
-  gone for the same reason. **Update note**: run `ratk-gcp-setup --project <id>` once per
+  (`agent-run-gcp-setup --project <id>`) when it does not. `agent-run-gcp-setup --no-runtime-sa` is
+  gone for the same reason. **Update note**: run `agent-run-gcp-setup --project <id>` once per
   project (it only adds), then a plain redeploy from this revision moves each engine off
   the default identity. Pass `service_account=` only for an account of your own (the README
   role set plus what your agent needs). The deployer needs `roles/iam.serviceAccountUser`
@@ -423,7 +452,7 @@ for the tag with this file's section as the notes.
   `RUNTIME_SA=<email>` for the custom runtime identity, unset for a bucket in another
   project).
 - `gemini.deploy(..., service_account=)` sets the engine's runtime identity (forwarded to
-  `AgentEngineConfig.service_account`); omitted, the project's `ratk-runtime@` (see
+  `AgentEngineConfig.service_account`); omitted, the project's `agent-run-runtime@` (see
   Backwards-incompatible above). The account's Vertex role is a custom role with only
   `aiplatform.endpoints.predict` (README IAM table), never `roles/aiplatform.user`.
 - **Per-worker dispatch for warm pools.** Every warm worker of an engine used to pull one
@@ -452,7 +481,7 @@ for the tag with this file's section as the notes.
   install to a new `local` install extra. The remote path (deploying and
   driving Gemini Agent Runtime engines) is unaffected — engines install the
   SDKs from their own baked requirements. **Update note**: if you run agents
-  locally (`local.deploy`), install `remote-agent-toolkit[local]`; a missing
+  locally (`local.deploy`), install `agent-run[local]`; a missing
   SDK now fails with an error message pointing at the extra. Motivation:
   `claude-agent-sdk` pins `mcp<2`, which blocked remote-only clients from
   using the mcp 2.x SDK.
@@ -496,14 +525,14 @@ for the tag with this file's section as the notes.
 
 ### Added
 
-- `ratk-gcp-setup` (a console script; also `python -m
-  remote_agent_toolkit.runtime.gemini.project_setup`): one-command GCP project setup
+- `agent-run-gcp-setup` (a console script; also `python -m
+  agent_run.runtime.gemini.project_setup`): one-command GCP project setup
   for the `gemini` backend. Audits a project against the README's "GCP setup & required
   permissions" section — required APIs, the staging/output buckets (+ handoff lifecycle
   rules), the operator SA with project roles and *bucket-scoped* storage grants, the
-  impersonation grant, the runtime service account engines run as (`ratk-runtime`: the
-  `ratkRuntimePredict` custom role with only `aiplatform.endpoints.predict`, its project
-  roles, `objectViewer` on the staging bucket, the conditional `jobs/` + `events/ratk-`
+  impersonation grant, the runtime service account engines run as (`agent-run-runtime`: the
+  `agentRunPredict` custom role with only `aiplatform.endpoints.predict`, its project
+  roles, `objectViewer` on the staging bucket, the conditional `jobs/` + `events/agent-run-`
   bindings on the output bucket, and the operator's `serviceAccountUser` on it; the
   default Agent Runtime service agent is granted nothing, and grants it still holds from
   the earlier identity model are reported as a migration note), and live Claude-on-Vertex

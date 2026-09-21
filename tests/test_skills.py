@@ -6,8 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from remote_agent_toolkit.skills import provision
-from remote_agent_toolkit.spec import SkillSource
+from agent_run.skills import provision
+from agent_run.spec import SkillSource
 
 
 def _make_skill(root: Path, name: str, body: str) -> Path:

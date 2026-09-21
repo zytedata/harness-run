@@ -56,9 +56,9 @@ def _reject_repos_in_chosen_workspace(spec: AgentSpec, workspace: Path | None) -
 class LocalSession:
     """An in-process session with the CMA-style lifecycle (DESIGN.md §4).
 
-    The session's :class:`~remote_agent_toolkit.config.SessionConfig` (bound at
+    The session's :class:`~agent_run.config.SessionConfig` (bound at
     ``engine.start_session(config=...)``) overlays the engine's spec for every turn of
-    this session; a per-turn :class:`~remote_agent_toolkit.config.TurnConfig` overlays
+    this session; a per-turn :class:`~agent_run.config.TurnConfig` overlays
     that for one turn. Same scope model as gemini — see ``runtime.base``.
     """
 
@@ -157,9 +157,9 @@ class LocalSession:
         ``secrets`` is a per-invocation name → value map (the agent's own API keys, any repo
         ``auth`` / GitHub MCP token). Values live only for this run; they are never baked into
         the spec and never logged. ``config`` is this turn's
-        :class:`~remote_agent_toolkit.config.TurnConfig` overlay (invocation knobs only).
+        :class:`~agent_run.config.TurnConfig` overlay (invocation knobs only).
         *hooks* are Claude Agent SDK hook callbacks for this turn
-        (``{HookEvent: [HookMatcher, ...]}``); see :meth:`~remote_agent_toolkit.runtime.base.Session.run`.
+        (``{HookEvent: [HookMatcher, ...]}``); see :meth:`~agent_run.runtime.base.Session.run`.
 
         Raises ``RuntimeError`` while a turn is running: a second concurrent turn under
         the same session id would corrupt its checkpoint and transcript. Use :meth:`send`
@@ -190,11 +190,11 @@ class LocalSession:
         workspace continuity requires ``spec.checkpoint=True``; without it this runs a fresh
         turn with no memory of the prior one. Pass ``secrets`` again (they are not persisted
         across turns) so repo push auth is re-embedded on resume, and *hooks* again for the
-        same reason. ``config`` is a per-turn :class:`~remote_agent_toolkit.config.TurnConfig`;
+        same reason. ``config`` is a per-turn :class:`~agent_run.config.TurnConfig`;
         the SESSION config cannot change here (bound at ``start_session``).
 
         On a RUNNING session the message goes INTO the running turn and the same
-        :class:`Run` is returned (see :meth:`~remote_agent_toolkit.runtime.base.Session.send`):
+        :class:`Run` is returned (see :meth:`~agent_run.runtime.base.Session.send`):
         with ``interrupt=False`` the model sees it at its next step; with ``interrupt=True``
         the model is interrupted first and continues from the message. ``message_id`` is
         stamped on the ``user`` event that acknowledges delivery. ``secrets`` / ``config`` /
@@ -318,7 +318,7 @@ class LocalSession:
 
         Runs on the host under ``/bin/bash -c`` in :attr:`workspace` (or ``cwd`` under it),
         off the event loop. Same rule as ``gemini``: only while a turn runs — otherwise it
-        raises :class:`~remote_agent_toolkit.control.ControlUnavailable`, so code written
+        raises :class:`~agent_run.control.ControlUnavailable`, so code written
         against ``local`` behaves the same way remotely (on the host you can always read
         :attr:`workspace` directly).
         """
@@ -432,7 +432,7 @@ class LocalEngine:
         self, spec: AgentSpec, workdir: str | None = None, workspace: str | None = None
     ) -> None:
         self.spec = spec
-        root = Path(workdir) if workdir else Path(tempfile.mkdtemp(prefix="ratk-"))
+        root = Path(workdir) if workdir else Path(tempfile.mkdtemp(prefix="agent-run-"))
         root.mkdir(parents=True, exist_ok=True)
         self._root = root
         self._workspace = Path(workspace) if workspace else None

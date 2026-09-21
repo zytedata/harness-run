@@ -8,7 +8,7 @@ in-memory store, and the GCS store's precondition mapping over a fake storage cl
 
 from __future__ import annotations
 
-from remote_agent_toolkit.runtime.gemini.roster import (
+from agent_run.runtime.gemini.roster import (
     GcsRosterStore,
     InMemoryRosterStore,
     PoolRoster,

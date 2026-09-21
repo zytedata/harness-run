@@ -1,4 +1,4 @@
-# remote-agent-toolkit — Design
+# agent-run — Design
 
 A Python library for **defining and running remote/background AI agents** at Zyte. It distills the
 experience of two proofs-of-concept (self-healing spiders, interactive spider creation) built on
@@ -161,7 +161,7 @@ Three planes over a set of pluggable ports:
 ## 5. Public API
 
 ```python
-from remote_agent_toolkit import AgentSpec, SystemPrompt, SkillSource, McpServer, gemini, local
+from agent_run import AgentSpec, SystemPrompt, SkillSource, McpServer, gemini, local
 
 spec = AgentSpec(
     name="spider-builder",
@@ -488,8 +488,8 @@ These are facts measured live. The library encodes them so consumers inherit the
   `artifactregistry.writer` on the image repo, `iam.serviceAccountTokenCreator` on the model SA. There is
   **no per-sandbox IAM**: `aiplatform.sandboxEnvironments.execute` covers every sandbox under the host
   instance, so the client identity is the trust boundary and the roster is only a coordination device.
-- **The model identity** (`ratk-model@`, `model_token.py`): a service account with only the
-  `ratkRuntimePredict` custom role (`aiplatform.endpoints.predict`). The client mints its access token
+- **The model identity** (`agent-run-model@`, `model_token.py`): a service account with only the
+  `agentRunPredict` custom role (`aiplatform.endpoints.predict`). The client mints its access token
   (an hour, IAM's default ceiling) per turn and every 25 minutes after that, pushing each one to the worker
   (`/token`). The worker never puts it in the agent's environment: it runs a loopback **metadata server**
   that speaks the GCE metadata protocol for exactly one thing, the running turn's token, and sets
@@ -645,13 +645,13 @@ stayed in `gemini-agent-runtime` behind the seam.
 (No `src/` layer — the package sits at the repo root.)
 
 ```
-remote-agent-toolkit/
+agent-run/
 ├── pyproject.toml                 # runtime deps in core; the harness SDKs behind the `local` extra; dev tooling in a group
 ├── README.md                      # team onboarding; the only user-facing doc
 ├── DESIGN.md                      # this file (internal design record)
 ├── TESTING.md                     # the test ladder: offline suite, parity image, live probes
 ├── CHANGELOG.md                   # releases and the Unreleased section
-├── remote_agent_toolkit/
+├── agent_run/
 │   ├── __init__.py                # AgentSpec, SystemPrompt, SkillSource, McpServer, gemini, local
 │   ├── spec.py                    # AgentSpec + value types (serializable)
 │   ├── events.py                  # AgentEvent, RunResult, RunStatus, StopReason, Run handle
@@ -685,7 +685,7 @@ remote-agent-toolkit/
 │   │       ├── stream.py          # the GCS event mirror (writer) + its tail (the fallback stream)
 │   │       ├── history.py         # history / list_sessions readers over the mirror
 │   │       ├── resources.py       # in-sandbox CPU/RAM sampling (cgroup) → mirror, pressure event, result
-│   │       └── project_setup.py   # ratk-gcp-setup
+│   │       └── project_setup.py   # agent-run-gcp-setup
 │   ├── ports/
 │   │   ├── blobstore.py           # BlobStore + GcsBlobStore + LocalBlobStore
 │   │   └── secrets.py             # SecretResolver + GcpSecretResolver + EnvSecretResolver
@@ -825,7 +825,7 @@ it is off the hot path, and `deploy` does not block on it.
   Session/turn configs are written to GCS by the client for the 30-day post-mortem record, but the worker
   never reads them from there.
 - **Model credentials.** The sandbox has no Google identity, so the model token is ours to provide. The
-  client mints it by impersonating a **predict-only service account** (the `ratkRuntimePredict` custom
+  client mints it by impersonating a **predict-only service account** (the `agentRunPredict` custom
   role; the client needs `serviceAccountTokenCreator` on it) with a 1 h lifetime and re-pushes a fresh one
   over `/token` every 25 minutes for as long as it holds the running turn. The worker serves it from a
   loopback metadata server behind `GCE_METADATA_HOST`, so the CLI refreshes on its own and the token never
@@ -860,7 +860,7 @@ it is off the hot path, and `deploy` does not block on it.
   Platform: the Agent Sandbox service agent (`service-<number>@gcp-sa-vertex-sandbox`) needs
   `artifactregistry.reader` on the image repo. There is no per-sandbox IAM: whoever can execute on the
   instance can drive any sandbox, so the trust boundary is the client identity, and the roster is purely a
-  coordination device. `ratk-gcp-setup` applies exactly this (§6 "Identity").
+  coordination device. `agent-run-gcp-setup` applies exactly this (§6 "Identity").
 
 ### 13.2 Platform facts and limits
 

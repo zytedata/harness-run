@@ -1,4 +1,4 @@
-# remote-agent-toolkit
+# agent-run
 
 A Python library for **defining and running remote/background AI agents** at Zyte. Define an agent
 declaratively as an `AgentSpec`, then run it both **locally** (in-process, for dev) and **remotely** in
@@ -36,7 +36,7 @@ sandbox image installs the harness SDKs from its own baked requirements). Runnin
 extra:
 
 ```bash
-pip install "remote-agent-toolkit[local] @ git+ssh://git@github.com/zytedata/remote-agent-toolkit.git"
+pip install "agent-run[local] @ git+ssh://git@github.com/zytedata/remote-agent-toolkit.git"
 ```
 
 (Kept out of the base install because the SDKs are heavy and pin aggressively — e.g.
@@ -50,7 +50,7 @@ Scrapy Cloud builds and other environments without access to this git repo shoul
 
 ```bash
 # From the internal PyPI (read credentials: the usual pkgrepo user, or ask IT support):
-pip install "remote-agent-toolkit==0.3.0" --extra-index-url "https://<user>:<password>@pypi.internal.example/simple/"
+pip install "agent-run==0.3.0" --extra-index-url "https://<user>:<password>@pypi.internal.example/simple/"
 # Straight from the git tag:
 pip install "git+ssh://git@github.com/zytedata/remote-agent-toolkit.git@v0.3.1"
 ```
@@ -65,7 +65,7 @@ the suite exercises both harnesses).
 ## Define an agent
 
 ```python
-from remote_agent_toolkit import AgentSpec, SystemPrompt, SkillSource, McpServer, gemini, local
+from agent_run import AgentSpec, SystemPrompt, SkillSource, McpServer, gemini, local
 
 spec = AgentSpec(
     name="spider-builder",
@@ -85,7 +85,7 @@ is ever baked into the deployment or shared across runs (see [Secrets & security
 
 For authenticated remote MCP servers and migration of credential-bearing config, see
 [runtime secret references and validation boundaries](docs/secret-configuration.md).
-Every field except `name` and `model` has a sensible default (see [`spec.py`](remote_agent_toolkit/spec.py));
+Every field except `name` and `model` has a sensible default (see [`spec.py`](agent_run/spec.py));
 a two-line spec (`AgentSpec(name=..., model=...)`) is a valid agent. For **structured output**, see the
 section below.
 
@@ -239,7 +239,7 @@ absent from the command's environment.
 **Exact cost** is the charge OpenRouter reports for each response. There is no estimated
 price: OpenRouter routes one model id to providers whose prices differ by up to 2.5x, so a
 per-model estimate would only match whoever served the call (the measured gap is in the
-[`pricing`](remote_agent_toolkit/harness/pricing.py) module docstring). A turn OpenRouter reports no
+[`pricing`](agent_run/harness/pricing.py) module docstring). A turn OpenRouter reports no
 charge for gets `cost_usd=None` on its result event, plus a `cost_unknown` status event, and its
 `max_budget_usd` cannot be enforced. `RunResult.cost_usd` is `float | None` and carries that same
 `None`, so an unreported charge stays apart from a turn that really was free.
@@ -456,7 +456,7 @@ auth in your environment (the Agent SDK drives the `claude` CLI). See a complete
 
 ```python
 import asyncio
-from remote_agent_toolkit import local
+from agent_run import local
 
 async def main():
     engine = local.deploy(spec)
@@ -474,7 +474,7 @@ The deployed spec is the *default*; a session can override parts of it without r
 on gemini alike ([full story](#deploy--session--turn-the-three-configuration-scopes)):
 
 ```python
-from remote_agent_toolkit import SessionConfig, TurnConfig
+from agent_run import SessionConfig, TurnConfig
 
 session = engine.start_session(config=SessionConfig(model="claude-opus-4-6"))   # this conversation only
 result = await session.run("…", config=TurnConfig(max_budget_usd=0.5))          # this turn only
@@ -781,7 +781,7 @@ The toolkit validates the SDK's structured value when available and can parse JS
 ```python
 import json
 import pydantic
-from remote_agent_toolkit import AgentSpec, local
+from agent_run import AgentSpec, local
 
 class PriceCheck(pydantic.BaseModel):
     in_stock: bool
@@ -866,7 +866,7 @@ modify the code, then commit and push. Declare repos on the spec, naming (via `a
 secret that authenticates each one:
 
 ```python
-from remote_agent_toolkit import AgentSpec, RepoSource
+from agent_run import AgentSpec, RepoSource
 
 spec = AgentSpec(
     name="repo-fixer",
@@ -939,7 +939,7 @@ the blast radius:
 3. **Least secrets per run** — pass only what the task needs.
 
 **LLM API key.** By default `gemini` routes the model through **Vertex** with **hourly tokens** the client
-mints from a predict-only service account (`ratk-model@<project>`, created by `ratk-gcp-setup`) and the
+mints from a predict-only service account (`agent-run-model@<project>`, created by `agent-run-gcp-setup`) and the
 sandbox worker serves to Claude Code from a loopback metadata server (the client pushes a fresh one every
 25 minutes while the turn runs, so long turns just work — see [Long turns](#gcp-setup--required-permissions)).
 The token is not in the agent's environment, but the agent's shell can fetch it the way the CLI does — the
@@ -1086,7 +1086,7 @@ additive exception — it adds onto the deployed `env`). Deploy-only facts have 
 field at all, so "different `packages` per run" is a `TypeError`, not a silent no-op.
 
 ```python
-from remote_agent_toolkit import RepoSource, SessionConfig, TurnConfig
+from agent_run import RepoSource, SessionConfig, TurnConfig
 
 engine = gemini.get_engine("spider-builder", project=..., location=...)
 
@@ -1141,7 +1141,7 @@ The contracts behind this:
 gemini.deploy(spec, project=..., location=...)   # build + push the image, create a template; ops/CI only
 gemini.deploy(spec, ..., warm_pool=True, pool_size=2, pool_max_wait_s=3600)   # + a ready pool, idle life 1 h
 gemini.deploy(spec, ..., resource_limits={"cpu": "8", "memory": "16Gi"})      # sandbox CPU/RAM (default 4 / 4Gi; max 8 vCPU)
-gemini.deploy(spec, ..., image="…-docker.pkg.dev/proj/ratk/my-agent:tag")     # use an image you pushed; no build
+gemini.deploy(spec, ..., image="…-docker.pkg.dev/proj/agent-run/my-agent:tag")     # use an image you pushed; no build
 gemini.get_engine("spider-builder", project=..., location=...)   # look up by name (app code; addressing only)
 gemini.list_engines(project=..., location=...)   # discover what's deployed: {name, resource, versions}
 engine.name, engine.version, engine.resource     # identity / template id / the template's resource name
@@ -1254,7 +1254,7 @@ identity to ship telemetry with. What replaces them:
 type, no usage fields on the sandbox resource — checked 2026-09-16), so the worker samples **itself**: gVisor
 mounts cgroup v1 accounting and reports the template's memory limit as `MemTotal`. Three outputs:
 
-- **Per-session samples** — every 20 s (`RATK_RESOURCE_SAMPLE_S` in the image env; `0` disables) to the
+- **Per-session samples** — every 20 s (`AGENT_RUN_RESOURCE_SAMPLE_S` in the image env; `0` disables) to the
   session's **event mirror only**, not the live stream, so a watcher is not drowned and the record survives a
   mid-turn kill: after an OOM the last sample sits at most one interval before death. `session.history()`
   skips them (`history(include_samples=True)` keeps them); read them as rows with:
@@ -1279,7 +1279,7 @@ show above that is your agent's own work.
 Everything below can be created by a team in their own project; the concrete values are the shared
 `my-project` setup we use for testing.
 
-> **One command sets all of this up:** `ratk-gcp-setup --project <your-project>` (installed with the
+> **One command sets all of this up:** `agent-run-gcp-setup --project <your-project>` (installed with the
 > toolkit; plain ADC, no gcloud needed) audits a project against everything in this section, shows
 > what's missing, asks for confirmation, applies it, and re-audits. It is **additive only** and
 > idempotent — safe to run, and re-run, against existing non-empty projects. `--check` audits without
@@ -1322,10 +1322,10 @@ in the app's secret store (`gcloud iam service-accounts keys create key.json --i
 then point `GOOGLE_APPLICATION_CREDENTIALS` at it). A key is a long-lived credential, so prefer
 impersonation or workload identity federation where they're available, and rotate keys you do hand out.
 
-**2. The model service account** — `ratk-model@<project>.iam.gserviceaccount.com` (created by
-`ratk-gcp-setup`; `gemini.deploy(model_service_account=)` names another one). The sandbox runs the model
+**2. The model service account** — `agent-run-model@<project>.iam.gserviceaccount.com` (created by
+`agent-run-gcp-setup`; `gemini.deploy(model_service_account=)` names another one). The sandbox runs the model
 on a token minted for this account, and the agent's shell can read that token, so it holds **only** a custom
-role with `aiplatform.endpoints.predict` (`ratkRuntimePredict`) — model calls and nothing else. Never
+role with `aiplatform.endpoints.predict` (`agentRunPredict`) — model calls and nothing else. Never
 `roles/aiplatform.user` here: it would hand the shell every sandbox and template in the project.
 
 **Platform side**: the Google-managed **Agent Sandbox service agent**,
@@ -1333,10 +1333,10 @@ role with `aiplatform.endpoints.predict` (`ratkRuntimePredict`) — model calls 
 sandbox starts and needs `roles/artifactregistry.reader` on the image repo. It gets nothing else; the
 sandbox it starts runs as a zero-permission tenant identity.
 
-**Prerequisites** (`ratk-gcp-setup` creates them; `deploy` ensures the lifecycle rules):
+**Prerequisites** (`agent-run-gcp-setup` creates them; `deploy` ensures the lifecycle rules):
 
 - An output bucket `gs://<project>-agent-output` with uniform bucket-level access.
-- An Artifact Registry Docker repo `ratk` in the location (`gemini.deploy(image_repo=)` names another).
+- An Artifact Registry Docker repo `agent-run` in the location (`gemini.deploy(image_repo=)` names another).
 - **Claude model access** — see the note below.
 - The Docker CLI on the deploying machine, logged into the registry.
 
@@ -1367,8 +1367,8 @@ a long-lived key, so prefer Vertex for anything exposed to untrusted input (see
 
 **Concrete shared setup** (`my-project`): location `us-central1` (Claude: `us-central1` + `global`);
 operator SA `agent-runtime@my-project.iam.gserviceaccount.com`; image repo
-`us-central1-docker.pkg.dev/my-project/ratk`. The setup tool's default operator SA is
-`agent-runtime@`, so audit this project with `ratk-gcp-setup --project my-project
+`us-central1-docker.pkg.dev/my-project/agent-run`. The setup tool's default operator SA is
+`agent-runtime@`, so audit this project with `agent-run-gcp-setup --project my-project
 --operator-sa agent-runtime --check`; the tool discovers the ADC principal itself (a plain
 `gcloud auth application-default login` included) and `--impersonator user:...` only names *other*
 people to grant. Sketch for a fresh project:
@@ -1376,25 +1376,25 @@ people to grant. Sketch for a fresh project:
 ```bash
 PROJECT=your-project; REGION=us-central1; NUMBER=$(gcloud projects describe $PROJECT --format='value(projectNumber)')
 OP="agent-runtime@$PROJECT.iam.gserviceaccount.com"        # operator SA you create
-MODEL="ratk-model@$PROJECT.iam.gserviceaccount.com"        # model identity you create
+MODEL="agent-run-model@$PROJECT.iam.gserviceaccount.com"        # model identity you create
 OUT="gs://$PROJECT-agent-output"
 
 gcloud services enable aiplatform.googleapis.com artifactregistry.googleapis.com storage.googleapis.com \
   iamcredentials.googleapis.com --project $PROJECT
 gcloud iam service-accounts create agent-runtime --project $PROJECT
-gcloud iam service-accounts create ratk-model --project $PROJECT
+gcloud iam service-accounts create agent-run-model --project $PROJECT
 gcloud projects add-iam-policy-binding $PROJECT --member "serviceAccount:$OP" --role roles/aiplatform.user
 # the model identity reaches Vertex only for model calls: a custom role, never roles/aiplatform.user
-gcloud iam roles create ratkRuntimePredict --project $PROJECT --stage GA \
-  --title "ratk model identity: model calls only" --permissions aiplatform.endpoints.predict
+gcloud iam roles create agentRunPredict --project $PROJECT --stage GA \
+  --title "agent-run model identity: model calls only" --permissions aiplatform.endpoints.predict
 gcloud projects add-iam-policy-binding $PROJECT --member "serviceAccount:$MODEL" \
-  --role projects/$PROJECT/roles/ratkRuntimePredict
+  --role projects/$PROJECT/roles/agentRunPredict
 gcloud storage buckets create $OUT --project $PROJECT --uniform-bucket-level-access
 gcloud storage buckets add-iam-policy-binding $OUT --member "serviceAccount:$OP" --role roles/storage.admin
-gcloud artifacts repositories create ratk --repository-format=docker --location=$REGION --project $PROJECT
-gcloud artifacts repositories add-iam-policy-binding ratk --location=$REGION --project $PROJECT \
+gcloud artifacts repositories create agent-run --repository-format=docker --location=$REGION --project $PROJECT
+gcloud artifacts repositories add-iam-policy-binding agent-run --location=$REGION --project $PROJECT \
   --member "serviceAccount:$OP" --role roles/artifactregistry.writer
-gcloud artifacts repositories add-iam-policy-binding ratk --location=$REGION --project $PROJECT \
+gcloud artifacts repositories add-iam-policy-binding agent-run --location=$REGION --project $PROJECT \
   --member "serviceAccount:service-$NUMBER@gcp-sa-vertex-sandbox.iam.gserviceaccount.com" \
   --role roles/artifactregistry.reader
 # who mints tokens: the operator SA mints model tokens; you impersonate the operator SA
@@ -1406,7 +1406,7 @@ gcloud auth configure-docker $REGION-docker.pkg.dev
 ```
 
 Then authenticate impersonating the operator SA (`gcloud auth application-default login
---impersonate-service-account=$OP`); `gemini.deploy` pushes to the `ratk` repo and mints model tokens
+--impersonate-service-account=$OP`); `gemini.deploy` pushes to the `agent-run` repo and mints model tokens
 from `$MODEL` by default (pass `image_repo=` / `model_service_account=` for other names).
 
 ## Latency & cost (the `gemini` path)

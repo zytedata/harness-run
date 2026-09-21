@@ -14,9 +14,9 @@ from types import SimpleNamespace
 import pytest
 from sandbox_fakes import FakeSandboxProvider, ScriptedWorker, make_engine
 
-from remote_agent_toolkit import TurnConfig
-from remote_agent_toolkit.runtime.gemini import backend, handoff, scoped_gcs
-from remote_agent_toolkit.runtime.gemini.provider import SandboxGone
+from agent_run import TurnConfig
+from agent_run.runtime.gemini import backend, handoff, scoped_gcs
+from agent_run.runtime.gemini.provider import SandboxGone
 
 
 async def _await(run):
@@ -38,7 +38,7 @@ def test_pre_dispatch_failure_leaves_no_refresher_and_never_dispatches(monkeypat
     if phase == "config":
         monkeypatch.setattr(session, "_resolve_session_config", fail)
     if phase == "model-token":
-        from remote_agent_toolkit.runtime.gemini import model_token
+        from agent_run.runtime.gemini import model_token
 
         monkeypatch.setattr(model_token, "mint_model_token", fail)
     with pytest.raises(RuntimeError) as caught:

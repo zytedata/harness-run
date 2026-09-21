@@ -22,12 +22,12 @@ from codex_fakes import (
     turn_started,
 )
 
-from remote_agent_toolkit import AgentSpec, local
-from remote_agent_toolkit.events import AgentEvent
-from remote_agent_toolkit.harness import pricing
-from remote_agent_toolkit.harness.codex import CodexEventTranslator, CodexHarness
-from remote_agent_toolkit.harness.context import RunContext
-from remote_agent_toolkit.spec import McpServer, SystemPrompt
+from agent_run import AgentSpec, local
+from agent_run.events import AgentEvent
+from agent_run.harness import pricing
+from agent_run.harness.codex import CodexEventTranslator, CodexHarness
+from agent_run.harness.context import RunContext
+from agent_run.spec import McpServer, SystemPrompt
 
 _UNSET = object()
 
@@ -53,7 +53,7 @@ async def _events_of(
     resolved=_UNSET,
 ):
     import openai_codex
-    from remote_agent_toolkit.harness import _openrouter_proxy
+    from agent_run.harness import _openrouter_proxy
 
     client_cls = (
         make_async_codex(script)
@@ -214,7 +214,7 @@ def test_build_options_mcp_servers(tmp_path):
     assert 'mcp_servers.github.url="https://api.githubcopilot.com/mcp/"' in ovr
     assert "bearer_token_env_var" in ovr
     assert "gh-secret" not in ovr  # token never rides argv
-    assert opts.codex_config.env["RATK_GITHUB_MCP_TOKEN"] == "gh-secret"
+    assert opts.codex_config.env["AGENT_RUN_GITHUB_MCP_TOKEN"] == "gh-secret"
     assert "GH_TOKEN" not in opts.codex_config.env  # consumed, not agent env
     assert 'mcp_servers.zyte.url="https://mcp.example.com"' in ovr
     assert 'mcp_servers.zyte.http_headers={"X-K" = "v"}' in ovr
@@ -461,8 +461,8 @@ def _fake_rollout(codex_home, thread_id="thr-fake"):
 
 
 async def test_checkpoint_persists_thread_and_resume_restores(tmp_path, monkeypatch):
-    from remote_agent_toolkit.checkpoint.session_store import BlobSessionStore
-    from remote_agent_toolkit.ports.blobstore import LocalBlobStore
+    from agent_run.checkpoint.session_store import BlobSessionStore
+    from agent_run.ports.blobstore import LocalBlobStore
 
     blobs = LocalBlobStore(str(tmp_path / "blobs"))
     spec = AgentSpec(name="a", model="gpt-5.6-luna", harness="codex", checkpoint=True)
@@ -511,8 +511,8 @@ async def test_resume_ignores_a_rollout_path_outside_codex_home_sessions(
     """meta.json sits under the run's own token prefix, so the previous turn's agent could
     have edited it: a relpath that escapes CODEX_HOME/sessions must not be written, and the
     session starts fresh instead."""
-    from remote_agent_toolkit.checkpoint.session_store import BlobSessionStore
-    from remote_agent_toolkit.ports.blobstore import LocalBlobStore
+    from agent_run.checkpoint.session_store import BlobSessionStore
+    from agent_run.ports.blobstore import LocalBlobStore
 
     blobs = LocalBlobStore(str(tmp_path / "blobs"))
     blobs.put_bytes("codex-threads/sid/meta.json",
@@ -533,8 +533,8 @@ async def test_resume_ignores_a_rollout_path_outside_codex_home_sessions(
 
 async def test_resume_ignores_a_symlinked_sessions_dir_that_escapes(tmp_path, monkeypatch):
     """A symlink under CODEX_HOME/sessions pointing elsewhere must not be followed either."""
-    from remote_agent_toolkit.checkpoint.session_store import BlobSessionStore
-    from remote_agent_toolkit.ports.blobstore import LocalBlobStore
+    from agent_run.checkpoint.session_store import BlobSessionStore
+    from agent_run.ports.blobstore import LocalBlobStore
 
     blobs = LocalBlobStore(str(tmp_path / "blobs"))
     blobs.put_bytes("codex-threads/sid/meta.json", json.dumps(
@@ -558,8 +558,8 @@ async def test_resume_ignores_a_sessions_dir_that_is_itself_a_symlink(tmp_path, 
     """If CODEX_HOME/sessions itself points elsewhere, a well-formed relpath must still be
     refused: the allowed root is CODEX_HOME (resolved) + literal ``sessions``, so resolving the
     destination through the link lands outside it."""
-    from remote_agent_toolkit.checkpoint.session_store import BlobSessionStore
-    from remote_agent_toolkit.ports.blobstore import LocalBlobStore
+    from agent_run.checkpoint.session_store import BlobSessionStore
+    from agent_run.ports.blobstore import LocalBlobStore
 
     blobs = LocalBlobStore(str(tmp_path / "blobs"))
     blobs.put_bytes("codex-threads/sid/meta.json", json.dumps(
@@ -580,8 +580,8 @@ async def test_resume_ignores_a_sessions_dir_that_is_itself_a_symlink(tmp_path, 
 
 
 async def test_resume_without_persisted_thread_starts_fresh(tmp_path, monkeypatch):
-    from remote_agent_toolkit.checkpoint.session_store import BlobSessionStore
-    from remote_agent_toolkit.ports.blobstore import LocalBlobStore
+    from agent_run.checkpoint.session_store import BlobSessionStore
+    from agent_run.ports.blobstore import LocalBlobStore
 
     blobs = LocalBlobStore(str(tmp_path / "blobs"))
     spec = AgentSpec(name="a", model="gpt-5.6-luna", harness="codex", checkpoint=True)
@@ -856,9 +856,9 @@ def test_openrouter_run_can_use_local_metadata_proxy(tmp_path):
     overrides = "\n".join(opts.codex_config.config_overrides)
 
     assert 'base_url="http://127.0.0.1:4321/api/v1"' in overrides
-    assert 'env_key="RATK_OPENROUTER_PROXY_TOKEN"' in overrides
+    assert 'env_key="AGENT_RUN_OPENROUTER_PROXY_TOKEN"' in overrides
     assert opts.codex_config.env["OPENROUTER_API_KEY"] == ""
-    assert opts.codex_config.env["RATK_OPENROUTER_PROXY_TOKEN"] == "local-token"
+    assert opts.codex_config.env["AGENT_RUN_OPENROUTER_PROXY_TOKEN"] == "local-token"
     assert opts.api_key == "real-key"
 
 
@@ -1211,7 +1211,7 @@ def test_openrouter_key_is_harness_consumed(tmp_path):
     back deliberately for ``env_key`` — and kept out of the agent's shell by
     ``shell_environment_policy.exclude``.
     """
-    from remote_agent_toolkit.harness._shared import harness_consumed_secret_names, runtime_env
+    from agent_run.harness._shared import harness_consumed_secret_names, runtime_env
 
     spec = _or_spec()
     assert harness_consumed_secret_names(spec) == {"OPENAI_API_KEY", "OPENROUTER_API_KEY"}
@@ -1348,7 +1348,7 @@ def test_local_engine_resolves_codex_harness(tmp_path):
 
 
 def test_skills_subdir_mapping():
-    from remote_agent_toolkit.skills import skills_subdir
+    from agent_run.skills import skills_subdir
 
     assert skills_subdir("codex") == ".agents/skills"
     assert skills_subdir("claude-code") == ".claude/skills"

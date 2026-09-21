@@ -5,9 +5,9 @@ from types import SimpleNamespace
 from sandbox_fakes import FakeSandboxProvider
 from sandbox_fakes import make_engine as _make_engine
 
-from remote_agent_toolkit import SessionConfig
-from remote_agent_toolkit.ports import blobstore
-from remote_agent_toolkit.runtime.gemini import backend, handoff, history
+from agent_run import SessionConfig
+from agent_run.ports import blobstore
+from agent_run.runtime.gemini import backend, handoff, history
 
 
 def test_config_operations_use_explicit_credentials(monkeypatch):

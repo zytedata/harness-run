@@ -6,7 +6,7 @@ import pytest
 from google.auth import _helpers
 from sandbox_fakes import FakeSandboxProvider, make_engine
 
-from remote_agent_toolkit.runtime.gemini import backend, scoped_gcs
+from agent_run.runtime.gemini import backend, scoped_gcs
 
 
 def test_client_preserves_expiry_and_writes_initial_refresh_before_thread(monkeypatch):
@@ -119,7 +119,7 @@ async def _wait(pred, timeout=3.0):
 def test_refresh_loop_pushes_a_fresh_model_token_to_the_running_turns_worker(monkeypatch):
     import asyncio
 
-    from remote_agent_toolkit.runtime.gemini import model_token
+    from agent_run.runtime.gemini import model_token
 
     minted = []
     monkeypatch.setattr(model_token, "mint_model_token",
@@ -148,7 +148,7 @@ def test_refresh_loop_pushes_a_fresh_model_token_to_the_running_turns_worker(mon
 def test_a_model_token_push_the_worker_did_not_take_is_retried_soon(monkeypatch):
     import asyncio
 
-    from remote_agent_toolkit.runtime.gemini import model_token
+    from agent_run.runtime.gemini import model_token
 
     monkeypatch.setattr(model_token, "mint_model_token", lambda *a, **kw: ("model", None))
     monkeypatch.setattr(backend, "TOKEN_REFRESH_S", 0.02)

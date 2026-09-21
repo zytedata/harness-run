@@ -3,7 +3,7 @@
 # dependency/install issues surface locally before a deploy.
 
 VENV ?= .venv
-IMAGE ?= ratk-dev
+IMAGE ?= agent-run-dev
 PACKAGES ?=
 
 .PHONY: test test-serial lint live-smoke live-openrouter live-openrouter-remote live-attribution live-usage live-interactive chat parity-build parity-shell parity-check
@@ -79,7 +79,7 @@ parity-shell:
 
 # Sanity check (no model call): confirm the toolkit imports and uv is present in the image.
 parity-check:
-	docker run --rm $(IMAGE) python -c "import remote_agent_toolkit, shutil, sys; \
+	docker run --rm $(IMAGE) python -c "import agent_run, shutil, sys; \
 print('python', sys.version.split()[0]); \
 print('toolkit import OK'); \
 print('uv on PATH:', shutil.which('uv') is not None)"

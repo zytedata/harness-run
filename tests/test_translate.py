@@ -13,7 +13,7 @@ from claude_agent_sdk import (
     UserMessage,
 )
 
-from remote_agent_toolkit.harness.translate import EventTranslator
+from agent_run.harness.translate import EventTranslator
 
 
 def test_assistant_text_thinking_and_tool_use():

@@ -15,8 +15,8 @@ import asyncio
 import os
 import tempfile
 
-from remote_agent_toolkit import AgentSpec, gemini, local
-from remote_agent_toolkit.events import StopReason
+from agent_run import AgentSpec, gemini, local
+from agent_run.events import StopReason
 
 TASK = (
     "Use Bash with run_in_background=true to run exactly this command: "
@@ -71,7 +71,7 @@ async def main() -> None:
         engine = local.deploy(
             AgentSpec(name="resume-probe", model="claude-haiku-4-5-20251001",
                       checkpoint=True, max_turns=12, max_budget_usd=1.0),
-            workdir=tempfile.mkdtemp(prefix="ratk-resume-"),
+            workdir=tempfile.mkdtemp(prefix="agent-run-resume-"),
         )
     await probe(engine, secrets={} if resource else None)
 

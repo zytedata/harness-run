@@ -30,12 +30,12 @@ import sys
 import time
 import traceback
 
-from remote_agent_toolkit import AgentSpec, SessionConfig, StopReason, TurnConfig, gemini
+from agent_run import AgentSpec, SessionConfig, StopReason, TurnConfig, gemini
 
 PROJECT = os.environ.get("PROJECT", "my-project")
 LOCATION = os.environ.get("LOCATION", "us-central1")
 SUFFIX = re.sub(r"[^a-z0-9-]", "-", (os.environ.get("SUFFIX") or getpass.getuser()).lower())
-NAME = f"ratk-openrouter-{SUFFIX}"
+NAME = f"agent-run-openrouter-{SUFFIX}"
 
 MODELS = [
     m.strip()
@@ -122,15 +122,15 @@ def _looks_like(provider: str | None, slug: str) -> bool:
     return provider is not None and norm(provider) == norm(slug.split("/", 1)[0])
 
 
-_TOOL_INPUT = b"ratk-openrouter-tool-check-2026-08-21"
+_TOOL_INPUT = b"agent-run-openrouter-tool-check-2026-08-21"
 EXPECTED_DIGEST = hashlib.sha256(_TOOL_INPUT).hexdigest()[:16]
 EXPECTED = EXPECTED_DIGEST + ":or0:rt0:aa0:ak0"
 TASK = (
     "Run this exact command in the shell and reply with only what it prints: "
     '`python3 -c "import hashlib, os; '
-    "h=hashlib.sha256(b'ratk-openrouter-tool-check-2026-08-21').hexdigest()[:16]; "
+    "h=hashlib.sha256(b'agent-run-openrouter-tool-check-2026-08-21').hexdigest()[:16]; "
     "s=':or%d:rt%d:aa%d:ak%d' % tuple(int(bool(os.environ.get(k))) for k in "
-    "('OPENROUTER_API_KEY','RATK_OPENROUTER_PROXY_TOKEN',"
+    "('OPENROUTER_API_KEY','AGENT_RUN_OPENROUTER_PROXY_TOKEN',"
     "'ANTHROPIC_AUTH_TOKEN','ANTHROPIC_API_KEY')); "
     'print(h+s)"`'
 )

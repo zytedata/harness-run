@@ -61,7 +61,7 @@ class Session(Protocol):
     is addressable by ``session_id``, so another process can re-attach via
     :meth:`Engine.get_session` and poll / continue it — and, while a turn is running,
     :meth:`send` into it, :meth:`interrupt` it or :meth:`exec` a probe in its workspace
-    (see :mod:`remote_agent_toolkit.control`).
+    (see :mod:`agent_run.control`).
     """
 
     def run(
@@ -76,7 +76,7 @@ class Session(Protocol):
 
         ``secrets`` is a per-invocation name → value map (the agent's own keys, any repo
         ``auth`` / GitHub MCP token). Values are never baked into the spec or logged.
-        ``config`` is this turn's :class:`~remote_agent_toolkit.config.TurnConfig` — a
+        ``config`` is this turn's :class:`~agent_run.config.TurnConfig` — a
         sparse overlay of the invocation knobs on the session's effective spec. *hooks*
         are Claude Agent SDK hook callbacks (``{HookEvent: [HookMatcher, ...]}``) — live
         callables in the caller's process, so ``local`` only; a backend that runs the turn
@@ -99,7 +99,7 @@ class Session(Protocol):
         **Idle** (e.g. after a ``needs_input`` pause): starts a new turn that resumes via
         checkpoint on a ready or fresh sandbox (DESIGN.md §3.7). Pass ``secrets`` again — they are not
         persisted across turns, so repo push auth is re-embedded on resume. ``config`` is a
-        per-turn :class:`~remote_agent_toolkit.config.TurnConfig`; the SESSION config cannot
+        per-turn :class:`~agent_run.config.TurnConfig`; the SESSION config cannot
         change here (bound at :meth:`Engine.start_session`, world snapshot-restored). *hooks*
         are per-turn like ``secrets`` (see :meth:`run`). ``interrupt`` is ignored.
 
@@ -115,7 +115,7 @@ class Session(Protocol):
         ``config`` / ``hooks`` cannot change mid-turn and raise ``ValueError`` then. A
         running turn whose worker cannot receive messages (an engine revision deployed
         before the control inbox existed) raises
-        :class:`~remote_agent_toolkit.control.ControlUnavailable`; a second concurrent turn
+        :class:`~agent_run.control.ControlUnavailable`; a second concurrent turn
         is never started.
         """
         ...
@@ -142,7 +142,7 @@ class Session(Protocol):
         before the turn delivers. ``command`` runs under ``/bin/bash -c`` with ``cwd`` the
         agent's working directory (the same directory :attr:`workspace` names on ``local``;
         a relative ``cwd`` is resolved against it). ``timeout`` in seconds defaults to
-        :data:`~remote_agent_toolkit.control.EXEC_DEFAULT_TIMEOUT_S`; a command that runs
+        :data:`~agent_run.control.EXEC_DEFAULT_TIMEOUT_S`; a command that runs
         past it is killed and reports ``returncode`` 124. Output is capped per stream and
         the result says ``truncated`` rather than failing.
 
@@ -150,7 +150,7 @@ class Session(Protocol):
         for the turn's duration, and ``local`` keeps the same rule so code written against
         it behaves the same way remotely. Called while the turn is still being dispatched
         (no worker yet) it waits for the worker; called when no turn runs, or once the turn
-        ended, it raises :class:`~remote_agent_toolkit.control.ControlUnavailable`. The
+        ended, it raises :class:`~agent_run.control.ControlUnavailable`. The
         command's own failure is not an exception: read ``returncode`` / ``stderr``.
 
         Read-only is the caller's contract — nothing here polices the command, and a
@@ -246,7 +246,7 @@ class Engine(Protocol):
     def start_session(self, config: SessionConfig | None = None) -> Session:
         """Begin a new session against this engine.
 
-        ``config`` binds the session's :class:`~remote_agent_toolkit.config.SessionConfig`
+        ``config`` binds the session's :class:`~agent_run.config.SessionConfig`
         (a sparse overlay over the deployed spec: repos, skills, prompt, model, ...) for
         the session's whole life — its world is created on the first turn and
         snapshot-restored after, so it cannot change mid-conversation.

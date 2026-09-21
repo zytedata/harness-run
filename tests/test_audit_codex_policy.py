@@ -1,9 +1,9 @@
 """Unsupported security restrictions must not produce runnable Codex options (S10)."""
 import pytest
 
-from remote_agent_toolkit import AgentSpec
-from remote_agent_toolkit.harness.codex import CodexHarness
-from remote_agent_toolkit.harness.context import RunContext
+from agent_run import AgentSpec
+from agent_run.harness.codex import CodexHarness
+from agent_run.harness.context import RunContext
 
 
 @pytest.mark.parametrize("settings,field", [

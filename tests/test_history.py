@@ -9,9 +9,9 @@ import json
 
 from sandbox_fakes import FakeSandboxProvider, make_engine
 
-from remote_agent_toolkit.events import AgentEvent, RunStatus, StopReason
-from remote_agent_toolkit.ports.blobstore import LocalBlobStore
-from remote_agent_toolkit.runtime.gemini import backend, history
+from agent_run.events import AgentEvent, RunStatus, StopReason
+from agent_run.ports.blobstore import LocalBlobStore
+from agent_run.runtime.gemini import backend, history
 
 
 def _result_event(text="done"):

@@ -3,7 +3,7 @@ import json
 
 import pytest
 
-from remote_agent_toolkit.runtime.gemini.scoped_gcs import access_boundary, run_object_prefixes
+from agent_run.runtime.gemini.scoped_gcs import access_boundary, run_object_prefixes
 
 
 @pytest.mark.parametrize("session_id", [

@@ -22,7 +22,7 @@ from typing import Any, Callable, Protocol
 # The display name of the parent "instance" every template and sandbox hangs off. Agent
 # Sandbox resources are children of a ``reasoningEngine``; the toolkit keeps exactly one
 # such (empty) resource per project/location and never serves anything from it.
-HOST_DISPLAY_NAME = "ratk-sandbox-host"
+HOST_DISPLAY_NAME = "agent-run-sandbox-host"
 
 # The HTTP port the worker listens on inside the container (the template declares it; the
 # proxy forwards only declared ports).
@@ -185,7 +185,7 @@ class AgentSandboxProvider:
                     config={
                         "display_name": HOST_DISPLAY_NAME,
                         "description": (
-                            "remote-agent-toolkit: parent of the sandbox templates and "
+                            "agent-run: parent of the sandbox templates and "
                             "sandboxes; serves nothing itself"
                         ),
                     }

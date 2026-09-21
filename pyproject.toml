@@ -3,14 +3,14 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "remote-agent-toolkit"
+name = "agent-run"
 version = "0.3.1"
 description = "Define and run remote/background coding agents (Claude Code, Codex) locally and in Gemini Enterprise Agent Platform sandboxes."
 readme = "README.md"
 requires-python = ">=3.12,<3.14"
 # The base install covers the remote path (deploy + drive sandbox engines); the harness
 # SDKs live in the `local` extra below. Backend imports stay lazy, so
-# `import remote_agent_toolkit` is still fast.
+# `import agent_run` is still fast.
 dependencies = [
     # The Agent Sandbox surface (client.sandboxes / client.runtimes) is in the 2.x client.
     "google-cloud-agentplatform>=2.1",
@@ -58,10 +58,10 @@ dev = [
 [project.scripts]
 # One-command GCP project setup for the gemini backend (audit -> confirm -> apply);
 # see the README's "GCP setup & required permissions" section.
-ratk-gcp-setup = "remote_agent_toolkit.runtime.gemini.project_setup:main"
+agent-run-gcp-setup = "agent_run.runtime.gemini.project_setup:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["remote_agent_toolkit"]
+packages = ["agent_run"]
 
 [tool.ruff]
 line-length = 100

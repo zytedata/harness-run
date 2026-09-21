@@ -1,6 +1,6 @@
 """One-command GCP project setup for the sandbox runtime (the ``gemini`` backend).
 
-``ratk-gcp-setup --project <id>`` makes a GCP project ready to run this toolkit's
+``agent-run-gcp-setup --project <id>`` makes a GCP project ready to run this toolkit's
 ``gemini`` backend: it audits the project against everything the README's "GCP setup &
 required permissions" section requires, prints a report, asks for confirmation, applies
 what is missing, and re-audits until the project is ready. It is **additive only** — it
@@ -25,7 +25,7 @@ What it manages (the README section explains the *why* of each piece):
   grants (least privilege for shared projects);
 * ``roles/iam.serviceAccountTokenCreator`` on the operator SA for the principals that will
   impersonate it (defaults to the ADC principal running this tool);
-* the **model service account** (``ratk-model@``): the identity whose one-hour tokens the
+* the **model service account** (``agent-run-model@``): the identity whose one-hour tokens the
   client mints and hands to each sandbox for Vertex model calls (the sandbox has no
   identity of its own). It holds a custom role with only ``aiplatform.endpoints.predict``;
   the operator SA and the impersonators get ``serviceAccountTokenCreator`` on it;
@@ -55,7 +55,7 @@ from .model_token import DEFAULT_MODEL_SA_ID
 
 DEFAULT_LOCATION = "us-central1"
 DEFAULT_OPERATOR_SA_ID = "agent-runtime"
-DEFAULT_REPO_ID = "ratk"  # must mirror _image.DEFAULT_REPO_ID (deploy's default image_repo)
+DEFAULT_REPO_ID = "agent-run"  # must mirror _image.DEFAULT_REPO_ID (deploy's default image_repo)
 # The models checked in Vertex Model Garden. Each check costs a handful of input tokens
 # + 1 output token. The client defaults CLOUD_ML_REGION to `global`, so that's the
 # location whose enablement actually matters for deployed runs. The FIRST required model
@@ -95,7 +95,7 @@ SANDBOX_AGENT_REPO_ROLE = "roles/artifactregistry.reader"
 # The model identity: the account whose access tokens the client mints per turn and hands
 # to the sandbox for Vertex model calls. It holds only what a model call needs — the agent's
 # shell inside the sandbox can read the token, so it must be worth nothing else.
-MODEL_PREDICT_ROLE_ID = "ratkRuntimePredict"  # custom role: model calls only (kept from the earlier model)
+MODEL_PREDICT_ROLE_ID = "agentRunPredict"  # custom role: model calls only (kept from the earlier model)
 MODEL_PREDICT_PERMISSIONS: tuple[str, ...] = ("aiplatform.endpoints.predict",)
 # Whoever drives turns mints the model tokens: tokenCreator on the model SA.
 TOKEN_CREATOR_ROLE = "roles/iam.serviceAccountTokenCreator"
@@ -126,7 +126,7 @@ def sandbox_agent_email(project_number: str | int) -> str:
 
 
 def predict_role_name(project: str) -> str:
-    """Full resource name of the project's ``ratkRuntimePredict`` custom role."""
+    """Full resource name of the project's ``agentRunPredict`` custom role."""
     return f"projects/{project}/roles/{MODEL_PREDICT_ROLE_ID}"
 
 
@@ -440,7 +440,7 @@ class GcpApi:
             "POST",
             f"https://artifactregistry.googleapis.com/v1/projects/{self.project}/locations/{location}"
             f"/repositories?repositoryId={repo_id}",
-            json_body={"format": "DOCKER", "description": "remote-agent-toolkit sandbox images"},
+            json_body={"format": "DOCKER", "description": "agent-run sandbox images"},
         )
         self._wait_operation("https://artifactregistry.googleapis.com/v1", op or {})
 
@@ -802,7 +802,7 @@ def audit(api: GcpApi, cfg: Settings) -> list[Item]:
                 f"create {model_email} (its tokens carry the sandboxes' model calls: "
                 "gemini.deploy(model_service_account=...))",
                 fix=lambda i=model_email.split("@")[0]: api.create_service_account(
-                    i, "remote-agent-toolkit model identity (Vertex model calls only)"
+                    i, "agent-run model identity (Vertex model calls only)"
                 ),
             )
         )
@@ -815,7 +815,7 @@ def audit(api: GcpApi, cfg: Settings) -> list[Item]:
                 FIX,
                 f"create custom role {MODEL_PREDICT_ROLE_ID} with " + ", ".join(MODEL_PREDICT_PERMISSIONS),
                 fix=lambda: api.create_role(
-                    MODEL_PREDICT_ROLE_ID, "ratk model identity: model calls only", MODEL_PREDICT_PERMISSIONS
+                    MODEL_PREDICT_ROLE_ID, "agent-run model identity: model calls only", MODEL_PREDICT_PERMISSIONS
                 ),
             )
         )
@@ -878,7 +878,7 @@ def audit(api: GcpApi, cfg: Settings) -> list[Item]:
                     FIX,
                     f"create {op_email}",
                     fix=lambda i=op_email.split("@")[0]: api.create_service_account(
-                        i, "remote-agent-toolkit operator (control plane)"
+                        i, "agent-run operator (control plane)"
                     ),
                 )
             )
@@ -1118,7 +1118,7 @@ def verify(api: GcpApi, cfg: Settings, items: Sequence[Item]) -> tuple[bool, lis
 
     user = re.sub(r"[^a-z0-9-]", "-", getpass.getuser().lower()) or "user"
     spec = AgentSpec(
-        name=f"ratk-setup-verify-{user}",
+        name=f"agent-run-setup-verify-{user}",
         model=cfg.models[0] if cfg.models else DEFAULT_CHECK_MODELS[0],
         max_turns=8,
         max_budget_usd=1.0,
@@ -1171,9 +1171,9 @@ def verify(api: GcpApi, cfg: Settings, items: Sequence[Item]) -> tuple[bool, lis
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        prog="ratk-gcp-setup",
+        prog="agent-run-gcp-setup",
         description=(
-            "Make a GCP project ready for remote-agent-toolkit's gemini backend: audit, "
+            "Make a GCP project ready for agent-run's gemini backend: audit, "
             "confirm, apply, re-audit. Additive only — safe on existing, non-empty projects."
         ),
     )
@@ -1296,7 +1296,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         return 1
 
-    print_report(items, f"remote-agent-toolkit GCP setup — {cfg.project} ({cfg.location})")
+    print_report(items, f"agent-run GCP setup — {cfg.project} ({cfg.location})")
     fixes = [i for i in items if i.status == FIX]
     blocked = [i for i in items if i.status == BLOCKED]
 

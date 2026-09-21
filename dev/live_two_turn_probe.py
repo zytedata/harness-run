@@ -19,12 +19,12 @@ import sys
 import time
 import traceback
 
-from remote_agent_toolkit import AgentSpec, gemini
+from agent_run import AgentSpec, gemini
 
 PROJECT = os.environ.get("PROJECT", "my-project")
 LOCATION = os.environ.get("LOCATION", "us-central1")
 SUFFIX = re.sub(r"[^a-z0-9-]", "-", (os.environ.get("SUFFIX") or getpass.getuser()).lower())
-NAME = f"ratk-stream2t-{SUFFIX}"
+NAME = f"agent-run-stream2t-{SUFFIX}"
 
 _checks: list[tuple[str, bool]] = []
 

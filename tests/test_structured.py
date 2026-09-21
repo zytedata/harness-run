@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from remote_agent_toolkit.structured import extract_json, parse_structured_output
+from agent_run.structured import extract_json, parse_structured_output
 
 
 def test_extract_from_fenced_block():

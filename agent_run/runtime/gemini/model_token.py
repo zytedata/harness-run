@@ -21,8 +21,8 @@ import datetime as _dt
 from typing import Any
 
 # The service account ``gemini.deploy`` uses when ``model_service_account=`` is omitted.
-# ``ratk-gcp-setup`` creates it with the predict-only custom role.
-DEFAULT_MODEL_SA_ID = "ratk-model"
+# ``agent-run-gcp-setup`` creates it with the predict-only custom role.
+DEFAULT_MODEL_SA_ID = "agent-run-model"
 
 _CLOUD_PLATFORM = "https://www.googleapis.com/auth/cloud-platform"
 DEFAULT_LIFETIME_S = 3600  # IAM's default ceiling for an impersonated token

@@ -45,9 +45,9 @@ from ...events import AgentEvent
 #: First crossing of this fraction of the memory limit emits the visible pressure event.
 PRESSURE_FRACTION = 0.85
 
-#: Sampling cadence (seconds); ``RATK_RESOURCE_SAMPLE_S`` in the worker's env overrides, ``0`` disables.
+#: Sampling cadence (seconds); ``AGENT_RUN_RESOURCE_SAMPLE_S`` in the worker's env overrides, ``0`` disables.
 DEFAULT_SAMPLE_S = 20.0
-SAMPLE_S_ENV = "RATK_RESOURCE_SAMPLE_S"
+SAMPLE_S_ENV = "AGENT_RUN_RESOURCE_SAMPLE_S"
 
 SAMPLE_EVENT = "resource_sample"
 PRESSURE_EVENT = "memory_pressure"
@@ -159,7 +159,7 @@ class ResourceSampler:
         self._cpu_usec: int | None = None
         self.samples = 0
         self._thread = threading.Thread(
-            target=self._run, name=f"ratk-resources-{session_id[:8]}", daemon=True
+            target=self._run, name=f"agent-run-resources-{session_id[:8]}", daemon=True
         )
 
     def start(self) -> ResourceSampler:

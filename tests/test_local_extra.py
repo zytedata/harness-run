@@ -15,9 +15,9 @@ import sys
 
 import pytest
 
-from remote_agent_toolkit import AgentSpec
-from remote_agent_toolkit.harness._local_sdk import import_local_sdk
-from remote_agent_toolkit.harness.context import RunContext
+from agent_run import AgentSpec
+from agent_run.harness._local_sdk import import_local_sdk
+from agent_run.harness.context import RunContext
 
 
 def _ctx(tmp_path, spec):
@@ -53,7 +53,7 @@ def test_import_local_sdk_does_not_mask_a_missing_inner_dependency(tmp_path, mon
 
 
 def test_claude_run_path_shows_the_extra_hint_without_the_sdk(tmp_path, monkeypatch):
-    from remote_agent_toolkit.harness.claude_code import ClaudeCodeHarness
+    from agent_run.harness.claude_code import ClaudeCodeHarness
 
     monkeypatch.setitem(sys.modules, "claude_agent_sdk", None)  # what a base install sees
     spec = AgentSpec(name="a", model="m")
@@ -69,7 +69,7 @@ def test_claude_run_path_shows_the_extra_hint_without_the_sdk(tmp_path, monkeypa
 
 
 def test_codex_run_path_shows_the_extra_hint_without_the_sdk(tmp_path, monkeypatch):
-    from remote_agent_toolkit.harness.codex import CodexHarness
+    from agent_run.harness.codex import CodexHarness
 
     monkeypatch.setitem(sys.modules, "openai_codex", None)
     spec = AgentSpec(name="a", model="gpt-5.6-luna", harness="codex")

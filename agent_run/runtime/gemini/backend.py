@@ -282,7 +282,7 @@ def deploy(
 
     Builds the agent's container image (the toolkit with the baked harness CLIs, the
     resolved skills, ``spec.packages`` and the spec itself — ``_image.py``), pushes it to
-    ``image_repo`` (default: the ``ratk`` Artifact Registry repo of the project/location),
+    ``image_repo`` (default: the ``agent-run`` Artifact Registry repo of the project/location),
     and creates an immutable **sandbox template** displayed as ``spec.name`` with the image,
     ``resource_limits`` and internet egress. **A template is a version**: ``get_engine(name)``
     resolves the newest one, ``version=`` pins one. A deploy whose image and resources match
@@ -299,7 +299,7 @@ def deploy(
 
     Model credentials: with ``use_vertex`` (default) every turn carries a one-hour Vertex
     token minted by impersonating ``model_service_account`` (default the project's
-    ``ratk-model@``, a predict-only account ``ratk-gcp-setup`` creates; the deployer and
+    ``agent-run-model@``, a predict-only account ``agent-run-gcp-setup`` creates; the deployer and
     every client need ``roles/iam.serviceAccountTokenCreator`` on it). The sandbox has no
     Google identity of its own. ``use_vertex=False`` is API-key mode: pass
     ``ANTHROPIC_API_KEY`` as a per-invocation secret.
@@ -442,7 +442,7 @@ def _toolkit_version() -> str | None:
     try:
         import importlib.metadata
 
-        return importlib.metadata.version("remote-agent-toolkit")
+        return importlib.metadata.version("agent-run")
     except Exception:  # noqa: BLE001
         return None
 
@@ -606,7 +606,7 @@ def list_engines(
 class GeminiSession:
     """A run-plane session over a sandbox engine (CMA-style lifecycle; DESIGN.md §4).
 
-    A session's :class:`~remote_agent_toolkit.config.SessionConfig` is bound ONCE, at
+    A session's :class:`~agent_run.config.SessionConfig` is bound ONCE, at
     ``engine.start_session(config=...)`` — persisted at a stable per-session GCS key and
     read back by a process re-attaching by id (``engine.get_session``). A re-attacher can
     never pass a different config: the session's world (repos, skills, prompt) is created
@@ -666,7 +666,7 @@ class GeminiSession:
         ``secrets`` is a per-invocation name → value map (the agent's own keys, any repo
         ``auth`` / GitHub MCP token) — never baked into the image, never logged; it travels
         in the turn's HTTP body to the worker and nowhere else (nothing is persisted).
-        ``config`` is this turn's :class:`~remote_agent_toolkit.config.TurnConfig`. *hooks*
+        ``config`` is this turn's :class:`~agent_run.config.TurnConfig`. *hooks*
         are rejected: the turn runs in a remote worker and a hook is a callable here.
 
         Returns at once: claiming or creating the sandbox and handing it the turn happen
@@ -698,7 +698,7 @@ class GeminiSession:
 
         On an idle session this resumes the conversation as a new turn (on a fresh sandbox,
         from the checkpoint). Pass ``secrets`` again (not persisted). ``config`` is a
-        per-turn :class:`~remote_agent_toolkit.config.TurnConfig`.
+        per-turn :class:`~agent_run.config.TurnConfig`.
 
         On a RUNNING session the message is posted to the worker's ``/control`` and the
         same :class:`Run` is returned: with ``interrupt=False`` the model sees it at its
@@ -714,7 +714,7 @@ class GeminiSession:
         it starts, so the model's first step is the message. If the turn ends before the
         queue drained (dispatch failed, the sandbox died), the messages are dropped and
         ``RunResult.warning`` says how many. Raises
-        :class:`~remote_agent_toolkit.control.ControlUnavailable` only when a ready
+        :class:`~agent_run.control.ControlUnavailable` only when a ready
         worker did not take the message (proxy/platform failure, or the turn just ended).
 
         A session re-attached in another process (``engine.get_session``) first adopts a
@@ -891,7 +891,7 @@ class GeminiSession:
             raise RuntimeError(
                 f"could not mint the model token by impersonating {engine._model_service_account} "
                 f"({type(exc).__name__}: {str(exc)[:200]}); the caller needs "
-                "roles/iam.serviceAccountTokenCreator on that account (ratk-gcp-setup grants it)"
+                "roles/iam.serviceAccountTokenCreator on that account (agent-run-gcp-setup grants it)"
             ) from exc
         self._model_token_expiry = expiry
         return token_record(token, expiry)
@@ -1415,7 +1415,7 @@ class GeminiSession:
         under ``/bin/bash -c`` in the agent's cwd (``/workspace/jobs/<sid>/workspace``, or
         ``cwd`` under it). While the turn is still being dispatched this waits for the
         worker (~1 s from the ready pool, 15–25 s on a fresh sandbox); it raises
-        :class:`~remote_agent_toolkit.control.ControlUnavailable` when no turn is running,
+        :class:`~agent_run.control.ControlUnavailable` when no turn is running,
         once the turn ended (its sandbox is deleted at the terminal event) or when the
         sandbox did not answer. ``timeout`` is capped at ``EXEC_MAX_TIMEOUT_S`` because the
         proxy cuts a call at ~300 s.
@@ -1538,7 +1538,7 @@ class GeminiSession:
 
         Each row: ``time`` (aware datetime, the worker's clock) + ``memory_current_bytes`` /
         ``memory_limit_bytes`` / ``memory_peak_bytes`` / ``cpu_usec`` as available, sampled
-        by the worker inside the sandbox every 20 s (``RATK_RESOURCE_SAMPLE_S``) and written
+        by the worker inside the sandbox every 20 s (``AGENT_RUN_RESOURCE_SAMPLE_S``) and written
         to the event mirror only — so it works for re-attached sessions, and for a sandbox
         the platform killed mid-turn, whose last sample landed at most one interval before
         death. The live stream carries the single ``memory_pressure`` warning instead, and
@@ -1732,7 +1732,7 @@ class GeminiEngine:
         return self._roster_cached
 
     def _display_prefix(self) -> str:
-        return f"ratk-{_slug(self.name)}-"
+        return f"agent-run-{_slug(self.name)}-"
 
     # -- sandboxes ------------------------------------------------------------------
 

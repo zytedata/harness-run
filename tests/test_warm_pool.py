@@ -8,9 +8,9 @@ import time
 import pytest
 from sandbox_fakes import FakeSandboxProvider, ScriptedWorker, make_engine, result_event
 
-from remote_agent_toolkit import AgentSpec
-from remote_agent_toolkit.runtime.gemini import backend
-from remote_agent_toolkit.runtime.gemini.provider import SandboxError
+from agent_run import AgentSpec
+from agent_run.runtime.gemini import backend
+from agent_run.runtime.gemini.provider import SandboxError
 
 
 async def _await(run):
@@ -28,7 +28,7 @@ def test_fill_pool_creates_ready_sandboxes_and_records_them():
         assert e.template == engine.resource
         assert e.expires_at == pytest.approx(e.created_at + 1000.0)  # the idle life
         assert provider.sandboxes[e.sandbox]["ttl_s"] == 1050.0  # idle life + room for a turn
-        assert provider.sandboxes[e.sandbox]["display_name"].startswith("ratk-g-")
+        assert provider.sandboxes[e.sandbox]["display_name"].startswith("agent-run-g-")
     # Every sandbox answered /health before it was recorded.
     assert [c[1] for c in provider.calls] == ["/health", "/health"]
     assert engine.wait_until_warm(timeout=0.01) is True
@@ -129,8 +129,8 @@ def test_delete_releases_every_sandbox_and_retires_all_versions(monkeypatch):
     engine = make_engine(provider, warm=True)
     old = provider.add_template("g", create_time=0.5)
     engine.fill_pool(2)
-    orphan = provider.create(engine.resource, ttl_s=60, display_name="ratk-g-orphan")  # a crashed client's
-    foreign = provider.create(old, ttl_s=60, display_name="ratk-other-x")
+    orphan = provider.create(engine.resource, ttl_s=60, display_name="agent-run-g-orphan")  # a crashed client's
+    foreign = provider.create(old, ttl_s=60, display_name="agent-run-other-x")
     monkeypatch.setattr(backend.time, "sleep", lambda s: None)
     engine.delete(timeout=1.0)
     assert orphan.name in provider.deleted and foreign.name not in provider.deleted
@@ -142,7 +142,7 @@ def test_delete_releases_every_sandbox_and_retires_all_versions(monkeypatch):
 def test_delete_of_engine_x_leaves_the_pool_of_engine_x_suffixed_alone(monkeypatch):
     # agentic-scraping (#84) field report: engines versioned by suffixing the name (``x`` and
     # ``x-b040d27``) — ``x``'s teardown swept ``x-b040d27``'s ready sandboxes because its
-    # display-name prefix ``ratk-x-`` matched them. The sweep goes by template now.
+    # display-name prefix ``agent-run-x-`` matched them. The sweep goes by template now.
     provider = FakeSandboxProvider()
     legacy = make_engine(provider, warm=True, spec=AgentSpec(name="x", model="m"))
     legacy.fill_pool(1)
@@ -150,9 +150,9 @@ def test_delete_of_engine_x_leaves_the_pool_of_engine_x_suffixed_alone(monkeypat
     pinned.fill_pool(2)
     # A rare shape: a sandbox of x-b040d27 whose suffix is itself 8 hex chars, and one
     # without a template on the listing row (the shape fallback applies to that one only).
-    lookalike = provider.create(pinned.resource, ttl_s=60, display_name="ratk-x-deadbeef")
-    provider.sandboxes[lookalike.name]["display_name"] = "ratk-x-b040d27a"
-    templateless = provider.create(legacy.resource, ttl_s=60, display_name="ratk-x-0123abcd")
+    lookalike = provider.create(pinned.resource, ttl_s=60, display_name="agent-run-x-deadbeef")
+    provider.sandboxes[lookalike.name]["display_name"] = "agent-run-x-b040d27a"
+    templateless = provider.create(legacy.resource, ttl_s=60, display_name="agent-run-x-0123abcd")
     provider.sandboxes[templateless.name]["template"] = None
     before = set(provider.live())
     monkeypatch.setattr(backend.time, "sleep", lambda s: None)
@@ -212,7 +212,7 @@ def test_retire_templates_gives_up_after_the_timeout(monkeypatch):
     provider = FakeSandboxProvider()
     engine = make_engine(provider)
     other = provider.add_template("g")
-    provider.create(other, ttl_s=60, display_name="ratk-g-busy")  # blocks the template delete
+    provider.create(other, ttl_s=60, display_name="agent-run-g-busy")  # blocks the template delete
     monkeypatch.setattr(backend.time, "sleep", lambda s: None)
     engine._retire_templates([other], timeout=0.0)
     assert other in provider.templates  # not deleted, not raised
@@ -239,7 +239,7 @@ def test_get_engine_handle_shares_the_pool_of_the_deploying_process():
     other = backend.GeminiEngine(template=deploying.resource, spec=AgentSpec(name="g", model="m"),
                                  project="p", location="l", output_bucket="gs://out", provider=provider,
                                  warm=True, roster_store=deploying._roster_store,
-                                 model_service_account="ratk-model@p.iam.gserviceaccount.com")
+                                 model_service_account="agent-run-model@p.iam.gserviceaccount.com")
     assert other.wait_until_warm(timeout=0.01)
     ready = deploying._roster().entries()[0].sandbox
     asyncio.run(_await(other.start_session().run("go")))
@@ -250,7 +250,7 @@ def test_get_engine_handle_shares_the_pool_of_the_deploying_process():
 
 def test_scripted_worker_pool_end_to_end_with_control_ready():
     provider = FakeSandboxProvider(lambda n: ScriptedWorker(auto=[
-        __import__("remote_agent_toolkit").events.AgentEvent(kind="status", summary="ready", raw={"event": "control_ready"}),
+        __import__("agent_run").events.AgentEvent(kind="status", summary="ready", raw={"event": "control_ready"}),
         result_event("42"),
     ]))
     engine = make_engine(provider, warm=True)

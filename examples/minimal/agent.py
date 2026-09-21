@@ -17,7 +17,7 @@ import asyncio
 
 import pydantic
 
-from remote_agent_toolkit import AgentSpec, SystemPrompt, local
+from agent_run import AgentSpec, SystemPrompt, local
 
 
 class PrimeReport(pydantic.BaseModel):

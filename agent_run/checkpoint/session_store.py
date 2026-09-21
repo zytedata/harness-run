@@ -2,9 +2,9 @@
 
 Keys by **``session_id`` alone** (ignores the SDK's cwd-derived ``project_key``) so any
 worker, any cwd can resume — the SDK's default cwd-keyed local store is fatal for
-serverless. Backed by any :class:`~remote_agent_toolkit.ports.blobstore.BlobStore`, so a
+serverless. Backed by any :class:`~agent_run.ports.blobstore.BlobStore`, so a
 ``LocalBlobStore`` gives local checkpointing and a ``GcsBlobStore`` gives cloud resume.
-Validated by :func:`remote_agent_toolkit.conformance.run_session_store_conformance`.
+Validated by :func:`agent_run.conformance.run_session_store_conformance`.
 
 Design (lifted from the PoC ``gcs_session_store.py``):
 
@@ -40,6 +40,14 @@ def _claude_session_id(session_id: str) -> str:
 
     Everything reading or writing the store must key by this, the worker driving the SDK
     and a client reading transcripts back alike.
+
+    The ``ratk-session:`` salt below is FROZEN and deliberately kept through the rename to
+    ``agent-run``: it is a uuid5 input, never displayed or typed, so renaming it buys
+    nothing and silently orphans stored data — the derived id is the blob path prefix
+    (``sessions/<csid>/main/``) and the run-scoped GCS credential's scope prefix
+    (``scoped_gcs.py``), and uuid5 is one-way, so old sessions could not be found again.
+    Should it ever have to change, dual-read on ``load``/``load_all`` (new id first, old id
+    as fallback) plus granting both prefixes for a transition window is the cheap route.
     """
     try:
         uuid.UUID(session_id)

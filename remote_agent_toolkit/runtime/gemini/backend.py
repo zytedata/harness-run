@@ -110,6 +110,11 @@ TOKEN_REFRESH_RETRY_S = 60.0
 
 
 _SANDBOX_NAME_RE = re.compile(r"[0-9a-f]{8}")  # the suffix ``_create_sandbox`` appends
+# ``deploy`` arguments of the Agent Runtime era: named in the error so a migrated deploy
+# script cannot believe it set something the sandbox runtime has no notion of.
+_DEPLOY_REMOVED_KWARGS = frozenset({
+    "service_account", "scoped_gcs", "min_instances", "max_instances", "staging_bucket", "new_engine",
+})
 
 
 class DispatchUncertain(SandboxError):
@@ -271,7 +276,7 @@ def deploy(
     workspace: str | None = None,
     provider: SandboxProvider | None = None,
     log: Callable[[str], None] | None = None,
-    **_: Any,
+    **kwargs: Any,
 ) -> Engine:
     """Deploy ``spec`` as a sandbox template, minting a **new version** (ops/CI action).
 
@@ -319,6 +324,15 @@ def deploy(
         stage_build_context,
         validate_resource_limits,
     )
+    if kwargs:
+        removed = sorted(k for k in kwargs if k in _DEPLOY_REMOVED_KWARGS)
+        if removed:
+            raise TypeError(
+                f"deploy() got {', '.join(k + '=' for k in removed)}: removed with the sandbox runtime "
+                "(a template has no runtime service account, staging bucket or instance counts; "
+                "CHANGELOG, 'Backwards-incompatible'). Drop the argument rather than assume it took effect."
+            )
+        raise TypeError(f"deploy() got unexpected keyword argument(s) {sorted(kwargs)}")
     from .handoff import ensure_handoff_lifecycle, write_deploy_record
     from .model_token import default_model_service_account
 
@@ -718,8 +732,16 @@ class GeminiSession:
 
     @property
     def busy(self) -> bool:
-        """Whether a turn of this session is running (or started and not yet finished)."""
-        return self._current_run is not None and not self._current_run.done
+        """Whether a turn of this session is running (or started and not yet finished).
+
+        On a session re-attached in another process the first access adopts a turn of it
+        still running there (:meth:`_attach`), as :attr:`current_run` does — so a poller
+        that only asks ``busy`` still keeps the turn's tokens fresh and its sandbox owned.
+        """
+        run = self._current_run
+        if run is None and self._foreign_check:
+            run = self._attach()
+        return run is not None and not run.done
 
     @property
     def current_run(self) -> DrivenRun | None:
@@ -1301,7 +1323,7 @@ class GeminiSession:
                 self._session_id, turn_id,
             )
 
-    def _attach(self) -> DrivenRun | None:
+    def _attach(self, events: list | None = None) -> DrivenRun | None:
         """Adopt this session's turn running under **another** process, if the mirror records one.
 
         A re-attached session (``engine.get_session(id)`` in a fresh process — a poller, or a
@@ -1317,12 +1339,13 @@ class GeminiSession:
         ``ADOPTED_RELEASE_DELAY_S`` after it, in case the owner is still draining events; an
         adopter whose loop merely shuts down leaves the turn to its owner (``_on_complete``).
 
-        One mirror read, on the first call of a ``get_session`` session (a session started
-        here never has a foreign turn). Returns the adopted run, or None when nothing runs.
+        One mirror read (or none, given ``events`` a caller already read), on the first call
+        of a ``get_session`` session (a session started here never has a foreign turn).
+        Returns the adopted run, or None when nothing runs.
         """
         self._foreign_check = False
         spec = self._client_spec()  # the session's record first: an unreadable re-attach fails there, with the fix
-        found = self._find_running_turn()
+        found = self._find_running_turn(events)
         if found is None:
             return None
         sandbox, turn_id, control_ready = found
@@ -1351,11 +1374,11 @@ class GeminiSession:
         logger.info("session %s: adopted turn %s running on %s", sid, turn_id, sandbox)
         return run
 
-    def _find_running_turn(self) -> tuple[str, str, bool] | None:
+    def _find_running_turn(self, events: list | None = None) -> tuple[str, str, bool] | None:
         """Scan the mirror for a started turn without a result: ``(sandbox, turn_id, control_ready)``."""
         current: tuple[str, str] | None = None
         ready = False
-        for event in self.history():
+        for event in self.history() if events is None else events:
             raw = event.raw or {}
             if event.kind == "status" and raw.get("event") == "turn_started":
                 turn_id, worker = raw.get("turn_id"), raw.get("worker")
@@ -1552,9 +1575,23 @@ class GeminiSession:
 
     @property
     def last_result(self) -> RunResult | None:
-        """The most recent run's result — reconstructed from history for re-attached sessions."""
-        if self._last_result is None and self._current_run is None:
+        """The most recent run's result — reconstructed from history for re-attached sessions.
+
+        On a session re-attached in another process the first access reads the record once
+        and, if a turn of it is still running there, **adopts** it (:meth:`_attach`, like
+        :attr:`current_run` and :attr:`busy`): the result then lands here at the turn's end,
+        and meanwhile this process refreshes the turn's tokens and owns its sandbox — a
+        poller that only asks ``last_result`` no longer lets a long turn lose model access.
+        Adoption drives the turn on the running event loop; without one (a plain sync
+        poller) the record is re-read on each access until the result appears.
+        """
+        run = self._current_run
+        if self._last_result is None and (run is None or run.task is None):
             events = self.history()
+            if run is None and self._foreign_check:
+                run = self._attach(events)
+                if run is not None and run.task is not None:
+                    return None  # adopted and being driven: the result lands at the turn's end
             result_ev = next((e for e in reversed(events) if e.kind == "result"), None)
             if result_ev is not None:
                 from .._run import build_result
@@ -1563,6 +1600,11 @@ class GeminiSession:
                     result_ev, self._session_id, self._client_spec()
                 )
                 self._status = RunStatus.IDLE
+                if run is not None:
+                    # Adopted without an event loop and now over: the owner (or the platform
+                    # TTL) releases the sandbox; this process only stops refreshing.
+                    self._stop_refresh(keep_record=True)
+                    self._current_run, self._adopted, self._sandbox = None, False, None
         return self._last_result
 
     @property

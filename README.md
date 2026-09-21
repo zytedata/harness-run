@@ -702,17 +702,21 @@ await session.send("OK, now do X")              # a normal turn, from the interr
   before, and catch `ControlUnavailable`.
 - **From another process (`gemini`).** `engine.get_session(id)` in the process that started the turn
   returns the live session. In a *different* process (a poller, or a worker adopting a job whose
-  owner died mid-turn) the session holds no run, so its first `send()`, `interrupt()`, `exec()` or
-  `run()` reads the session's event record once — every event names its turn and sandbox — and, if
-  a turn is still running there, **adopts** it: its events replay from the worker and then flow live
-  on the session's `Run` — `session.current_run` hands you that `Run`, so an adopter consumes the
-  events exactly as the owner would (`async for ev in run`, `await run`) instead of polling
-  `last_result` — `send()` steers it (no second turn is started; `run()` raises as it would
-  locally), `interrupt()` stops it, `exec()` probes it, and `last_result` lands at its end. The
-  adopter also keeps the turn's storage token fresh and deletes the sandbox at the result (a few
-  seconds late, in case the owner is still reading), so a job whose owner died is cleaned up; an
-  adopter that merely exits leaves the turn to its owner. With nothing running there `send()` is the
-  usual resume. Same-process re-attach needs none of this: the engine hands back the live session.
+  owner died mid-turn) the session holds no run, so its first `send()`, `interrupt()`, `exec()`,
+  `run()`, `current_run`, `busy` or `last_result` reads the session's event record once — every
+  event names its turn and sandbox — and, if a turn is still running there, **adopts** it: its
+  events replay from the worker and then flow live on the session's `Run` — `session.current_run`
+  hands you that `Run`, so an adopter consumes the events exactly as the owner would (`async for ev
+  in run`, `await run`) instead of polling `last_result` — `send()` steers it (no second turn is
+  started; `run()` raises as it would locally), `interrupt()` stops it, `exec()` probes it, and
+  `last_result` lands at its end. The adopter also keeps the turn's tokens fresh and deletes the
+  sandbox at the result (a few seconds late, in case the owner is still reading), so a job whose
+  owner died is cleaned up — a poller that only asks `busy` or `last_result` gets the same, so a
+  long turn does not lose model access for want of the right accessor. Adoption drives the turn on
+  the running event loop; a plain sync poller with no loop keeps re-reading the record on each
+  `last_result` until the result appears. An adopter that merely exits leaves the turn to its owner.
+  With nothing running there `send()` is the usual resume. Same-process re-attach needs none of
+  this: the engine hands back the live session.
 - **Transport (`gemini`).** The client POSTs the message to the worker's `/control` endpoint through
   the platform's proxy (sub-second); the worker feeds it to the harness and dedupes on `message_id`.
   The worker announces the channel with a `control_ready` status event at the start of the turn;
@@ -1201,8 +1205,10 @@ multi-turn session. It is also the client's fallback stream when a sandbox stops
 as the sandbox going away mid-turn: the run ends with an explained `sandbox_unreachable` error result unless
 the mirror already holds the terminal result).
 
-`session.last_result` on a re-attached session does one storage round-trip per access until a result
-exists — poll `run.done` for in-flight runs, not this. Caveats: the mirror is bucket-wide, so engines
+`session.last_result` on a re-attached session reads the record on first access and adopts a turn still
+running there (["From another process"](#from-another-process-gemini) above); without an event loop it
+re-reads the record on each access until a result exists — prefer `current_run` / `run.done` for
+in-flight runs. Caveats: the mirror is bucket-wide, so engines
 sharing an output bucket see each other's sessions in `list_sessions`; the `local` runtime keeps no durable
 event log (`list_sessions` shows its workdir's session dirs; `history()` raises).
 

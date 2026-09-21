@@ -177,6 +177,19 @@ def test_deploy_builds_when_the_image_is_missing_and_reuses_a_matching_template(
     assert [t["name"] for t in provider.list_templates()] == [third.resource]
 
 
+def test_deploy_rejects_removed_and_unknown_kwargs_before_any_side_effect(records, no_docker):
+    # PR #84 review, E2: deploy() swallowed **kwargs while get_engine() rejected them, so a
+    # migrated deploy script passing service_account= or new_engine= believed it set something.
+    provider = FakeSandboxProvider()
+    with pytest.raises(TypeError, match=r"service_account=.*removed with the sandbox runtime"):
+        backend.deploy(_spec(), "proj", "l", image="img:1", provider=provider, service_account="x@p.iam")
+    with pytest.raises(TypeError, match=r"new_engine=.*removed"):
+        backend.deploy(_spec(), "proj", "l", image="img:1", provider=provider, new_engine=True)
+    with pytest.raises(TypeError, match=r"unexpected keyword argument\(s\) \['pool_sizee'\]"):
+        backend.deploy(_spec(), "proj", "l", image="img:1", provider=provider, pool_sizee=3)
+    assert provider.list_templates() == [] and no_docker == []
+
+
 def test_deploy_reuses_a_template_only_when_its_egress_flag_matches(records, no_docker):
     # PR #84 review, C: redeploying the same image with internet_access=False used to return
     # the existing template with egress on and report a no-op.

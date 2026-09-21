@@ -98,6 +98,28 @@ for the tag with this file's section as the notes.
     `max_turn_s`) is gone; `max_turn_s` remains the sandbox's lifetime bound. The condition
     that remains: some client process must hold the session while the turn runs — the sandbox
     cannot mint tokens, so a turn whose last client exits loses model access within the hour.
+  - **Update notes for adopters (at the pin bump):**
+    1. *Deploy prerequisites:* the Docker CLI logged into Artifact Registry
+       (`docker login -u oauth2accesstoken --password-stdin <region>-docker.pkg.dev`); rerun
+       `ratk-gcp-setup --model-sa ... --repo ...` (it creates `ratk-model@` with the predict-only
+       role and grants the sandbox service agent read on the repo); `roles/iam.serviceAccountTokenCreator`
+       on `ratk-model@` for the deployer **and every identity that runs turns** (each client mints
+       the model token). The platform caps a template at 8 vCPU; 16 GiB is verified.
+    2. *Removed `deploy()` arguments now raise* (`service_account`, `scoped_gcs`, `min_instances`,
+       `max_instances`, `staging_bucket`, `new_engine`), as do unknown ones — a deploy script that
+       still passes them fails at once instead of silently deploying without them. `get_engine`
+       takes only `warm_pool`, `version`, `credentials`, `output_bucket`; `engine.delete()` takes
+       no arguments.
+    3. *Re-attach from another process:* `current_run`, `busy`, `last_result`, `send()`,
+       `interrupt()`, `exec()` and `run()` all adopt a turn still running there (tokens refreshed,
+       sandbox released at the end); a poller may use any of them. `history()` is a plain record
+       read and adopts nothing.
+    4. *Validators that now raise* — grep your specs and configs: `AgentSpec.env` /
+       `SessionConfig.extra_env` keys named like credentials (`*_TOKEN`, `*_API_KEY`, `*_SECRET`,
+       `*_PASSWORD`, `*_CREDENTIALS`) are rejected (pass them as per-turn `secrets`); static
+       `Authorization`-class MCP headers are rejected; the Codex harness raises on `allowed_tools`
+       and unknown `permission_mode`; a Codex resume raises on an unreadable checkpoint instead of
+       starting fresh (handle the failed run).
 - **Codex resume fails explicitly for unreadable or corrupt existing checkpoints**
   (#64). Denied metadata reads, malformed metadata/thread IDs, and missing/unreadable
   rollouts no longer silently start a fresh conversation. Errors omit storage exception
@@ -187,6 +209,20 @@ for the tag with this file's section as the notes.
   platform's `internet_access` flag, the check compares it (a listing that does not report the
   flag is trusted for the default, on, only — asking for no egress then always creates a
   template known to have none), and the deploy record stores what was asked.
+- **`busy` and `last_result` on a re-attached session adopt the turn running under another
+  process, like `current_run`** (PR #84 review, E4). Only `run()` / `send()` / `interrupt()` /
+  `exec()` / `current_run` adopted; a poller that re-attached with `get_session` and asked
+  `last_result` alone (self-healing's re-attach path) refreshed no tokens and released no
+  sandbox, so a turn longer than an hour under a dead owner lost model access and its sandbox
+  billed until the TTL. Both accessors now adopt on their first access, at no extra storage
+  read (`last_result` already read the record). Adoption drives the turn on the running event
+  loop; without one, `last_result` keeps re-reading the record until the result appears and
+  then stops its refresher.
+- **`deploy()` rejects unknown and removed keyword arguments** (PR #84 review, E2). It swallowed
+  `**kwargs` while `get_engine()` rejected them, so deploy scripts migrated from the Agent
+  Runtime era that still pass `service_account=` or `new_engine=` deployed without them and
+  believed otherwise. The removed names raise a `TypeError` that says so; any other unknown
+  name raises like `get_engine`. Validation happens before any side effect.
 - **`make live-smoke` mints the model token from the toolkit's predict-only account and
   checks what that token can reach** (PR #84 review, D). `MODEL_SA` defaulted to the
   operator account, whose impersonated token — served to the agent by the worker's loopback

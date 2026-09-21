@@ -163,6 +163,52 @@ def test_current_run_hands_a_reattached_session_the_adopted_run(tmp_path, monkey
     assert len(bucket.mirror_reads) == 1  # current_run after the turn does not look again
 
 
+def test_busy_and_last_result_adopt_a_running_turn_like_current_run(tmp_path, monkeypatch):
+    """PR #84 review, E4: a poller that only asks ``busy`` / ``last_result`` (self-healing's
+    re-attach path) must keep the turn's tokens fresh and own its sandbox too."""
+    bucket = _Bucket(tmp_path, monkeypatch)
+    provider = FakeSandboxProvider(lambda n: ScriptedWorker())
+    owner, session, other, adopter = _two_processes(provider)
+    third_engine = make_engine(provider)
+
+    async def go():
+        run, w, turn_id = await _owner_turn(provider, session, bucket)
+        assert adopter.last_result is None  # a turn is running there: no result yet…
+        assert adopter._adopted and adopter._refresh_stop is not None and adopter.current_run is not None
+        assert adopter.busy and len(bucket.mirror_reads) == 1  # …and it is adopted, on that one read
+        third = third_engine.get_session(session.session_id)
+        assert third.busy and third._adopted and third._refresh_stop is not None  # busy alone adopts too
+        adopted, third_run = adopter.current_run, third.current_run
+        w.emit(result_event("done"))
+        w.finish()
+        await run
+        await adopted
+        await third_run
+        return third, _sandbox_of(w)
+
+    third, sandbox = asyncio.run(go())
+    for engine in (owner, other, third_engine):
+        engine._join_background()
+    assert adopter.last_result.text == "done" and third.last_result.text == "done"
+    assert not adopter.busy and adopter._refresh_stop is None and third._refresh_stop is None
+    assert provider.deleted and set(provider.deleted) == {sandbox}  # the owner and both adopters release it
+
+
+def test_last_result_without_an_event_loop_polls_the_record_and_stops_refreshing_at_the_end(tmp_path, monkeypatch):
+    bucket = _Bucket(tmp_path, monkeypatch)
+    provider = FakeSandboxProvider()
+    sid = make_engine(provider).start_session().session_id
+    bucket.write(sid, "t1", _started("t1", "s-owner"))
+    adopter = make_engine(provider).get_session(sid)
+    assert adopter.last_result is None  # running elsewhere; adopted (refresher up) but not driven: no loop
+    assert adopter._adopted and adopter._refresh_stop is not None and adopter._current_run.task is None
+    assert adopter.last_result is None and len(bucket.mirror_reads) == 2  # re-read on each access
+    bucket.write(sid, "t1", _result("t1"), ms=2000)
+    assert adopter.last_result is not None and adopter.status == RunStatus.IDLE
+    assert adopter._refresh_stop is None and adopter._current_run is None and not adopter._adopted
+    assert provider.deleted == []  # the owner (or the TTL) releases the sandbox, not a loop-less poller
+
+
 def test_current_run_is_none_on_a_reattached_session_with_nothing_running(tmp_path, monkeypatch):
     bucket = _Bucket(tmp_path, monkeypatch)
     provider = FakeSandboxProvider()

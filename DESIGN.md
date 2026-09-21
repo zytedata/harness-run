@@ -425,7 +425,7 @@ These are facts measured live. The library encodes them so consumers inherit the
   the events (paths only on Codex, context-free old/new strings on Claude Code) are not.
 - **A re-attached session adopts its turn running under another process** (`GeminiSession._attach`).
   `get_session(id)` in a fresh process holds no run; the first `send()` / `interrupt()` / `exec()` /
-  `run()` reads the mirror once — the last `turn_started` marker without a `result` after it names the
+  `run()` / `current_run` / `busy` / `last_result` reads the mirror once — the last `turn_started` marker without a `result` after it names the
   turn and its sandbox (every event is stamped with both, #80; the sandbox name is rebuilt from the
   engine template's host instance) and whether `control_ready` was announced — and builds a `DrivenRun`
   over the same `_stream_turn` the owner uses (the worker replays the whole turn from `since=0`, then

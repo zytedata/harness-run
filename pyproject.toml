@@ -8,6 +8,17 @@ version = "0.3.1"
 description = "Define and run remote/background coding agents (Claude Code, Codex) locally and in Gemini Enterprise Agent Platform sandboxes."
 readme = "README.md"
 requires-python = ">=3.12,<3.14"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+keywords = ["agent", "claude-code", "codex", "sandbox", "llm", "remote-execution"]
+classifiers = [
+    "Environment :: Console",
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries",
+]
 # The base install covers the remote path (deploy + drive sandbox engines); the harness
 # SDKs live in the `local` extra below. Backend imports stay lazy, so
 # `import agent_run` is still fast.

@@ -175,6 +175,11 @@ for the tag with this file's section as the notes.
 
 ### Added
 
+- **The project is licensed under Apache-2.0** (`LICENSE`), declared as a PEP 639 SPDX
+  expression in `pyproject.toml` and shipped inside the wheel. Trove classifiers and
+  keywords are declared too. The licence text is verbatim, with no copyright line and no
+  `NOTICE` file, matching the other Zyte open-source repositories.
+
 - **`Session.exec(command, *, cwd=None, timeout=None) -> ExecResult`** (#85): a read-only shell
   probe of the running turn's workspace, for showing the agent's work while it works (agentic-scraping
   renders the workspace's `git diff` every ~10 s in its change panel; the events cannot give that —

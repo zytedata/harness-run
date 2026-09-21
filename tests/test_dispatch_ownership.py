@@ -235,6 +235,82 @@ def test_interrupt_while_a_sandbox_is_still_being_created_deletes_it_and_posts_n
     assert provider.deleted == [sandbox] and provider.live() == []
 
 
+def test_a_dispatch_landing_while_the_cancelled_run_completes_still_gets_its_sandbox_deleted():
+    """Review follow-up of 2026-09-21: the hand-over lands between ``_on_complete`` starting
+    to read state and its check of the dispatch slot. The dispatch thread publishes the
+    sandbox and then marks itself finished; if the completion read the sandbox first (None)
+    and the finished flag second (set), neither path deleted the sandbox. The ownership
+    decision is now one step under the dispatch lock, before the sandbox is read."""
+    entered, release = threading.Event(), threading.Event()
+
+    class SlowHandOver(FakeSandboxProvider):
+        def call(self, sandbox, path, body=None, **kw):
+            if path == "/turn":
+                entered.set()
+                assert release.wait(5)
+            return super().call(sandbox, path, body, **kw)
+
+    provider = SlowHandOver(lambda n: ScriptedWorker())
+    engine = make_engine(provider)
+    session = engine.start_session()
+    armed = threading.Event()  # _on_complete is past its bookkeeping, about to read state
+    fired = threading.Event()
+
+    class Interleaved(type(session)):
+        # The FIRST read of ``_sandbox`` on the completion path lets the blocked hand-over
+        # through and waits until the dispatch thread has published the sandbox and finished
+        # — the exact interleaving of the follow-up. The value returned is the one seen
+        # before that (None), as the unfixed code would have seen it.
+        @property
+        def _sandbox(self):
+            value = self.__dict__.get("_sandbox_value")
+            slot = self.__dict__.get("_dispatch_slot_value")
+            if armed.is_set() and slot is not None and not fired.is_set():
+                fired.set()
+                release.set()
+                assert slot.finished.wait(5)
+            return value
+
+        @_sandbox.setter
+        def _sandbox(self, value):
+            self.__dict__["_sandbox_value"] = value
+
+        @property
+        def _dispatch_slot(self):
+            return self.__dict__.get("_dispatch_slot_value")
+
+        @_dispatch_slot.setter
+        def _dispatch_slot(self, value):
+            self.__dict__["_dispatch_slot_value"] = value
+
+    session._sandbox, session._dispatch_slot = None, None
+    session.__class__ = Interleaved
+    real_drop = session._drop_pending_control
+
+    def drop_then_arm():
+        n = real_drop()
+        armed.set()
+        return n
+
+    session._drop_pending_control = drop_then_arm
+
+    async def go():
+        run = session.run("go")
+        assert await asyncio.to_thread(entered.wait, 5)
+        try:
+            await asyncio.wait_for(session.interrupt(timeout=0.1), 5)
+        finally:
+            release.set()
+        assert run.done and run.result.is_error and "cancelled" in run.result.warning
+
+    asyncio.run(go())
+    engine._join_background()
+    (sandbox,) = provider.workers
+    assert sum(len(w.turns) for w in provider.workers.values()) == 1  # the worker took the turn…
+    assert provider.deleted == [sandbox] and provider.live() == []  # …and exactly one delete followed
+    assert session._sandbox is None and not session.busy and session._dispatch_slot is None
+
+
 # -- B: the result is durable before the sandbox goes -------------------------------------
 
 

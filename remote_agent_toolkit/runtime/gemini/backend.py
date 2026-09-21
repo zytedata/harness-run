@@ -1263,17 +1263,27 @@ class GeminiSession:
             )
             result.warning = f"{result.warning}; {note}" if result.warning else note
             logger.warning("session %s: %s", self._session_id, note)
-        sandbox, self._sandbox = self._sandbox, None
         dispatch, self._dispatch_slot = self._dispatch_slot, None
         unmirrored, self._unmirrored_result = self._unmirrored_result, None
         turn_id = self._turn_id
-        if dispatch is not None and not dispatch.finished.is_set():
-            # Cancelled while the hand-over is in flight (its thread cannot be stopped): once
-            # it lands, whatever sandbox it holds — claimed, or running the turn — is deleted.
+        if dispatch is not None:
+            # Who owns the sandbox is decided in one step under the dispatch lock, BEFORE
+            # ``self._sandbox`` is read: the dispatch thread publishes ``self._sandbox`` under
+            # that lock and sets ``finished`` only afterwards, so reading the sandbox first
+            # and checking ``finished`` second lets a hand-over landing in between escape
+            # both paths (no delete at all).
             with dispatch.lock:
-                dispatch.abandoned = True
-            self._engine._in_background(self._release_after_dispatch, dispatch, name="sandbox-release")
-            return
+                in_flight = not dispatch.finished.is_set()
+                if in_flight:
+                    dispatch.abandoned = True
+            if in_flight:
+                # Cancelled while the hand-over is in flight (its thread cannot be stopped):
+                # once it lands, whatever sandbox it holds — claimed, or running the turn —
+                # is deleted by that job alone, so nothing is left for the path below.
+                self._sandbox = None
+                self._engine._in_background(self._release_after_dispatch, dispatch, name="sandbox-release")
+                return
+        sandbox, self._sandbox = self._sandbox, None
         if sandbox is None or walked_away:
             return
 

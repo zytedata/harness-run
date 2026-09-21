@@ -189,7 +189,9 @@ for the tag with this file's section as the notes.
   session owned, billing until the platform TTL. The dispatch now records the sandbox it holds
   at every step; a run cancelled meanwhile marks the hand-over abandoned, nothing more is
   posted, and the sandbox the dispatch lands on (claimed, or already running the turn) is
-  deleted the moment it lands.
+  deleted the moment it lands. The completion decides who owns the sandbox in one step under
+  the dispatch lock before it reads the sandbox, so a hand-over landing between those two
+  reads (follow-up of 2026-09-21) can no longer slip past both paths.
 - **The terminal result is in the mirror before the client can see it — and before the sandbox
   is deleted** (PR #84 review, B). The worker appended the result to its live record first and
   queued the mirror write behind it, while the client deleted the sandbox at the result it saw;

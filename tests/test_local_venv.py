@@ -24,11 +24,11 @@ def test_provision_venv_uses_engine_python_and_surfaces_failure(monkeypatch, tmp
     monkeypatch.setattr(venv_mod, "_run", fake_run)
     monkeypatch.setattr(venv_mod, "_uv_bin", lambda: "/opt/uv")
 
-    got = venv_mod.provision_venv(tmp_path, ("scrapy>=2.11", "scrapy-zyte-api"))
+    got = venv_mod.provision_venv(tmp_path, ("scrapy>=2.11", "httpx"))
     assert got == tmp_path / "venv"
     assert calls[0] == ["/opt/uv", "venv", str(got), "--python", "3.12"]  # engine-contract Python
     assert calls[1][:4] == ["/opt/uv", "pip", "install", "--python"]
-    assert calls[1][-2:] == ["scrapy>=2.11", "scrapy-zyte-api"]
+    assert calls[1][-2:] == ["scrapy>=2.11", "httpx"]
 
     # A failing uv command raises loudly (declared packages are explicit intent).
     def boom(cmd, what):

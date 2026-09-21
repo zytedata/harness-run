@@ -126,12 +126,12 @@ def test_remote_mcp_passthrough():
         harness="claude-code",
         name="a",
         model="m",
-        mcp_servers=[McpServer.remote("zyte", "https://mcp.zyte.com", {"X-Key": "v"})],
+        mcp_servers=[McpServer.remote("remote", "https://mcp.example.com", {"X-Key": "v"})],
     )
     opts = ClaudeCodeHarness().build_options(spec, _ctx(spec))
-    assert opts.mcp_servers["zyte"] == {
+    assert opts.mcp_servers["remote"] == {
         "type": "http",
-        "url": "https://mcp.zyte.com",
+        "url": "https://mcp.example.com",
         "headers": {"X-Key": "v"},
     }
 

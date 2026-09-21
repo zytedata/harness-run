@@ -366,6 +366,17 @@ for the tag with this file's section as the notes.
 
 ### Changed
 
+- **Documentation restructured for the public release.** The README is a short front page: what the
+  library is, install, one local and one remote example, the feature list, and links. The reference
+  it used to carry moved, section by section, into `docs/`: `getting-started`, `harnesses-and-models`,
+  `configuration`, `runs-and-sessions`, `local-runtime`, `sandbox-runtime`, `structured-output`,
+  `openrouter`, `secrets-and-security` (which absorbs the former `docs/secret-configuration.md`),
+  `observability` and `gcp-setup`. Examples no longer refer to internal projects, repositories or
+  domains; the live dev probes and `examples/sandbox` require `PROJECT` instead of defaulting to a
+  shared test project. `requires-python` is `>=3.12` with no upper bound: the `<3.14` cap dated from
+  the first scaffold and no dependency needs it (the sandbox image and local package venvs pin their
+  own Python 3.12 independently of the client's interpreter).
+
 - **`send()` into a turn that is still starting is queued instead of refused** (#84, from
   agentic-scraping's integration). Between `run()` and the worker's `control_ready` event (~1 s
   from the ready pool, 15–25 s when a sandbox is created) `send()` used to raise

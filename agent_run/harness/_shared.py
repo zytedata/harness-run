@@ -77,7 +77,7 @@ def mcp_header_secrets(server: Any, ctx: RunContext) -> dict[str, str]:
 # and wait for the user" step into "end the turn and await the next message", and steers
 # the agent away from interactive prompt tools that can't work in a one-shot background
 # job. The operator's reply arrives as the next turn (a resume). Generalized from the PoC
-# (no Zyte/spider specifics).
+# (nothing project-specific).
 INTERACTIVE_SUFFIX = (
     "\n\nINTERACTIVE MODE: You are in a multi-turn conversation with a human operator who "
     "can reply between your turns. A step that would normally prompt the operator must be "

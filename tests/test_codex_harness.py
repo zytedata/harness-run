@@ -204,7 +204,7 @@ def test_build_options_mcp_servers(tmp_path):
         harness="codex",
         mcp_servers=[
             McpServer.github(),
-            McpServer.remote("zyte", "https://mcp.example.com", headers={"X-K": "v"}),
+            McpServer.remote("remote", "https://mcp.example.com", headers={"X-K": "v"}),
             McpServer.stdio("loc", "svc", ["--fast"]),
         ],
     )
@@ -216,8 +216,8 @@ def test_build_options_mcp_servers(tmp_path):
     assert "gh-secret" not in ovr  # token never rides argv
     assert opts.codex_config.env["AGENT_RUN_GITHUB_MCP_TOKEN"] == "gh-secret"
     assert "GH_TOKEN" not in opts.codex_config.env  # consumed, not agent env
-    assert 'mcp_servers.zyte.url="https://mcp.example.com"' in ovr
-    assert 'mcp_servers.zyte.http_headers={"X-K" = "v"}' in ovr
+    assert 'mcp_servers.remote.url="https://mcp.example.com"' in ovr
+    assert 'mcp_servers.remote.http_headers={"X-K" = "v"}' in ovr
     assert 'mcp_servers.loc.command="svc"' in ovr
     assert 'mcp_servers.loc.args=["--fast"]' in ovr
 

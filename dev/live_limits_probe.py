@@ -35,7 +35,7 @@ from agentplatform._genai import types
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--image", required=True, help="a sandbox image built by sandbox.deploy")
-ap.add_argument("--project", default="my-project")
+ap.add_argument("--project", required=True, help="your GCP project id")
 ap.add_argument("--location", default="us-central1")
 ap.add_argument("--long-minutes", type=float, default=0.0, help="in-container ticker for that long")
 ap.add_argument("--sleep-steps", default="30,60,120,300,600", help="per-call ceiling probe")

@@ -1,6 +1,6 @@
 """Minimal generic example — a tiny coding agent run locally, in-process.
 
-Defines an :class:`AgentSpec` (no Zyte specifics), deploys it with ``local.deploy``, and
+Defines an :class:`AgentSpec` (nothing project-specific), deploys it with ``local.deploy``, and
 runs one task — streaming progress events, then reading the structured result. The same
 spec + ``Engine``/``Session`` API runs remotely, in a Google Agent Sandbox, via ``sandbox``
 (swap ``local`` → ``sandbox.deploy`` / ``sandbox.get_engine`` — see the top-level README).

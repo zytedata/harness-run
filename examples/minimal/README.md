@@ -1,6 +1,6 @@
 # minimal example agent
 
-A tiny, generic (non-Zyte) agent that proves the core API end-to-end: define an
+A tiny, generic agent that proves the core API end-to-end: define an
 `AgentSpec`, `local.deploy` it, run one task, stream events, and read a structured result.
 The same spec runs remotely, in a Google Agent Sandbox, by swapping `local` → `sandbox.deploy` /
 `sandbox.get_engine` (see the top-level README and [`../sandbox`](../sandbox)).

@@ -19,7 +19,7 @@ def _example_spec() -> AgentSpec:
         harness="claude-code",
         name="spider-builder",
         model="claude-sonnet-4-6",
-        system_prompt=SystemPrompt.inherit(append="Prefer the Zyte web-scraping skills."),
+        system_prompt=SystemPrompt.inherit(append="Prefer the skills below when they apply."),
         skills=[SkillSource.git("https://github.com/zytedata/claude-skills", ref="0.2.0")],
         repos=[RepoSource.git("https://github.com/acme/spiders", ref="main", auth="GH_TOKEN")],
         mcp_servers=[McpServer.github(), McpServer.stdio("local", "echo", ["hi"])],

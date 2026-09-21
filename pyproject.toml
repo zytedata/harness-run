@@ -10,6 +10,11 @@ readme = "README.md"
 requires-python = ">=3.12,<3.14"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
+authors = [
+    { name = "Konstantin Lopuhin" },
+    { name = "Ivan Sanchez" },
+    { name = "Julia Medina" },
+]
 keywords = ["agent", "claude-code", "codex", "sandbox", "llm", "remote-execution"]
 classifiers = [
     "Environment :: Console",

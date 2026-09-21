@@ -1,7 +1,7 @@
-"""One-command GCP project setup for the sandbox runtime (the ``gemini`` backend).
+"""One-command GCP project setup for the sandbox runtime (the ``sandbox`` backend).
 
 ``agent-run-gcp-setup --project <id>`` makes a GCP project ready to run this toolkit's
-``gemini`` backend: it audits the project against everything the README's "GCP setup &
+``sandbox`` backend: it audits the project against everything the README's "GCP setup &
 required permissions" section requires, prints a report, asks for confirmation, applies
 what is missing, and re-audits until the project is ready. It is **additive only** — it
 never disables, removes, or narrows anything — so it is safe to run (and re-run: every
@@ -135,7 +135,7 @@ def repo_resource(project: str, location: str, repo_id: str) -> str:
 
 
 def image_repo_uri(project: str, location: str, repo_id: str) -> str:
-    """The Docker host path of the repo — what ``gemini.deploy(image_repo=)`` takes."""
+    """The Docker host path of the repo — what ``sandbox.deploy(image_repo=)`` takes."""
     return f"{location}-docker.pkg.dev/{project}/{repo_id}"
 
 
@@ -800,7 +800,7 @@ def audit(api: GcpApi, cfg: Settings) -> list[Item]:
                 "model SA",
                 FIX,
                 f"create {model_email} (its tokens carry the sandboxes' model calls: "
-                "gemini.deploy(model_service_account=...))",
+                "sandbox.deploy(model_service_account=...))",
                 fix=lambda i=model_email.split("@")[0]: api.create_service_account(
                     i, "agent-run model identity (Vertex model calls only)"
                 ),
@@ -1173,7 +1173,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="agent-run-gcp-setup",
         description=(
-            "Make a GCP project ready for agent-run's gemini backend: audit, "
+            "Make a GCP project ready for agent-run's sandbox backend: audit, "
             "confirm, apply, re-audit. Additive only — safe on existing, non-empty projects."
         ),
     )
@@ -1202,7 +1202,7 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "model service account whose tokens the sandboxes call Vertex with — an account id in "
             f"the target project or a full email (default {DEFAULT_MODEL_SA_ID!r}, which is also what "
-            "gemini.deploy uses when model_service_account= is omitted; name another one here and "
+            "sandbox.deploy uses when model_service_account= is omitted; name another one here and "
             "pass it to every deploy)"
         ),
     )
@@ -1339,7 +1339,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if code == 0:
         print(f"\n{cfg.project} is ready.", flush=True)
         print(
-            f"deploy with gemini.deploy(..., image_repo={cfg.image_repo()!r}, "
+            f"deploy with sandbox.deploy(..., image_repo={cfg.image_repo()!r}, "
             f"model_service_account={cfg.model_email()!r}) — both are the defaults for "
             "this project/location when the tool's defaults were kept.",
             flush=True,

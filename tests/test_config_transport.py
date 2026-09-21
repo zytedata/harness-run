@@ -9,7 +9,7 @@ The deploy/session/turn scope model (README). Under test here:
 * client: ``get_session`` re-attach recovers the opener's persisted config — it cannot
   substitute a different one (the method takes no config);
 * client: ``get_engine(spec=)`` is gone, with an error that points at the replacement;
-* worker: the turn runs baked ← session ← turn merged (``test_gemini_runtime`` covers the
+* worker: the turn runs baked ← session ← turn merged (``test_sandbox_runtime`` covers the
   echo and the fail-closed cases);
 * local: the same session/turn config surface works in-process (dev/prod parity).
 """
@@ -24,7 +24,7 @@ from sandbox_fakes import FakeSandboxProvider, make_engine
 from agent_run import AgentSpec, SessionConfig, SkillSource, TurnConfig
 from agent_run.ports.blobstore import LocalBlobStore
 from agent_run.runtime import local
-from agent_run.runtime.gemini import backend, handoff, history, worker as worker_mod
+from agent_run.runtime.sandbox import backend, handoff, history, worker as worker_mod
 
 
 def _patched_store(tmp_path, monkeypatch):

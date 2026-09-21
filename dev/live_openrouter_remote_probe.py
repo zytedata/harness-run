@@ -30,7 +30,7 @@ import sys
 import time
 import traceback
 
-from agent_run import AgentSpec, SessionConfig, StopReason, TurnConfig, gemini
+from agent_run import AgentSpec, SessionConfig, StopReason, TurnConfig, sandbox
 
 PROJECT = os.environ.get("PROJECT", "my-project")
 LOCATION = os.environ.get("LOCATION", "us-central1")
@@ -439,21 +439,21 @@ async def _check_visibility(session, final_raw: dict, expect_model: str, harness
 
 
 _TORN_DOWN = False
-_ENGINE = None  # set as soon as gemini.deploy returns; read by the signal handler
+_ENGINE = None  # set as soon as sandbox.deploy returns; read by the signal handler
 _CREDENTIALS = None  # set before the handler goes on, so a delete by name can authenticate
 
 
 def _delete_by_name() -> str | None:
     """Delete the engine when the run never got a handle for it. ``None`` if it went.
 
-    An interrupt during ``gemini.deploy`` leaves no engine object, but the platform may
+    An interrupt during ``sandbox.deploy`` leaves no engine object, but the platform may
     already have created the engine, and it bills while it exists. ``NAME`` is fixed, so
     look the engine up by it and delete it. On failure return the reason as one line: the
     common case is that the deploy had not created anything yet, and a full traceback for
     that would bury the message that matters.
     """
     try:
-        gemini.get_engine(NAME, PROJECT, LOCATION, credentials=_CREDENTIALS).delete()
+        sandbox.get_engine(NAME, PROJECT, LOCATION, credentials=_CREDENTIALS).delete()
         return None
     except Exception as exc:  # noqa: BLE001 — best effort; the caller says what to do
         return f"{type(exc).__name__}: {str(exc)[:200]}"
@@ -465,7 +465,7 @@ def _teardown() -> None:
     SIGTERM and SIGINT can end the process before ``finally`` runs. The signal handler and
     this idempotent function ensure the engine is deleted once.
 
-    Before ``gemini.deploy`` returns there is no engine object, so that window deletes by
+    Before ``sandbox.deploy`` returns there is no engine object, so that window deletes by
     name instead.
     """
     global _TORN_DOWN
@@ -505,7 +505,7 @@ def _teardown() -> None:
 def _install_signal_teardown() -> None:
     """On SIGTERM/SIGINT: delete the engine, then exit non-zero.
 
-    Installed BEFORE ``gemini.deploy``, because that call is the longest part of the run
+    Installed BEFORE ``sandbox.deploy``, because that call is the longest part of the run
     (the image build, then a template create the platform has taken up to 30 min over) and
     the process is routinely wrapped in a ``timeout`` or interrupted. An
     interrupt during the deploy would otherwise leave a billing engine behind with nothing
@@ -561,7 +561,7 @@ async def main() -> int:
 
     try:
         _ENGINE = engine = await asyncio.to_thread(
-            gemini.deploy,
+            sandbox.deploy,
             spec,
             PROJECT,
             LOCATION,

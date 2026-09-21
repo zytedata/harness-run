@@ -2,9 +2,9 @@
 
 Drives ``claude_agent_sdk.query()`` against the per-run working directory and translates
 each streamed SDK message into a generic :class:`AgentEvent` (via :mod:`translate`), so
-the rest of the toolkit — and every runtime (``local`` / ``gemini``) — stays harness-
+the rest of the toolkit — and every runtime (``local`` / ``sandbox``) — stays harness-
 agnostic. This is the generalized core of the PoC ``ClaudeCodeAgent``: running it in a
-sandbox (the worker, the HTTP contract) is a ``gemini``-side concern, not the harness's.
+sandbox (the worker, the HTTP contract) is a ``sandbox``-side concern, not the harness's.
 
 ``claude_agent_sdk`` is imported lazily inside methods, so importing this module needs no
 third-party deps.
@@ -989,7 +989,7 @@ class ClaudeCodeHarness:
                         pass
         except Exception as exc:
             # Surface the captured stderr with the failure: as a status event (reaches the
-            # stream / Cloud Logging on gemini) and embedded in the raised error, so a
+            # stream / Cloud Logging on sandbox) and embedded in the raised error, so a
             # non-zero CLI exit is classifiable post-mortem instead of "check stderr".
             tail = stderr_log.tail()
             if tail:

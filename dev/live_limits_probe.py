@@ -1,6 +1,6 @@
 """Live probe: the undocumented limits of Agent Sandbox custom containers (DESIGN.md §13.2).
 
-Runs against an image built by ``gemini.deploy`` (``--image``: the ``image`` field of a deploy
+Runs against an image built by ``sandbox.deploy`` (``--image``: the ``image`` field of a deploy
 record, or any ``engine.revisions()`` entry) — it needs only the worker's ``/health`` and ``/exec``
 — and answers, with numbers (the 2026-09-11 findings are tabulated in TESTING.md, "The limits probe"):
 
@@ -34,7 +34,7 @@ import agentplatform
 from agentplatform._genai import types
 
 ap = argparse.ArgumentParser()
-ap.add_argument("--image", required=True, help="a sandbox image built by gemini.deploy")
+ap.add_argument("--image", required=True, help="a sandbox image built by sandbox.deploy")
 ap.add_argument("--project", default="my-project")
 ap.add_argument("--location", default="us-central1")
 ap.add_argument("--long-minutes", type=float, default=0.0, help="in-container ticker for that long")

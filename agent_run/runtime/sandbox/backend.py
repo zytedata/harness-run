@@ -1,6 +1,6 @@
 """Sandbox runtime control plane: deploy / get_engine / list_engines + Engine/Session/Run.
 
-The ``gemini`` backend runs the harness inside an **Agent Sandbox custom container**
+The ``sandbox`` backend runs the harness inside an **Agent Sandbox custom container**
 (DESIGN.md §13): ``deploy`` builds the agent's image, pushes it and creates an immutable
 sandbox **template** (a template is a version); app code addresses engines by name via
 ``get_engine`` and never deploys. The **client is the whole control plane**: a turn claims a
@@ -53,7 +53,7 @@ logger = logging.getLogger(__name__)
 # Default idle life of a ready-pool sandbox: how long it waits for a turn before its TTL
 # deletes it. A day keeps a pool warm across working-hours gaps while bounding idle
 # billing (a ready sandbox bills like an idle warm worker did). Deploy-time override:
-# ``gemini.deploy(..., pool_max_wait_s=...)``.
+# ``sandbox.deploy(..., pool_max_wait_s=...)``.
 DEFAULT_MAX_WAIT_S = 24 * 3600.0
 # Longest turn a sandbox must survive: an on-demand sandbox's TTL, and the margin added to
 # a pool sandbox's TTL past its idle life (a TTL cannot be extended, so a sandbox claimed at
@@ -79,7 +79,7 @@ DIRECT_RETRY_SLEEP_S = 1.0
 GONE_GRACE_S = 30.0
 # Attempts to hand a turn to a sandbox: a sandbox that definitely never accepted the turn
 # (gone, or refusing) is dropped and another claimed. A ``/turn`` call whose answer was lost
-# is instead settled with THAT sandbox (``GeminiSession._reconcile``): the worker's acceptance
+# is instead settled with THAT sandbox (``SandboxSession._reconcile``): the worker's acceptance
 # is idempotent per turn id, so asking again tells whether the turn runs there — never a
 # replay elsewhere while the first sandbox may be running the agent.
 DISPATCH_ATTEMPTS = 3
@@ -120,7 +120,7 @@ _DEPLOY_REMOVED_KWARGS = frozenset({
 class DispatchUncertain(SandboxError):
     """A ``/turn`` hand-over ended in an unknown state: the sandbox may be running the turn.
 
-    Raised by :meth:`GeminiSession._dispatch` when the sandbox that may have accepted the
+    Raised by :meth:`SandboxSession._dispatch` when the sandbox that may have accepted the
     turn cannot be asked any more (it vanished, or stopped answering). The run ends with an
     error result saying so and the sandbox is deleted, which stops any run it started; the
     turn is never replayed on another sandbox.
@@ -421,7 +421,7 @@ def deploy(
 
         warnings.warn(f"could not write the deploy record to {output_bucket}: {exc}", stacklevel=2)
 
-    engine = GeminiEngine(
+    engine = SandboxEngine(
         template=template, spec=spec, project=project, location=location,
         output_bucket=output_bucket, credentials=credentials, provider=provider,
         warm=warm_pool, pool_max_wait_s=pool_max_wait_s, max_turn_s=max_turn_s,
@@ -503,7 +503,7 @@ def get_engine(
         if gone in kwargs:
             raise TypeError(
                 f"get_engine() got {gone}=: these are deploy-time settings now (the deploy "
-                "record carries them); pass them to gemini.deploy()"
+                "record carries them); pass them to sandbox.deploy()"
             )
     if kwargs:
         raise TypeError(f"get_engine() got unexpected keyword argument(s) {sorted(kwargs)}")
@@ -520,7 +520,7 @@ def get_engine(
             raise LookupError(
                 f"engine {name!r} has no ACTIVE version: "
                 + ", ".join(f"{template_id(t['name'])} is {t.get('state')}" for t in templates)
-                + ". A FAILED template is a deploy that did not come up; re-run gemini.deploy() "
+                + ". A FAILED template is a deploy that did not come up; re-run sandbox.deploy() "
                 "(it creates a new version and retires the failed ones)."
             )
         chosen = active[0]
@@ -555,7 +555,7 @@ def get_engine(
             f"{output_bucket}: this handle can only address the template — a turn routed "
             "through Vertex fails at dispatch for lack of a model service account. Usually the "
             "deploy that created this version was interrupted before it wrote the record; re-run "
-            "gemini.deploy() for the engine (idempotent: the image and the template are reused, "
+            "sandbox.deploy() for the engine (idempotent: the image and the template are reused, "
             "the record is written).",
             stacklevel=2,
         )
@@ -565,7 +565,7 @@ def get_engine(
             spec = AgentSpec.from_dict(record["spec"])
         except Exception:  # noqa: BLE001 — a record from another toolkit revision
             spec = None
-    return GeminiEngine(
+    return SandboxEngine(
         template=chosen["name"],
         spec=spec or _fallback_spec(name),
         project=project,
@@ -603,7 +603,7 @@ def list_engines(
 # -- run plane -----------------------------------------------------------------
 
 
-class GeminiSession:
+class SandboxSession:
     """A run-plane session over a sandbox engine (CMA-style lifecycle; DESIGN.md §4).
 
     A session's :class:`~agent_run.config.SessionConfig` is bound ONCE, at
@@ -615,7 +615,7 @@ class GeminiSession:
 
     def __init__(
         self,
-        engine: GeminiEngine,
+        engine: SandboxEngine,
         session_id: str,
         config: SessionConfig | None = None,
         config_resolved: bool = True,
@@ -1429,7 +1429,7 @@ class GeminiSession:
         limit = EXEC_DEFAULT_TIMEOUT_S if timeout is None else float(timeout)
         if limit > EXEC_MAX_TIMEOUT_S:
             raise ValueError(
-                f"exec() timeout must be at most {EXEC_MAX_TIMEOUT_S:g}s on gemini: the platform "
+                f"exec() timeout must be at most {EXEC_MAX_TIMEOUT_S:g}s on sandbox: the platform "
                 "proxy cuts a sandbox call at ~300 s. Run a longer probe in the background inside "
                 "the sandbox (nohup ... &) and poll its output."
             )
@@ -1629,13 +1629,13 @@ class GeminiSession:
             "spec.repos, and collect outputs via events/history or a repo push."
         )
 
-    def fork(self) -> GeminiSession:
+    def fork(self) -> SandboxSession:
         raise NotImplementedError(
             "fork is not supported yet (would copy the workspace snapshot + transcript under a new id)."
         )
 
 
-class GeminiEngine:
+class SandboxEngine:
     """A deployed sandbox engine handle (implements ``runtime.base.Engine``; DESIGN.md §4).
 
     ``template`` is the version this handle's turns run on; ``spec`` is the deploy-baked
@@ -1678,7 +1678,7 @@ class GeminiEngine:
         self._vertex_region = vertex_region
         self._pinned = pinned
         self._roster_store = roster_store
-        self._sessions: dict[str, GeminiSession] = {}
+        self._sessions: dict[str, SandboxSession] = {}
         self._roster_cached: Any = None
         self._background: list[threading.Thread] = []
 
@@ -1887,7 +1887,7 @@ class GeminiEngine:
 
     # -- Engine protocol -------------------------------------------------------------
 
-    def start_session(self, config: SessionConfig | None = None) -> GeminiSession:
+    def start_session(self, config: SessionConfig | None = None) -> SandboxSession:
         """Begin a new session; ``config`` binds its :class:`SessionConfig` for good.
 
         Session ids are client-minted canonical UUIDs (the Claude Agent SDK requires that
@@ -1898,14 +1898,14 @@ class GeminiEngine:
                 "start_session(config=...) requires the engine's output bucket (the config "
                 "is persisted there for re-attach); construct the engine with output_bucket/project set."
             )
-        session = GeminiSession(self, str(uuid.uuid4()))
+        session = SandboxSession(self, str(uuid.uuid4()))
         session._bind_config(config)
         self._sessions[session.session_id] = session
         return session
 
-    def get_session(self, session_id: str) -> GeminiSession:
+    def get_session(self, session_id: str) -> SandboxSession:
         """Re-attach to an existing session by id (poll / continue). Takes NO config on purpose."""
-        return self._sessions.get(session_id) or GeminiSession(self, session_id, config_resolved=False)
+        return self._sessions.get(session_id) or SandboxSession(self, session_id, config_resolved=False)
 
     def list_sessions(self) -> list[dict]:
         """Sessions recorded under the output bucket (the event mirror), newest first.

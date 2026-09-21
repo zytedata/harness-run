@@ -57,7 +57,7 @@ def _drive(script, tmp_path, monkeypatch):
 def test_cli_crash_surfaces_stderr_tail(tmp_path, monkeypatch):
     # A non-zero CLI exit raises out of the stream; the harness must surface what the
     # CLI said: a status event with the tail (reaches the stream / Cloud Logging on
-    # gemini) and the tail + log path embedded in the raised error.
+    # sandbox) and the tail + log path embedded in the raised error.
     script = [
         lambda c: c.options.stderr("node: something went wrong"),
         lambda c: c.options.stderr("Error: ENOMEM at finish line"),

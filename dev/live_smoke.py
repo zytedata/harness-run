@@ -4,7 +4,7 @@ The offline suite (`make test`) can't catch platform-contract breakage: the Agen
 side changes underneath us (see TESTING.md). This script is the standard live check for a
 branch that touches any deploy/runtime contract — it validates, on real infrastructure:
 
-  * ``gemini.deploy``: the image build + push (Docker), the template, the deploy record,
+  * ``sandbox.deploy``: the image build + push (Docker), the template, the deploy record,
     a ready pool of one sandbox (``wait_until_warm``)
   * a **pool** turn: dispatch → first event / result latency on the ready sandbox, the
     refill, the sandbox's deletion at the terminal event
@@ -80,8 +80,8 @@ import sys
 import time
 import traceback
 
-from agent_run import AgentSpec, SessionConfig, StopReason, SystemPrompt, TurnConfig, gemini
-from agent_run.runtime.gemini.model_token import default_model_service_account
+from agent_run import AgentSpec, SessionConfig, StopReason, SystemPrompt, TurnConfig, sandbox
+from agent_run.runtime.sandbox.model_token import default_model_service_account
 
 PROJECT = os.environ.get("PROJECT", "my-project")
 LOCATION = os.environ.get("LOCATION", "us-central1")
@@ -92,8 +92,8 @@ SUFFIX = re.sub(r"[^a-z0-9-]", "-", (os.environ.get("SUFFIX") or getpass.getuser
 LONG_MINUTES = float(os.environ.get("LONG_MINUTES", "0") or 0)
 TOKEN_LIFETIME_S = int(os.environ.get("TOKEN_LIFETIME_S", "0") or 0)
 if TOKEN_LIFETIME_S:
-    from agent_run.runtime.gemini import backend as _backend
-    from agent_run.runtime.gemini import model_token as _model_token
+    from agent_run.runtime.sandbox import backend as _backend
+    from agent_run.runtime.sandbox import model_token as _model_token
 
     _real_mint = _model_token.mint_model_token
     _model_token.mint_model_token = lambda creds, sa, lifetime_s=TOKEN_LIFETIME_S: _real_mint(creds, sa, TOKEN_LIFETIME_S)
@@ -109,7 +109,7 @@ RESOURCE_LIMITS = (
 # ``exec <command>`` / ``steer <message> <message_id>`` / ``interrupt``; one JSON verdict line.
 REATTACH_PROBE = r"""
 import asyncio, json, os, sys
-from agent_run import ControlUnavailable, gemini
+from agent_run import ControlUnavailable, sandbox
 name, project, location, sid, op = sys.argv[1:6]
 args = sys.argv[6:]
 creds = None
@@ -120,7 +120,7 @@ if os.environ.get("IMPERSONATE"):  # the same identity the smoke itself drives t
     creds = impersonated_credentials.Credentials(
         source_credentials=source, target_principal=os.environ["IMPERSONATE"],
         target_scopes=["https://www.googleapis.com/auth/cloud-platform"], lifetime=600)
-engine = gemini.get_engine(name, project=project, location=location, warm_pool=False, credentials=creds)
+engine = sandbox.get_engine(name, project=project, location=location, warm_pool=False, credentials=creds)
 session = engine.get_session(sid)
 async def main():
     try:
@@ -309,7 +309,7 @@ async def check_pool_turn(engine, verdicts) -> None:
 
 
 async def check_configs(verdicts) -> None:
-    engine = await asyncio.to_thread(gemini.get_engine, NAME, PROJECT, LOCATION, warm_pool=False,
+    engine = await asyncio.to_thread(sandbox.get_engine, NAME, PROJECT, LOCATION, warm_pool=False,
                                        credentials=CREDS)
     label = "session-config"
     try:
@@ -602,7 +602,7 @@ async def main() -> int:
             spec = AgentSpec(**{**spec.to_dict(), "env": {"BASH_DEFAULT_TIMEOUT_MS": str(int(LONG_MINUTES * 60 * 1000) + 120_000),
                                                        "BASH_MAX_TIMEOUT_MS": str(int(LONG_MINUTES * 60 * 1000) + 120_000)}})
         engine = await asyncio.to_thread(
-            gemini.deploy, spec, PROJECT, LOCATION, warm_pool=True, pool_size=1,
+            sandbox.deploy, spec, PROJECT, LOCATION, warm_pool=True, pool_size=1,
             image_repo=IMAGE_REPO, model_service_account=MODEL_SA, output_bucket=OUTPUT_BUCKET,
             log=lambda m: log("deploy", m), credentials=CREDS, resource_limits=RESOURCE_LIMITS,
         )
@@ -626,7 +626,7 @@ async def main() -> int:
                 await asyncio.to_thread(engine.delete)
                 log("teardown", "engine deleted (templates + sandboxes)")
             except Exception:
-                log("teardown", "FAILED — delete by hand: gemini.get_engine(...).delete()\n" + traceback.format_exc())
+                log("teardown", "FAILED — delete by hand: sandbox.get_engine(...).delete()\n" + traceback.format_exc())
     print("\n=== VERDICTS ===", flush=True)
     for check, ok in verdicts.items():
         print(f"  {check}: {'PASS' if ok else 'FAIL'}", flush=True)

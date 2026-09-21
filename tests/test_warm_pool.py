@@ -9,8 +9,8 @@ import pytest
 from sandbox_fakes import FakeSandboxProvider, ScriptedWorker, make_engine, result_event
 
 from agent_run import AgentSpec
-from agent_run.runtime.gemini import backend
-from agent_run.runtime.gemini.provider import SandboxError
+from agent_run.runtime.sandbox import backend
+from agent_run.runtime.sandbox.provider import SandboxError
 
 
 async def _await(run):
@@ -236,7 +236,7 @@ def test_get_engine_handle_shares_the_pool_of_the_deploying_process():
     provider = FakeSandboxProvider()
     deploying = make_engine(provider, warm=True)
     deploying.fill_pool(1)
-    other = backend.GeminiEngine(template=deploying.resource, spec=AgentSpec(name="g", model="m"),
+    other = backend.SandboxEngine(template=deploying.resource, spec=AgentSpec(name="g", model="m"),
                                  project="p", location="l", output_bucket="gs://out", provider=provider,
                                  warm=True, roster_store=deploying._roster_store,
                                  model_service_account="agent-run-model@p.iam.gserviceaccount.com")

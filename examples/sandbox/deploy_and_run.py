@@ -1,7 +1,7 @@
 """Deploy the example agent as a sandbox engine, run a turn, tear it down.
 
 The same `AgentSpec` and `Engine`/`Session`/`Run` API as the local example — only the
-backend (`local` → `gemini`) changes. This is the prod path the top-level README's "Prod"
+backend (`local` → `sandbox`) changes. This is the prod path the top-level README's "Prod"
 section describes, as a runnable template.
 
 Prerequisites (see the top-level README "GCP setup & required permissions"):
@@ -12,8 +12,8 @@ Configure via env (defaults are the shared my-project test setup):
   PROJECT, LOCATION, IMPERSONATE_SA (optional least-priv impersonation), WARM=1 (ready pool).
 
 Run:
-  .venv/bin/python examples/gemini/deploy_and_run.py             # reuse-or-deploy, then run a turn
-  TEARDOWN=1 .venv/bin/python examples/gemini/deploy_and_run.py  # tear the engine down (templates + ready sandboxes)
+  .venv/bin/python examples/sandbox/deploy_and_run.py             # reuse-or-deploy, then run a turn
+  TEARDOWN=1 .venv/bin/python examples/sandbox/deploy_and_run.py  # tear the engine down (templates + ready sandboxes)
 
 The engine is REUSED if one of this name already exists (a subsequent run skips the image
 build); it's left in place afterwards for that reuse. A template itself costs nothing; a ready
@@ -27,7 +27,7 @@ import os
 
 import pydantic
 
-from agent_run import AgentSpec, SystemPrompt, gemini
+from agent_run import AgentSpec, SystemPrompt, sandbox
 
 PROJECT = os.environ.get("PROJECT", "my-project")
 LOCATION = os.environ.get("LOCATION", "us-central1")
@@ -78,13 +78,13 @@ async def _run_turn(engine) -> None:
 def get_or_deploy(creds):
     """Reuse the named engine if it exists; deploy it only if not. Returns ``(engine, reused)``."""
     try:
-        engine = gemini.get_engine(SPEC.name, project=PROJECT, location=LOCATION,
+        engine = sandbox.get_engine(SPEC.name, project=PROJECT, location=LOCATION,
                                    warm_pool=WARM, credentials=creds)
         print(f"reusing existing engine {engine.resource}", flush=True)
         return engine, True
     except LookupError:
         print(f"no engine named {SPEC.name!r} — deploying (image build + push + template)...", flush=True)
-        engine = gemini.deploy(SPEC, project=PROJECT, location=LOCATION, credentials=creds,
+        engine = sandbox.deploy(SPEC, project=PROJECT, location=LOCATION, credentials=creds,
                                warm_pool=WARM, pool_size=1)
         print(f"deployed {engine.resource}", flush=True)
         return engine, False
@@ -93,7 +93,7 @@ def get_or_deploy(creds):
 def teardown(creds) -> None:
     """Tear the named engine down — deletes its ready sandboxes and every version's template."""
     try:
-        engine = gemini.get_engine(SPEC.name, project=PROJECT, location=LOCATION,
+        engine = sandbox.get_engine(SPEC.name, project=PROJECT, location=LOCATION,
                                    warm_pool=WARM, credentials=creds)
     except LookupError:
         print(f"no engine named {SPEC.name!r} — nothing to tear down", flush=True)
@@ -119,9 +119,9 @@ def main() -> None:
 
     # Left in place so the next run reuses it (skipping the image build). Ready sandboxes
     # bill while they exist — tear it down when done:
-    #     TEARDOWN=1 .venv/bin/python examples/gemini/deploy_and_run.py
+    #     TEARDOWN=1 .venv/bin/python examples/sandbox/deploy_and_run.py
     print(f"\nengine left running for reuse: {engine.resource}"
-          "\n  tear down with:  TEARDOWN=1 .venv/bin/python examples/gemini/deploy_and_run.py", flush=True)
+          "\n  tear down with:  TEARDOWN=1 .venv/bin/python examples/sandbox/deploy_and_run.py", flush=True)
 
 
 if __name__ == "__main__":

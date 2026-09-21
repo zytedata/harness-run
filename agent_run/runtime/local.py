@@ -1,9 +1,9 @@
 """Local, in-process run plane (DESIGN.md §3.2, §3.4).
 
 ``local.deploy(spec)`` returns a ``LocalEngine`` exposing the *same* Engine/Session/Run
-surface as ``gemini``, backed by the in-process :class:`ClaudeCodeHarness` and
+surface as ``sandbox``, backed by the in-process :class:`ClaudeCodeHarness` and
 filesystem/in-memory port adapters (no GCP beyond model access). This is the first-class
-dev loop: develop against ``local``, ship against ``gemini``, with zero code change.
+dev loop: develop against ``local``, ship against ``sandbox``, with zero code change.
 
 A ``Run`` is consumable three ways — ``await`` it (→ ``RunResult``), ``async for`` over it
 (→ ``AgentEvent``s), or poll ``run.done`` / ``run.status``. A single background task drives
@@ -32,7 +32,7 @@ if TYPE_CHECKING:
     from ..spec import AgentSpec
 
 # Where a session's bound config is persisted inside the engine's blob root, so a
-# process re-attaching by id (with the same workdir) recovers it — same rule as gemini:
+# process re-attaching by id (with the same workdir) recovers it — same rule as sandbox:
 # the config is bound once at session start and cannot be substituted on re-attach.
 _SESSION_CONFIG_KEY = "session-config/{sid}.json"
 
@@ -59,7 +59,7 @@ class LocalSession:
     The session's :class:`~agent_run.config.SessionConfig` (bound at
     ``engine.start_session(config=...)``) overlays the engine's spec for every turn of
     this session; a per-turn :class:`~agent_run.config.TurnConfig` overlays
-    that for one turn. Same scope model as gemini — see ``runtime.base``.
+    that for one turn. Same scope model as sandbox — see ``runtime.base``.
     """
 
     def __init__(
@@ -89,7 +89,7 @@ class LocalSession:
         self._spec = spec
         self._job_dir = engine._jobs_root / session_id
         # Wire the blob/session-store adapters only when the spec opts in (parity with
-        # gemini). ``transcript`` wires them for reading the transcript back; the workspace
+        # sandbox). ``transcript`` wires them for reading the transcript back; the workspace
         # snapshot stays behind ``checkpoint`` alone (see ``_shared.finalize_checkpoint``).
         self._blobs: Any | None = None
         self._session_store: Any | None = None
@@ -98,7 +98,7 @@ class LocalSession:
 
             ckpt_gcs = os.environ.get("AGENT_CHECKPOINT_GCS")
             if ckpt_gcs:
-                # Same env hook as the gemini runtime: durable checkpoints even for the
+                # Same env hook as the sandbox runtime: durable checkpoints even for the
                 # in-process engine (a pod-local <workdir>/blobs dies with the pod).
                 from ..ports.blobstore import GcsBlobStore, parse_gcs_uri
 
@@ -317,7 +317,7 @@ class LocalSession:
         """Run a shell command in the running turn's workspace (``Session.exec``).
 
         Runs on the host under ``/bin/bash -c`` in :attr:`workspace` (or ``cwd`` under it),
-        off the event loop. Same rule as ``gemini``: only while a turn runs — otherwise it
+        off the event loop. Same rule as ``sandbox``: only while a turn runs — otherwise it
         raises :class:`~agent_run.control.ControlUnavailable`, so code written
         against ``local`` behaves the same way remotely (on the host you can always read
         :attr:`workspace` directly).
@@ -415,7 +415,7 @@ class LocalSession:
     def history(self) -> list[AgentEvent]:
         raise NotImplementedError(
             "local runs don't persist an event log yet — stream the Run (async for) or use "
-            "the gemini runtime, whose sessions keep a durable GCS/Cloud Logging history."
+            "the sandbox runtime, whose sessions keep a durable GCS/Cloud Logging history."
         )
 
     def fork(self) -> LocalSession:
@@ -443,7 +443,7 @@ class LocalEngine:
         self._blob_root.mkdir(parents=True, exist_ok=True)
         self._sessions: dict[str, LocalSession] = {}
 
-        # spec.packages parity with gemini's baked engine image: resolve the agent's declared
+        # spec.packages parity with sandbox's baked engine image: resolve the agent's declared
         # packages into a per-engine venv at deploy time (uv; warm installs take seconds) and
         # activate it in the agent's env. Its bin leads PATH, composing with any spec.env PATH.
         self._agent_env: dict[str, str] | None = None
@@ -515,7 +515,7 @@ class LocalEngine:
         """Begin a new session; ``config`` binds its ``SessionConfig`` for good (see base).
 
         The config is persisted under the engine's workdir so a process re-attaching by
-        id (same workdir) recovers it — parity with gemini's GCS persistence.
+        id (same workdir) recovers it — parity with sandbox's GCS persistence.
         """
         # Canonical UUID (dashed), NOT uuid4().hex: this id is passed to the Claude Agent
         # SDK as session_id (checkpoint keying) / resume, and the SDK rejects a non-canonical
@@ -540,7 +540,7 @@ class LocalEngine:
         """Sessions known to this engine's workdir (each per-session job dir), newest last id.
 
         Local runs keep no durable event log — this lists the job dirs so a persistent
-        ``workdir`` can be re-attached across processes; ``history()`` stays gemini-only.
+        ``workdir`` can be re-attached across processes; ``history()`` stays sandbox-only.
         """
         if not self._jobs_root.is_dir():
             return []
@@ -569,7 +569,7 @@ class LocalEngine:
 def deploy(
     spec: AgentSpec, *, workdir: str | None = None, workspace: str | None = None, **_: Any
 ) -> LocalEngine:
-    """Stand up an in-process engine for ``spec`` (mirrors ``gemini.deploy``).
+    """Stand up an in-process engine for ``spec`` (mirrors ``sandbox.deploy``).
 
     ``workdir`` sets the root for per-session job dirs and the local blob store; omit it
     for a throwaway temp dir. The harness + local/in-memory adapters are wired here.

@@ -3,7 +3,7 @@
 Run with the real pinned CLI and Anthropic credentials:
     python dev/live_resume_probe.py
 
-For a throwaway Gemini engine deployed from this checkout, set ENGINE=<resource>,
+For a throwaway sandbox engine deployed from this checkout, set ENGINE=<resource>,
 PROJECT and LOCATION. The caller owns that engine's teardown. Logs go to stdout;
 this probe never runs in the offline suite. A missing pending-task state is a failure,
 not evidence that resume worked.
@@ -15,7 +15,7 @@ import asyncio
 import os
 import tempfile
 
-from agent_run import AgentSpec, gemini, local
+from agent_run import AgentSpec, sandbox, local
 from agent_run.events import StopReason
 
 TASK = (
@@ -63,7 +63,7 @@ async def probe(engine, secrets: dict[str, str] | None = None) -> None:
 async def main() -> None:
     resource = os.environ.get("ENGINE")
     if resource:
-        engine = gemini.get_engine(
+        engine = sandbox.get_engine(
             resource, project=os.environ.get("PROJECT", "my-project"),
             location=os.environ.get("LOCATION", "us-central1"), warm_pool=True,
         )

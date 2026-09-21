@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from agent_run.ports.blobstore import LocalBlobStore
-from agent_run.runtime.gemini import handoff
+from agent_run.runtime.sandbox import handoff
 
 
 def test_session_config_is_stable_keyed_and_turn_configs_are_nonce_keyed(tmp_path):

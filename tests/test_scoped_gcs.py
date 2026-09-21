@@ -1,4 +1,4 @@
-"""Run-scoped GCS tokens (runtime/gemini/scoped_gcs.py): the worker's GCS work runs on a
+"""Run-scoped GCS tokens (runtime/sandbox/scoped_gcs.py): the worker's GCS work runs on a
 token limited to the run's own objects (the sandbox has no identity of its own).
 
 Everything here is offline: the access boundary is inspected as data, the worker
@@ -14,7 +14,7 @@ import json
 from agent_run import AgentSpec
 from agent_run.checkpoint.session_store import _claude_session_id
 from agent_run.ports import blobstore as bs
-from agent_run.runtime.gemini import scoped_gcs
+from agent_run.runtime.sandbox import scoped_gcs
 
 
 def test_run_object_prefixes_cover_every_gcs_surface_of_a_turn():

@@ -42,7 +42,7 @@ for the tag with this file's section as the notes.
   - its custom role `ratkRuntimePredict` -> `agentRunPredict`.
 
   The old repo, account and role are left in place; delete them once nothing deploys against
-  them. Images already pushed to the `ratk` repo stay valid — pass `gemini.deploy(image=...)`
+  them. Images already pushed to the `ratk` repo stay valid — pass `sandbox.deploy(image=...)`
   or `image_repo=...` to keep using them.
 
   Sandbox display names now start with `agent-run-<agent>-` instead of `ratk-<agent>-`, and the
@@ -57,8 +57,22 @@ for the tag with this file's section as the notes.
   would silently orphan every stored session (uuid5 is one-way — they could not be found again).
   See the note in that function if it ever has to change.
 
-- **The `gemini` backend runs on Agent Sandbox instead of Agent Runtime query jobs** (#84,
-  DESIGN.md §13). `gemini.deploy` now builds the agent's container image with Docker, pushes it
+- **The `gemini` run-plane namespace is renamed `sandbox`**, so the two backends are now
+  `local` and `sandbox` — named for where a turn runs rather than for the vendor that hosts
+  it. `agent_run.runtime.gemini` -> `agent_run.runtime.sandbox`, `gemini.deploy` /
+  `gemini.get_engine` / `gemini.list_engines` -> `sandbox.*`, and `GeminiEngine` /
+  `GeminiSession` -> `SandboxEngine` / `SandboxSession`. The example moves with it
+  (`examples/gemini/` -> `examples/sandbox/`). **Update note**: `from agent_run.runtime import
+  gemini` becomes `from agent_run.runtime import sandbox`; the Engine/Session/Run surface is
+  unchanged, so nothing else in calling code moves.
+
+  Nothing persisted carries the name — deploy records have no backend field — so there is no
+  stored state to migrate for this half of the rename. Google's product keeps its own name
+  throughout the docs: the backend is `sandbox`, the platform it runs on is still Gemini
+  Enterprise Agent Platform.
+
+- **The `sandbox` backend runs on Agent Sandbox instead of Agent Runtime query jobs** (#84,
+  DESIGN.md §13). `sandbox.deploy` now builds the agent's container image with Docker, pushes it
   to Artifact Registry and creates an immutable sandbox **template** (a template is a version);
   a turn claims a ready sandbox off the roster or creates one, hands it the turn over HTTP
   through the platform's proxy, streams events straight from the sandbox (the GCS mirror stays
@@ -70,7 +84,7 @@ for the tag with this file's section as the notes.
   14.5 s before); a turn with no ready sandbox takes ~20 s instead of ~150 s. Module, `deploy` /
   `get_engine` / `list_engines`, `Engine` / `Session` / `Run` keep their names, so app code that
   looks an engine up and runs turns keeps working. What breaks:
-  - `gemini.deploy` drops `service_account`, `scoped_gcs`, `min_instances`, `max_instances`,
+  - `sandbox.deploy` drops `service_account`, `scoped_gcs`, `min_instances`, `max_instances`,
     `staging_bucket`, `new_engine`; adds `image_repo` (Artifact Registry Docker repo; default
     `<location>-docker.pkg.dev/<project>/agent-run`), `image` (skip the build, use a pushed image),
     `model_service_account` (default `agent-run-model@<project>`), `max_turn_s` (a turn's ceiling on
@@ -107,7 +121,7 @@ for the tag with this file's section as the notes.
     being dispatched (before its first event) — wait for the first event and send again.
   - Dependencies: `google-cloud-agentplatform>=2.1` replaces `google-cloud-aiplatform<2`,
     `google-adk`, `google-cloud-logging`, `google-cloud-pubsub` and `a2a-sdk`;
-    `runtime/gemini/constraints.txt` is gone (no pickle coupling to a deploy venv).
+    `runtime/sandbox/constraints.txt` is gone (no pickle coupling to a deploy venv).
   - IAM: the runtime service account, its custom role and the conditional bucket bindings are
     no longer needed. The client identity needs `roles/aiplatform.user` (sandbox + template
     permissions), storage on the output bucket, `artifactregistry.writer` on the image repo and
@@ -166,16 +180,16 @@ for the tag with this file's section as the notes.
   renders the workspace's `git diff` every ~10 s in its change panel; the events cannot give that —
   Codex reports paths only, Claude Code old/new strings without context, and shell edits escape
   both). The command runs under `/bin/bash -c` in the agent's cwd (`cwd=` relative to it), on
-  `gemini` through the sandbox worker's existing `/exec` endpoint and on `local` on the host; both
+  `sandbox` through the sandbox worker's existing `/exec` endpoint and on `local` on the host; both
   share one implementation (`control.run_shell`): output capped at 500 000 characters per stream
-  with `truncated` flagged instead of failing, a timeout (default 60 s; at most 240 s on `gemini`,
+  with `truncated` flagged instead of failing, a timeout (default 60 s; at most 240 s on `sandbox`,
   the platform proxy cuts a call at ~300 s) that kills the command and reports `returncode` 124.
   Only a running turn has a workspace to probe: called before the sandbox is known `exec()` waits
   for dispatch, called with no turn running or after the turn ended it raises `ControlUnavailable`
   (`local` keeps the same rule for parity). `ExecResult` is exported from the package root. The
   worker's `/exec` now defaults its cwd to the running turn's workspace (was the workspace root)
   and takes an optional `turn_id` it checks against the running turn.
-- **A session re-attached in another process adopts its running turn** (`gemini`; #86 review). A
+- **A session re-attached in another process adopts its running turn** (`sandbox`; #86 review). A
   session held only by id (`engine.get_session(id)` in a fresh process — a poller, or a worker
   adopting a job whose owner died mid-turn) had no run, so `exec()` raised `ControlUnavailable`
   while the turn was still running, `interrupt()` was a no-op and `send()` started a **second**
@@ -324,7 +338,7 @@ for the tag with this file's section as the notes.
   Codex reports conversation-save failures as `checkpoint_error` while preserving a
   successfully saved `workspace_key` and the completed/interrupted turn's result.
 
-- **Gemini events are scoped to the submitted turn and addressed worker.** A previous
+- **Sandbox events are scoped to the submitted turn and addressed worker.** A previous
   turn's trailing checkpoint cannot retire a booting worker's subscription. Pickup
   requires the matching `turn_started` and unrelated events cannot extend its deadline.
   Live tails and all history-recovery fallbacks reject earlier turns and abandoned
@@ -342,7 +356,7 @@ for the tag with this file's section as the notes.
   queued that early interrupts the harness right after it starts. Messages still queued when the
   turn ends (dispatch failed, sandbox died) are dropped and counted on `RunResult.warning`.
   `ControlUnavailable` is now raised only when a ready worker did not take the message.
-- **The default sandbox size is 4 CPU / 4 GiB** (`gemini.deploy(resource_limits=)` default was
+- **The default sandbox size is 4 CPU / 4 GiB** (`sandbox.deploy(resource_limits=)` default was
   `{"cpu": "4", "memory": "8Gi"}`). A deploy of an unchanged spec with the default creates a new
   version, since the template's resources changed; pass `resource_limits` explicitly to keep 8 GiB.
 - **`deploy` no longer blocks on the template's long-running operation** (#84 field note): the
@@ -413,7 +427,7 @@ for the tag with this file's section as the notes.
 
 ### Backwards-incompatible
 
-- **`gemini.deploy` always runs the engine as a service account you own.** With
+- **`sandbox.deploy` always runs the engine as a service account you own.** With
   `service_account=` omitted (or `None`) the engine now runs as
   `agent-run-runtime@<project>.iam.gserviceaccount.com`, the account `agent-run-gcp-setup` creates
   with the README role set. There is no way to deploy as the platform default (the Agent
@@ -433,7 +447,7 @@ for the tag with this file's section as the notes.
   2026-09-02; README "The runtime identity is reachable by the agent"). Fixed by
   **run-scoped GCS tokens**: the client mints a downscoped token per turn, limited to
   the run's own object prefixes, and the worker does all of its GCS work with it
-  (`runtime/gemini/scoped_gcs.py`; `GcsBlobStore(credentials=...)` and a process
+  (`runtime/sandbox/scoped_gcs.py`; `GcsBlobStore(credentials=...)` and a process
   default the worker sets at turn start). The token rides the cold path as the last
   `AGENT_GCS_TOKEN=` directive and the warm path as `gcs_token` in the payload; the
   client refreshes it while the run lives. On by default (`get_engine(...,
@@ -443,7 +457,7 @@ for the tag with this file's section as the notes.
   `reasoningEngineServiceAgent` role reads every bucket in the engine project), give it
   `objectCreator` + `legacyObjectReader` on `jobs/` in the output bucket (the platform
   writes the job output and reads the job input by name), redeploy every engine from
-  this revision with the new `gemini.deploy(..., service_account=...)`, and only then
+  this revision with the new `sandbox.deploy(..., service_account=...)`, and only then
   remove the service agent's `objectAdmin` on the bucket and its `roles/aiplatform.user`
   on the project (README, "Migration"). No date: the removal waits until no engine runs
   as the service agent. Mixed client/engine versions keep working on the runtime
@@ -451,7 +465,7 @@ for the tag with this file's section as the notes.
   `dev/live_isolation_probe.py` (the finding) and `dev/live_scoped_gcs.py` (the fix:
   `RUNTIME_SA=<email>` for the custom runtime identity, unset for a bucket in another
   project).
-- `gemini.deploy(..., service_account=)` sets the engine's runtime identity (forwarded to
+- `sandbox.deploy(..., service_account=)` sets the engine's runtime identity (forwarded to
   `AgentEngineConfig.service_account`); omitted, the project's `agent-run-runtime@` (see
   Backwards-incompatible above). The account's Vertex role is a custom role with only
   `aiplatform.endpoints.predict` (README IAM table), never `roles/aiplatform.user`.
@@ -461,7 +475,7 @@ for the tag with this file's section as the notes.
   that run never started. Now `fill_pool` gives each worker its own randomly named,
   filtered subscription (named only in that worker's job input; `roles/pubsub.subscriber`
   can consume by name but not list) and records it in the pool's roster (client-owned GCS
-  objects under `pool/`, `runtime/gemini/roster.py`); each turn claims one idle worker off
+  objects under `pool/`, `runtime/sandbox/roster.py`); each turn claims one idle worker off
   the roster atomically and is published addressed to that worker alone, whose channel the
   client deletes as soon as the worker has started the turn. Along the way: a turn that
   finds no idle worker spawns one for itself instead of stranding (an empty pool now
@@ -517,7 +531,7 @@ for the tag with this file's section as the notes.
   + `output_tokens`; `reasoning_output_tokens` is already inside `output_tokens`), and
   per-thread subagent detail is at `raw["subagent_usage"]`. The harness conformance
   suite now asserts the normalized shape. The harness code runs inside the engine,
-  so a deployed gemini engine keeps emitting the legacy `usage` shape until it is
+  so a deployed sandbox engine keeps emitting the legacy `usage` shape until it is
   redeployed with this version (the client passes results through unchanged), and
   events already recorded stay in the legacy shape. `num_turns` is unchanged and now documented: the
   main agent's model calls on both harnesses, cumulative across re-invocation
@@ -526,8 +540,8 @@ for the tag with this file's section as the notes.
 ### Added
 
 - `agent-run-gcp-setup` (a console script; also `python -m
-  agent_run.runtime.gemini.project_setup`): one-command GCP project setup
-  for the `gemini` backend. Audits a project against the README's "GCP setup & required
+  agent_run.runtime.sandbox.project_setup`): one-command GCP project setup
+  for the `sandbox` backend. Audits a project against the README's "GCP setup & required
   permissions" section — required APIs, the staging/output buckets (+ handoff lifecycle
   rules), the operator SA with project roles and *bucket-scoped* storage grants, the
   impersonation grant, the runtime service account engines run as (`agent-run-runtime`: the
@@ -554,7 +568,7 @@ for the tag with this file's section as the notes.
   first and continues from the message in the same harness session and workspace. Each
   delivered message is a `user` event on the stream / mirror / `history()`, carrying the
   caller's `message_id=` — the acknowledgement that the model has it; the worker dedupes
-  on the id, so a retried send never reaches the model twice. On `gemini` the transport
+  on the id, so a retried send never reaches the model twice. On `sandbox` the transport
   is a GCS inbox (`control/<sid>/` under the output bucket, `AGENT_CONTROL_GCS` in the
   engine env) the worker polls every ~1.5 s during the turn, cold and warm alike, from
   any process that holds the session id; the worker announces it with a `control_ready`
@@ -617,7 +631,7 @@ for the tag with this file's section as the notes.
   files were lost while its conversation survived. **Update note**: code that treated an
   interrupted session's `stop_reason == ERROR` as "stopped" should check for
   `INTERRUPTED`; the old cancel remains only as the fallback when the worker cannot be
-  reached or does not stop in time, and the result's `warning` says so. On `gemini` the
+  reached or does not stop in time, and the result's `warning` says so. On `sandbox` the
   new path needs an engine redeployed with this version (the worker polls the control
   inbox); against an older revision `interrupt()` falls back as before. ([#44])
 - `AgentEvent.kind` has a new value, `"user"`: an operator message delivered into a
@@ -649,7 +663,7 @@ for the tag with this file's section as the notes.
 
 - Warm-pool workers cold-started under a previous engine revision no longer claim turns
   dispatched after a redeploy (they used to serve them with the old deploy-baked
-  spec/skills for up to `pool_max_wait_s`, silently). Each `gemini.deploy(warm_pool=True)`
+  spec/skills for up to `pool_max_wait_s`, silently). Each `sandbox.deploy(warm_pool=True)`
   now mints a deploy-scoped dispatch topic/subscription pair and deletes the previous
   pair once the new pool is filled, so stale idle workers fail their next claim poll and
   exit within seconds. `get_engine(warm_pool=True)` reads the live subscription back from
@@ -691,7 +705,7 @@ for the tag with this file's section as the notes.
   (`model`, `reasoning_effort`, budgets, `permission_mode`, tool lists,
   `output_schema`). Both configs are sparse overlays: a field left at
   `INHERIT` keeps the value from the layer below. Full parity between the
-  `local` and `gemini` backends; no more ~4 min engine redeploy to vary
+  `local` and `sandbox` backends; no more ~4 min engine redeploy to vary
   per-conversation or per-turn settings.
 - The worker echoes the merged configuration it actually executed as an
   `effective_spec` event in the session's stream — the durable ground-truth
@@ -702,7 +716,7 @@ for the tag with this file's section as the notes.
 
 (all [#16])
 
-- `gemini.deploy(..., pool_max_wait_s=...)` sets how long an idle warm-pool
+- `sandbox.deploy(..., pool_max_wait_s=...)` sets how long an idle warm-pool
   worker waits for an assignment before exiting. The worker side always read
   `AGENT_POOL_MAX_WAIT_S`, but nothing plumbed it into the engine env, so
   the knob was unreachable; passing it without `warm_pool=True` now fails
@@ -717,7 +731,7 @@ for the tag with this file's section as the notes.
   `checkpoint=True`, which also archives the entire working directory to blobs
   at every turn: hundreds of MB per run for an agent that writes a lot, paid
   purely to get at a JSONL. `checkpoint=True` still implies `transcript`
-  (resume needs the transcript), so existing specs are unaffected. On `gemini`
+  (resume needs the transcript), so existing specs are unaffected. On `sandbox`
   the flag is what opens the checkpoint bucket, so a transcript-only spec needs
   a redeploy with an `output_bucket`. `transcript` on its own is purely
   observational: `send()` still needs `checkpoint=True` to continue a
@@ -733,7 +747,7 @@ for the tag with this file's section as the notes.
   `PreToolUse` hook fires under every `permission_mode`, unlike the SDK's
   `can_use_tool`, which the default `bypassPermissions` shadows entirely. Hooks
   are live callables, so they ride the run plane next to `secrets` rather than a
-  config overlay (configs are serialized data) and are `local`-only: `gemini`
+  config overlay (configs are serialized data) and are `local`-only: `sandbox`
   runs the turn in a remote worker and rejects them, and the `codex` harness
   fails the turn rather than run it with the hooks never called ([#25]).
 - `local.deploy(spec, workspace=…)` (and `local.run(…, workspace=…)`) runs every
@@ -745,7 +759,7 @@ for the tag with this file's section as the notes.
   from each other there, `repos` is rejected (they would all clone to the same
   path), and `checkpoint=True` checkpoints the conversation only, so a resume
   continues in the directory as it stands instead of restoring a snapshot over it.
-  `gemini.deploy(workspace=…)` raises — a worker's cwd is its own `/tmp` ([#29]).
+  `sandbox.deploy(workspace=…)` raises — a worker's cwd is its own `/tmp` ([#29]).
 - `run_harness_conformance()` is the `Harness` port's conformance suite, the
   sibling of `run_session_store_conformance()`: hand it a callable that runs one
   turn and it asserts what callers read off `AgentEvent.raw` beyond the event's

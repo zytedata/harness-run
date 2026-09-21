@@ -1,7 +1,7 @@
 """``DrivenRun`` — the shared, backend-agnostic ``Run`` handle (DESIGN.md §4, §5).
 
 A run is driven by a background task that pulls an async ``AgentEvent`` source (the
-in-process harness for ``local``; a Cloud-Logging tail for ``gemini``) into a queue while
+in-process harness for ``local``; a Cloud-Logging tail for ``sandbox``) into a queue while
 accumulating the terminal :class:`RunResult`. That single driver feeds all three
 consumption modes uniformly:
 

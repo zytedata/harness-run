@@ -8,7 +8,7 @@ Claude Code — pointed at it with ``GCE_METADATA_HOST`` and ``CLAUDE_CODE_USE_V
 fetches it the way it would on a Compute Engine VM and fetches it *again* when it nears
 expiry (google-auth refreshes a token with less than five minutes left; verified with the
 CLI 2026-09-16). So the client keeps minting hourly tokens for as long as the turn runs and
-pushes each one to the worker (``/token``, ``backend.GeminiSession._start_refresh``) — no
+pushes each one to the worker (``/token``, ``backend.SandboxSession._start_refresh``) — no
 organization policy, no long-lived credential anywhere.
 
 SECURITY: the token is worth ``aiplatform.endpoints.predict`` in the project for its
@@ -20,7 +20,7 @@ from __future__ import annotations
 import datetime as _dt
 from typing import Any
 
-# The service account ``gemini.deploy`` uses when ``model_service_account=`` is omitted.
+# The service account ``sandbox.deploy`` uses when ``model_service_account=`` is omitted.
 # ``agent-run-gcp-setup`` creates it with the predict-only custom role.
 DEFAULT_MODEL_SA_ID = "agent-run-model"
 

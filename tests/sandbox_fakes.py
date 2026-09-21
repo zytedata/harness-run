@@ -1,7 +1,7 @@
 """Offline stand-ins for the sandbox platform: a ``SandboxProvider`` over in-memory state.
 
 ``FakeSandboxProvider`` keeps templates and sandboxes in dicts and routes every ``call``
-to the sandbox's *worker* — either the real :class:`~agent_run.runtime.gemini.worker.Worker`
+to the sandbox's *worker* — either the real :class:`~agent_run.runtime.sandbox.worker.Worker`
 (driven in-process, its harness faked by the test) or a :class:`ScriptedWorker` a test
 feeds events to. Failure injection: ``fail_next[path]`` makes the next calls to ``path``
 raise, ``vanish(sandbox)`` makes a sandbox answer :class:`SandboxGone`.
@@ -16,10 +16,10 @@ from typing import Any, Callable
 
 from agent_run.control import run_shell
 from agent_run.events import AgentEvent
-from agent_run.runtime.gemini import backend
-from agent_run.runtime.gemini.history import mirror_line
-from agent_run.runtime.gemini.provider import SandboxError, SandboxGone, SandboxHandle
-from agent_run.runtime.gemini.roster import InMemoryRosterStore
+from agent_run.runtime.sandbox import backend
+from agent_run.runtime.sandbox.history import mirror_line
+from agent_run.runtime.sandbox.provider import SandboxError, SandboxGone, SandboxHandle
+from agent_run.runtime.sandbox.roster import InMemoryRosterStore
 from agent_run.spec import AgentSpec
 
 INSTANCE = "projects/p/locations/l/reasoningEngines/host"
@@ -207,13 +207,13 @@ class FakeSandboxProvider:
 
 
 def make_engine(provider: FakeSandboxProvider, *, spec: AgentSpec | None = None, warm: bool = False,
-                template: str | None = None, output_bucket: str | None = "gs://out", **kw) -> backend.GeminiEngine:
-    """A ``GeminiEngine`` over ``provider`` with an in-memory roster and no GCP client."""
+                template: str | None = None, output_bucket: str | None = "gs://out", **kw) -> backend.SandboxEngine:
+    """A ``SandboxEngine`` over ``provider`` with an in-memory roster and no GCP client."""
     spec = spec or AgentSpec(name="g", model="m")
     template = template or provider.add_template(spec.name)
     kw.setdefault("model_service_account", "agent-run-model@p.iam.gserviceaccount.com")
     kw.setdefault("roster_store", InMemoryRosterStore())
-    return backend.GeminiEngine(
+    return backend.SandboxEngine(
         template=template, spec=spec, project="p", location="l", output_bucket=output_bucket,
         provider=provider, warm=warm, **kw,
     )

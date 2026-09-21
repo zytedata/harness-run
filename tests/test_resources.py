@@ -1,10 +1,10 @@
-"""In-sandbox CPU/RAM sampling (runtime/gemini/resources.py): reads, the sampler, the rows."""
+"""In-sandbox CPU/RAM sampling (runtime/sandbox/resources.py): reads, the sampler, the rows."""
 import datetime as dt
 import time
 from pathlib import Path
 
 from agent_run.events import AgentEvent
-from agent_run.runtime.gemini import resources
+from agent_run.runtime.sandbox import resources
 
 
 def _v1_tree(root: Path, *, usage=575_750_144, limit=None, cpu_ns=3_420_000_000, meminfo_kb=1_048_576) -> Path:

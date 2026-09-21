@@ -14,7 +14,7 @@ import pytest
 from sandbox_fakes import FakeSandboxProvider
 
 from agent_run.ports.blobstore import LocalBlobStore
-from agent_run.runtime.gemini import _image, backend, handoff
+from agent_run.runtime.sandbox import _image, backend, handoff
 from agent_run.spec import AgentSpec, SkillSource
 
 
@@ -63,7 +63,7 @@ def test_render_dockerfile_contract() -> None:
     assert "FROM python:3.12-slim-bookworm" in text
     assert "COPY skills /opt/toolkit/skills" in text
     assert "USER agent" in text and "EXPOSE 8080" in text
-    assert 'CMD ["python", "-m", "agent_run.runtime.gemini.worker"]' in text
+    assert 'CMD ["python", "-m", "agent_run.runtime.sandbox.worker"]' in text
     assert "AGENT_RUN_BAKED_SPEC=/opt/toolkit/spec.json" in text
     assert "COPY skills" not in _image.render_dockerfile(_spec(), has_skills=False)
 
@@ -84,7 +84,7 @@ def test_stage_build_context_is_complete_and_content_addressed(tmp_path: Path) -
     spec = _spec(skills=(SkillSource.local(str(src)),), packages=("httpx",))
     ctx, digest = _image.stage_build_context(spec)
     assert (ctx / "Dockerfile").is_file() and (ctx / "requirements.txt").is_file()
-    assert (ctx / "agent_run" / "runtime" / "gemini" / "worker.py").is_file()
+    assert (ctx / "agent_run" / "runtime" / "sandbox" / "worker.py").is_file()
     assert (ctx / "skills" / "sk" / "SKILL.md").is_file()
     import json
     assert json.loads((ctx / "spec.json").read_text())["name"] == "test-agent"
@@ -213,7 +213,7 @@ def test_deploy_reuses_a_template_only_when_its_egress_flag_matches(records, no_
 
 
 def test_deploy_with_image_skips_the_build_and_fills_the_pool(records, no_docker, monkeypatch):
-    from agent_run.runtime.gemini import roster as roster_mod
+    from agent_run.runtime.sandbox import roster as roster_mod
 
     monkeypatch.setattr(_image, "image_exists", lambda uri: pytest.fail("no registry check with image="))
     monkeypatch.setattr(roster_mod, "GcsRosterStore",
@@ -264,7 +264,7 @@ def test_get_engine_without_a_record_is_addressing_only(no_docker, monkeypatch):
     new = provider.add_template("test-agent", create_time=2.0)
     # The gap is announced at lookup, where the operator looks (field report on #84: a deploy
     # interrupted mid-poll left an ACTIVE template with no record; turns failed days later).
-    with pytest.warns(UserWarning, match="version t2 has no deploy record under gs://proj-agent-output.*re-run gemini.deploy"):
+    with pytest.warns(UserWarning, match="version t2 has no deploy record under gs://proj-agent-output.*re-run sandbox.deploy"):
         engine = backend.get_engine("test-agent", "proj", "l", provider=provider)
     assert engine.resource == new and not engine._spec_known and engine.spec.model == ""
     assert engine.versions() == ["t2", "t1"]

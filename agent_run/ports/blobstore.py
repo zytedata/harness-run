@@ -86,8 +86,8 @@ def _normalize_key(root: Path, key: str) -> Path:
     return candidate
 
 
-# Process-wide credentials for every GcsBlobStore built without its own. The gemini
-# WORKER sets the run's scoped token here at turn start (runtime/gemini/scoped_gcs.py) so
+# Process-wide credentials for every GcsBlobStore built without its own. The sandbox
+# WORKER sets the run's scoped token here at turn start (runtime/sandbox/scoped_gcs.py) so
 # every GCS access of the turn authorizes with that token instead of the runtime identity.
 # ``None`` (the default, and what the client process always has) means ADC.
 _default_credentials: Any = None

@@ -2,7 +2,7 @@
 
 A Python library for **defining and running remote/background AI agents** at Zyte. It distills the
 experience of two proofs-of-concept (self-healing spiders, interactive spider creation) built on
-`gemini-agent-runtime` into reusable building blocks, so any team can stand up a Claude-Code-based
+`sandbox-agent-runtime` into reusable building blocks, so any team can stand up a Claude-Code-based
 agent — with custom skills, GitHub access, structured outputs, checkpoint/resume and ready sandboxes —
 without re-learning the platform's sharp edges.
 
@@ -34,7 +34,7 @@ without re-learning the platform's sharp edges.
   The prefix keeps model selection per turn and preserves compatibility with existing engine configs.
 - Non-GCP backends. We design the **ports** (storage, secrets, the sandbox provider) as protocols, but ship
   GCP adapters (GCS, Agent Sandbox) plus local/in-memory adapters for dev.
-- Replacing Scrapy-Cloud / monitoring logic — that stays in `gemini-agent-runtime` behind the seam.
+- Replacing Scrapy-Cloud / monitoring logic — that stays in `sandbox-agent-runtime` behind the seam.
 
 ---
 
@@ -54,8 +54,8 @@ Google's platform, via `AnthropicVertex` model access), and **borrow CMA's API s
 We cannot host *on* CMA.
 
 > **Naming.** The remote backend runs in **Agent Sandbox**, the sandbox-environment feature of Google's
-> Gemini Enterprise Agent Platform (§13). The public namespace is **`gemini.*`** (`gemini.deploy`,
-> `gemini.get_engine`). The underlying Google Python SDK is `google-cloud-agentplatform` 2.x
+> Gemini Enterprise Agent Platform (§13). The public namespace is **`sandbox.*`** (`sandbox.deploy`,
+> `sandbox.get_engine`). The underlying Google Python SDK is `google-cloud-agentplatform` 2.x
 > (`client.sandboxes` / `client.runtimes`); that's an internal detail, not part of our surface.
 
 What we borrow from CMA / the SDK (things our PoC did implicitly or not at all):
@@ -79,12 +79,12 @@ in the public surface.
 
 1. **Declarative, serializable agent definition.** An `AgentSpec` is data; it can live in code or YAML,
    be version-controlled, diffed in CI, and deployed reproducibly.
-2. **Local / remote parity.** `local.deploy(spec)` (in-process) and `gemini.deploy(spec)` /
-   `gemini.get_engine(name)` return the *same* `Engine` + `Session` surface. Develop and test locally,
-   ship remotely, **zero code change** — swap `local` ↔ `gemini`. Local uses filesystem/in-memory port
+2. **Local / remote parity.** `local.deploy(spec)` (in-process) and `sandbox.deploy(spec)` /
+   `sandbox.get_engine(name)` return the *same* `Engine` + `Session` surface. Develop and test locally,
+   ship remotely, **zero code change** — swap `local` ↔ `sandbox`. Local uses filesystem/in-memory port
    adapters, so it needs no GCP beyond model access.
 3. **Deploy is rare; lookup-and-run is the hot path.** App code addresses a deployed engine **by name**
-   (optionally a version) via `gemini.get_engine(...)` and never triggers a deploy. `gemini.deploy(...)`
+   (optionally a version) via `sandbox.get_engine(...)` and never triggers a deploy. `sandbox.deploy(...)`
    is an ops/CI action.
 4. **Ports & adapters.** Every platform dependency is a protocol with a concrete adapter. Storage, secret
    resolver, session store, harness, sandbox provider — all swappable.
@@ -110,7 +110,7 @@ Three planes over a set of pluggable ports:
 ```
  DEFINITION plane        DEPLOY plane (ops/CI)         RUN plane (app code)
  ────────────────        ─────────────────────        ──────────────────────────────
-  AgentSpec        ──▶    gemini.deploy(spec)          gemini.get_engine(name[, ver]) ─┐
+  AgentSpec        ──▶    sandbox.deploy(spec)          sandbox.get_engine(name[, ver]) ─┐
   (declarative,           → versioned engine,          local.deploy(spec)              │
    serializable;            encodes platform           → Engine                        ▼
    code or YAML)            contracts §6                  · start_session()  → Session
@@ -136,10 +136,10 @@ Three planes over a set of pluggable ports:
 
 - **Harness** is the abstraction over "a coding agent loop." `ClaudeCodeHarness` wraps the Agent SDK
   `query()`, builds `ClaudeAgentOptions` from the `AgentSpec`, translates SDK messages → generic
-  `AgentEvent`s; the sandbox worker (`runtime/gemini/worker.py`) drives it inside the container exactly as
+  `AgentEvent`s; the sandbox worker (`runtime/sandbox/worker.py`) drives it inside the container exactly as
   `local` does in-process. This is the generalized `ClaudeCodeAgent` from the PoC.
-- **Engine** is the deployed (or local) agent handle. `gemini.deploy(spec)` registers an engine under
-  `spec.name` and returns a `GeminiEngine`; `gemini.get_engine(name[, version])` looks one up without
+- **Engine** is the deployed (or local) agent handle. `sandbox.deploy(spec)` registers an engine under
+  `spec.name` and returns a `SandboxEngine`; `sandbox.get_engine(name[, version])` looks one up without
   deploying; `local.deploy(spec)` returns a `LocalEngine`. All expose `start_session()` and
   `get_session(id)`.
 - **Session** is the run-plane object with the CMA-style lifecycle:
@@ -152,7 +152,7 @@ Three planes over a set of pluggable ports:
   `stop_reason="interrupted"`, checkpoint taken, so the session is resumable (`control.py`; issue #44).
   Every delivered message is a `user` event, the acknowledgement that the model has it.
 - **Run** is the handle returned by `session.run(msg)` — awaitable (→ `RunResult`), async-iterable
-  (→ `AgentEvent`s), and pollable (`done` / `status` / `result`). For `gemini`, "stream" = long-poll the
+  (→ `AgentEvent`s), and pollable (`done` / `status` / `result`). For `sandbox`, "stream" = long-poll the
   worker's `/events` (the GCS event mirror is the fallback); "await" = wait for the terminal result event;
   "poll" = check the run's status.
 
@@ -161,7 +161,7 @@ Three planes over a set of pluggable ports:
 ## 5. Public API
 
 ```python
-from agent_run import AgentSpec, SystemPrompt, SkillSource, McpServer, gemini, local
+from agent_run import AgentSpec, SystemPrompt, SkillSource, McpServer, sandbox, local
 
 spec = AgentSpec(
     name="spider-builder",
@@ -188,10 +188,10 @@ print(result.text, result.structured_output, result.cost_usd)
 ```python
 # ── PROD ──────────────────────────────────────────────────────────────────────────────────────────
 # Ops / CI deploys once (rare):
-gemini.deploy(spec, project="my-project", location="us-central1", warm_pool=True)
+sandbox.deploy(spec, project="my-project", location="us-central1", warm_pool=True)
 
 # App code looks the engine up by name (optionally a version) and runs — it never deploys:
-engine = gemini.get_engine("spider-builder")               # latest deployed version
+engine = sandbox.get_engine("spider-builder")               # latest deployed version
 session = engine.start_session()
 result = await session.run("/scrape https://books.toscrape.com title, price")   # default: wait for the result
 ```
@@ -219,7 +219,7 @@ session = engine.get_session(session_id)
 if session.status == "idle" and session.stop_reason == "needs_input":
     await session.send("yes, that schema looks right")     # resumes via checkpoint on a ready sandbox
 
-# enumerate past sessions and read a finished one's record (gemini)
+# enumerate past sessions and read a finished one's record (sandbox)
 for info in engine.list_sessions():                        # newest first
     past = engine.get_session(info["session_id"])
     events = past.history()                                # persisted AgentEvents, oldest first
@@ -229,10 +229,10 @@ for info in engine.list_sessions():                        # newest first
 **Managing deployed engines** (control plane):
 
 ```python
-gemini.deploy(spec, project=..., location=...)   # create / update; mints a new version when the image or resources change
-gemini.get_engine("spider-builder")              # newest version (app code default)
-gemini.get_engine("spider-builder", version=3)   # pin a version (routes to that template)
-gemini.list_engines(project=..., location=...)   # discover what's deployed
+sandbox.deploy(spec, project=..., location=...)   # create / update; mints a new version when the image or resources change
+sandbox.get_engine("spider-builder")              # newest version (app code default)
+sandbox.get_engine("spider-builder", version=3)   # pin a version (routes to that template)
+sandbox.list_engines(project=..., location=...)   # discover what's deployed
 engine.versions() / engine.revisions()           # list versions of one engine (newest first) / their metadata
 engine.delete_version(3) / engine.delete()       # retire one version / the whole engine (its ready pool included)
 engine.name, engine.version, engine.resource     # identity / underlying resource name
@@ -281,7 +281,7 @@ newer deploy; "serving" simply means "newest", and there is no traffic configura
 - **Claude CLI stderr is captured** (`jobs/<sid>/stderr.log`, capped, beside — not inside — the agent
   workspace). The SDK pipes stderr only when a callback is registered; without one, `ProcessError`'s
   "Check stderr output for details" promises output nobody captured. On a CLI-exit failure the tail is
-  surfaced as a `claude_stderr` status event (in the event mirror on gemini) and embedded in the error.
+  surfaced as a `claude_stderr` status event (in the event mirror on sandbox) and embedded in the error.
 
 ---
 
@@ -331,7 +331,7 @@ These are facts measured live. The library encodes them so consumers inherit the
   because callers collect artifacts from the job dir. Prompt disclaimers ("stay in your current directory")
   fight the path instead of fixing it. The leaf also keeps `jobs/<sid>/` itself free for session
   bookkeeping the agent shouldn't see. Derived in ONE place (`RunContext.workspace`); callers use the
-  `Session.workspace` accessor (local: host `Path`, created on access, seed-before/collect-after; gemini:
+  `Session.workspace` accessor (local: host `Path`, created on access, seed-before/collect-after; sandbox:
   raises — the filesystem is remote) instead of hand-building `workdir/jobs/<sid>`. `local.deploy(spec,
   workspace=...)` swaps that leaf for a caller-owned directory: a per-session path is a per-session system
   prompt, so suites of short sessions pay prompt-cache creation on every one of them (measured 2x on a
@@ -420,10 +420,10 @@ These are facts measured live. The library encodes them so consumers inherit the
   and the timeout semantics (killed, `returncode` 124) are identical. Only a running turn can be probed
   (the sandbox is deleted at the terminal event; `local` keeps the rule for parity): before the sandbox is
   known `exec()` waits for dispatch, afterwards it raises `ControlUnavailable`. The timeout is capped at
-  240 s on `gemini` because the proxy cuts a call at ~300 s. Motivation: agentic-scraping renders the
+  240 s on `sandbox` because the proxy cuts a call at ~300 s. Motivation: agentic-scraping renders the
   workspace's `git diff` every ~10 s while the coding agent works — exact and harness-independent, which
   the events (paths only on Codex, context-free old/new strings on Claude Code) are not.
-- **A re-attached session adopts its turn running under another process** (`GeminiSession._attach`).
+- **A re-attached session adopts its turn running under another process** (`SandboxSession._attach`).
   `get_session(id)` in a fresh process holds no run; the first `send()` / `interrupt()` / `exec()` /
   `run()` / `current_run` / `busy` / `last_result` reads the mirror once — the last `turn_started` marker without a `result` after it names the
   turn and its sandbox (every event is stamped with both, #80; the sandbox name is rebuilt from the
@@ -464,7 +464,7 @@ These are facts measured live. The library encodes them so consumers inherit the
   maps through `uuid5`). Nothing is persisted by the platform: no job input, no job output, no platform
   session.
 
-**Deploy contracts (applied automatically by `gemini.deploy`; `_image.py`)**
+**Deploy contracts (applied automatically by `sandbox.deploy`; `_image.py`)**
 - **The image**: `python:3.12-slim-bookworm` (glibc — the `claude-agent-sdk` wheel ships a self-contained
   glibc ELF `claude` binary; no Alpine/musl), `git`, `curl`, build tools; the base requirements
   (`claude-agent-sdk` pin, `openai-codex` when the Codex harness is baked, `google-cloud-storage`, `uv`, …)
@@ -615,12 +615,12 @@ Each is a `typing.Protocol`; concrete adapters ship for prod (GCP) and dev (loca
 
 ## 8. Origins
 
-The toolkit distilled the `gemini-agent-runtime` proofs-of-concept. What was lifted and generalized: the
+The toolkit distilled the `sandbox-agent-runtime` proofs-of-concept. What was lifted and generalized: the
 Claude Code run loop (`harness/claude_code.py`), the event translation (`harness/translate.py`),
 checkpoint/resume (`checkpoint/` over `BlobStore`), skills staging (`skills.py`, configurable sources), git
 clone + token injection and the GitHub MCP attach (`integrations/`), artifacts, cost tracking on the result,
 and the config/runtime resolution that became `AgentSpec`. Scrapy Cloud, monitoring and the scrape prompts
-stayed in `gemini-agent-runtime` behind the seam.
+stayed in `sandbox-agent-runtime` behind the seam.
 
 ---
 
@@ -633,10 +633,10 @@ stayed in `gemini-agent-runtime` behind the seam.
    imperative builder or thin functions.
 3. **First milestone** — a **minimal generic (non-Zyte) example agent** run local + remote, proving the core
    API + deploy + the ready pool with the least surface, before porting a real PoC.
-4. **Local deploy is first-class** — `local.deploy(spec)` mirrors `gemini` exactly (same Engine/Session
+4. **Local deploy is first-class** — `local.deploy(spec)` mirrors `sandbox` exactly (same Engine/Session
    API), so the dev loop and the prod loop are the same code.
-5. **App code looks up engines, never deploys** — `gemini.get_engine(name[, version])` is the hot path;
-   `gemini.deploy(...)` is ops/CI.
+5. **App code looks up engines, never deploys** — `sandbox.get_engine(name[, version])` is the hot path;
+   `sandbox.deploy(...)` is ops/CI.
 
 ---
 
@@ -652,7 +652,7 @@ agent-run/
 ├── TESTING.md                     # the test ladder: offline suite, parity image, live probes
 ├── CHANGELOG.md                   # releases and the Unreleased section
 ├── agent_run/
-│   ├── __init__.py                # AgentSpec, SystemPrompt, SkillSource, McpServer, gemini, local
+│   ├── __init__.py                # AgentSpec, SystemPrompt, SkillSource, McpServer, sandbox, local
 │   ├── spec.py                    # AgentSpec + value types (serializable)
 │   ├── events.py                  # AgentEvent, RunResult, RunStatus, StopReason, Run handle
 │   ├── control.py                 # ControlMessage, ControlChannel, LocalControlChannel, ControlledStream, run_shell
@@ -672,12 +672,12 @@ agent-run/
 │   │   ├── _run.py                # DrivenRun — the shared, backend-agnostic Run handle
 │   │   ├── local.py               # local.deploy / local.run -> LocalEngine
 │   │   ├── venv.py                # per-engine uv venv for spec.packages on local
-│   │   └── gemini/
-│   │       ├── backend.py         # deploy(), get_engine(), list_engines(), GeminiEngine, GeminiSession
+│   │   └── sandbox/
+│   │       ├── backend.py         # deploy(), get_engine(), list_engines(), SandboxEngine, SandboxSession
 │   │       ├── provider.py        # SandboxProvider seam + AgentSandboxProvider (the platform adapter)
 │   │       ├── worker.py          # the in-container worker: /health /turn /events /control /token /exec
 │   │       ├── _image.py          # Dockerfile generation, content-digest tag, docker build/push
-│   │       │                      #   (underscored: `deploy.py` would shadow gemini.deploy)
+│   │       │                      #   (underscored: `deploy.py` would shadow sandbox.deploy)
 │   │       ├── model_token.py     # the predict-only model identity's per-turn token
 │   │       ├── scoped_gcs.py      # the run-scoped GCS token (mint / refresh / worker credentials)
 │   │       ├── roster.py          # the ready pool's idle-sandbox roster (GCS, atomic claim)
@@ -699,7 +699,7 @@ agent-run/
 │   └── conformance.py             # SessionStore / Harness conformance suites
 ├── examples/
 │   ├── minimal/                   # the generic example agent, local
-│   └── gemini/                    # deploy + run on the sandbox runtime
+│   └── sandbox/                    # deploy + run on the sandbox runtime
 ├── dev/                           # the parity image and the paid live probes (dev/README.md)
 ├── docs/                          # notes referenced from the README
 └── tests/
@@ -719,14 +719,14 @@ saving all onboarding docs for the end.
   artifacts, `AgentSpec`, `local.deploy`/`local.run` with filesystem/in-memory adapters.
   *Gate:* the generic example runs in-process. *README:* the **local quickstart** works end-to-end
   (define → `local.deploy` → `run` / stream / poll). (Done.)
-- **P2 — Gemini backend + ready pool + deploy.** `gemini.deploy` (contracts encoded) + `gemini.get_engine`
+- **P2 — Sandbox backend + ready pool + deploy.** `sandbox.deploy` (contracts encoded) + `sandbox.get_engine`
   / `list_engines`; the engine handle & `Session` state machine; the ready pool; the event channel;
   structured outputs. Permissions runbook. (Done, on Agent Sandbox — §13.)
   *First-milestone gate:* **the minimal generic example runs locally *and* remotely with a warm start.**
   *README:* the **deploy quickstart** + engine management.
 - **P3 — Onboarding polish.** Examples, the platform-notes appendix, conformance docs, README polish
   (troubleshooting, IAM runbook link, the "why" sections).
-- **P4 — Migrate the PoC.** `gemini-agent-runtime` depends on the toolkit; re-implement self-heal +
+- **P4 — Migrate the PoC.** `sandbox-agent-runtime` depends on the toolkit; re-implement self-heal +
   interactive spider on top; delete the lifted code; `scrapy` becomes an extra there.
 
 ---
@@ -737,7 +737,7 @@ saving all onboarding docs for the end.
   (precedence on name collision, per-source ref pinning) is specified in P1 but the merge policy needs a
   decision. (P1 ships **last-source-wins**.)
 - **Baked engine dependencies** — `AgentSpec.packages` means "the agent's starting Python packages" on
-  BOTH backends: `gemini.deploy` bakes them into the image with uv; `local.deploy` resolves them into a
+  BOTH backends: `sandbox.deploy` bakes them into the image with uv; `local.deploy` resolves them into a
   per-engine venv (uv, engine-contract Python 3.12) activated in the agent env. (Decided after eval-harness
   feedback: a spec field silently meaning different things per backend broke local/remote parity; a
   Docker-based local mode was rejected — it would trade away the in-process fast dev loop that `local`
@@ -765,12 +765,12 @@ saving all onboarding docs for the end.
 
 ## 13. Sandbox runtime
 
-The `gemini` backend runs each turn in a **Gemini Enterprise Agent Platform Agent Sandbox custom
+The `sandbox` backend runs each turn in a **Gemini Enterprise Agent Platform Agent Sandbox custom
 container**: our image, behind Google's authenticated HTTP proxy, on gVisor, with **no usable Google
 identity** inside (the metadata server answers with a tenant-project workload identity that is 403 on
 everything in our project — verified), and created from a **pre-warmed pool Google keeps per template**, so
 a sandbox is assigned in ~2 s. The platform's part is small and the toolkit owns the rest — dispatch,
-events, checkpoints, control, secrets — over HTTP and an object store (§13.5). `runtime/gemini/` is the
+events, checkpoints, control, secrets — over HTTP and an object store (§13.5). `runtime/sandbox/` is the
 implementation; `provider.py` is the only module that talks to the platform.
 
 **Measured (2026-09-11, `make live-smoke`, 4 CPU / 8 GiB, Haiku, `checkpoint=True`)**: deploy 81 s (image
@@ -786,7 +786,7 @@ it is off the hot path, and `deploy` does not block on it.
 ```
  DEPLOY (ops/CI)                                RUN (app code; the client IS the control plane)
  ───────────────                                ────────────────────────────────────────────────
- gemini.deploy(spec)                            gemini.get_engine(name) → Engine
+ sandbox.deploy(spec)                            sandbox.get_engine(name) → Engine
    docker build (Dockerfile = toolkit + harness    start_session() → Session
      CLIs + baked skills + spec.packages)          run(msg):
    push → Artifact Registry                          1. claim a READY sandbox off the roster (GCS,
@@ -805,7 +805,7 @@ it is off the hot path, and `deploy` does not block on it.
    token; checkpoint tar → GCS
 ```
 
-- **Deploy = image + template.** `gemini.deploy` builds the image from a generated Dockerfile (the
+- **Deploy = image + template.** `sandbox.deploy` builds the image from a generated Dockerfile (the
   `dev/Dockerfile` contract: Debian, Python 3.12, git, uv, the toolkit with the baked harness CLIs, resolved
   skills, `spec.packages`), pushes it to an Artifact Registry repo in the project, and creates a template
   named `<spec.name>` with the image, `ports=[8080]`, `resources` (`resource_limits`) and

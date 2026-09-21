@@ -1,6 +1,6 @@
 """Engine / Session / Run protocols + the session state machine (DESIGN.md §4).
 
-Stdlib-only: these are ``typing.Protocol`` contracts that ``local`` and ``gemini``
+Stdlib-only: these are ``typing.Protocol`` contracts that ``local`` and ``sandbox``
 both implement identically, so app code is backend-agnostic.
 """
 
@@ -25,7 +25,7 @@ class Run(Protocol):
     * **async-iterate**  → stream :class:`AgentEvent`s as they happen.
     * **poll**           → check ``done`` / ``status``, read ``result`` when done.
 
-    For ``gemini``: "stream" = tail the EventSink; "await" = wait for the terminal
+    For ``sandbox``: "stream" = tail the EventSink; "await" = wait for the terminal
     result event; "poll" = read the latest logged status.
     """
 
@@ -80,7 +80,7 @@ class Session(Protocol):
         sparse overlay of the invocation knobs on the session's effective spec. *hooks*
         are Claude Agent SDK hook callbacks (``{HookEvent: [HookMatcher, ...]}``) — live
         callables in the caller's process, so ``local`` only; a backend that runs the turn
-        elsewhere (``gemini``) rejects them.
+        elsewhere (``sandbox``) rejects them.
         """
         ...
 
@@ -146,7 +146,7 @@ class Session(Protocol):
         past it is killed and reports ``returncode`` 124. Output is capped per stream and
         the result says ``truncated`` rather than failing.
 
-        Only a **running** turn has a workspace to probe: on ``gemini`` the sandbox exists
+        Only a **running** turn has a workspace to probe: on ``sandbox`` the sandbox exists
         for the turn's duration, and ``local`` keeps the same rule so code written against
         it behaves the same way remotely. Called while the turn is still being dispatched
         (no worker yet) it waits for the worker; called when no turn runs, or once the turn
@@ -189,7 +189,7 @@ class Session(Protocol):
 
         The same object :meth:`run` / :meth:`send` returned: iterate it for the events,
         await it for the result. Its point is the session that did **not** start the
-        turn — on ``gemini`` a session re-attached in another process (a worker adopting
+        turn — on ``sandbox`` a session re-attached in another process (a worker adopting
         a job whose owner died mid-turn) adopts the turn still running there on its first
         access (one storage read; ``None`` when nothing runs), and this hands the adopter
         that run so it consumes the events exactly as the owner would, instead of
@@ -206,14 +206,14 @@ class Session(Protocol):
         ``cd`` away), with session bookkeeping kept outside the visible cwd. On ``local``
         this is a host :class:`~pathlib.Path` — seed input files into it before
         :meth:`run`, collect artifacts from it after. Backends whose filesystem is
-        remote (``gemini``) raise ``NotImplementedError``.
+        remote (``sandbox``) raise ``NotImplementedError``.
         """
         ...
 
     def history(self) -> list[AgentEvent]:
         """All persisted events of this session, oldest first.
 
-        Works for re-attached sessions long after the run (``gemini``: mirrored GCS events →
+        Works for re-attached sessions long after the run (``sandbox``: mirrored GCS events →
         platform job output → Cloud Logging). Empty when nothing was persisted.
         """
         ...
@@ -239,8 +239,8 @@ class Session(Protocol):
 class Engine(Protocol):
     """A deployed (or local) agent handle (DESIGN.md §4).
 
-    ``gemini.deploy(spec)`` / ``local.deploy(spec)`` return an ``Engine``;
-    ``gemini.get_engine(name)`` looks one up without deploying.
+    ``sandbox.deploy(spec)`` / ``local.deploy(spec)`` return an ``Engine``;
+    ``sandbox.get_engine(name)`` looks one up without deploying.
     """
 
     def start_session(self, config: SessionConfig | None = None) -> Session:
@@ -273,7 +273,7 @@ class Engine(Protocol):
     def versions(self) -> list[str]:
         """List the deployed versions of this engine, newest first.
 
-        A version is whatever the backend versions a deployment by: on ``gemini`` an Agent
+        A version is whatever the backend versions a deployment by: on ``sandbox`` an Agent
         Runtime **runtime revision** (each ``deploy`` of an existing name mints one); on
         ``local`` the single pseudo-version ``"local"``.
         """
@@ -291,5 +291,5 @@ class Engine(Protocol):
 
     @property
     def resource(self) -> str:
-        """The underlying resource name (e.g. the sandbox template's resource path on ``gemini``)."""
+        """The underlying resource name (e.g. the sandbox template's resource path on ``sandbox``)."""
         ...

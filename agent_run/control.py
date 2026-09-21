@@ -12,9 +12,9 @@ interactive loop needs two more things while a turn is RUNNING:
 Both travel as a :class:`ControlMessage` over a :class:`ControlChannel` the runtime hands
 the harness in ``RunContext.control``. The harness reads the channel while the harness
 stream runs (:class:`ControlledStream`) and acts on each message. ``local`` uses the
-in-process :class:`LocalControlChannel`; ``gemini`` posts the message to the sandbox
+in-process :class:`LocalControlChannel`; ``sandbox`` posts the message to the sandbox
 worker's ``/control`` endpoint, which feeds the same kind of queue on the worker's loop
-(``runtime/gemini/worker.py``).
+(``runtime/sandbox/worker.py``).
 
 Every delivered message is surfaced as a ``user`` event whose ``raw["message_id"]`` is the
 caller's id — that event is the acknowledgement that the model has the message.
@@ -23,7 +23,7 @@ A third operator action LOOKS at the running turn instead of talking to it: ``Se
 runs a shell command in the turn's workspace and returns an :class:`ExecResult` — the
 read-only probe an application uses to show the agent's work while it is still working (a
 ``git diff`` of the workspace, a file listing). Both runtimes run it through :func:`run_shell`
-here (``local`` on the host, ``gemini`` inside the sandbox via the worker's ``/exec``), so
+here (``local`` on the host, ``sandbox`` inside the sandbox via the worker's ``/exec``), so
 the output cap and the timeout semantics are the same everywhere.
 
 Stdlib-only.
@@ -63,7 +63,7 @@ class ControlMessage:
     then deliver ``message`` in the same harness session) or ``"stop"`` (interrupt and end
     the turn; ``message`` is ``None``). ``message_id`` is the caller's id for the message;
     it is stamped on the ``user`` event the harness emits when the model gets the message,
-    and the gemini inbox dedupes on it.
+    and the sandbox inbox dedupes on it.
     """
 
     op: ControlOp
@@ -103,7 +103,7 @@ class ControlMessage:
 # -- exec: a read-only probe of the running turn's workspace ----------------------------
 
 # Longest ``exec`` runs when the caller gives no timeout. Bounded so a probe can never pin a
-# worker (or the gemini proxy call, which the platform cuts at ~300 s) indefinitely.
+# worker (or the sandbox proxy call, which the platform cuts at ~300 s) indefinitely.
 EXEC_DEFAULT_TIMEOUT_S = 60.0
 # Kept per stream (characters, head of the output). The sandbox proxy rejects answers past
 # ~2 MB serialized; two streams under this cap fit with JSON escaping to spare.

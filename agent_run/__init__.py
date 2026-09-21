@@ -10,7 +10,7 @@ from __future__ import annotations
 from .config import INHERIT, SessionConfig, TurnConfig
 from .control import ControlUnavailable, ExecResult
 from .events import AgentEvent, RunResult, RunStatus, StopReason
-from .runtime import gemini, local
+from .runtime import sandbox, local
 from .spec import (
     DEFAULT_MAX_BUFFER_SIZE,
     AgentSpec,
@@ -36,6 +36,6 @@ __all__ = [
     "RunResult",
     "RunStatus",
     "StopReason",
-    "gemini",
+    "sandbox",
     "local",
 ]

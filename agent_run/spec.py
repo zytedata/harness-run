@@ -375,7 +375,7 @@ class AgentSpec:
             per-invocation to ``run``/``send`` (see ``secrets=`` on the run plane) so nothing
             sensitive is ever baked or shared across runs.
         packages: Python package requirement specifiers (e.g. ``"pandas==2.2.*"``) the agent
-            starts with, on BOTH backends: ``gemini.deploy`` bakes them into the engine image;
+            starts with, on BOTH backends: ``sandbox.deploy`` bakes them into the engine image;
             ``local.deploy`` resolves them into a per-engine venv (via ``uv``, Python pinned to
             the engine contract's 3.12) activated in the agent's environment. Either way the
             agent can still install more at runtime via ``uv``.

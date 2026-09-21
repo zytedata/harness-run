@@ -3,7 +3,7 @@ from copy import deepcopy
 
 import pytest
 
-from agent_run.runtime.gemini.handoff import (
+from agent_run.runtime.sandbox.handoff import (
     ensure_handoff_lifecycle,
     handoff_lifecycle_rules,
 )

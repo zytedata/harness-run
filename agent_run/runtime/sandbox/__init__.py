@@ -1,7 +1,7 @@
-"""The ``gemini.*`` public namespace — the sandbox runtime backend (DESIGN.md §13).
+"""The ``sandbox.*`` public namespace — the sandbox runtime backend (DESIGN.md §13).
 
-``gemini.deploy`` is an ops/CI action (rare); ``gemini.get_engine`` /
-``gemini.list_engines`` are the app-code hot path (lookup-and-run). The underlying
+``sandbox.deploy`` is an ops/CI action (rare); ``sandbox.get_engine`` /
+``sandbox.list_engines`` are the app-code hot path (lookup-and-run). The underlying
 platform client (``google-cloud-agentplatform``) is an internal detail imported lazily
 inside ``.provider``.
 

@@ -1,6 +1,6 @@
-"""Deploy-time agent venv for the local runtime (``spec.packages`` parity with ``gemini``).
+"""Deploy-time agent venv for the local runtime (``spec.packages`` parity with ``sandbox``).
 
-``spec.packages`` means "the agent's Python packages" on BOTH backends: ``gemini`` bakes them
+``spec.packages`` means "the agent's Python packages" on BOTH backends: ``sandbox`` bakes them
 into the engine image; ``local`` resolves them here into a **per-engine venv** at
 ``local.deploy()`` time. A fresh venv per engine (rather than a shared content-hash cache)
 keeps runs hermetic — an agent that installs extra packages mid-run mutates only its own

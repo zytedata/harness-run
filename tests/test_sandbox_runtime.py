@@ -17,9 +17,9 @@ from sandbox_fakes import FakeSandboxProvider, ScriptedWorker, make_engine, resu
 from agent_run import AgentSpec, SessionConfig, TurnConfig
 from agent_run.events import AgentEvent, RunStatus, StopReason
 from agent_run.ports.blobstore import LocalBlobStore
-from agent_run.runtime.gemini import backend, worker as worker_mod
-from agent_run.runtime.gemini.provider import SandboxGone
-from agent_run.runtime.gemini.worker import Worker
+from agent_run.runtime.sandbox import backend, worker as worker_mod
+from agent_run.runtime.sandbox.provider import SandboxGone
+from agent_run.runtime.sandbox.worker import Worker
 
 
 async def _await(run):
@@ -65,7 +65,7 @@ class _DoneHarness:
 
 def _drive(worker: Worker, body: dict) -> list[AgentEvent]:
     """Run one turn to completion through the worker's endpoints; return its events."""
-    from agent_run.runtime.gemini.history import event_from_mirror
+    from agent_run.runtime.sandbox.history import event_from_mirror
 
     acc = worker.handle("/turn", body)
     assert acc["ok"], acc
@@ -181,7 +181,7 @@ def test_a_failed_harness_result_still_carries_the_resource_peak(tmp_path, monke
 def test_history_hides_samples_and_resource_samples_returns_rows(monkeypatch):
     from sandbox_fakes import FakeSandboxProvider, make_engine
 
-    from agent_run.runtime.gemini import history as history_mod
+    from agent_run.runtime.sandbox import history as history_mod
 
     events = [
         AgentEvent(kind="status", summary="turn started", raw={"event": "turn_started"}),
@@ -755,7 +755,7 @@ def test_interrupt_before_control_ready_cancels_without_a_checkpoint():
 
 
 def test_start_session_mints_a_canonical_uuid_and_binds_the_config(monkeypatch):
-    from agent_run.runtime.gemini import handoff
+    from agent_run.runtime.sandbox import handoff
 
     recorded = {}
     monkeypatch.setattr(handoff, "persist_session_config",
@@ -774,7 +774,7 @@ def test_start_session_mints_a_canonical_uuid_and_binds_the_config(monkeypatch):
 
 
 def test_turn_config_rides_the_body_and_is_recorded(monkeypatch):
-    from agent_run.runtime.gemini import handoff
+    from agent_run.runtime.sandbox import handoff
 
     recorded = []
     monkeypatch.setattr(handoff, "stage_turn_config",
@@ -816,7 +816,7 @@ def _transcript_engine(spec, monkeypatch, tmp_path):
 
 
 def _attached(engine, session_id):
-    session = backend.GeminiSession(engine, session_id)
+    session = backend.SandboxSession(engine, session_id)
     session._session_config_resolved = True
     return session
 
@@ -859,9 +859,9 @@ def test_deploy_rejects_the_local_only_workspace_argument():
 def test_worker_module_layout_does_not_shadow_the_package_exports():
     import pkgutil
 
-    from agent_run import gemini
+    from agent_run import sandbox
 
-    submodules = {m.name for m in pkgutil.iter_modules(gemini.__path__)}
-    assert not submodules & set(gemini.__all__)
-    assert callable(gemini.deploy)
+    submodules = {m.name for m in pkgutil.iter_modules(sandbox.__path__)}
+    assert not submodules & set(sandbox.__all__)
+    assert callable(sandbox.deploy)
     assert Path(worker_mod.__file__).name == "worker.py"

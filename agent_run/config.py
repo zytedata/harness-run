@@ -200,7 +200,7 @@ class SessionConfig(_ConfigBase):
     Attributes:
         repos: The repos cloned into the session's workspace on its first turn.
         skills: Skill sources for the session. REPLACES the deployed declaration (no
-            merging); on gemini, the deploy-baked skills stay a staging fast path only
+            merging); on sandbox, the deploy-baked skills stay a staging fast path only
             while this declaration matches them.
         mcp_servers: MCP servers attached to the agent for this session.
         system_prompt: The conversation's framing, re-applied to the harness on every

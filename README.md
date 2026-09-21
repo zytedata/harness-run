@@ -12,7 +12,7 @@ models, OpenAI GPT models, and — through OpenRouter — Kimi, GLM and DeepSeek
 [Harnesses and models](#harnesses-and-models).
 
 > **Status: `local` and the sandbox runtime both work — validated live.** Define an `AgentSpec` and run it
-> in-process (`local.deploy`), or deploy + run in Agent Sandbox (`gemini.deploy` / `gemini.get_engine`), with
+> in-process (`local.deploy`), or deploy + run in Agent Sandbox (`sandbox.deploy` / `sandbox.get_engine`), with
 > skills, structured output, checkpoint/resume, per-session/per-turn configuration, and a **ready pool**
 > (~1 s to the first event; ~20 s when no sandbox is ready) — all exercised end-to-end on real infrastructure.
 > The two paths share one `Engine`/`Session`/`Run` API. Not yet built (raise `NotImplementedError` or simply
@@ -65,7 +65,7 @@ the suite exercises both harnesses).
 ## Define an agent
 
 ```python
-from agent_run import AgentSpec, SystemPrompt, SkillSource, McpServer, gemini, local
+from agent_run import AgentSpec, SystemPrompt, SkillSource, McpServer, sandbox, local
 
 spec = AgentSpec(
     name="spider-builder",
@@ -92,7 +92,7 @@ section below.
 ## Harnesses and models
 
 A **harness** is the coding-agent loop; the **model** is what it calls. Two harnesses ship, and
-both run on both backends (`local` and `gemini`) through the same Engine/Session/Run API.
+both run on both backends (`local` and `sandbox`) through the same Engine/Session/Run API.
 
 | Harness | Agent loop | Models it runs | Per-invocation secret |
 | --- | --- | --- | --- |
@@ -471,7 +471,7 @@ For a quick sync script, `local.run(spec, "…")` does `deploy → start_session
 `RunResult`.
 
 The deployed spec is the *default*; a session can override parts of it without redeploying — locally and
-on gemini alike ([full story](#deploy--session--turn-the-three-configuration-scopes)):
+on sandbox alike ([full story](#deploy--session--turn-the-three-configuration-scopes)):
 
 ```python
 from agent_run import SessionConfig, TurnConfig
@@ -509,14 +509,14 @@ await session.run("…", secrets={"ANTHROPIC_API_KEY": os.environ["MY_KEY"]})
 spec = AgentSpec(name="…", model="…", env={"ANTHROPIC_API_KEY": os.environ["MY_KEY"]})
 ```
 
-> Keep keys out of `spec.env` for anything you `gemini.deploy` — the spec is serialized *into* the deployed
+> Keep keys out of `spec.env` for anything you `sandbox.deploy` — the spec is serialized *into* the deployed
 > engine, so a value there is baked into the deployment and shared by every run. Per-invocation `secrets` (or
 > Vertex routing, which needs no key at all) is the deployable answer.
 
 To force the **subscription** instead, unset `ANTHROPIC_API_KEY` (and the other higher-priority variables) in
 the shell you launch from — the toolkit cannot unset an inherited variable for you. To mirror **prod** locally,
 set `CLAUDE_CODE_USE_VERTEX=1` with `ANTHROPIC_VERTEX_PROJECT_ID` and `CLOUD_ML_REGION`, which is what
-`gemini.deploy` bakes by default (see [Prod](#prod-deploy-once-look-up-and-run)); a deployed engine therefore
+`sandbox.deploy` bakes by default (see [Prod](#prod-deploy-once-look-up-and-run)); a deployed engine therefore
 never touches anyone's subscription.
 
 **Seeding inputs / collecting artifacts.** `session.workspace` is the agent's working directory on the
@@ -525,7 +525,7 @@ host — a `Path` you can drop input files into before `run()` and read the agen
 `<workdir>/jobs/<session-id>/workspace/`, where the `workspace/` leaf is deliberate — the agent runs in a
 directory whose own name says "this is your workspace", not in the anonymous `jobs/<uuid>` dir (which reads
 as disposable temp and tempts weaker models into `cd`-ing away, leaving deliverables outside the collected
-dir). The same `workspace/` cwd convention applies on `gemini`, but there the filesystem is remote, so
+dir). The same `workspace/` cwd convention applies on `sandbox`, but there the filesystem is remote, so
 `session.workspace` raises — seed via the prompt or `spec.repos`, collect via events or a repo push.
 
 **Picking the agent's cwd.** `local.deploy(spec, workspace="/path/of/your/choosing")` runs every session of
@@ -540,7 +540,7 @@ tempts weaker models into `cd`-ing away from it.
 Because the directory is yours, the toolkit stops writing to it on your behalf: `repos` is rejected (every
 session would clone into the same path), and `checkpoint=True` snapshots the conversation only, leaving the
 files alone — a resume continues the conversation in the directory as it stands now, and nothing rolls back
-to what the session last saw. This is `local`-only; `gemini.deploy(workspace=…)` raises, since a worker's cwd
+to what the session last saw. This is `local`-only; `sandbox.deploy(workspace=…)` raises, since a worker's cwd
 is its own `/tmp`.
 
 [cache]: https://docs.claude.com/en/docs/build-with-claude/prompt-caching
@@ -565,12 +565,12 @@ run = session.run("…", hooks={"PreToolUse": [HookMatcher(hooks=[gate])]})
 
 `PreToolUse` fires under every `permission_mode`, unlike the SDK's `can_use_tool`, which `bypassPermissions`
 (the toolkit default) shadows entirely. Hooks are live callables, so they are a `local`-only argument —
-`gemini` runs the turn in a remote worker and rejects them, as does the `codex` harness.
+`sandbox` runs the turn in a remote worker and rejects them, as does the `codex` harness.
 
 ## Consuming a run: wait, stream, or poll
 
 `session.run(msg)` (and `session.send(msg)` to resume) returns a `Run` handle, consumable three ways — the
-same on `local` and `gemini`:
+same on `local` and `sandbox`:
 
 ```python
 # (a) wait for completion (simplest — the headline default). Pass any credentials the run
@@ -635,7 +635,7 @@ tasks — size it to the longest job the agent legitimately waits on. Two accoun
 whole run (`max_budget_usd` remains a global cap). Event-driven waiting instead of poll-loops is exactly
 what keeps long crawls nearly free in turns.
 
-On `gemini`, live events and recovery records carry the submitted turn's ID. Reattaching a
+On `sandbox`, live events and recovery records carry the submitted turn's ID. Reattaching a
 session and immediately sending again cannot replay an earlier result. Per-worker warm
 dispatch also matches the addressed worker: only its `turn_started` acknowledges pickup,
 and late events from abandoned workers are ignored. Every storage poll is time-bounded.
@@ -653,7 +653,7 @@ workers during the rollout; `Session.history()` continues to return all turns.
 The session API is turn-based, and an interactive loop like Claude Code's needs two more things while
 a turn is **running**: send a message into it, and cut it short without losing the session (a third,
 looking into its workspace, is [below](#looking-into-a-running-turn-exec)). Both work the same on
-`local` and `gemini`, and from any process that holds the session id (`engine.get_session(session_id)`):
+`local` and `sandbox`, and from any process that holds the session id (`engine.get_session(session_id)`):
 
 ```python
 run = session.run("Build the spider")
@@ -678,7 +678,7 @@ await session.send("OK, now do X")              # a normal turn, from the interr
   mirror and in `history()` as an event of kind `user` (the text as `summary`; `raw["message_id"]`,
   `raw["interrupt"]`), emitted when the harness hands it to the model. Pass your own
   `message_id=` to match it up; the worker dedupes on it, so a retried send after re-attaching never
-  reaches the model twice. Until that event arrives the message is "waiting" — on `gemini` well under a
+  reaches the model twice. Until that event arrives the message is "waiting" — on `sandbox` well under a
   second to reach the worker, plus whatever tool call the model is in the middle of.
 - **A message sent while the turn is still starting is queued, not refused.** Between `run()` and
   the worker's `control_ready` event (~1 s from the ready pool, 15–25 s when a sandbox has to be
@@ -700,7 +700,7 @@ await session.send("OK, now do X")              # a normal turn, from the interr
   turn ended between your `busy` check and the post. Mind that race on your side: `send()` on a session
   that has just gone idle is a resume, i.e. a new turn with no secrets — check `session.busy` right
   before, and catch `ControlUnavailable`.
-- **From another process (`gemini`).** `engine.get_session(id)` in the process that started the turn
+- **From another process (`sandbox`).** `engine.get_session(id)` in the process that started the turn
   returns the live session. In a *different* process (a poller, or a worker adopting a job whose
   owner died mid-turn) the session holds no run, so its first `send()`, `interrupt()`, `exec()`,
   `run()`, `current_run`, `busy` or `last_result` reads the session's event record once — every
@@ -717,7 +717,7 @@ await session.send("OK, now do X")              # a normal turn, from the interr
   `last_result` until the result appears. An adopter that merely exits leaves the turn to its owner.
   With nothing running there `send()` is the usual resume. Same-process re-attach needs none of
   this: the engine hands back the live session.
-- **Transport (`gemini`).** The client POSTs the message to the worker's `/control` endpoint through
+- **Transport (`sandbox`).** The client POSTs the message to the worker's `/control` endpoint through
   the platform's proxy (sub-second); the worker feeds it to the harness and dedupes on `message_id`.
   The worker announces the channel with a `control_ready` status event at the start of the turn;
   until then the message waits in the client's queue (above). A message can only reach a running
@@ -749,12 +749,12 @@ while not run.done:
 
 - **What it returns.** `ExecResult(stdout, stderr, returncode, truncated, duration_ms)` (`r.ok` is
   `returncode == 0`). The command runs under `/bin/bash -c` with the agent's working directory as cwd
-  (`cwd=` relative to it, or absolute). `timeout` in seconds (default 60; on `gemini` at most 240,
+  (`cwd=` relative to it, or absolute). `timeout` in seconds (default 60; on `sandbox` at most 240,
   the platform proxy cuts a call at ~300 s) kills the command and reports `returncode` 124. Output is
   kept up to 500 000 characters per stream and `truncated` says when it was cut — a probe never
   fails for printing too much. The command's own failure is data, not an exception: read
   `returncode` and `stderr`.
-- **Only a running turn has a workspace.** On `gemini` the sandbox exists for the turn's duration
+- **Only a running turn has a workspace.** On `sandbox` the sandbox exists for the turn's duration
   and is deleted at the terminal event; `local` keeps the same rule so code written against it
   behaves the same remotely (between turns, read `session.workspace` directly there). Called right
   after `run()`, before the sandbox is known, `exec()` waits for the worker (~1 s from the ready
@@ -766,7 +766,7 @@ while not run.done:
 - **From another process it works too.** A re-attached session's `exec()` first adopts the turn
   running there (see [From another process](#talking-to-a-running-turn-steer-interrupt-stop-exec))
   and probes its sandbox; with nothing running it raises `ControlUnavailable`, as usual.
-- **Transport (`gemini`).** The worker's `/exec` endpoint through the platform proxy (~0.3 s plus
+- **Transport (`sandbox`).** The worker's `/exec` endpoint through the platform proxy (~0.3 s plus
   the command itself); the same endpoint `dev/live_smoke.py` uses to test the sandbox's isolation.
 
 ## Structured output
@@ -938,7 +938,7 @@ the blast radius:
    coerced, the exposure is limited to that one scoped token for that one run.
 3. **Least secrets per run** — pass only what the task needs.
 
-**LLM API key.** By default `gemini` routes the model through **Vertex** with **hourly tokens** the client
+**LLM API key.** By default `sandbox` routes the model through **Vertex** with **hourly tokens** the client
 mints from a predict-only service account (`agent-run-model@<project>`, created by `agent-run-gcp-setup`) and the
 sandbox worker serves to Claude Code from a loopback metadata server (the client pushes a fresh one every
 25 minutes while the turn runs, so long turns just work — see [Long turns](#gcp-setup--required-permissions)).
@@ -968,7 +968,7 @@ its shell is therefore what the turn itself brought along, and the toolkit keeps
 
 - **Run-scoped GCS token.** The worker's GCS work (the event mirror, checkpoints, transcripts, artifacts)
   runs on a short-lived, downscoped token the client mints per turn — this bucket, only this run's object
-  prefixes (`runtime/gemini/scoped_gcs.py`). Another run's records are unreachable with it. The client
+  prefixes (`runtime/sandbox/scoped_gcs.py`). Another run's records are unreachable with it. The client
   refreshes it for turns longer than an hour through an object under the run's own prefix.
 - **Model token.** An hourly Vertex token for the predict-only model service account (above), served by
   the worker's loopback metadata server (`GCE_METADATA_HOST` in the agent's env points at it): model calls,
@@ -983,7 +983,7 @@ no runtime service account, no per-worker message channel and no platform-persis
 ## Pre-baked engine dependencies
 
 Runtime `uv` (above) is great for experimentation, but for **pinned versions, a private index, or packages
-you don't want re-fetched on every run**, declare them on the spec. `gemini.deploy` bakes them into the
+you don't want re-fetched on every run**, declare them on the spec. `sandbox.deploy` bakes them into the
 sandbox image (a `pip install` layer of the generated Dockerfile), so a deployed agent starts with them
 already installed:
 
@@ -995,7 +995,7 @@ spec = AgentSpec(
 )
 ```
 
-**The image's base layer is pinned in-tree.** `runtime/gemini/_image.py` lists what every sandbox image
+**The image's base layer is pinned in-tree.** `runtime/sandbox/_image.py` lists what every sandbox image
 installs besides the toolkit (the `claude-agent-sdk` pin that ships the `claude` binary, `openai-codex` when
 the Codex harness is baked, `google-cloud-storage`, `uv`, …). Your `packages` merge with these — a pin that
 contradicts the base fails fast at deploy, before the build. The image tag is a content digest of the whole
@@ -1023,11 +1023,11 @@ Requires GCP setup — see [GCP setup & required permissions](#gcp-setup--requir
 ```python
 # Ops / CI deploys once (rare): builds + pushes the agent's image (Docker), creates a template,
 # fills a ready pool of two sandboxes.
-engine = gemini.deploy(spec, project="my-project", location="us-central1", warm_pool=True, pool_size=2)
+engine = sandbox.deploy(spec, project="my-project", location="us-central1", warm_pool=True, pool_size=2)
 engine.wait_until_warm()                          # block until a ready sandbox is in the pool (pool only)
 
 # App code looks the engine up by name and runs — it never deploys:
-engine = gemini.get_engine("spider-builder", project="my-project", location="us-central1")
+engine = sandbox.get_engine("spider-builder", project="my-project", location="us-central1")
 session = engine.start_session()
 result = await session.run("/scrape https://books.toscrape.com title, price")   # default: wait for the result
 ```
@@ -1076,7 +1076,7 @@ configures:
 
 | Scope | Type | Bound at | What belongs here |
 |---|---|---|---|
-| deploy | `AgentSpec` | `gemini.deploy(spec)` | identity (`name`), image contents (`packages`, the agent `env`, the harness CLIs — `harnesses=(...)` bakes several), and the *defaults* for everything below |
+| deploy | `AgentSpec` | `sandbox.deploy(spec)` | identity (`name`), image contents (`packages`, the agent `env`, the harness CLIs — `harnesses=(...)` bakes several), and the *defaults* for everything below |
 | session | `SessionConfig` | `engine.start_session(config=...)` | the conversation's world: `repos`, `skills`, `mcp_servers`, `system_prompt`, `harness` (selects among the baked CLIs), `checkpoint`/`interactive`, `extra_env` — plus session-wide defaults for the turn knobs |
 | turn | `TurnConfig` | `session.run(config=...)` / `send(config=...)` | the knobs the harness re-reads every invocation: `model`, `openrouter_provider`, `openrouter_routing`, `reasoning_effort`, `max_turns`, `max_budget_usd`, `max_buffer_size`, `background_task_timeout`, `permission_mode`, tool lists, `output_schema` |
 
@@ -1088,7 +1088,7 @@ field at all, so "different `packages` per run" is a `TypeError`, not a silent n
 ```python
 from agent_run import RepoSource, SessionConfig, TurnConfig
 
-engine = gemini.get_engine("spider-builder", project=..., location=...)
+engine = sandbox.get_engine("spider-builder", project=..., location=...)
 
 session = engine.start_session(config=SessionConfig(          # bound ONCE, for good
     repos=[RepoSource.git("https://bitbucket.org/o/store", ref="heal/issue-123",
@@ -1138,12 +1138,12 @@ The contracts behind this:
 **Managing deployed engines** (control plane):
 
 ```python
-gemini.deploy(spec, project=..., location=...)   # build + push the image, create a template; ops/CI only
-gemini.deploy(spec, ..., warm_pool=True, pool_size=2, pool_max_wait_s=3600)   # + a ready pool, idle life 1 h
-gemini.deploy(spec, ..., resource_limits={"cpu": "8", "memory": "16Gi"})      # sandbox CPU/RAM (default 4 / 4Gi; max 8 vCPU)
-gemini.deploy(spec, ..., image="…-docker.pkg.dev/proj/agent-run/my-agent:tag")     # use an image you pushed; no build
-gemini.get_engine("spider-builder", project=..., location=...)   # look up by name (app code; addressing only)
-gemini.list_engines(project=..., location=...)   # discover what's deployed: {name, resource, versions}
+sandbox.deploy(spec, project=..., location=...)   # build + push the image, create a template; ops/CI only
+sandbox.deploy(spec, ..., warm_pool=True, pool_size=2, pool_max_wait_s=3600)   # + a ready pool, idle life 1 h
+sandbox.deploy(spec, ..., resource_limits={"cpu": "8", "memory": "16Gi"})      # sandbox CPU/RAM (default 4 / 4Gi; max 8 vCPU)
+sandbox.deploy(spec, ..., image="…-docker.pkg.dev/proj/agent-run/my-agent:tag")     # use an image you pushed; no build
+sandbox.get_engine("spider-builder", project=..., location=...)   # look up by name (app code; addressing only)
+sandbox.list_engines(project=..., location=...)   # discover what's deployed: {name, resource, versions}
 engine.name, engine.version, engine.resource     # identity / template id / the template's resource name
 engine.wait_until_warm(timeout=300)              # pools: wait for a ready sandbox before dispatching
 engine.fill_pool(2)                              # top a pool up (after its sandboxes idled out)
@@ -1169,7 +1169,7 @@ engine.revisions()                       # + image / create_time / state / which
 engine.version                           # the template this handle's turns run on
 engine.delete_version("…")               # delete one version (its template + ready sandboxes)
 
-gemini.get_engine("spider-builder", ..., version="…")   # pin: turns run on that template
+sandbox.get_engine("spider-builder", ..., version="…")   # pin: turns run on that template
 ```
 
 **`version=` routes.** Any template can be dispatched to, so a pinned handle keeps running its version
@@ -1186,11 +1186,11 @@ engine touches only sandboxes created from *its* templates, so `x` can be torn d
 
 ## Past jobs: listing sessions & reading history
 
-Every `gemini` run leaves a durable record, and the library reads it back — from any process, long after
+Every `sandbox` run leaves a durable record, and the library reads it back — from any process, long after
 the run:
 
 ```python
-engine = gemini.get_engine("spider-builder", project=..., location=...)
+engine = sandbox.get_engine("spider-builder", project=..., location=...)
 
 for info in engine.list_sessions():            # newest first: {"session_id", "sources", "last_file"}
     session = engine.get_session(info["session_id"])
@@ -1206,7 +1206,7 @@ as the sandbox going away mid-turn: the run ends with an explained `sandbox_unre
 the mirror already holds the terminal result).
 
 `session.last_result` on a re-attached session reads the record on first access and adopts a turn still
-running there (["From another process"](#from-another-process-gemini) above); without an event loop it
+running there (["From another process"](#from-another-process-sandbox) above); without an event loop it
 re-reads the record on each access until a result exists — prefer `current_run` / `run.done` for
 in-flight runs. Caveats: the mirror is bucket-wide, so engines
 sharing an output bucket see each other's sessions in `list_sessions`; the `local` runtime keeps no durable
@@ -1296,7 +1296,7 @@ Everything below can be created by a team in their own project; the concrete val
 Two identities take part; the sandbox itself has none:
 
 **1. The operator identity** — you (a human or CI) *impersonate* the operator service account, or run as
-your own identity, to drive the whole control plane: `gemini.deploy`, `get_engine`, `list_engines`,
+your own identity, to drive the whole control plane: `sandbox.deploy`, `get_engine`, `list_engines`,
 running turns. Grants (tighten to your policy):
 
 | Role | Scope | Why |
@@ -1323,7 +1323,7 @@ then point `GOOGLE_APPLICATION_CREDENTIALS` at it). A key is a long-lived creden
 impersonation or workload identity federation where they're available, and rotate keys you do hand out.
 
 **2. The model service account** — `agent-run-model@<project>.iam.gserviceaccount.com` (created by
-`agent-run-gcp-setup`; `gemini.deploy(model_service_account=)` names another one). The sandbox runs the model
+`agent-run-gcp-setup`; `sandbox.deploy(model_service_account=)` names another one). The sandbox runs the model
 on a token minted for this account, and the agent's shell can read that token, so it holds **only** a custom
 role with `aiplatform.endpoints.predict` (`agentRunPredict`) — model calls and nothing else. Never
 `roles/aiplatform.user` here: it would hand the shell every sandbox and template in the project.
@@ -1336,7 +1336,7 @@ sandbox it starts runs as a zero-permission tenant identity.
 **Prerequisites** (`agent-run-gcp-setup` creates them; `deploy` ensures the lifecycle rules):
 
 - An output bucket `gs://<project>-agent-output` with uniform bucket-level access.
-- An Artifact Registry Docker repo `agent-run` in the location (`gemini.deploy(image_repo=)` names another).
+- An Artifact Registry Docker repo `agent-run` in the location (`sandbox.deploy(image_repo=)` names another).
 - **Claude model access** — see the note below.
 - The Docker CLI on the deploying machine, logged into the registry.
 
@@ -1406,10 +1406,10 @@ gcloud auth configure-docker $REGION-docker.pkg.dev
 ```
 
 Then authenticate impersonating the operator SA (`gcloud auth application-default login
---impersonate-service-account=$OP`); `gemini.deploy` pushes to the `agent-run` repo and mints model tokens
+--impersonate-service-account=$OP`); `sandbox.deploy` pushes to the `agent-run` repo and mints model tokens
 from `$MODEL` by default (pass `image_repo=` / `model_service_account=` for other names).
 
-## Latency & cost (the `gemini` path)
+## Latency & cost (the `sandbox` path)
 
 Platform realities the toolkit encodes (measured on Agent Sandbox, 2026-09-10/11; the `local` path has none
 of them):
@@ -1431,7 +1431,7 @@ prompt, tokens and configs, and the events stream straight back from it (one lon
 of the no-pool path is route propagation, not boot. DESIGN.md §13 has the architecture and the measured
 numbers.
 
-**How `warm_pool=True` works.** `gemini.deploy(spec, warm_pool=True, pool_size=N)` creates N sandboxes from
+**How `warm_pool=True` works.** `sandbox.deploy(spec, warm_pool=True, pool_size=N)` creates N sandboxes from
 the new template, waits until each answers, and records them in a **roster** (client-owned GCS objects under
 `pool/<template>/` in the output bucket). A turn takes the oldest ready sandbox off the roster (claimed
 atomically, so several client processes share one pool), hands it the turn, and refills the pool in the

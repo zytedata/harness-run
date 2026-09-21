@@ -31,7 +31,7 @@ if TYPE_CHECKING:
 def _claude_session_id(session_id: str) -> str:
     """Map a runtime session id to the canonical UUID the Claude Agent SDK requires.
 
-    The gemini cold path's session id comes from ADK ``sessions.create`` and is NUMERIC
+    The sandbox cold path's session id comes from ADK ``sessions.create`` and is NUMERIC
     (e.g. ``1966652674296250368``); pinning it as the Claude session id makes the ``claude``
     CLI exit 1 with "Invalid session ID. Must be a valid UUID" — before emitting any event.
     A sid that is already a canonical UUID (the warm path's client-chosen id, every local

@@ -6,8 +6,8 @@ Offline throughout. Four layers, each against fakes:
 * the harnesses — the Claude Agent SDK client and the Codex app-server are faked (see
   ``fakes`` / ``codex_fakes``); the scripts wait for the harness to act (a second
   ``query()``, an ``interrupt()``) the way the live CLIs were observed to.
-* the runtimes — ``local`` in-process; the gemini client + worker over the worker's
-  ``/control`` endpoint are covered in ``test_gemini_runtime``.
+* the runtimes — ``local`` in-process; the sandbox client + worker over the worker's
+  ``/control`` endpoint are covered in ``test_sandbox_runtime``.
 * the four session transitions run the same way on both runtimes.
 """
 

@@ -22,9 +22,9 @@ from sandbox_fakes import FakeSandboxProvider, ScriptedWorker, make_engine, resu
 from agent_run import AgentSpec
 from agent_run.events import AgentEvent
 from agent_run.ports.blobstore import LocalBlobStore
-from agent_run.runtime.gemini import history
-from agent_run.runtime.gemini.stream import MirrorStream
-from agent_run.runtime.gemini.worker import Worker
+from agent_run.runtime.sandbox import history
+from agent_run.runtime.sandbox.stream import MirrorStream
+from agent_run.runtime.sandbox.worker import Worker
 
 
 def _turn_calls(provider):

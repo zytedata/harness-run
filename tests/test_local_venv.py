@@ -72,7 +72,7 @@ def test_provision_venv_reuses_existing_venv(monkeypatch, tmp_path):
 def test_provision_venv_replaces_wrong_python_version(monkeypatch, tmp_path):
     """A venv whose interpreter doesn't match the engine contract's Python is re-provisioned:
     a persistent workdir must not silently keep the old interpreter across an
-    ENGINE_PYTHON bump (local/gemini parity is the whole point of the venv)."""
+    ENGINE_PYTHON bump (local/sandbox parity is the whole point of the venv)."""
     calls = []
     monkeypatch.setattr(venv_mod, "_run", lambda cmd, what: calls.append(cmd))
     monkeypatch.setattr(venv_mod, "_uv_bin", lambda: "/opt/uv")

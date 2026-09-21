@@ -496,7 +496,7 @@ def test_interactive_decoupled_from_checkpoint(tmp_path):
 
 def test_checkpoint_blobstore_gcs_env_selection(tmp_path, monkeypatch):
     # AGENT_CHECKPOINT_GCS points the local engine's checkpoint blobs at GCS (same env
-    # hook as the gemini runtime); without it the store is the pod-local <workdir>/blobs.
+    # hook as the sandbox runtime); without it the store is the pod-local <workdir>/blobs.
     from agent_run.ports import blobstore as bs
 
     created = {}
@@ -559,7 +559,7 @@ def test_transcripts_without_persistence_raises(tmp_path):
 
 def test_transcript_only_send_does_not_resume(tmp_path):
     # transcript=True is observational: it wires the store but leaves send() the documented
-    # fresh turn. Resume is checkpointing's, and stays in parity with gemini.
+    # fresh turn. Resume is checkpointing's, and stays in parity with sandbox.
     def resume_sid_of(spec, name):
         seen = {}
         engine = local.deploy(spec, workdir=str(tmp_path / name))

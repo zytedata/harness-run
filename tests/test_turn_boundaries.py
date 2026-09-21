@@ -9,8 +9,8 @@ from sandbox_fakes import FakeSandboxProvider, ScriptedWorker
 
 from agent_run.events import AgentEvent
 from agent_run.ports.blobstore import LocalBlobStore
-from agent_run.runtime.gemini import backend, history, stream
-from agent_run.runtime.gemini.provider import SandboxGone
+from agent_run.runtime.sandbox import backend, history, stream
+from agent_run.runtime.sandbox.provider import SandboxGone
 
 SID = "sid-1"
 URI = "gs://out/events"

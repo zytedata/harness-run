@@ -41,7 +41,7 @@ def _reset_teardown_flag(monkeypatch):
 
 
 def _deployed(monkeypatch, engine):
-    """Put the probe in the state it reaches once gemini.deploy has returned."""
+    """Put the probe in the state it reaches once sandbox.deploy has returned."""
     monkeypatch.setattr(probe, "_ENGINE", engine)
     return engine
 
@@ -88,7 +88,7 @@ def test_sigterm_tears_down_and_exits(monkeypatch):
 
 
 def test_sigterm_during_the_deploy_deletes_by_name(monkeypatch):
-    """The window this fixes: interrupted before gemini.deploy returned.
+    """The window this fixes: interrupted before sandbox.deploy returned.
 
     There is no engine object yet, but the platform may already have created the engine
     and it bills while it exists. The name is fixed, so the handler looks it up and
@@ -101,7 +101,7 @@ def test_sigterm_during_the_deploy_deletes_by_name(monkeypatch):
         looked_up.update(name=name, project=project, location=location)
         return engine
 
-    monkeypatch.setattr(probe.gemini, "get_engine", fake_get_engine)
+    monkeypatch.setattr(probe.sandbox, "get_engine", fake_get_engine)
     probe._install_signal_teardown()  # no engine: deploy has not returned
     try:
         with pytest.raises(SystemExit) as exc:
@@ -120,7 +120,7 @@ def test_a_failed_delete_by_name_prints_the_manual_steps(monkeypatch, capsys):
     def broken_get_engine(*_a, **_kw):
         raise RuntimeError("lookup failed")
 
-    monkeypatch.setattr(probe.gemini, "get_engine", broken_get_engine)
+    monkeypatch.setattr(probe.sandbox, "get_engine", broken_get_engine)
     probe._teardown()  # must not raise
     out = capsys.readouterr().out
     assert "COULD NOT DELETE" in out and probe.NAME in out
@@ -131,6 +131,6 @@ def test_keep_wins_before_the_deploy_returns(monkeypatch):
     """KEEP=1 must not trigger a delete-by-name either."""
     monkeypatch.setenv("KEEP", "1")
     called = []
-    monkeypatch.setattr(probe.gemini, "get_engine", lambda *a, **k: called.append(1))
+    monkeypatch.setattr(probe.sandbox, "get_engine", lambda *a, **k: called.append(1))
     probe._teardown()
     assert called == []

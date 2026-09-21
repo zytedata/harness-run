@@ -4,7 +4,7 @@ import json
 import pytest
 from sandbox_fakes import FakeSandboxProvider, make_engine
 
-from agent_run.runtime.gemini import handoff
+from agent_run.runtime.sandbox import handoff
 
 
 class Store:

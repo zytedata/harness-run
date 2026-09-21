@@ -179,7 +179,7 @@ _OPENROUTER_WIRE_API = "responses"
 _OPENROUTER_MIN_EFFORT = "low"
 
 # Tool-result content kept in events is truncated: command output can be megabytes, and
-# events ride Cloud Logging on gemini (per-entry size limits).
+# events ride Cloud Logging on sandbox (per-entry size limits).
 _CONTENT_CAP = 4000
 
 # Blob-key prefix for persisted Codex conversations (the rollout file + thread id).

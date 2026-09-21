@@ -1,7 +1,7 @@
 """``RunContext`` — the per-run inputs a runtime hands the harness (DESIGN.md §7).
 
 The harness is intentionally ignorant of *where* it runs: a runtime (``local`` or
-``gemini``) resolves the platform-specific bits — the working directory, resolved
+``sandbox``) resolves the platform-specific bits — the working directory, resolved
 secret values, the SessionStore, the BlobStore for checkpointing — and packs them into
 a ``RunContext``. The harness turns ``(spec, ctx)`` into backend options and drives the
 loop. This keeps the Claude binding free of GCP / ADK / Secret Manager knowledge.
@@ -76,7 +76,7 @@ class RunContext:
             while the turn runs, or ``None``. Carries the operator's steer / interrupt /
             stop messages (``Session.send()`` on a running session, ``Session.interrupt()``);
             the runtime owns the transport (in-process queue on ``local``, a GCS inbox the
-            worker polls on ``gemini``).
+            worker polls on ``sandbox``).
     """
 
     spec: AgentSpec

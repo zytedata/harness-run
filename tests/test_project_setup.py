@@ -12,8 +12,8 @@ import copy
 
 import pytest
 
-from agent_run.runtime.gemini import project_setup as ps
-from agent_run.runtime.gemini.handoff import handoff_lifecycle_rules
+from agent_run.runtime.sandbox import project_setup as ps
+from agent_run.runtime.sandbox.handoff import handoff_lifecycle_rules
 
 # ---------------------------------------------------------------------------------
 # Pure helpers
@@ -31,7 +31,7 @@ def test_sandbox_agent_email_and_repo_helpers():
 def test_defaults_mirror_backend_deploy_defaults():
     # backend.deploy defaults to gs://<project>-agent-output and the `agent-run` repo; the setup
     # tool must create exactly those or a plain deploy() won't find them.
-    from agent_run.runtime.gemini import _image, model_token
+    from agent_run.runtime.sandbox import _image, model_token
 
     assert ps.default_output_bucket("proj") == "gs://proj-agent-output"
     assert ps.DEFAULT_REPO_ID == _image.DEFAULT_REPO_ID
@@ -358,7 +358,7 @@ def test_model_sa_default_matches_what_deploy_uses():
 
 
 def test_verify_deploys_with_the_projects_repo_and_model_sa(monkeypatch):
-    from agent_run.runtime.gemini import backend
+    from agent_run.runtime.sandbox import backend
 
     seen = {}
 

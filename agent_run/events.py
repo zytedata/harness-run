@@ -98,7 +98,7 @@ class RunResult:
             *after* emitting this result. The result (text, spend, usage) is real and
             kept; the warning records that the run didn't shut down cleanly.
         resources: The turn's resource high-water marks as the worker sampled them
-            inside its container (``gemini``): ``memory_peak_bytes``,
+            inside its container (``sandbox``): ``memory_peak_bytes``,
             ``memory_limit_bytes``, ``cpu_usec`` — whichever were readable. ``None``
             when nothing was sampled (``local``, sampling disabled, no cgroup).
     """

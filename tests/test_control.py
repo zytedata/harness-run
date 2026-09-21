@@ -6,8 +6,8 @@ Offline throughout. Four layers, each against fakes:
 * the harnesses — the Claude Agent SDK client and the Codex app-server are faked (see
   ``fakes`` / ``codex_fakes``); the scripts wait for the harness to act (a second
   ``query()``, an ``interrupt()``) the way the live CLIs were observed to.
-* the runtimes — ``local`` in-process; the gemini client + worker over the worker's
-  ``/control`` endpoint are covered in ``test_gemini_runtime``.
+* the runtimes — ``local`` in-process; the sandbox client + worker over the worker's
+  ``/control`` endpoint are covered in ``test_sandbox_runtime``.
 * the four session transitions run the same way on both runtimes.
 """
 
@@ -27,21 +27,21 @@ from fakes import init_msg, make_sdk_client, result_msg, tool_result_msg
 
 from claude_agent_sdk import AssistantMessage, TextBlock, ToolUseBlock
 
-from remote_agent_toolkit import AgentSpec, local
-from remote_agent_toolkit.checkpoint.session_store import BlobSessionStore
-from remote_agent_toolkit.conformance import run_harness_conformance
-from remote_agent_toolkit.control import (
+from agent_run import AgentSpec, local
+from agent_run.checkpoint.session_store import BlobSessionStore
+from agent_run.conformance import run_harness_conformance
+from agent_run.control import (
     ControlledStream,
     ControlMessage,
     LocalControlChannel,
 )
-from remote_agent_toolkit.events import AgentEvent, RunStatus, StopReason
-from remote_agent_toolkit.harness._shared import finalize_checkpoint
-from remote_agent_toolkit.harness.claude_code import ClaudeCodeHarness
-from remote_agent_toolkit.harness.codex import CodexHarness
-from remote_agent_toolkit.harness.context import RunContext
-from remote_agent_toolkit.ports.blobstore import LocalBlobStore
-from remote_agent_toolkit.runtime._run import build_result
+from agent_run.events import AgentEvent, RunStatus, StopReason
+from agent_run.harness._shared import finalize_checkpoint
+from agent_run.harness.claude_code import ClaudeCodeHarness
+from agent_run.harness.codex import CodexHarness
+from agent_run.harness.context import RunContext
+from agent_run.ports.blobstore import LocalBlobStore
+from agent_run.runtime._run import build_result
 
 
 async def _until(pred, what: str, timeout: float = 5.0):
@@ -565,7 +565,7 @@ def test_local_interrupt_checkpoints_and_a_later_send_resumes_from_it(tmp_path):
 
 
 def test_local_run_and_send_guards_while_a_turn_runs(tmp_path):
-    from remote_agent_toolkit.config import TurnConfig
+    from agent_run.config import TurnConfig
 
     harness = ControlAwareHarness()
     session = _local_engine(tmp_path, harness).start_session()

@@ -2,7 +2,7 @@
 
 Offline throughout. Three layers: ``control.run_shell`` (the one implementation), the
 sandbox worker's ``/exec`` (cwd = the running turn's workspace), and the two runtimes'
-``exec()`` — gemini over the fake provider (waits for dispatch, refuses once the turn is
+``exec()`` — sandbox over the fake provider (waits for dispatch, refuses once the turn is
 over), local on the host (same rule).
 """
 
@@ -16,12 +16,12 @@ from typing import AsyncIterator
 import pytest
 from sandbox_fakes import FakeSandboxProvider, ScriptedWorker, make_engine, result_event
 
-from remote_agent_toolkit import AgentSpec, ControlUnavailable, ExecResult, local
-from remote_agent_toolkit.control import EXEC_TIMEOUT_RC, run_shell
-from remote_agent_toolkit.events import AgentEvent
-from remote_agent_toolkit.runtime.gemini import backend
-from remote_agent_toolkit.runtime.gemini.provider import SandboxGone
-from remote_agent_toolkit.runtime.gemini.worker import Worker
+from agent_run import AgentSpec, ControlUnavailable, ExecResult, local
+from agent_run.control import EXEC_TIMEOUT_RC, run_shell
+from agent_run.events import AgentEvent
+from agent_run.runtime.sandbox import backend
+from agent_run.runtime.sandbox.provider import SandboxGone
+from agent_run.runtime.sandbox.worker import Worker
 
 # -- control.run_shell ---------------------------------------------------------------------
 
@@ -42,7 +42,7 @@ def test_run_shell_kills_the_process_group_at_the_timeout():
 
 
 def test_run_shell_caps_each_stream_and_flags_it(monkeypatch):
-    from remote_agent_toolkit import control
+    from agent_run import control
 
     monkeypatch.setattr(control, "EXEC_OUTPUT_CAP", 100)
     r = run_shell("head -c 500 /dev/zero | tr '\\0' x; echo short >&2", cwd=None, timeout=10)
@@ -64,7 +64,7 @@ def test_exec_result_round_trips_through_a_dict():
 
 
 def _patch_harness(monkeypatch, harness_cls):
-    import remote_agent_toolkit.harness.claude_code as harness_mod
+    import agent_run.harness.claude_code as harness_mod
 
     monkeypatch.setattr(harness_mod, "ClaudeCodeHarness", harness_cls)
 
@@ -113,10 +113,10 @@ def test_worker_exec_runs_in_the_running_turns_workspace(tmp_path, monkeypatch):
         pass
 
 
-# -- gemini: Session.exec over the fake provider -----------------------------------------
+# -- sandbox: Session.exec over the fake provider -----------------------------------------
 
 
-def test_gemini_exec_waits_for_dispatch_and_runs_on_the_turns_worker(tmp_path):
+def test_sandbox_exec_waits_for_dispatch_and_runs_on_the_turns_worker(tmp_path):
     provider = FakeSandboxProvider(lambda n: ScriptedWorker())
     engine = make_engine(provider)
     session = engine.start_session()
@@ -143,7 +143,7 @@ def test_gemini_exec_waits_for_dispatch_and_runs_on_the_turns_worker(tmp_path):
     assert calls == [("/exec", 5.0), ("/exec", 5.0)]
 
 
-def test_gemini_exec_refuses_when_no_turn_runs_or_after_it_ended():
+def test_sandbox_exec_refuses_when_no_turn_runs_or_after_it_ended():
     provider = FakeSandboxProvider(lambda n: ScriptedWorker(auto=[result_event("done")]))
     engine = make_engine(provider)
     session = engine.start_session()
@@ -161,7 +161,7 @@ def test_gemini_exec_refuses_when_no_turn_runs_or_after_it_ended():
     assert not any(path == "/exec" for _sb, path, _b in provider.calls)
 
 
-def test_gemini_exec_surfaces_a_dead_sandbox_and_a_refusing_worker_as_control_unavailable():
+def test_sandbox_exec_surfaces_a_dead_sandbox_and_a_refusing_worker_as_control_unavailable():
     class Refusing(ScriptedWorker):
         def handle(self, path, body):
             if path == "/exec":
@@ -190,7 +190,7 @@ def test_gemini_exec_surfaces_a_dead_sandbox_and_a_refusing_worker_as_control_un
     engine._join_background()
 
 
-def test_gemini_exec_validates_its_arguments():
+def test_sandbox_exec_validates_its_arguments():
     session = make_engine(FakeSandboxProvider(lambda n: ScriptedWorker())).start_session()
 
     async def go():
@@ -202,7 +202,7 @@ def test_gemini_exec_validates_its_arguments():
     asyncio.run(go())
 
 
-def test_gemini_exec_when_dispatch_fails_raises_instead_of_waiting_forever():
+def test_sandbox_exec_when_dispatch_fails_raises_instead_of_waiting_forever():
     provider = FakeSandboxProvider(lambda n: ScriptedWorker())
     provider.fail_next["/turn"] = [SandboxGone("expired")] * backend.DISPATCH_ATTEMPTS
     engine = make_engine(provider)

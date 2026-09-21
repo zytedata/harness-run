@@ -6,8 +6,8 @@ import urllib.request
 
 import pytest
 
-from remote_agent_toolkit.runtime.gemini.worker import TurnRecord, Worker
-from remote_agent_toolkit.spec import AgentSpec
+from agent_run.runtime.sandbox.worker import TurnRecord, Worker
+from agent_run.spec import AgentSpec
 
 
 def _worker(tmp_path) -> Worker:
@@ -98,6 +98,6 @@ def test_a_turn_without_a_model_token_refuses_token_pushes_and_serves_none(tmp_p
     ({"access_token": ""}, None), ({"expires_at": "x"}, None), (None, None), (42, None),
 ])
 def test_token_record_normalization(value, expected):
-    from remote_agent_toolkit.runtime.gemini.worker import _token_record
+    from agent_run.runtime.sandbox.worker import _token_record
 
     assert _token_record(value) == expected

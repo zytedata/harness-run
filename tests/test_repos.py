@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import subprocess
 
-from remote_agent_toolkit import AgentSpec, RepoSource
-from remote_agent_toolkit.integrations.git import (
+from agent_run import AgentSpec, RepoSource
+from agent_run.integrations.git import (
     _auth_url,
     provision_repos,
     reauth_repos,

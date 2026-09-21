@@ -9,7 +9,7 @@ The deploy/session/turn scope model (README). Under test here:
 * client: ``get_session`` re-attach recovers the opener's persisted config — it cannot
   substitute a different one (the method takes no config);
 * client: ``get_engine(spec=)`` is gone, with an error that points at the replacement;
-* worker: the turn runs baked ← session ← turn merged (``test_gemini_runtime`` covers the
+* worker: the turn runs baked ← session ← turn merged (``test_sandbox_runtime`` covers the
   echo and the fail-closed cases);
 * local: the same session/turn config surface works in-process (dev/prod parity).
 """
@@ -21,10 +21,10 @@ import asyncio
 import pytest
 from sandbox_fakes import FakeSandboxProvider, make_engine
 
-from remote_agent_toolkit import AgentSpec, SessionConfig, SkillSource, TurnConfig
-from remote_agent_toolkit.ports.blobstore import LocalBlobStore
-from remote_agent_toolkit.runtime import local
-from remote_agent_toolkit.runtime.gemini import backend, handoff, history, worker as worker_mod
+from agent_run import AgentSpec, SessionConfig, SkillSource, TurnConfig
+from agent_run.ports.blobstore import LocalBlobStore
+from agent_run.runtime import local
+from agent_run.runtime.sandbox import backend, handoff, history, worker as worker_mod
 
 
 def _patched_store(tmp_path, monkeypatch):
@@ -130,7 +130,7 @@ def test_baked_skills_are_skipped_when_the_effective_skills_differ(monkeypatch, 
         staged["sources"] = tuple(sources)
         return []
 
-    import remote_agent_toolkit.skills as skills_mod
+    import agent_run.skills as skills_mod
     monkeypatch.setattr(skills_mod, "provision", fake_provision)
 
     class RC:

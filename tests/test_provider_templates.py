@@ -8,8 +8,8 @@ import types
 
 import pytest
 
-from remote_agent_toolkit.runtime.gemini import provider as prov
-from remote_agent_toolkit.runtime.gemini.provider import AgentSandboxProvider, SandboxError
+from agent_run.runtime.sandbox import provider as prov
+from agent_run.runtime.sandbox.provider import AgentSandboxProvider, SandboxError
 
 INSTANCE = "projects/p/locations/l/reasoningEngines/1"
 

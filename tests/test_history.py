@@ -9,9 +9,9 @@ import json
 
 from sandbox_fakes import FakeSandboxProvider, make_engine
 
-from remote_agent_toolkit.events import AgentEvent, RunStatus, StopReason
-from remote_agent_toolkit.ports.blobstore import LocalBlobStore
-from remote_agent_toolkit.runtime.gemini import backend, history
+from agent_run.events import AgentEvent, RunStatus, StopReason
+from agent_run.ports.blobstore import LocalBlobStore
+from agent_run.runtime.sandbox import backend, history
 
 
 def _result_event(text="done"):
@@ -74,8 +74,8 @@ def test_engine_list_sessions_and_history_use_the_mirror(tmp_path, monkeypatch):
 
 def test_reattached_session_reconstructs_last_result(monkeypatch):
     engine = make_engine(FakeSandboxProvider())
-    session = backend.GeminiSession(engine, "old-sid")
-    monkeypatch.setattr(backend.GeminiSession, "history",
+    session = backend.SandboxSession(engine, "old-sid")
+    monkeypatch.setattr(backend.SandboxSession, "history",
                         lambda self: [AgentEvent(kind="message", summary="hi"), _result_event("final answer")])
     result = session.last_result
     assert result is not None and result.text == "final answer" and result.num_turns == 2
@@ -84,6 +84,6 @@ def test_reattached_session_reconstructs_last_result(monkeypatch):
 
 def test_reattached_session_without_history_has_no_result(monkeypatch):
     engine = make_engine(FakeSandboxProvider())
-    session = backend.GeminiSession(engine, "old-sid")
-    monkeypatch.setattr(backend.GeminiSession, "history", lambda self: [])
+    session = backend.SandboxSession(engine, "old-sid")
+    monkeypatch.setattr(backend.SandboxSession, "history", lambda self: [])
     assert session.last_result is None and session.status == RunStatus.PENDING

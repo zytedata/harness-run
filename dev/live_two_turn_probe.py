@@ -19,12 +19,12 @@ import sys
 import time
 import traceback
 
-from remote_agent_toolkit import AgentSpec, gemini
+from agent_run import AgentSpec, sandbox
 
 PROJECT = os.environ.get("PROJECT", "my-project")
 LOCATION = os.environ.get("LOCATION", "us-central1")
 SUFFIX = re.sub(r"[^a-z0-9-]", "-", (os.environ.get("SUFFIX") or getpass.getuser()).lower())
-NAME = f"ratk-stream2t-{SUFFIX}"
+NAME = f"agent-run-stream2t-{SUFFIX}"
 
 _checks: list[tuple[str, bool]] = []
 
@@ -52,9 +52,9 @@ async def main() -> int:
     spec = AgentSpec(name=NAME, model="claude-haiku-4-5", max_turns=8,
                      max_budget_usd=1.0, checkpoint=True)
     print(f"{time.strftime('%H:%M:%S')} deploying {NAME} ...", flush=True)
-    engine = gemini.deploy(spec, PROJECT, LOCATION)
+    engine = sandbox.deploy(spec, PROJECT, LOCATION)
     try:
-        looked_up = gemini.get_engine(NAME, project=PROJECT, location=LOCATION)
+        looked_up = sandbox.get_engine(NAME, project=PROJECT, location=LOCATION)
         check("get_engine resolves the engine", looked_up.resource == engine.resource)
 
         session = looked_up.start_session()

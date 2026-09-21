@@ -13,10 +13,10 @@ import asyncio
 import pytest
 from sandbox_fakes import INSTANCE, FakeSandboxProvider, ScriptedWorker, make_engine, result_event
 
-from remote_agent_toolkit import ControlUnavailable
-from remote_agent_toolkit.events import AgentEvent, RunStatus, StopReason
-from remote_agent_toolkit.ports.blobstore import LocalBlobStore
-from remote_agent_toolkit.runtime.gemini import backend, handoff, history, stream
+from agent_run import ControlUnavailable
+from agent_run.events import AgentEvent, RunStatus, StopReason
+from agent_run.ports.blobstore import LocalBlobStore
+from agent_run.runtime.sandbox import backend, handoff, history, stream
 
 
 def _started(turn_id, worker):
@@ -424,5 +424,5 @@ def test_an_adopters_explicit_cancel_still_releases_the_sandbox(tmp_path, monkey
 ])
 def test_find_running_turn_reads_the_last_started_turn_without_a_result(monkeypatch, events, expected):
     session = make_engine(FakeSandboxProvider()).get_session("old-sid")
-    monkeypatch.setattr(backend.GeminiSession, "history", lambda self: list(events))
+    monkeypatch.setattr(backend.SandboxSession, "history", lambda self: list(events))
     assert session._find_running_turn() == expected

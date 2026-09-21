@@ -12,8 +12,8 @@ from urllib.parse import urlsplit
 
 import pytest
 
-from remote_agent_toolkit.harness import _openrouter_proxy as proxy_module
-from remote_agent_toolkit.harness._openrouter_proxy import (
+from agent_run.harness import _openrouter_proxy as proxy_module
+from agent_run.harness._openrouter_proxy import (
     OpenRouterProxy,
     _append_capture,
     _capture_request,

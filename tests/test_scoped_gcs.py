@@ -1,4 +1,4 @@
-"""Run-scoped GCS tokens (runtime/gemini/scoped_gcs.py): the worker's GCS work runs on a
+"""Run-scoped GCS tokens (runtime/sandbox/scoped_gcs.py): the worker's GCS work runs on a
 token limited to the run's own objects (the sandbox has no identity of its own).
 
 Everything here is offline: the access boundary is inspected as data, the worker
@@ -11,10 +11,10 @@ import datetime as dt
 import logging
 import json
 
-from remote_agent_toolkit import AgentSpec
-from remote_agent_toolkit.checkpoint.session_store import _claude_session_id
-from remote_agent_toolkit.ports import blobstore as bs
-from remote_agent_toolkit.runtime.gemini import scoped_gcs
+from agent_run import AgentSpec
+from agent_run.checkpoint.session_store import _claude_session_id
+from agent_run.ports import blobstore as bs
+from agent_run.runtime.sandbox import scoped_gcs
 
 
 def test_run_object_prefixes_cover_every_gcs_surface_of_a_turn():
@@ -224,7 +224,7 @@ class _RecordingBlobStore:
     """A LocalBlobStore that records every key it is asked for and every prefix it lists."""
 
     def __init__(self, root):
-        from remote_agent_toolkit.ports.blobstore import LocalBlobStore
+        from agent_run.ports.blobstore import LocalBlobStore
 
         self._inner = LocalBlobStore(str(root))
         self.keys: set[str] = set()
@@ -294,8 +294,8 @@ async def test_every_checkpoint_object_of_a_two_turn_codex_run_is_inside_the_run
     from codex_fakes import agent_message, token_usage, turn_completed, turn_started
     from test_codex_harness import _events_of, _fake_rollout
 
-    from remote_agent_toolkit.checkpoint.session_store import BlobSessionStore
-    from remote_agent_toolkit.harness.context import RunContext
+    from agent_run.checkpoint.session_store import BlobSessionStore
+    from agent_run.harness.context import RunContext
 
     sid = "5f2e3c1a-9b7d-4e6f-8a1b-2c3d4e5f6a7b"  # a UUID: the warm path's id, csid == sid
     assert _claude_session_id(sid) == sid
@@ -335,8 +335,8 @@ def test_workspace_snapshot_and_restore_stay_inside_the_run_prefixes(tmp_path):
     """The Claude path's checkpoint writers (shared with Codex): transcript store + workspace tar."""
     import asyncio
 
-    from remote_agent_toolkit.checkpoint import workspace
-    from remote_agent_toolkit.checkpoint.session_store import BlobSessionStore
+    from agent_run.checkpoint import workspace
+    from agent_run.checkpoint.session_store import BlobSessionStore
 
     sid = "5f2e3c1a-9b7d-4e6f-8a1b-2c3d4e5f6a7b"
     blobs = _RecordingBlobStore(tmp_path / "blobs")

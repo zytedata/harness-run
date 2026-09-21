@@ -51,7 +51,7 @@ engine with a ready pool; the caller must arrange its deployment and teardown.
 
 The control channel adds nothing measurable on `local`; the time is the model's. A steer
 waits for the running tool call to finish (here a `sleep 8`), because the model reads the
-message at its next step. On `gemini` a steer is one HTTPS call into the sandbox (~0.3 s);
+message at its next step. On `sandbox` a steer is one HTTPS call into the sandbox (~0.3 s);
 `make live-smoke` exercises it on every run.
 
 ## 1. Offline tests (`make test`)
@@ -69,11 +69,11 @@ platform against [`tests/sandbox_fakes.py`](tests/sandbox_fakes.py): `FakeSandbo
 templates and sandboxes in memory and routes every call to a worker — the REAL `Worker` class
 driven in-process with its harness faked (a client turn then runs client → provider → worker →
 harness fake → events → client), or a `ScriptedWorker` a test feeds events to. `make_engine`
-builds a `GeminiEngine` over it with an in-memory roster. Useful conventions when adding tests:
+builds a `SandboxEngine` over it with an in-memory roster. Useful conventions when adding tests:
 
 - **Patch the seam, not the internals** — e.g. monkeypatch `handoff.GcsBlobStore` to
   `LocalBlobStore`, inject a `FakeSandboxProvider`, and drive the real code path above it.
-- **Re-attach sessions by id** — `GeminiSession(engine, "sid")` constructs a handle without
+- **Re-attach sessions by id** — `SandboxSession(engine, "sid")` constructs a handle without
   any platform call.
 - The client's `/events` long-poll is shortened by an autouse fixture (`asyncio.run` waits for
   executor threads at shutdown, so a cancelled run would otherwise hold a test for the hold time).
@@ -110,7 +110,7 @@ LONG_MINUTES=70 make live-smoke                        # + a turn whose one Bash
 ```
 
 [`dev/live_smoke.py`](dev/live_smoke.py) deploys **a throwaway engine from your checkout**
-(named `ratk-smoke-<you>`: image build + push with your Docker, a template, a ready pool of
+(named `agent-run-smoke-<you>`: image build + push with your Docker, a template, a ready pool of
 one), runs Haiku turns against it, and tears everything down in `finally`:
 
 - **pool-turn** — a turn on the ready sandbox: `turn_started` must say `warm=True`, the first
@@ -141,9 +141,9 @@ Prerequisites: the GCP setup from the
 (ADC that can impersonate the model service account, Haiku enabled in Vertex Model Garden)
 and the Docker CLI logged into the registry (`docker login -u oauth2accesstoken
 --password-stdin us-central1-docker.pkg.dev` with an access token). Defaults target the shared
-`my-project` test project and its `ratk-sandbox` repo; `MODEL_SA` overrides the model
-service account (default: the toolkit's `ratk-model@<project>`, the predict-only account
-`ratk-gcp-setup` creates — the operator account would hand the agent the whole project, and
+`my-project` test project and its `agent-run-sandbox` repo; `MODEL_SA` overrides the model
+service account (default: the toolkit's `agent-run-model@<project>`, the predict-only account
+`agent-run-gcp-setup` creates — the operator account would hand the agent the whole project, and
 the smoke's **model-token** check fails on any account whose token reaches more than the
 model).
 
@@ -151,14 +151,14 @@ model).
 
 Not part of the regular ladder: it measures the platform's undocumented ceilings (TTL, CPU and
 memory, disk, proxy body sizes, the per-call ceiling, call rate, concurrent creates) and takes
-~15 min plus the optional long-running-process check. It runs against any image `gemini.deploy`
+~15 min plus the optional long-running-process check. It runs against any image `sandbox.deploy`
 built (`--image`, from a deploy record or `engine.revisions()`), needs only the worker's `/health`
 and `/exec`, creates its own templates and sandboxes and deletes them in `finally`. Re-run it when
 the platform announces changes to Agent Sandbox or when a limit in `backend.py` / `worker.py`
 (`EVENTS_WAIT_S`, `EVENTS_PAGE_BYTES`, the `exec()` timeout cap) needs re-grounding.
 
 ```bash
-.venv/bin/python dev/live_limits_probe.py --image us-central1-docker.pkg.dev/<project>/ratk-sandbox/<image>:<tag> [--long-minutes 25]
+.venv/bin/python dev/live_limits_probe.py --image us-central1-docker.pkg.dev/<project>/agent-run-sandbox/<image>:<tag> [--long-minutes 25]
 ```
 
 Findings of 2026-09-11 (my-project / us-central1, 4 CPU / 8 GiB unless noted):
@@ -316,9 +316,9 @@ the event stream — the probe that caught the stale-result replay bug) and
 - **Check for leftovers** after any failed run — sandboxes bill while they exist:
 
   ```python
-  from remote_agent_toolkit import gemini
-  from remote_agent_toolkit.runtime.gemini.provider import AgentSandboxProvider
-  for e in gemini.list_engines("my-project", "us-central1"):
+  from agent_run import sandbox
+  from agent_run.runtime.sandbox.provider import AgentSandboxProvider
+  for e in sandbox.list_engines("my-project", "us-central1"):
       print(e)
   for sb in AgentSandboxProvider("my-project", "us-central1").list():
       print(sb["display_name"], sb["state"], sb["expire_time"])

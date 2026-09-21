@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from remote_agent_toolkit import (
+from agent_run import (
     DEFAULT_MAX_BUFFER_SIZE,
     AgentSpec,
     McpServer,

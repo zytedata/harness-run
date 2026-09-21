@@ -4,7 +4,7 @@ from urllib.parse import urlsplit
 
 import pytest
 
-from remote_agent_toolkit.harness import _openrouter_proxy as module
+from agent_run.harness import _openrouter_proxy as module
 
 
 def test_zero_budget_is_exhausted_before_any_cost_is_known():

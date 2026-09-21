@@ -6,13 +6,13 @@ import pytest
 from codex_fakes import make_async_codex, turn_completed, turn_started
 from fakes import init_msg, make_sdk_client, result_msg
 
-from remote_agent_toolkit import AgentSpec
-from remote_agent_toolkit.checkpoint.session_store import BlobSessionStore
-from remote_agent_toolkit.control import ControlMessage, LocalControlChannel
-from remote_agent_toolkit.harness.claude_code import ClaudeCodeHarness
-from remote_agent_toolkit.harness.codex import CodexHarness
-from remote_agent_toolkit.harness.context import RunContext
-from remote_agent_toolkit.ports.blobstore import LocalBlobStore
+from agent_run import AgentSpec
+from agent_run.checkpoint.session_store import BlobSessionStore
+from agent_run.control import ControlMessage, LocalControlChannel
+from agent_run.harness.claude_code import ClaudeCodeHarness
+from agent_run.harness.codex import CodexHarness
+from agent_run.harness.context import RunContext
+from agent_run.ports.blobstore import LocalBlobStore
 
 
 def context(tmp_path, harness):

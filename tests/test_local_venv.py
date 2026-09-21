@@ -11,8 +11,8 @@ from pathlib import Path
 
 import pytest
 
-from remote_agent_toolkit import AgentSpec, local
-from remote_agent_toolkit.runtime import venv as venv_mod
+from agent_run import AgentSpec, local
+from agent_run.runtime import venv as venv_mod
 
 
 def test_provision_venv_uses_engine_python_and_surfaces_failure(monkeypatch, tmp_path):
@@ -72,7 +72,7 @@ def test_provision_venv_reuses_existing_venv(monkeypatch, tmp_path):
 def test_provision_venv_replaces_wrong_python_version(monkeypatch, tmp_path):
     """A venv whose interpreter doesn't match the engine contract's Python is re-provisioned:
     a persistent workdir must not silently keep the old interpreter across an
-    ENGINE_PYTHON bump (local/gemini parity is the whole point of the venv)."""
+    ENGINE_PYTHON bump (local/sandbox parity is the whole point of the venv)."""
     calls = []
     monkeypatch.setattr(venv_mod, "_run", lambda cmd, what: calls.append(cmd))
     monkeypatch.setattr(venv_mod, "_uv_bin", lambda: "/opt/uv")

@@ -133,6 +133,49 @@ spec = AgentSpec(
 
 The model can also be overridden per session or per turn, and an engine deployed with both harnesses baked in can pick either one per session, so a deployed engine does not need to represent a single fixed model configuration.
 
+### Customize the agent
+
+Skills, MCP servers, a repository to work on and extra packages are all declared on the spec. Secrets are not: the spec names them, and each run supplies the values.
+
+```python
+import os
+from agent_run import AgentSpec, McpServer, RepoSource, SkillSource, SystemPrompt, local
+
+spec = AgentSpec(
+    name="repo-fixer",
+    harness="codex",
+    model="gpt-5.6-luna",
+    system_prompt=SystemPrompt.inherit(append="Keep changes small and add tests."),
+    # Skills from a git repository or a local directory, staged for the harness.
+    skills=[SkillSource.git("https://github.com/zytedata/codex-skills")],
+    # Cloned into the working directory before the agent runs; `auth` makes it push-ready.
+    repos=[RepoSource.git("https://github.com/acme/some-repo", ref="main", auth="GH_TOKEN")],
+    mcp_servers=[
+        McpServer.github(),  # lets the agent open pull requests, using GH_TOKEN
+        McpServer.remote(
+            "search",
+            "https://mcp.example.com",
+            header_secrets={"Authorization": "SEARCH_AUTH"},
+        ),
+    ],
+    packages=["httpx", "beautifulsoup4"],  # installed into the agent's environment
+    checkpoint=True,
+)
+
+session = local.deploy(spec).start_session()
+
+result = await session.run(
+    "Fix the failing test in tests/test_parser.py and open a pull request.",
+    secrets={
+        "OPENAI_API_KEY": os.environ["OPENAI_API_KEY"],
+        "GH_TOKEN": os.environ["GH_TOKEN"],
+        "SEARCH_AUTH": "Bearer " + os.environ["SEARCH_API_KEY"],
+    },
+)
+```
+
+The same spec deploys unchanged to the sandbox. Every other field has a default; [Configuration](docs/configuration.md) covers the rest, from environment variables and tool allow-lists to budgets and reasoning effort.
+
 ## Features
 
 Beyond the basic example, `agent-run` supports:

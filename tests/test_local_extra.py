@@ -56,7 +56,7 @@ def test_claude_run_path_shows_the_extra_hint_without_the_sdk(tmp_path, monkeypa
     from agent_run.harness.claude_code import ClaudeCodeHarness
 
     monkeypatch.setitem(sys.modules, "claude_agent_sdk", None)  # what a base install sees
-    spec = AgentSpec(name="a", model="m")
+    spec = AgentSpec(harness="claude-code", name="a", model="m")
 
     async def drive():
         return [ev async for ev in ClaudeCodeHarness().run(spec, _ctx(tmp_path, spec))]

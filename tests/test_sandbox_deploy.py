@@ -19,7 +19,7 @@ from agent_run.spec import AgentSpec, SkillSource
 
 
 def _spec(**overrides) -> AgentSpec:
-    base = {"name": "test-agent", "model": "claude-sonnet-4-6"}
+    base = {"name": "test-agent", "model": "claude-sonnet-4-6", "harness": "claude-code"}
     base.update(overrides)
     return AgentSpec(**base)
 

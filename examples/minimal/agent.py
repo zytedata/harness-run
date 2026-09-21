@@ -28,6 +28,7 @@ class PrimeReport(pydantic.BaseModel):
 
 
 SPEC = AgentSpec(
+    harness="claude-code",
     name="hello-coder",
     # Haiku is cheap for a demo; bump to "claude-sonnet-4-6" for real work.
     model="claude-haiku-4-5",

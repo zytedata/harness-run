@@ -136,7 +136,7 @@ def _claude_events(script, tmp_path, monkeypatch, control, spec=None, ctx=None):
 
     client_cls = make_sdk_client(script)
     monkeypatch.setattr(claude_agent_sdk, "ClaudeSDKClient", client_cls)
-    spec = spec or AgentSpec(name="a", model="m")
+    spec = spec or AgentSpec(harness="claude-code", name="a", model="m")
     ctx = ctx or _claude_ctx(tmp_path, spec, control)
 
     async def drive():
@@ -251,7 +251,7 @@ def test_claude_stop_ends_the_turn_as_interrupted_with_a_checkpoint(tmp_path, mo
     # Session.interrupt(): the settle result IS the turn's end, re-stamped as a pause
     # (subtype interrupted, not an error), with the model's last text and the turn's
     # accounting; the checkpoint runs inline so the interrupted turn's files survive.
-    spec = AgentSpec(name="a", model="m", checkpoint=True)
+    spec = AgentSpec(harness="claude-code", name="a", model="m", checkpoint=True)
     blobs = LocalBlobStore(str(tmp_path / "blobs"))
     control = LocalControlChannel()
     control.send(ControlMessage(op="stop"))
@@ -428,7 +428,7 @@ def test_codex_stop_ends_the_turn_as_interrupted(tmp_path, monkeypatch):
     assert result.raw["is_error"] is False and result.summary == "working on it"
     assert result.raw["num_turns"] == 1 and result.cost_usd is not None
     assert len(client.turns) == 1
-    assert build_result(result, "sid", AgentSpec(name="a", model="m"))[1] == StopReason.INTERRUPTED
+    assert build_result(result, "sid", AgentSpec(harness="claude-code", name="a", model="m"))[1] == StopReason.INTERRUPTED
 
 
 def test_codex_stop_with_no_settle_settles_synthetically(tmp_path, monkeypatch):
@@ -497,7 +497,7 @@ class ControlAwareHarness:
 
 
 def _local_engine(tmp_path, harness, checkpoint=False):
-    engine = local.deploy(AgentSpec(name="d", model="m", checkpoint=checkpoint),
+    engine = local.deploy(AgentSpec(harness="claude-code", name="d", model="m", checkpoint=checkpoint),
                           workdir=str(tmp_path / "wd"))
     engine._harness = harness
     return engine

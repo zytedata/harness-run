@@ -28,6 +28,20 @@ for the tag with this file's section as the notes.
 
 ### Backwards-incompatible
 
+- **`AgentSpec.harness` is required; there is no default harness.** It used to default to
+  `"claude-code"`, which quietly made Claude Code the norm and Codex the opt-in — the wrong
+  signal from a library whose point is that both loops run the same agent. `AgentSpec(name=…,
+  model=…)` now raises `TypeError`; name the loop: `harness="claude-code"` or
+  `harness="codex"`. **Update note**: add `harness=` to every `AgentSpec(...)` you construct.
+  Nothing else changes — a spec that already named its harness behaves exactly as before.
+
+  The same assumption is gone from three further places: `AgentSpec.from_dict` requires a
+  `harness` key instead of substituting `"claude-code"` (every dict `to_dict` has ever
+  written carries one); `resolve_harness` raises a named error instead of falling back; and
+  `skills.skills_subdir` raises for an unknown harness instead of returning Claude's
+  `.claude/skills`, which would have staged an agent's skills where its CLI never looks and
+  started it with none of them.
+
 - **The library is renamed `remote-agent-toolkit` -> `agent-run`**, ahead of the open-source
   release. The distribution is `agent-run`, the import root is `agent_run`, the console script
   is `agent-run-gcp-setup`, and the `RATK_*` environment variables are now `AGENT_RUN_*`

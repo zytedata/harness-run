@@ -21,7 +21,7 @@ def test_authentication_headers_cannot_be_static_config(header):
 def test_recognized_credential_env_names_require_runtime_secrets(field):
     with pytest.raises(ValueError, match="secrets"):
         if field == "env":
-            AgentSpec(name="audit", model="dummy", env={"AUDIT_API_KEY": "AUDIT_FAKE_SECRET"})
+            AgentSpec(harness="claude-code", name="audit", model="dummy", env={"AUDIT_API_KEY": "AUDIT_FAKE_SECRET"})
         else:
             SessionConfig(extra_env={"AUDIT_API_KEY": "AUDIT_FAKE_SECRET"})
 
@@ -31,7 +31,7 @@ def test_header_reference_roundtrip_and_runtime_resolution(tmp_path):
                              header_secrets={"Authorization": "MCP_AUTH"})
     config = SessionConfig(mcp_servers=[server], extra_env={"MODE": "audit"})
     config = SessionConfig.from_dict(config.to_dict())
-    spec = apply_session_config(AgentSpec(name="audit", model="dummy"), config)
+    spec = apply_session_config(AgentSpec(harness="claude-code", name="audit", model="dummy"), config)
     token = "Bearer AUDIT_FAKE_SECRET"
     ctx = RunContext(spec=spec, prompt="dummy", job_dir=tmp_path, session_id="audit",
                      secrets={"MCP_AUTH": token})
@@ -55,7 +55,7 @@ def test_missing_header_secret_fails_without_ambient_fallback(tmp_path, monkeypa
     monkeypatch.setenv("MCP_AUTH", "AUDIT_FAKE_AMBIENT_SECRET")
     server = McpServer.remote("audit", "https://audit.invalid",
                              header_secrets={"Authorization": "MCP_AUTH"})
-    spec = AgentSpec(name="audit", model="dummy", mcp_servers=[server])
+    spec = AgentSpec(harness="claude-code", name="audit", model="dummy", mcp_servers=[server])
     ctx = RunContext(spec=spec, prompt="dummy", job_dir=tmp_path, session_id="audit")
     with pytest.raises(ValueError, match="MCP header secret"):
         harness().build_options(spec, ctx)

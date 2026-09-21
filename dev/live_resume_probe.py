@@ -69,7 +69,7 @@ async def main() -> None:
         )
     else:
         engine = local.deploy(
-            AgentSpec(name="resume-probe", model="claude-haiku-4-5-20251001",
+            AgentSpec(harness="claude-code", name="resume-probe", model="claude-haiku-4-5-20251001",
                       checkpoint=True, max_turns=12, max_budget_usd=1.0),
             workdir=tempfile.mkdtemp(prefix="agent-run-resume-"),
         )

@@ -23,7 +23,7 @@ async def run(script, tmp_path, monkeypatch, *, resume=True):
 
     client_cls = make_sdk_client(script)
     monkeypatch.setattr(claude_agent_sdk, "ClaudeSDKClient", client_cls)
-    spec = AgentSpec(name="resume", model="m")
+    spec = AgentSpec(harness="claude-code", name="resume", model="m")
     blobs = LocalBlobStore(str(tmp_path / "blobs"))
     ctx = RunContext(
         spec=spec, prompt="Which files are here?", job_dir=tmp_path / "job",

@@ -28,7 +28,7 @@ from agent_run.config import (
 
 def _spec(**kw) -> AgentSpec:
     base = dict(
-        name="a", model="m-deploy", system_prompt="DEPLOY-PROMPT",
+        name="a", model="m-deploy", harness="claude-code", system_prompt="DEPLOY-PROMPT",
         env={"KEEP": "1"}, packages=("lxml",), max_budget_usd=5.0,
     )
     base.update(kw)

@@ -520,7 +520,7 @@ These are facts measured live. The library encodes them so consumers inherit the
 Each is a `typing.Protocol`; concrete adapters ship for prod (GCP) and dev (local/in-memory).
 
 - **`Harness`** — `build_options(spec, ctx)` + an async run loop yielding `AgentEvent`s. Adapters:
-  `ClaudeCodeHarness` (default) and `CodexHarness`, selected by `spec.harness` via `resolve_harness`
+  `ClaudeCodeHarness` and `CodexHarness`, selected by `spec.harness` via `resolve_harness`
   (the single seam both runtimes use). Shared policy — secret routing, agent-env layering, the
   interactive suffix, the inline workspace checkpoint — lives in `harness/_shared.py` so the bindings
   can't drift where the spec doesn't distinguish them. Both read `ctx.control` (a `ControlChannel`)

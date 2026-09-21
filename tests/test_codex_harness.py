@@ -1338,7 +1338,6 @@ async def test_attribution_failure_never_fails_the_turn(tmp_path, monkeypatch):
 def test_spec_round_trips_harness():
     spec = AgentSpec(name="a", model="gpt-5.6-luna", harness="codex")
     assert AgentSpec.from_dict(spec.to_dict()).harness == "codex"
-    assert AgentSpec.from_dict({"name": "a", "model": "m"}).harness == "claude-code"
 
 
 def test_local_engine_resolves_codex_harness(tmp_path):
@@ -1352,7 +1351,8 @@ def test_skills_subdir_mapping():
 
     assert skills_subdir("codex") == ".agents/skills"
     assert skills_subdir("claude-code") == ".claude/skills"
-    assert skills_subdir("anything-else") == ".claude/skills"
+    with pytest.raises(ValueError, match="no skills layout known"):
+        skills_subdir("anything-else")
 
 
 async def test_subagent_spend_crossing_the_budget_is_not_a_success(tmp_path, monkeypatch):

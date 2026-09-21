@@ -52,7 +52,7 @@ def harness_consumed_secret_names(spec: AgentSpec) -> set[str]:
         names.update((server.header_secrets or {}).values())
     if any(m.kind == "github" for m in spec.mcp_servers):
         names.update(GITHUB_MCP_TOKEN_KEYS)
-    if getattr(spec, "harness", "claude-code") == "codex":
+    if getattr(spec, "harness", "") == "codex":
         names.update(CODEX_MODEL_AUTH_KEYS)
     elif (getattr(spec, "model", "") or "").startswith(OPENROUTER_PREFIX):
         # claude-code reaches OpenRouter through ANTHROPIC_AUTH_TOKEN, so the key is the

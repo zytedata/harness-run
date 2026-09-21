@@ -76,7 +76,7 @@ def _events_of(script, tmp_path, monkeypatch, spec=None, secrets=None):
 
     client_cls = make_sdk_client(script)
     monkeypatch.setattr(claude_agent_sdk, "ClaudeSDKClient", client_cls)
-    spec = spec or AgentSpec(name="a", model="m")
+    spec = spec or AgentSpec(harness="claude-code", name="a", model="m")
     if (spec.model or "").startswith("openrouter/"):
         from agent_run.harness import _openrouter_proxy
 
@@ -326,7 +326,7 @@ def test_error_result_ends_turn_even_with_pending_tasks(tmp_path, monkeypatch):
 def test_pending_wait_times_out_and_last_result_stands(tmp_path, monkeypatch):
     # A task that never completes must not hang the run: background_task_timeout expires,
     # a task_wait_timeout status is emitted, and the stashed result becomes the turn's.
-    spec = AgentSpec(name="a", model="m", background_task_timeout=0.01)  # floor is 1s
+    spec = AgentSpec(harness="claude-code", name="a", model="m", background_task_timeout=0.01)  # floor is 1s
     script = [
         task_started_msg("t1"),
         result_msg(num_turns=4, result="started the crawl"),
@@ -370,7 +370,7 @@ def test_final_result_carries_displaced_deliverable_and_build_result_recovers_it
 ):
     # The exact Rothy's run-004 shape: deliverable emitted, monitor still pending →
     # demoted; the kill notification re-invokes; the ack becomes the final message.
-    spec = AgentSpec(name="a", model="m", output_schema=_SCHEMA)
+    spec = AgentSpec(harness="claude-code", name="a", model="m", output_schema=_SCHEMA)
     script = [
         init_msg(),
         task_started_msg("t1", description="tail crawl.log"),
@@ -410,7 +410,7 @@ def test_segment_summaries_newest_first_schema_valid_only_capped(tmp_path, monke
     # Four demoted segments with schema-valid JSON, one prose-only, one with junk JSON:
     # only schema-valid texts are kept (junk must not fill the cap and evict a real
     # answer), capped at 3, newest first.
-    spec = AgentSpec(name="a", model="m", output_schema=_SCHEMA)
+    spec = AgentSpec(harness="claude-code", name="a", model="m", output_schema=_SCHEMA)
     script = [init_msg()]
     texts = ["no json here", '{"quoted_api_response": true}'] + [
         '{"url": "https://example.com/%d"}' % i for i in range(4)
@@ -435,7 +435,7 @@ def test_segment_summaries_newest_first_schema_valid_only_capped(tmp_path, monke
 def test_promoted_stash_excludes_its_own_text_from_summaries(tmp_path, monkeypatch):
     # Timeout path: the newest demoted result IS the final result; only the earlier
     # segment's text rides along as a fallback candidate.
-    spec = AgentSpec(name="a", model="m", output_schema=_SCHEMA, background_task_timeout=0.01)
+    spec = AgentSpec(harness="claude-code", name="a", model="m", output_schema=_SCHEMA, background_task_timeout=0.01)
     first = '{"url": "https://example.com/first"}'
     second = '{"url": "https://example.com/second"}'
     script = [
@@ -458,6 +458,7 @@ def test_promoted_stash_excludes_its_own_text_from_summaries(tmp_path, monkeypat
 def test_openrouter_exact_budget_interrupts_before_another_request(tmp_path, monkeypatch):
     """The proxy's running total is what the cap is measured against."""
     spec = AgentSpec(
+        harness="claude-code",
         name="a",
         model="openrouter/deepseek/deepseek-v4-flash",
         max_budget_usd=0.01,
@@ -480,6 +481,7 @@ def test_openrouter_exact_budget_interrupts_before_another_request(tmp_path, mon
 def test_openrouter_run_passes_provider_to_proxy(tmp_path, monkeypatch):
     created = _install_fake_proxy(monkeypatch, cost=0.001)
     spec = AgentSpec(
+        harness="claude-code",
         name="a",
         model="openrouter/moonshotai/kimi-k3",
         openrouter_provider="moonshotai",
@@ -514,6 +516,7 @@ def test_openrouter_run_passes_routing_to_proxy(tmp_path, monkeypatch):
     created = _install_fake_proxy(monkeypatch, cost=0.001)
     routing = {"only": ["moonshotai", "fireworks"]}
     spec = AgentSpec(
+        harness="claude-code",
         name="a",
         model="openrouter/moonshotai/kimi-k3",
         openrouter_routing=routing,
@@ -541,7 +544,7 @@ def test_openrouter_proxies_without_a_provider(tmp_path, monkeypatch):
         raw={"event": "openrouter_request", "http_status": 200, "cost_usd": 0.004},
     )
     created = _install_fake_proxy(monkeypatch, cost=0.004, events=[proxy_event])
-    spec = AgentSpec(name="a", model="openrouter/z-ai/glm-5.3")
+    spec = AgentSpec(harness="claude-code", name="a", model="openrouter/z-ai/glm-5.3")
 
     events, client_cls = _events_of(
         [init_msg(), result_msg(result="done")],
@@ -566,7 +569,7 @@ def test_openrouter_proxies_without_a_provider(tmp_path, monkeypatch):
 def test_proxy_402_maps_to_budget_exceeded(tmp_path, monkeypatch):
     """The CLI reports its own failure; the proxy knows the cap was the cause."""
     _install_fake_proxy(monkeypatch, cost=0.02, blocked=True)
-    spec = AgentSpec(name="a", model="openrouter/z-ai/glm-5.3", max_budget_usd=10.0)
+    spec = AgentSpec(harness="claude-code", name="a", model="openrouter/z-ai/glm-5.3", max_budget_usd=10.0)
 
     events, _ = _events_of(
         [init_msg(), result_msg(subtype="error_during_execution", is_error=True)],
@@ -582,7 +585,7 @@ def test_proxy_402_maps_to_budget_exceeded(tmp_path, monkeypatch):
 
 def test_metadata_timeout_is_reported_before_the_result(tmp_path, monkeypatch):
     _install_fake_proxy(monkeypatch, cost=0.001, idle=False)
-    spec = AgentSpec(name="a", model="openrouter/z-ai/glm-5.3")
+    spec = AgentSpec(harness="claude-code", name="a", model="openrouter/z-ai/glm-5.3")
 
     events, _ = _events_of(
         [init_msg(), result_msg(result="done")],
@@ -610,7 +613,7 @@ def _result_event(summary, segment_summaries=None):
 def test_build_result_terminal_parse_wins_over_segments():
     from agent_run.runtime._run import build_result
 
-    spec = AgentSpec(name="a", model="m", output_schema=_SCHEMA)
+    spec = AgentSpec(harness="claude-code", name="a", model="m", output_schema=_SCHEMA)
     ev = _result_event('{"url": "https://final.example"}', ['{"url": "https://old.example"}'])
     result, _ = build_result(ev, "sid", spec)
     assert result.structured_output == {"url": "https://final.example"}
@@ -620,7 +623,7 @@ def test_build_result_terminal_parse_wins_over_segments():
 def test_build_result_skips_schema_invalid_segments():
     from agent_run.runtime._run import build_result
 
-    spec = AgentSpec(name="a", model="m", output_schema=_SCHEMA)
+    spec = AgentSpec(harness="claude-code", name="a", model="m", output_schema=_SCHEMA)
     ev = _result_event(
         "wrapping up",
         ['{"url": 42}', '{"url": "https://valid.example"}'],  # newest first; newest invalid
@@ -633,7 +636,7 @@ def test_build_result_skips_schema_invalid_segments():
 def test_build_result_ignores_segments_without_schema():
     from agent_run.runtime._run import build_result
 
-    spec = AgentSpec(name="a", model="m")
+    spec = AgentSpec(harness="claude-code", name="a", model="m")
     ev = _result_event("done", ['{"url": "https://x.example"}'])
     result, _ = build_result(ev, "sid", spec)
     assert result.structured_output is None

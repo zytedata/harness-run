@@ -21,7 +21,7 @@ def _run_turn(script, tmp_path, monkeypatch):
     import claude_agent_sdk
 
     monkeypatch.setattr(claude_agent_sdk, "ClaudeSDKClient", make_sdk_client(script))
-    spec = AgentSpec(name="a", model="m")
+    spec = AgentSpec(harness="claude-code", name="a", model="m")
     ctx = RunContext(spec=spec, prompt="hi", job_dir=tmp_path / "job", session_id="sid")
     return lambda: ClaudeCodeHarness().run(spec, ctx)
 

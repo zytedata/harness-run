@@ -54,6 +54,7 @@ class Answer(pydantic.BaseModel):
 
 
 SPEC = AgentSpec(
+    harness="claude-code",
     name="agent-run-example",
     # A family alias enabled in your Vertex Model Garden (see the README model-access note).
     model="claude-haiku-4-5",

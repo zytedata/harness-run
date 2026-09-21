@@ -54,7 +54,7 @@ def _skill_src(tmp_path):
 
 def test_await_returns_result_and_stages_skills(tmp_path):
     seen = {}
-    spec = AgentSpec(name="demo", model="m", skills=[SkillSource.local(_skill_src(tmp_path))])
+    spec = AgentSpec(harness="claude-code", name="demo", model="m", skills=[SkillSource.local(_skill_src(tmp_path))])
     engine = local.deploy(spec, workdir=str(tmp_path / "wd"))
     engine._harness = FakeHarness(
         [AgentEvent(kind="message", summary="working"), _result_ev(text="final")],
@@ -76,7 +76,7 @@ def test_await_returns_result_and_stages_skills(tmp_path):
 
 
 def test_async_iter_streams_events(tmp_path):
-    spec = AgentSpec(name="demo", model="m")  # no skills
+    spec = AgentSpec(harness="claude-code", name="demo", model="m")  # no skills
     engine = local.deploy(spec, workdir=str(tmp_path / "wd"))
     engine._harness = FakeHarness([
         AgentEvent(kind="tool_use", summary="Bash ls"),
@@ -96,7 +96,7 @@ def test_async_iter_streams_events(tmp_path):
 
 def test_run_hooks_reach_the_harness(tmp_path):
     seen = {}
-    spec = AgentSpec(name="demo", model="m")
+    spec = AgentSpec(harness="claude-code", name="demo", model="m")
     engine = local.deploy(spec, workdir=str(tmp_path / "wd"))
     engine._harness = FakeHarness([_result_ev()], on_run=lambda s, c: seen.update(hooks=c.hooks))
     hooks = {"PreToolUse": []}
@@ -113,7 +113,7 @@ def test_sync_run_forwards_config_and_hooks(tmp_path, monkeypatch):
     from agent_run.config import TurnConfig
 
     seen = {}
-    spec = AgentSpec(name="demo", model="m")
+    spec = AgentSpec(harness="claude-code", name="demo", model="m")
     hooks = {"PreToolUse": []}
     monkeypatch.setattr(
         local.LocalEngine, "_harness_for",
@@ -126,7 +126,7 @@ def test_sync_run_forwards_config_and_hooks(tmp_path, monkeypatch):
 
 
 def test_poll_until_done(tmp_path):
-    spec = AgentSpec(name="demo", model="m")
+    spec = AgentSpec(harness="claude-code", name="demo", model="m")
     engine = local.deploy(spec, workdir=str(tmp_path / "wd"))
     engine._harness = FakeHarness([_result_ev(text="polled")])
 
@@ -153,7 +153,7 @@ def test_stop_reason_mapping(tmp_path):
         (False, "error_during_execution", True, StopReason.ERROR),
     ]
     for checkpoint, subtype, is_error, expected in cases:
-        spec = AgentSpec(name="demo", model="m", checkpoint=checkpoint)
+        spec = AgentSpec(harness="claude-code", name="demo", model="m", checkpoint=checkpoint)
         engine = local.deploy(spec, workdir=str(tmp_path / f"wd-{subtype}-{checkpoint}"))
         engine._harness = FakeHarness([_result_ev(subtype=subtype, is_error=is_error)])
         session = engine.start_session()
@@ -166,7 +166,7 @@ async def _await(run):
 
 
 def test_resume_restores_workspace(tmp_path):
-    spec = AgentSpec(name="demo", model="m", checkpoint=True)
+    spec = AgentSpec(harness="claude-code", name="demo", model="m", checkpoint=True)
     engine = local.deploy(spec, workdir=str(tmp_path / "wd"))
 
     # Pre-seed a checkpoint snapshot for a fixed session id, as a prior turn would have.
@@ -212,7 +212,7 @@ def test_resume_restores_a_workspace_with_a_venv_symlink(tmp_path):
     # #74: every coding run leaves a ``.venv`` whose ``bin/python`` is an absolute symlink;
     # restoring such a snapshot on another worker aborted, and the fallback then tried to
     # clone the repo into the half-restored directory.
-    spec = AgentSpec(name="demo", model="m", checkpoint=True)
+    spec = AgentSpec(harness="claude-code", name="demo", model="m", checkpoint=True)
     engine = local.deploy(spec, workdir=str(tmp_path / "wd"))
 
     def populate(seed):
@@ -239,7 +239,7 @@ def test_resume_restores_a_workspace_with_a_venv_symlink(tmp_path):
 def test_resume_with_a_broken_snapshot_starts_fresh_and_says_so(tmp_path):
     # A snapshot that cannot be extracted is not the caller's clone error and not silence:
     # the turn runs in a clean workspace and ``workspace_ready`` carries the reason.
-    spec = AgentSpec(name="demo", model="m", checkpoint=True)
+    spec = AgentSpec(harness="claude-code", name="demo", model="m", checkpoint=True)
     engine = local.deploy(spec, workdir=str(tmp_path / "wd"))
     _seed_snapshot(engine, "badsid", lambda seed: (seed / "a.txt").write_text("x"))
     (engine._blob_root / "workspace" / "badsid.tar.gz").write_bytes(b"\x1f\x8b not a tarball")
@@ -261,7 +261,7 @@ def test_workspace_accessor_seed_and_collect(tmp_path):
     # reads as disposable temp and weaker models cd away from it), and Session.workspace
     # is the caller-facing accessor: seed inputs before run(), collect artifacts after —
     # no deriving <workdir>/jobs/<sid> by hand.
-    spec = AgentSpec(name="demo", model="m")
+    spec = AgentSpec(harness="claude-code", name="demo", model="m")
     engine = local.deploy(spec, workdir=str(tmp_path / "wd"))
     session = engine.start_session()
 
@@ -291,7 +291,7 @@ def test_deploy_workspace_is_shared_by_every_session(tmp_path):
     # a per-session jobs/<sid>/workspace: the identical cwd keeps the system-prompt
     # prefix identical across sessions, which is what the prompt cache keys on.
     shared = tmp_path / "shared"
-    spec = AgentSpec(name="demo", model="m")
+    spec = AgentSpec(harness="claude-code", name="demo", model="m")
     engine = local.deploy(spec, workdir=str(tmp_path / "wd"), workspace=str(shared))
 
     cwds = []
@@ -321,7 +321,7 @@ def test_run_forwards_the_chosen_workspace(tmp_path, monkeypatch):
         "resolve_harness",
         lambda spec: FakeHarness([_result_ev()], on_run=lambda s, c: seen.update(cwd=c.workspace)),
     )
-    local.run(AgentSpec(name="demo", model="m"), "go",
+    local.run(AgentSpec(harness="claude-code", name="demo", model="m"), "go",
               workdir=str(tmp_path / "wd"), workspace=str(shared))
     assert seen["cwd"] == shared
 
@@ -336,10 +336,10 @@ def test_chosen_workspace_rejects_repos(tmp_path):
     repos = [RepoSource.git("https://github.com/o/r")]
     shared = str(tmp_path / "shared")
     with pytest.raises(ValueError, match="workspace="):
-        local.deploy(AgentSpec(name="demo", model="m", repos=repos),
+        local.deploy(AgentSpec(harness="claude-code", name="demo", model="m", repos=repos),
                      workdir=str(tmp_path / "wd"), workspace=shared)
 
-    engine = local.deploy(AgentSpec(name="demo", model="m"),
+    engine = local.deploy(AgentSpec(harness="claude-code", name="demo", model="m"),
                           workdir=str(tmp_path / "wd2"), workspace=shared)
     with pytest.raises(ValueError, match="workspace="):
         engine.start_session(config=SessionConfig(repos=repos))
@@ -351,7 +351,7 @@ def test_chosen_workspace_is_never_restored_over(tmp_path):
     # which would roll files back to whatever this session last saw.
     shared = tmp_path / "shared"
     shared.mkdir()
-    spec = AgentSpec(name="demo", model="m", checkpoint=True)
+    spec = AgentSpec(harness="claude-code", name="demo", model="m", checkpoint=True)
     engine = local.deploy(spec, workdir=str(tmp_path / "wd"), workspace=str(shared))
 
     from agent_run.checkpoint.workspace import snapshot
@@ -382,7 +382,7 @@ def test_error_result_keeps_accounting(tmp_path):
         raw={"subtype": "error_max_turns", "is_error": True, "num_turns": 121,
              "session_id": "claude-sid"},
     )
-    engine = local.deploy(AgentSpec(name="demo", model="m"), workdir=str(tmp_path / "wd"))
+    engine = local.deploy(AgentSpec(harness="claude-code", name="demo", model="m"), workdir=str(tmp_path / "wd"))
     engine._harness = FakeHarness([ev])
     session = engine.start_session()
     asyncio.run(_await(session.run("go")))
@@ -398,7 +398,7 @@ def test_late_harness_crash_keeps_finished_result(tmp_path):
     # then the claude CLI exited 1 during shutdown and the whole run (deliverable text,
     # ~$10 of spend, usage) was reported as an errored, free run. The terminal result is
     # authoritative: keep it, and record the late death as a warning, not an error.
-    engine = local.deploy(AgentSpec(name="demo", model="m"), workdir=str(tmp_path / "wd"))
+    engine = local.deploy(AgentSpec(harness="claude-code", name="demo", model="m"), workdir=str(tmp_path / "wd"))
     engine._harness = FakeHarness(
         [_result_ev(text="all done")],
         raise_after=RuntimeError("Command failed with exit code 1"),
@@ -429,7 +429,7 @@ def test_unknown_cost_reaches_the_caller_as_none(tmp_path):
     """
     ev = _result_ev()
     ev.cost_usd = None
-    engine = local.deploy(AgentSpec(name="demo", model="m"), workdir=str(tmp_path / "wd"))
+    engine = local.deploy(AgentSpec(harness="claude-code", name="demo", model="m"), workdir=str(tmp_path / "wd"))
     engine._harness = FakeHarness([ev])
     session = engine.start_session()
     asyncio.run(_await(session.run("go")))
@@ -442,7 +442,7 @@ def test_a_free_run_still_reports_zero(tmp_path):
     """The other side of the same contract: 0.0 stays 0.0 and never becomes None."""
     ev = _result_ev()
     ev.cost_usd = 0.0
-    engine = local.deploy(AgentSpec(name="demo", model="m"), workdir=str(tmp_path / "wd"))
+    engine = local.deploy(AgentSpec(harness="claude-code", name="demo", model="m"), workdir=str(tmp_path / "wd"))
     engine._harness = FakeHarness([ev])
     session = engine.start_session()
     asyncio.run(_await(session.run("go")))
@@ -452,7 +452,7 @@ def test_a_free_run_still_reports_zero(tmp_path):
 
 def test_crash_before_result_is_still_an_error(tmp_path):
     # No terminal result → the exception is the outcome (unchanged semantics).
-    engine = local.deploy(AgentSpec(name="demo", model="m"), workdir=str(tmp_path / "wd"))
+    engine = local.deploy(AgentSpec(harness="claude-code", name="demo", model="m"), workdir=str(tmp_path / "wd"))
     engine._harness = FakeHarness([], raise_after=RuntimeError("boom"))
     session = engine.start_session()
     asyncio.run(_await(session.run("go")))
@@ -469,7 +469,7 @@ def test_start_session_mints_canonical_uuid(tmp_path):
     # runtime with "Invalid session ID. Must be a valid UUID", breaking the live resume path.
     import uuid
 
-    engine = local.deploy(AgentSpec(name="demo", model="m", checkpoint=True),
+    engine = local.deploy(AgentSpec(harness="claude-code", name="demo", model="m", checkpoint=True),
                           workdir=str(tmp_path / "wd"))
     sid = engine.start_session().session_id
     assert "-" in sid                     # dashed, unlike uuid4().hex
@@ -486,7 +486,7 @@ def test_interactive_decoupled_from_checkpoint(tmp_path):
     ]
     for i, (kw, expected) in enumerate(cases):
         seen = {}
-        spec = AgentSpec(name="demo", model="m", **kw)
+        spec = AgentSpec(harness="claude-code", name="demo", model="m", **kw)
         engine = local.deploy(spec, workdir=str(tmp_path / f"wd-int-{i}"))
         engine._harness = FakeHarness(
             [_result_ev()], on_run=lambda s, c: seen.update(interactive=c.interactive))
@@ -507,7 +507,7 @@ def test_checkpoint_blobstore_gcs_env_selection(tmp_path, monkeypatch):
 
     monkeypatch.setattr(bs, "GcsBlobStore", StubGcs)
     monkeypatch.setenv("AGENT_CHECKPOINT_GCS", "gs://ckpt-bkt/some/prefix")
-    spec = AgentSpec(name="demo", model="m", checkpoint=True)
+    spec = AgentSpec(harness="claude-code", name="demo", model="m", checkpoint=True)
     session = local.deploy(spec, workdir=str(tmp_path / "wd-gcs")).start_session()
     assert isinstance(session._blobs, StubGcs)
     assert created == {"bucket": "ckpt-bkt", "prefix": "some/prefix/"}
@@ -522,7 +522,7 @@ def test_transcript_wires_the_session_store_without_snapshotting(tmp_path):
     # workspace snapshot stays off, so a huge working directory is not archived per turn.
     from agent_run.harness._shared import finalize_checkpoint
 
-    spec = AgentSpec(name="demo", model="m", transcript=True)
+    spec = AgentSpec(harness="claude-code", name="demo", model="m", transcript=True)
     engine = local.deploy(spec, workdir=str(tmp_path / "wd"))
     session = engine.start_session()
     assert session._session_store is not None
@@ -551,7 +551,7 @@ def test_transcript_wires_the_session_store_without_snapshotting(tmp_path):
 
 
 def test_transcripts_without_persistence_raises(tmp_path):
-    session = local.deploy(AgentSpec(name="demo", model="m"),
+    session = local.deploy(AgentSpec(harness="claude-code", name="demo", model="m"),
                            workdir=str(tmp_path / "wd")).start_session()
     with pytest.raises(RuntimeError, match="transcript=True"):
         asyncio.run(session.transcripts())
@@ -569,5 +569,5 @@ def test_transcript_only_send_does_not_resume(tmp_path):
         assert seen["ctx"].session_store is not None
         return seen["ctx"].resume_sid
 
-    assert resume_sid_of(AgentSpec(name="d", model="m", transcript=True), "t") is None
-    assert resume_sid_of(AgentSpec(name="d", model="m", checkpoint=True), "c") is not None
+    assert resume_sid_of(AgentSpec(harness="claude-code", name="d", model="m", transcript=True), "t") is None
+    assert resume_sid_of(AgentSpec(harness="claude-code", name="d", model="m", checkpoint=True), "c") is not None

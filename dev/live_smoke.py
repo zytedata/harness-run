@@ -258,7 +258,7 @@ def log(label: str, msg: str) -> None:
 
 
 def _spec() -> AgentSpec:
-    return AgentSpec(name=NAME, model="claude-haiku-4-5", checkpoint=True, max_turns=8, max_budget_usd=1.0)
+    return AgentSpec(harness="claude-code", name=NAME, model="claude-haiku-4-5", checkpoint=True, max_turns=8, max_budget_usd=1.0)
 
 
 async def _drive(label: str, run, *, on_event=None):

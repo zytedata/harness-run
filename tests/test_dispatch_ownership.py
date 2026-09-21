@@ -156,7 +156,7 @@ def test_the_worker_reacknowledges_a_turn_id_it_knows_and_refuses_a_different_on
     import agent_run.harness.claude_code as harness_mod
 
     monkeypatch.setattr(harness_mod, "ClaudeCodeHarness", HeldHarness)
-    worker = Worker(workspace_root=str(tmp_path), baked=AgentSpec(name="w", model="m"), baked_skills=None,
+    worker = Worker(workspace_root=str(tmp_path), baked=AgentSpec(harness="claude-code", name="w", model="m"), baked_skills=None,
                     mirror_factory=lambda *a: None)
     first = worker.handle("/turn", {"turn_id": "t1", "session_id": "s"})
     again = worker.handle("/turn", {"turn_id": "t1", "session_id": "s"})
@@ -330,7 +330,7 @@ def _real_worker_engine(tmp_path, monkeypatch, store, provider_cls=FakeSandboxPr
 
     monkeypatch.setattr(harness_mod, "ClaudeCodeHarness", _DoneHarness)
     monkeypatch.setattr(history, "GcsBlobStore", lambda bucket, *a, **kw: store)
-    spec = AgentSpec(name="g", model="m")
+    spec = AgentSpec(harness="claude-code", name="g", model="m")
 
     def factory(name):
         return Worker(

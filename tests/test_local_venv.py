@@ -127,7 +127,7 @@ def test_local_deploy_provisions_and_activates_packages_venv(monkeypatch, tmp_pa
 
     monkeypatch.setattr(venv_mod, "provision_venv", fake_provision)
 
-    spec = AgentSpec(name="a", model="m", packages=["scrapy"], env={"PATH": "/spec/bin"})
+    spec = AgentSpec(harness="claude-code", name="a", model="m", packages=["scrapy"], env={"PATH": "/spec/bin"})
     engine = local.deploy(spec, workdir=str(tmp_path))
 
     assert provisioned["packages"] == ("scrapy",)
@@ -136,5 +136,5 @@ def test_local_deploy_provisions_and_activates_packages_venv(monkeypatch, tmp_pa
     assert engine._agent_env["PATH"] == f"{tmp_path}/venv/bin:/spec/bin"
 
     # No packages -> no venv, no runtime env injected (current fast-path behavior unchanged).
-    plain = local.deploy(AgentSpec(name="b", model="m"), workdir=str(tmp_path / "b"))
+    plain = local.deploy(AgentSpec(harness="claude-code", name="b", model="m"), workdir=str(tmp_path / "b"))
     assert plain._agent_env is None

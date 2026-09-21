@@ -96,7 +96,7 @@ both run on both backends (`local` and `sandbox`) through the same Engine/Sessio
 
 | Harness | Agent loop | Models it runs | Per-invocation secret |
 | --- | --- | --- | --- |
-| `claude-code` (default) | Claude Code, via the Claude Agent SDK | Claude models (`claude-sonnet-4-6`, `claude-haiku-4-5`, …) | none on Vertex (the default), else `ANTHROPIC_API_KEY` |
+| `claude-code` | Claude Code, via the Claude Agent SDK | Claude models (`claude-sonnet-4-6`, `claude-haiku-4-5`, …) | none on Vertex (the default), else `ANTHROPIC_API_KEY` |
 | `codex` | OpenAI Codex, via the `openai-codex` SDK | OpenAI models (`gpt-5.6-sol` / `-terra` / `-luna`, `gpt-5.3-codex`) | `OPENAI_API_KEY` |
 | **either one** | the same loop, pointed at OpenRouter | `openrouter/<vendor>/<model>` — Kimi, GLM, DeepSeek (see [below](#openrouter-models-either-harness)) | `OPENROUTER_API_KEY` |
 
@@ -126,7 +126,7 @@ Omit `harness` entirely. Auth resolves in the order documented under
 needed; locally, `ANTHROPIC_API_KEY` or a logged-in `claude` CLI both work.
 
 ```python
-spec = AgentSpec(name="spider-builder", model="claude-sonnet-4-6")   # harness defaults to claude-code
+spec = AgentSpec(name="spider-builder", model="claude-sonnet-4-6", harness="claude-code")
 ```
 
 ### Codex

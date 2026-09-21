@@ -49,7 +49,7 @@ async def run_turn(session, message: str, expect: str, *, resume: bool = False) 
 
 
 async def main() -> int:
-    spec = AgentSpec(name=NAME, model="claude-haiku-4-5", max_turns=8,
+    spec = AgentSpec(harness="claude-code", name=NAME, model="claude-haiku-4-5", max_turns=8,
                      max_budget_usd=1.0, checkpoint=True)
     print(f"{time.strftime('%H:%M:%S')} deploying {NAME} ...", flush=True)
     engine = sandbox.deploy(spec, PROJECT, LOCATION)

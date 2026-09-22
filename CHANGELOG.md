@@ -23,6 +23,19 @@ publish workflow refuses a tag whose version differs from `pyproject.toml`; once
 it has uploaded the release, create the GitHub Release for the tag with this
 file's section as the notes.
 
+The workflow needs no token: PyPI and TestPyPI trust `publish.yml` from this repository
+running in the `pypi` and `testpypi` GitHub environments (Trusted Publishing, configured on
+the PyPI side under the project's Publishing settings and on the GitHub side under Settings
+→ Environments). To rehearse a release, run the workflow by hand from the Actions tab or with
+`gh workflow run publish.yml`: it builds the checked-out version and uploads it to TestPyPI
+only, where it can be checked with
+
+```
+pip install -i https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ "harness-run==X.Y.Z"
+```
+
+TestPyPI never accepts the same version twice, so a second rehearsal needs a version bump.
+
 ## 0.4.0 — 2026-09-23
 
 First public release.

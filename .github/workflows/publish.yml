@@ -1,27 +1,17 @@
-name: Publish to internal PyPI
+name: Publish to PyPI
 
-# Publishes the package to Zyte's internal PyPI, https://pypi.internal.example/simple/, so
-# that Scrapy Cloud builds and other consumers can `pip install agent-run`
-# instead of pulling this private git repo (which Scrapy Cloud builds cannot do).
+# Publishes a release to PyPI, https://pypi.org/project/agent-run/, through PyPI's Trusted
+# Publishing (OpenID Connect): no API token is stored in this repository. PyPI is configured
+# to trust this exact workflow file in this repository when it runs in the `pypi` GitHub
+# environment; that trust is set up on the PyPI project's Publishing page, not here.
 #
-# The index is a static site served from the S3 bucket `pkgrepo.internal.example`; the
-# `simple/` pages regenerate on the bucket side about a minute after an upload. There is
-# no upload API: publishing is `aws s3 sync dist/ s3://pkgrepo.internal.example/python/packages/`,
-# the same command every other zytedata repo uses. The AWS key pair in the repo secrets is a
-# personal developer key (the only kind IT hands out for this bucket); replace it when the
-# repo moves to a new owner or to public PyPI.
-#
-# What gets published:
-#   * a tag `vX.Y.Z`   -> version X.Y.Z, which must equal `version` in pyproject.toml
-#   * a push to `main` -> a dev build X.Y.Z.dev<run number>, where X.Y.Z is the pyproject
-#                         version. A dev build sorts BEFORE the release of the same version,
-#                         so `pip install agent-run` never picks one up by
-#                         accident; pin it exactly (==X.Y.Z.devN) to use it.
+# A release is a tag `vX.Y.Z` on `main`, and X.Y.Z must equal `version` in pyproject.toml
+# (the build job refuses otherwise; see the release checklist at the top of CHANGELOG.md).
+# Plain pushes publish nothing.
 
 on:
   push:
-    branches: [main]
-    tags: ["v*"]
+    tags: ["v[0-9]*"]
 
 permissions:
   contents: read
@@ -31,9 +21,11 @@ concurrency:
   cancel-in-progress: false  # never cancel an upload half-way
 
 jobs:
-  publish:
+  build:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -42,43 +34,45 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v5
 
-      - name: Resolve the version to publish
+      - name: Check the tag against pyproject.toml
         id: version
         run: |
           set -euo pipefail
           declared=$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')
-          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
-            tag="${GITHUB_REF_NAME#v}"
-            if [[ "$tag" != "$declared" ]]; then
-              echo "::error::tag $GITHUB_REF_NAME does not match pyproject version $declared; bump the version first (CHANGELOG.md, release checklist)"
-              exit 1
-            fi
-            version="$declared"
-          else
-            version="${declared}.dev${GITHUB_RUN_NUMBER}"
-            sed -i "s/^version = \"${declared}\"$/version = \"${version}\"/" pyproject.toml
-            grep -q "^version = \"${version}\"$" pyproject.toml
+          tag="${GITHUB_REF_NAME#v}"
+          if [[ "$tag" != "$declared" ]]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match pyproject version $declared; bump the version first (CHANGELOG.md, release checklist)"
+            exit 1
           fi
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "publishing agent-run $version"
+          echo "version=$declared" >> "$GITHUB_OUTPUT"
+          echo "building agent-run $declared"
 
       - name: Build sdist and wheel
         run: |
           set -euo pipefail
           uv build
-          uvx twine check dist/*
+          uvx twine check --strict dist/*
           ls -l dist/
 
-      - name: Upload to the package bucket
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: us-east-1
-        run: |
-          set -euo pipefail
-          uvx --from awscli aws s3 sync dist/ s3://pkgrepo.internal.example/python/packages/
-          # Confirm both files are in the bucket before calling this a success.
-          for f in dist/*; do
-            uvx --from awscli aws s3 ls "s3://pkgrepo.internal.example/python/packages/$(basename "$f")" | grep -q "$(basename "$f")"
-          done
-          echo "published agent-run ${{ steps.version.outputs.version }}; the index lists it at https://pypi.internal.example/simple/agent-run/ within a few minutes"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: pypi
+      url: https://pypi.org/project/agent-run/${{ needs.build.outputs.version }}/
+    permissions:
+      id-token: write  # mint the OIDC token PyPI exchanges for a short-lived upload token
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - name: Upload to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1

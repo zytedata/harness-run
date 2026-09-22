@@ -654,3 +654,11 @@ def test_crash_while_awaiting_tasks_keeps_stashed_result(tmp_path, monkeypatch):
     events, _ = _events_of(script, tmp_path, monkeypatch)  # must not raise
     assert events[-1].kind == "result" and events[-1].summary == "work done, awaiting crawl"
     assert any((e.raw or {}).get("event") == "late_harness_error" for e in events)
+
+
+def test_codex_config_is_ignored_with_a_warning(tmp_path, monkeypatch):
+    spec = AgentSpec(name="a", model="m", harness="codex", codex_config={"web_search": "disabled"})
+    events, _ = _events_of([init_msg(), result_msg()], tmp_path, monkeypatch, spec=spec)
+    warning = next(e for e in events if (e.raw or {}).get("event") == "spec_warning")
+    assert "codex_config" in warning.summary
+    assert events[-1].kind == "result"

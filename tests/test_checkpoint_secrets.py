@@ -1,4 +1,4 @@
-"""A failed credential scrub must never create a credential-bearing snapshot (S11)."""
+"""A failed credential scrub must never create a credential-bearing snapshot."""
 from pathlib import Path
 
 import pytest
@@ -11,7 +11,7 @@ from agent_run.ports.blobstore import LocalBlobStore
 
 @pytest.mark.parametrize("operation", ["read_text", "write_text"])
 def test_scrub_failure_prevents_checkpoint(tmp_path, monkeypatch, operation):
-    spec = AgentSpec(name="audit", model="dummy", checkpoint=True)
+    spec = AgentSpec(harness="claude-code", name="audit", model="dummy", checkpoint=True)
     blobs = LocalBlobStore(str(tmp_path / "blobs"))
     ctx = RunContext(spec=spec, prompt="dummy", job_dir=tmp_path / "job",
                      session_id="audit", blobs=blobs, session_store=object())

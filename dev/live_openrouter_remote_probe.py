@@ -32,7 +32,7 @@ import traceback
 
 from agent_run import AgentSpec, SessionConfig, StopReason, TurnConfig, sandbox
 
-PROJECT = os.environ.get("PROJECT", "my-project")
+PROJECT = os.environ.get("PROJECT", "")  # required; checked at startup, not import
 LOCATION = os.environ.get("LOCATION", "us-central1")
 SUFFIX = re.sub(r"[^a-z0-9-]", "-", (os.environ.get("SUFFIX") or getpass.getuser()).lower())
 NAME = f"agent-run-openrouter-{SUFFIX}"
@@ -648,4 +648,6 @@ async def main() -> int:
 
 
 if __name__ == "__main__":
+    if not PROJECT:
+        sys.exit("PROJECT is required: your GCP project id")
     raise SystemExit(asyncio.run(main()))

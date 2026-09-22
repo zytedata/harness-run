@@ -298,7 +298,9 @@ class AgentSpec:
         model: Model id the harness runs, e.g. ``"claude-sonnet-4-6"`` (Claude Code) or
             a GPT model id (Codex). An ``openrouter/<vendor>/<model>`` id runs through
             OpenRouter on either harness.
-        harness: The coding-agent loop to run: ``"claude-code"`` (default) or ``"codex"``.
+        harness: The coding-agent loop to run: ``"claude-code"`` or ``"codex"``. Required —
+            there is no default, because which loop runs an agent is a choice worth making
+            rather than inheriting.
             The spec's harness-shaped fields (``permission_mode``, tool lists, skills)
             are translated by each binding; see the harness module docstrings for the
             mapping and any parity caveats.
@@ -389,7 +391,7 @@ class AgentSpec:
 
     name: str
     model: str
-    harness: str = "claude-code"
+    harness: str
     system_prompt: str | SystemPrompt | None = None
     skills: tuple[SkillSource, ...] = ()
     repos: tuple[RepoSource, ...] = ()
@@ -543,7 +545,7 @@ class AgentSpec:
         return cls(
             name=d["name"],
             model=d["model"],
-            harness=d.get("harness", "claude-code"),
+            harness=d["harness"],
             system_prompt=system_prompt,
             skills=tuple(SkillSource.from_dict(s) for s in d.get("skills", ())),
             repos=tuple(RepoSource.from_dict(r) for r in d.get("repos", ())),

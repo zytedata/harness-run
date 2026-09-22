@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import sys
 import tempfile
 
 from agent_run import AgentSpec, sandbox, local
@@ -64,12 +65,12 @@ async def main() -> None:
     resource = os.environ.get("ENGINE")
     if resource:
         engine = sandbox.get_engine(
-            resource, project=os.environ.get("PROJECT", "my-project"),
+            resource, project=os.environ.get("PROJECT") or sys.exit("PROJECT is required: your GCP project id"),
             location=os.environ.get("LOCATION", "us-central1"), warm_pool=True,
         )
     else:
         engine = local.deploy(
-            AgentSpec(name="resume-probe", model="claude-haiku-4-5-20251001",
+            AgentSpec(harness="claude-code", name="resume-probe", model="claude-haiku-4-5-20251001",
                       checkpoint=True, max_turns=12, max_budget_usd=1.0),
             workdir=tempfile.mkdtemp(prefix="agent-run-resume-"),
         )

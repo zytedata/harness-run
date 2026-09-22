@@ -137,11 +137,11 @@ Typical numbers (2026-09-11): deploy 81 s (build 32 s on a warm cache, push 13 s
 of model spend. Exit code is non-zero on any FAIL, so you can gate on it.
 
 Prerequisites: the GCP setup from the
-[README "GCP setup & required permissions"](README.md#gcp-setup--required-permissions)
+[GCP setup](docs/gcp-setup.md)
 (ADC that can impersonate the model service account, Haiku enabled in Vertex Model Garden)
 and the Docker CLI logged into the registry (`docker login -u oauth2accesstoken
---password-stdin us-central1-docker.pkg.dev` with an access token). Defaults target the shared
-`my-project` test project and its `agent-run-sandbox` repo; `MODEL_SA` overrides the model
+--password-stdin us-central1-docker.pkg.dev` with an access token). `PROJECT` names your GCP project (required);
+`IMAGE_REPO` defaults to its `agent-run-sandbox` repo; `MODEL_SA` overrides the model
 service account (default: the toolkit's `agent-run-model@<project>`, the predict-only account
 `agent-run-gcp-setup` creates — the operator account would hand the agent the whole project, and
 the smoke's **model-token** check fails on any account whose token reaches more than the
@@ -161,7 +161,7 @@ the platform announces changes to Agent Sandbox or when a limit in `backend.py` 
 .venv/bin/python dev/live_limits_probe.py --image us-central1-docker.pkg.dev/<project>/agent-run-sandbox/<image>:<tag> [--long-minutes 25]
 ```
 
-Findings of 2026-09-11 (my-project / us-central1, 4 CPU / 8 GiB unless noted):
+Findings of 2026-09-11 (us-central1, 4 CPU / 8 GiB unless noted):
 
 | Limit | Measured |
 |---|---|

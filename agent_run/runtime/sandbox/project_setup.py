@@ -1118,6 +1118,7 @@ def verify(api: GcpApi, cfg: Settings, items: Sequence[Item]) -> tuple[bool, lis
 
     user = re.sub(r"[^a-z0-9-]", "-", getpass.getuser().lower()) or "user"
     spec = AgentSpec(
+        harness="claude-code",
         name=f"agent-run-setup-verify-{user}",
         model=cfg.models[0] if cfg.models else DEFAULT_CHECK_MODELS[0],
         max_turns=8,

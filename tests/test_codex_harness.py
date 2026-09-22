@@ -213,7 +213,7 @@ def test_build_options_mcp_servers(tmp_path):
         harness="codex",
         mcp_servers=[
             McpServer.github(),
-            McpServer.remote("zyte", "https://mcp.example.com", headers={"X-K": "v"}),
+            McpServer.remote("remote", "https://mcp.example.com", headers={"X-K": "v"}),
             McpServer.stdio("loc", "svc", ["--fast"]),
         ],
     )
@@ -225,8 +225,8 @@ def test_build_options_mcp_servers(tmp_path):
     assert "gh-secret" not in ovr  # token never rides argv
     assert opts.codex_config.env["AGENT_RUN_GITHUB_MCP_TOKEN"] == "gh-secret"
     assert "GH_TOKEN" not in opts.codex_config.env  # consumed, not agent env
-    assert 'mcp_servers.zyte.url="https://mcp.example.com"' in ovr
-    assert 'mcp_servers.zyte.http_headers={"X-K" = "v"}' in ovr
+    assert 'mcp_servers.remote.url="https://mcp.example.com"' in ovr
+    assert 'mcp_servers.remote.http_headers={"X-K" = "v"}' in ovr
     assert 'mcp_servers.loc.command="svc"' in ovr
     assert 'mcp_servers.loc.args=["--fast"]' in ovr
 
@@ -1373,7 +1373,6 @@ async def test_attribution_failure_never_fails_the_turn(tmp_path, monkeypatch):
 def test_spec_round_trips_harness():
     spec = AgentSpec(name="a", model="gpt-5.6-luna", harness="codex")
     assert AgentSpec.from_dict(spec.to_dict()).harness == "codex"
-    assert AgentSpec.from_dict({"name": "a", "model": "m"}).harness == "claude-code"
 
 
 def test_local_engine_resolves_codex_harness(tmp_path):
@@ -1387,7 +1386,8 @@ def test_skills_subdir_mapping():
 
     assert skills_subdir("codex") == ".agents/skills"
     assert skills_subdir("claude-code") == ".claude/skills"
-    assert skills_subdir("anything-else") == ".claude/skills"
+    with pytest.raises(ValueError, match="no skills layout known"):
+        skills_subdir("anything-else")
 
 
 async def test_subagent_spend_crossing_the_budget_is_not_a_success(tmp_path, monkeypatch):

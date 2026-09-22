@@ -28,6 +28,20 @@ for the tag with this file's section as the notes.
 
 ### Backwards-incompatible
 
+- **`AgentSpec.harness` is required; there is no default harness.** It used to default to
+  `"claude-code"`, which quietly made Claude Code the norm and Codex the opt-in — the wrong
+  signal from a library whose point is that both loops run the same agent. `AgentSpec(name=…,
+  model=…)` now raises `TypeError`; name the loop: `harness="claude-code"` or
+  `harness="codex"`. **Update note**: add `harness=` to every `AgentSpec(...)` you construct.
+  Nothing else changes — a spec that already named its harness behaves exactly as before.
+
+  The same assumption is gone from three further places: `AgentSpec.from_dict` requires a
+  `harness` key instead of substituting `"claude-code"` (every dict `to_dict` has ever
+  written carries one); `resolve_harness` raises a named error instead of falling back; and
+  `skills.skills_subdir` raises for an unknown harness instead of returning Claude's
+  `.claude/skills`, which would have staged an agent's skills where its CLI never looks and
+  started it with none of them.
+
 - **The library is renamed `remote-agent-toolkit` -> `agent-run`**, ahead of the open-source
   release. The distribution is `agent-run`, the import root is `agent_run`, the console script
   is `agent-run-gcp-setup`, and the `RATK_*` environment variables are now `AGENT_RUN_*`
@@ -174,6 +188,11 @@ for the tag with this file's section as the notes.
   cannot replay each other's results.
 
 ### Added
+
+- **The project is licensed under Apache-2.0** (`LICENSE`), declared as a PEP 639 SPDX
+  expression in `pyproject.toml` and shipped inside the wheel. Trove classifiers and
+  keywords are declared too. The licence text is verbatim, with no copyright line and no
+  `NOTICE` file, matching the other Zyte open-source repositories.
 
 - **`AgentSpec.codex_config`**: extra Codex `config.toml` settings, as a mapping of dotted
   key to value (strings, booleans, numbers, lists), passed to the `codex` harness as
@@ -362,6 +381,17 @@ for the tag with this file's section as the notes.
   `Session.history()` still returns the complete session.
 
 ### Changed
+
+- **Documentation restructured for the public release.** The README is a short front page: what the
+  library is, install, one local and one remote example, the feature list, and links. The reference
+  it used to carry moved, section by section, into `docs/`: `getting-started`, `harnesses-and-models`,
+  `configuration`, `runs-and-sessions`, `local-runtime`, `sandbox-runtime`, `structured-output`,
+  `openrouter`, `secrets-and-security` (which absorbs the former `docs/secret-configuration.md`),
+  `observability` and `gcp-setup`. Examples no longer refer to internal projects, repositories or
+  domains; the live dev probes and `examples/sandbox` require `PROJECT` instead of defaulting to a
+  shared test project. `requires-python` is `>=3.12` with no upper bound: the `<3.14` cap dated from
+  the first scaffold and no dependency needs it (the sandbox image and local package venvs pin their
+  own Python 3.12 independently of the client's interpreter).
 
 - **`send()` into a turn that is still starting is queued instead of refused** (#84, from
   agentic-scraping's integration). Between `run()` and the worker's `control_ready` event (~1 s

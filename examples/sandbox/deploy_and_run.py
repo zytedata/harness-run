@@ -8,7 +8,7 @@ Prerequisites (see the top-level README "GCP setup & required permissions"):
   * `agent-run-gcp-setup` done for the project (image repo, model service account, bucket), the Claude
     model enabled in Vertex Model Garden, and Docker logged into the registry (the deploy builds
     and pushes the agent's image).
-Configure via env (defaults are the shared my-project test setup):
+Configure via env (PROJECT is required; the rest have defaults):
   PROJECT, LOCATION, IMPERSONATE_SA (optional least-priv impersonation), WARM=1 (ready pool).
 
 Run:
@@ -24,12 +24,13 @@ from __future__ import annotations
 
 import asyncio
 import os
+import sys
 
 import pydantic
 
 from agent_run import AgentSpec, SystemPrompt, sandbox
 
-PROJECT = os.environ.get("PROJECT", "my-project")
+PROJECT = os.environ.get("PROJECT", "")  # required; checked at startup, not import
 LOCATION = os.environ.get("LOCATION", "us-central1")
 WARM = os.environ.get("WARM") == "1"
 
@@ -54,6 +55,7 @@ class Answer(pydantic.BaseModel):
 
 
 SPEC = AgentSpec(
+    harness="claude-code",
     name="agent-run-example",
     # A family alias enabled in your Vertex Model Garden (see the README model-access note).
     model="claude-haiku-4-5",
@@ -125,4 +127,6 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    if not PROJECT:
+        sys.exit("PROJECT is required: your GCP project id")
     main()

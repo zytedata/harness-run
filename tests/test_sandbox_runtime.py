@@ -87,7 +87,7 @@ def _body(session_id="sid-1", prompt="go", **extra) -> dict:
 def test_worker_runs_the_turn_and_maps_the_session_id(tmp_path, monkeypatch):
     _DoneHarness.seen = []
     _patch_harness(monkeypatch, _DoneHarness)
-    spec = AgentSpec(name="w", model="m")
+    spec = AgentSpec(harness="claude-code", name="w", model="m")
     worker = _real_worker_factory(tmp_path, spec)("s1")
 
     events = _drive(worker, _body(session_id="1966652674296250368", secrets={"K": "v"},
@@ -141,7 +141,7 @@ def test_worker_samples_resources_to_the_mirror_only_and_stamps_the_result(tmp_p
     (cg / "cpuacct" / "cpuacct.usage").write_text("3420000000\n")
     (tmp_path / "meminfo").write_text("MemTotal:        1048576 kB\n")
     mirror = _RecordingMirror()
-    worker = Worker(workspace_root=str(tmp_path / "ws"), baked=AgentSpec(name="w", model="m"), baked_skills=None,
+    worker = Worker(workspace_root=str(tmp_path / "ws"), baked=AgentSpec(harness="claude-code", name="w", model="m"), baked_skills=None,
                     mirror_factory=lambda uri, sid, tid: mirror, metadata_port=0,
                     resource_root=cg, resource_meminfo=tmp_path / "meminfo", resource_sample_s=0.01)
 
@@ -169,7 +169,7 @@ def test_a_failed_harness_result_still_carries_the_resource_peak(tmp_path, monke
     (cg / "memory").mkdir(parents=True)
     (cg / "memory" / "memory.usage_in_bytes").write_text(f"{300 << 20}\n")
     (tmp_path / "meminfo").write_text("MemTotal:        1048576 kB\n")
-    worker = Worker(workspace_root=str(tmp_path / "ws"), baked=AgentSpec(name="w", model="m"), baked_skills=None,
+    worker = Worker(workspace_root=str(tmp_path / "ws"), baked=AgentSpec(harness="claude-code", name="w", model="m"), baked_skills=None,
                     mirror_factory=lambda uri, sid, tid: _NullMirror(), metadata_port=0,
                     resource_root=cg, resource_meminfo=tmp_path / "meminfo", resource_sample_s=0.01)
     live = _drive(worker, _body())
@@ -216,7 +216,7 @@ def test_a_turn_with_a_model_token_points_the_cli_at_the_workers_metadata_server
                 yield ev
 
     _patch_harness(monkeypatch, _Probing)
-    worker = _real_worker_factory(tmp_path, AgentSpec(name="w", model="m"))("s1")
+    worker = _real_worker_factory(tmp_path, AgentSpec(harness="claude-code", name="w", model="m"))("s1")
 
     events = _drive(worker, _body(model_env={"CLAUDE_CODE_USE_VERTEX": "1"},
                                   model_token={"access_token": "TOK", "expires_at": None}))
@@ -239,7 +239,7 @@ def test_worker_refuses_a_second_concurrent_turn_and_unknown_turns(tmp_path, mon
             yield result_event()
 
     _patch_harness(monkeypatch, Slow)
-    worker = _real_worker_factory(tmp_path, AgentSpec(name="w", model="m"))("s1")
+    worker = _real_worker_factory(tmp_path, AgentSpec(harness="claude-code", name="w", model="m"))("s1")
     first = _body()
     assert worker.handle("/turn", first)["ok"]
     second = worker.handle("/turn", _body())
@@ -261,7 +261,7 @@ def test_worker_surfaces_a_harness_crash_as_a_terminal_error(tmp_path, monkeypat
             yield  # pragma: no cover
 
     _patch_harness(monkeypatch, Crashing)
-    worker = _real_worker_factory(tmp_path, AgentSpec(name="w", model="m"))("s1")
+    worker = _real_worker_factory(tmp_path, AgentSpec(harness="claude-code", name="w", model="m"))("s1")
     events = _drive(worker, _body())
     assert events[-1].kind == "result" and events[-1].raw["is_error"] is True
     assert "agent run failed" in events[-1].summary
@@ -274,7 +274,7 @@ def test_worker_late_crash_keeps_the_terminal_result(tmp_path, monkeypatch):
             raise RuntimeError("Command failed with exit code 1")
 
     _patch_harness(monkeypatch, Dying)
-    worker = _real_worker_factory(tmp_path, AgentSpec(name="w", model="m"))("s1")
+    worker = _real_worker_factory(tmp_path, AgentSpec(harness="claude-code", name="w", model="m"))("s1")
     events = _drive(worker, _body())
     assert [e.kind for e in events].count("result") == 1
     assert events[-1].kind == "status" and "result kept" in events[-1].summary
@@ -286,7 +286,7 @@ def test_worker_surfaces_a_workspace_prep_crash(tmp_path, monkeypatch):
         raise RuntimeError("git clone failed: fatal: Authentication failed")
 
     monkeypatch.setattr(worker_mod, "_prepare_workspace", boom)
-    worker = _real_worker_factory(tmp_path, AgentSpec(name="w", model="m"))("s1")
+    worker = _real_worker_factory(tmp_path, AgentSpec(harness="claude-code", name="w", model="m"))("s1")
     events = _drive(worker, _body())
     assert [(e.kind, (e.raw or {}).get("event")) for e in events] == [
         ("status", "turn_started"), ("status", "control_ready"), ("result", "harness_error")]
@@ -309,7 +309,7 @@ def test_worker_prep_falls_back_to_a_clean_workspace_when_the_snapshot_is_broken
     blobs = HalfThenFail(str(tmp_path / "store"))
     snapshot(blobs, "sid", str(tmp_path))
     rc = SimpleNamespace(resume_sid="sid", blobs=blobs, workspace=tmp_path / "ws",
-                         spec=AgentSpec(name="w", model="m", checkpoint=True), secrets={})
+                         spec=AgentSpec(harness="claude-code", name="w", model="m", checkpoint=True), secrets={})
     ready = worker_mod._prepare_workspace(rc, prefer_baked_skills=False)
     assert ready["restored"] is False
     assert ready["restore_error"] == "OSError: archive aborted at member 162"
@@ -319,7 +319,7 @@ def test_worker_prep_falls_back_to_a_clean_workspace_when_the_snapshot_is_broken
 def test_worker_merges_configs_over_the_baked_spec_and_echoes_them(tmp_path, monkeypatch):
     _DoneHarness.seen = []
     _patch_harness(monkeypatch, _DoneHarness)
-    baked = AgentSpec(name="w", model="m-baked", max_budget_usd=5.0)
+    baked = AgentSpec(harness="claude-code", name="w", model="m-baked", max_budget_usd=5.0)
     worker = _real_worker_factory(tmp_path, baked)("s1")
     events = _drive(worker, _body(
         session_config=SessionConfig(model="m-session", system_prompt="SESSION").to_dict(),
@@ -340,7 +340,7 @@ def test_worker_merges_configs_over_the_baked_spec_and_echoes_them(tmp_path, mon
 def test_worker_fails_the_turn_on_a_config_it_cannot_honor(tmp_path, monkeypatch, cfg, needle):
     _DoneHarness.seen = []
     _patch_harness(monkeypatch, _DoneHarness)
-    worker = _real_worker_factory(tmp_path, AgentSpec(name="w", model="m-baked"))("s1")
+    worker = _real_worker_factory(tmp_path, AgentSpec(harness="claude-code", name="w", model="m-baked"))("s1")
     events = _drive(worker, _body(session_config=cfg))
     assert len(events) == 1 and events[0].kind == "result" and events[0].raw["is_error"] is True
     assert needle in events[0].summary
@@ -356,7 +356,7 @@ def test_worker_control_reaches_the_harness_and_dedupes(tmp_path, monkeypatch):
             yield result_event(f"saw {msg.op}: {msg.message}")
 
     _patch_harness(monkeypatch, ControlAware)
-    worker = _real_worker_factory(tmp_path, AgentSpec(name="w", model="m"))("s1")
+    worker = _real_worker_factory(tmp_path, AgentSpec(harness="claude-code", name="w", model="m"))("s1")
     body = _body()
     assert worker.handle("/turn", body)["ok"]
     import time
@@ -391,7 +391,7 @@ def test_worker_events_are_paged_by_bytes(tmp_path, monkeypatch):
             yield result_event()
 
     _patch_harness(monkeypatch, Chatty)
-    worker = _real_worker_factory(tmp_path, AgentSpec(name="w", model="m"))("s1")
+    worker = _real_worker_factory(tmp_path, AgentSpec(harness="claude-code", name="w", model="m"))("s1")
     body = _body()
     assert worker.handle("/turn", body)["ok"]
     pages, since = [], 0
@@ -416,13 +416,13 @@ def test_worker_transcript_only_spec_does_not_resume_the_conversation(tmp_path, 
 
     _patch_harness(monkeypatch, Recording)
     blobs = LocalBlobStore(str(tmp_path / "blobs"))
-    worker = _real_worker_factory(tmp_path, AgentSpec(name="w", model="m", transcript=True), blobs)("s1")
+    worker = _real_worker_factory(tmp_path, AgentSpec(harness="claude-code", name="w", model="m", transcript=True), blobs)("s1")
     _drive(worker, _body(resume=True, gcs={"output_bucket": "gs://out"}))
     assert seen["session_store"] is not None and seen["resume_sid"] is None
 
 
 def test_worker_health_and_exec(tmp_path):
-    worker = Worker(workspace_root=str(tmp_path), baked=AgentSpec(name="w", model="m"), baked_skills=None)
+    worker = Worker(workspace_root=str(tmp_path), baked=AgentSpec(harness="claude-code", name="w", model="m"), baked_skills=None)
     health = worker.handle("/health", {})
     assert health["ok"] and health["workspace_writable"] and health["running_turn"] is None
     out = worker.handle("/exec", {"command": "echo hi; exit 3", "timeout": 5})
@@ -443,7 +443,7 @@ def test_find_baked_skills(tmp_path):
 def test_session_run_streams_from_the_worker_and_releases_the_sandbox(tmp_path, monkeypatch):
     _DoneHarness.seen = []
     _patch_harness(monkeypatch, _DoneHarness)
-    spec = AgentSpec(name="g", model="m")
+    spec = AgentSpec(harness="claude-code", name="g", model="m")
     provider = FakeSandboxProvider(_real_worker_factory(tmp_path, spec))
     engine = make_engine(provider, spec=spec)
     session = engine.start_session()
@@ -491,7 +491,7 @@ def test_session_run_returns_at_once_and_dispatches_in_the_driver():
 
 def test_session_send_resumes_on_a_fresh_sandbox_with_the_resume_flag():
     provider = FakeSandboxProvider()
-    engine = make_engine(provider, spec=AgentSpec(name="g", model="m", checkpoint=True))
+    engine = make_engine(provider, spec=AgentSpec(harness="claude-code", name="g", model="m", checkpoint=True))
     session = engine.start_session()
     asyncio.run(_await(session.run("go")))
     asyncio.run(_await(session.send("answer", secrets={"K": "v2"})))
@@ -824,7 +824,7 @@ def _attached(engine, session_id):
 def test_transcripts_read_the_id_the_worker_wrote_under(tmp_path, monkeypatch):
     from agent_run.checkpoint.session_store import BlobSessionStore, _claude_session_id
 
-    engine, blobs = _transcript_engine(AgentSpec(name="g", model="m", transcript=True), monkeypatch, tmp_path)
+    engine, blobs = _transcript_engine(AgentSpec(harness="claude-code", name="g", model="m", transcript=True), monkeypatch, tmp_path)
     raw_sid = "1966652674296250368"
     entries = [{"uuid": "u1", "type": "user"}, {"uuid": "u2", "type": "assistant"}]
     store = BlobSessionStore(blobs)
@@ -836,7 +836,7 @@ def test_transcripts_read_the_id_the_worker_wrote_under(tmp_path, monkeypatch):
 
 
 def test_transcripts_raise_only_when_the_spec_is_known_to_persist_nothing(tmp_path, monkeypatch):
-    engine, _ = _transcript_engine(AgentSpec(name="g", model="m"), monkeypatch, tmp_path)
+    engine, _ = _transcript_engine(AgentSpec(harness="claude-code", name="g", model="m"), monkeypatch, tmp_path)
     with pytest.raises(RuntimeError, match="transcript=True"):
         asyncio.run(_attached(engine, "sid").transcripts())
     engine._spec_known = False
@@ -853,7 +853,7 @@ def test_workspace_and_fork_are_remote_only():
 
 def test_deploy_rejects_the_local_only_workspace_argument():
     with pytest.raises(ValueError, match="local-only"):
-        backend.deploy(AgentSpec(name="w", model="m"), project="p", location="l", workspace="/some/dir")
+        backend.deploy(AgentSpec(harness="claude-code", name="w", model="m"), project="p", location="l", workspace="/some/dir")
 
 
 def test_worker_module_layout_does_not_shadow_the_package_exports():

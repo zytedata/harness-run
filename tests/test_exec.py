@@ -78,7 +78,7 @@ def test_worker_exec_runs_in_the_running_turns_workspace(tmp_path, monkeypatch):
             yield result_event()
 
     _patch_harness(monkeypatch, Held)
-    worker = Worker(workspace_root=str(tmp_path), baked=AgentSpec(name="w", model="m"), baked_skills=None)
+    worker = Worker(workspace_root=str(tmp_path), baked=AgentSpec(harness="claude-code", name="w", model="m"), baked_skills=None)
     # No turn: the workspace root is the cwd.
     idle = worker.handle("/exec", {"command": "pwd"})
     assert idle["ok"] and idle["stdout"].strip() == str(tmp_path) and idle["cwd"] == str(tmp_path)
@@ -234,7 +234,7 @@ class _HeldHarness:
 
 
 def test_local_exec_runs_in_the_sessions_workspace_while_the_turn_runs(tmp_path):
-    engine = local.deploy(AgentSpec(name="demo", model="m"), workdir=str(tmp_path / "wd"))
+    engine = local.deploy(AgentSpec(harness="claude-code", name="demo", model="m"), workdir=str(tmp_path / "wd"))
     session = engine.start_session()
 
     async def go():

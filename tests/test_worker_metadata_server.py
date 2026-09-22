@@ -11,7 +11,7 @@ from agent_run.spec import AgentSpec
 
 
 def _worker(tmp_path) -> Worker:
-    return Worker(workspace_root=str(tmp_path), baked=AgentSpec(name="w", model="m"), baked_skills=None,
+    return Worker(workspace_root=str(tmp_path), baked=AgentSpec(harness="claude-code", name="w", model="m"), baked_skills=None,
                   metadata_port=0)
 
 

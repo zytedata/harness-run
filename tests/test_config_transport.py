@@ -117,7 +117,7 @@ def test_start_session_with_config_requires_output_bucket():
 
 def test_get_engine_spec_kwarg_is_a_clear_error():
     with pytest.raises(TypeError, match="SessionConfig"):
-        backend.get_engine("name", "p", "l", spec=AgentSpec(name="n", model="m"))
+        backend.get_engine("name", "p", "l", spec=AgentSpec(harness="claude-code", name="n", model="m"))
 
 
 # ---------------------------------------------------------------- worker side
@@ -137,7 +137,7 @@ def test_baked_skills_are_skipped_when_the_effective_skills_differ(monkeypatch, 
         resume_sid = None
         blobs = None
         workspace = tmp_path / "ws"
-        spec = AgentSpec(name="w", model="m", skills=(SkillSource.git("https://h/run-skills.git"),))
+        spec = AgentSpec(harness="claude-code", name="w", model="m", skills=(SkillSource.git("https://h/run-skills.git"),))
         secrets = {}
 
     worker_mod._prepare_workspace(RC(), prefer_baked_skills=False, baked_dir=tmp_path / "baked")
@@ -150,9 +150,9 @@ def test_baked_skills_are_skipped_when_the_effective_skills_differ(monkeypatch, 
 
 
 def test_local_session_and_turn_configs_overlay_the_spec(tmp_path):
-    engine = local.deploy(AgentSpec(name="d", model="m-baked"), workdir=str(tmp_path))
+    engine = local.deploy(AgentSpec(harness="claude-code", name="d", model="m-baked"), workdir=str(tmp_path))
     session = engine.start_session(config=SessionConfig(model="m-session"))
     assert session._spec.model == "m-session"
     # Re-attach by id from a fresh handle recovers the persisted config.
-    again = local.deploy(AgentSpec(name="d", model="m-baked"), workdir=str(tmp_path)).get_session(session.session_id)
+    again = local.deploy(AgentSpec(harness="claude-code", name="d", model="m-baked"), workdir=str(tmp_path)).get_session(session.session_id)
     assert again._spec.model == "m-session"

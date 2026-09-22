@@ -18,7 +18,7 @@ def test_reposource_and_spec_roundtrip():
     assert r.url == "https://bitbucket.org/o/r" and r.ref == "v1"
     assert r.auth == "BB_TOKEN" and r.auth_user == "alice"
     assert RepoSource.from_dict(r.to_dict()) == r
-    spec = AgentSpec(name="a", model="m", repos=[RepoSource.git("https://x/y")])
+    spec = AgentSpec(harness="claude-code", name="a", model="m", repos=[RepoSource.git("https://x/y")])
     assert AgentSpec.from_dict(spec.to_dict()) == spec  # repos survive dict round-trip
 
 

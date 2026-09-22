@@ -144,9 +144,9 @@ def test_delete_of_engine_x_leaves_the_pool_of_engine_x_suffixed_alone(monkeypat
     # ``x-b040d27``) — ``x``'s teardown swept ``x-b040d27``'s ready sandboxes because its
     # display-name prefix ``agent-run-x-`` matched them. The sweep goes by template now.
     provider = FakeSandboxProvider()
-    legacy = make_engine(provider, warm=True, spec=AgentSpec(name="x", model="m"))
+    legacy = make_engine(provider, warm=True, spec=AgentSpec(harness="claude-code", name="x", model="m"))
     legacy.fill_pool(1)
-    pinned = make_engine(provider, warm=True, spec=AgentSpec(name="x-b040d27", model="m"))
+    pinned = make_engine(provider, warm=True, spec=AgentSpec(harness="claude-code", name="x-b040d27", model="m"))
     pinned.fill_pool(2)
     # A rare shape: a sandbox of x-b040d27 whose suffix is itself 8 hex chars, and one
     # without a template on the listing row (the shape fallback applies to that one only).
@@ -236,7 +236,7 @@ def test_get_engine_handle_shares_the_pool_of_the_deploying_process():
     provider = FakeSandboxProvider()
     deploying = make_engine(provider, warm=True)
     deploying.fill_pool(1)
-    other = backend.SandboxEngine(template=deploying.resource, spec=AgentSpec(name="g", model="m"),
+    other = backend.SandboxEngine(template=deploying.resource, spec=AgentSpec(harness="claude-code", name="g", model="m"),
                                  project="p", location="l", output_bucket="gs://out", provider=provider,
                                  warm=True, roster_store=deploying._roster_store,
                                  model_service_account="agent-run-model@p.iam.gserviceaccount.com")

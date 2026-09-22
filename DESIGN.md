@@ -1,6 +1,9 @@
 # agent-run — Design
 
-A Python library for **defining and running remote/background AI agents** at Zyte. It distills the
+> Terminology: this document, and comments in the code, often say "the toolkit". That is this
+> library, `agent-run`, under the name it had while it was being designed.
+
+A Python library for **defining and running remote/background AI agents**. It distills the
 experience of two proofs-of-concept (self-healing spiders, interactive spider creation) built on
 `sandbox-agent-runtime` into reusable building blocks, so any team can stand up a Claude-Code-based
 agent — with custom skills, GitHub access, structured outputs, checkpoint/resume and ready sandboxes —
@@ -166,7 +169,7 @@ from agent_run import AgentSpec, SystemPrompt, SkillSource, McpServer, sandbox, 
 spec = AgentSpec(
     name="spider-builder",
     model="claude-sonnet-4-6",
-    system_prompt=SystemPrompt.inherit(append="Prefer the Zyte web-scraping skills."),
+    system_prompt=SystemPrompt.inherit(append="Prefer the skills below when they apply."),
     skills=[SkillSource.git("https://github.com/zytedata/claude-skills", ref="0.2.0")],
     mcp_servers=[McpServer.github()],        # token supplied per-invocation (run/send secrets=), not here
     permission_mode="bypassPermissions",
@@ -520,7 +523,7 @@ These are facts measured live. The library encodes them so consumers inherit the
 Each is a `typing.Protocol`; concrete adapters ship for prod (GCP) and dev (local/in-memory).
 
 - **`Harness`** — `build_options(spec, ctx)` + an async run loop yielding `AgentEvent`s. Adapters:
-  `ClaudeCodeHarness` (default) and `CodexHarness`, selected by `spec.harness` via `resolve_harness`
+  `ClaudeCodeHarness` and `CodexHarness`, selected by `spec.harness` via `resolve_harness`
   (the single seam both runtimes use). Shared policy — secret routing, agent-env layering, the
   interactive suffix, the inline workspace checkpoint — lives in `harness/_shared.py` so the bindings
   can't drift where the spec doesn't distinguish them. Both read `ctx.control` (a `ControlChannel`)
@@ -632,7 +635,7 @@ stayed in `sandbox-agent-runtime` behind the seam.
    now ships behind `spec.harness`; see §7.)
 2. **Definition API** — **declarative `AgentSpec` + `deploy()`** (control-plane / data-plane split), not an
    imperative builder or thin functions.
-3. **First milestone** — a **minimal generic (non-Zyte) example agent** run local + remote, proving the core
+3. **First milestone** — a **minimal generic example agent** run local + remote, proving the core
    API + deploy + the ready pool with the least surface, before porting a real PoC.
 4. **Local deploy is first-class** — `local.deploy(spec)` mirrors `sandbox` exactly (same Engine/Session
    API), so the dev loop and the prod loop are the same code.
@@ -648,7 +651,7 @@ stayed in `sandbox-agent-runtime` behind the seam.
 ```
 agent-run/
 ├── pyproject.toml                 # runtime deps in core; the harness SDKs behind the `local` extra; dev tooling in a group
-├── README.md                      # team onboarding; the only user-facing doc
+├── README.md                      # the public front page; the reference lives in docs/
 ├── DESIGN.md                      # this file (internal design record)
 ├── TESTING.md                     # the test ladder: offline suite, parity image, live probes
 ├── CHANGELOG.md                   # releases and the Unreleased section

@@ -28,8 +28,19 @@ _SKILLS_SUBDIR = {"claude-code": ".claude/skills", "codex": ".agents/skills"}
 
 
 def skills_subdir(harness: str) -> str:
-    """The cwd-relative skills directory for ``harness`` (Claude's layout is the default)."""
-    return _SKILLS_SUBDIR.get(harness, _SKILLS_SUBDIR["claude-code"])
+    """The cwd-relative skills directory for ``harness``.
+
+    Raises for an unknown harness rather than assuming one: silently using Claude's
+    layout would stage skills where the running CLI never looks for them, and the agent
+    would start with none of the skills the spec declared.
+    """
+    try:
+        return _SKILLS_SUBDIR[harness]
+    except KeyError:
+        raise ValueError(
+            f"no skills layout known for harness {harness!r} "
+            f"(expected one of {sorted(_SKILLS_SUBDIR)})"
+        ) from None
 
 
 def discover_skill_names(src: Path) -> list[str]:

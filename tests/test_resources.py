@@ -123,7 +123,7 @@ def test_run_result_carries_the_sampled_high_water_marks():
     from agent_run.runtime._run import build_result
     from agent_run.spec import AgentSpec
 
-    spec = AgentSpec(name="a", model="m")
+    spec = AgentSpec(harness="claude-code", name="a", model="m")
     ev = AgentEvent(kind="result", summary="42", raw={"subtype": "success", "num_turns": 1,
                                                      "memory_peak_bytes": 600, "memory_limit_bytes": 1000, "cpu_usec": 5})
     result, _ = build_result(ev, "sid", spec)

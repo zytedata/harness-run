@@ -16,9 +16,10 @@ from agent_run import (
 
 def _example_spec() -> AgentSpec:
     return AgentSpec(
+        harness="claude-code",
         name="spider-builder",
         model="claude-sonnet-4-6",
-        system_prompt=SystemPrompt.inherit(append="Prefer the Zyte web-scraping skills."),
+        system_prompt=SystemPrompt.inherit(append="Prefer the skills below when they apply."),
         skills=[SkillSource.git("https://github.com/zytedata/claude-skills", ref="0.2.0")],
         repos=[RepoSource.git("https://github.com/acme/spiders", ref="main", auth="GH_TOKEN")],
         mcp_servers=[McpServer.github(), McpServer.stdio("local", "echo", ["hi"])],
@@ -76,20 +77,20 @@ def test_skillsource_git_smoke() -> None:
 
 def test_agentspec_reasoning_effort_round_trip() -> None:
     # None (default) is omitted from the dict and survives the trip.
-    spec = AgentSpec(name="a", model="m")
+    spec = AgentSpec(harness="claude-code", name="a", model="m")
     assert spec.reasoning_effort is None
     assert "reasoning_effort" not in spec.to_dict()
     assert AgentSpec.from_dict(spec.to_dict()).reasoning_effort is None
-    explicit = AgentSpec(name="a", model="m", reasoning_effort="xhigh")
+    explicit = AgentSpec(harness="claude-code", name="a", model="m", reasoning_effort="xhigh")
     assert AgentSpec.from_dict(explicit.to_dict()).reasoning_effort == "xhigh"
 
 
 def test_agentspec_max_buffer_size_round_trip_and_default() -> None:
     # The default is the toolkit's own generous cap, NOT the SDK's 1 MiB (which a real
     # message — a base64 image, a large tool result — exceeds and dies mid-turn on).
-    assert AgentSpec(name="a", model="m").max_buffer_size == DEFAULT_MAX_BUFFER_SIZE
+    assert AgentSpec(harness="claude-code", name="a", model="m").max_buffer_size == DEFAULT_MAX_BUFFER_SIZE
     assert DEFAULT_MAX_BUFFER_SIZE > 1024 * 1024
-    explicit = AgentSpec(name="a", model="m", max_buffer_size=4 * 1024 * 1024)
+    explicit = AgentSpec(harness="claude-code", name="a", model="m", max_buffer_size=4 * 1024 * 1024)
     assert AgentSpec.from_dict(explicit.to_dict()).max_buffer_size == 4 * 1024 * 1024
     # A spec serialized before the field existed takes the default, not the old 1 MiB.
     older = {k: v for k, v in explicit.to_dict().items() if k != "max_buffer_size"}
@@ -101,7 +102,7 @@ def test_agentspec_rejects_non_positive_max_buffer_size(bad: int) -> None:
     # Would reject every message; caught at construction rather than as a turn failure
     # that reads like the payload's fault.
     with pytest.raises(ValueError, match="max_buffer_size must be > 0"):
-        AgentSpec(name="a", model="m", max_buffer_size=bad)
+        AgentSpec(harness="claude-code", name="a", model="m", max_buffer_size=bad)
 
 
 def test_agentspec_interactive_round_trip() -> None:
@@ -111,13 +112,14 @@ def test_agentspec_interactive_round_trip() -> None:
     assert "interactive" not in spec.to_dict()
     assert AgentSpec.from_dict(spec.to_dict()).interactive is None
     # Explicit False (checkpoint WITHOUT the operator-pause guidance) round-trips.
-    explicit = AgentSpec(name="a", model="m", checkpoint=True, interactive=False)
+    explicit = AgentSpec(harness="claude-code", name="a", model="m", checkpoint=True, interactive=False)
     restored = AgentSpec.from_dict(explicit.to_dict())
     assert restored.interactive is False and restored.checkpoint is True
 
 
 def test_openrouter_provider_round_trip_and_validation() -> None:
     spec = AgentSpec(
+        harness="claude-code",
         name="a",
         model="openrouter/moonshotai/kimi-k3",
         openrouter_provider="moonshotai",
@@ -126,14 +128,15 @@ def test_openrouter_provider_round_trip_and_validation() -> None:
     assert spec.to_dict()["openrouter_provider"] == "moonshotai"
 
     with pytest.raises(ValueError, match="requires an openrouter/ model"):
-        AgentSpec(name="a", model="claude-sonnet-4-6", openrouter_provider="moonshotai")
+        AgentSpec(harness="claude-code", name="a", model="claude-sonnet-4-6", openrouter_provider="moonshotai")
     with pytest.raises(ValueError, match="non-empty"):
-        AgentSpec(name="a", model="openrouter/moonshotai/kimi-k3", openrouter_provider="")
+        AgentSpec(harness="claude-code", name="a", model="openrouter/moonshotai/kimi-k3", openrouter_provider="")
 
 
 def test_openrouter_routing_round_trip_and_validation() -> None:
     routing = {"order": ["moonshotai", "fireworks"], "allow_fallbacks": True}
     spec = AgentSpec(
+        harness="claude-code",
         name="a",
         model="openrouter/moonshotai/kimi-k3",
         openrouter_routing=routing,
@@ -144,23 +147,26 @@ def test_openrouter_routing_round_trip_and_validation() -> None:
     # The spec keeps its own copy, so a later edit of the caller's dict cannot reach it.
     caller = {"only": ["moonshotai"]}
     kept = AgentSpec(
+        harness="claude-code",
         name="a", model="openrouter/moonshotai/kimi-k3", openrouter_routing=caller
     )
     caller["only"] = ["novita"]
     assert kept.openrouter_routing == {"only": ["moonshotai"]}
 
     with pytest.raises(ValueError, match="requires an openrouter/ model"):
-        AgentSpec(name="a", model="claude-sonnet-4-6", openrouter_routing=routing)
+        AgentSpec(harness="claude-code", name="a", model="claude-sonnet-4-6", openrouter_routing=routing)
     with pytest.raises(ValueError, match="non-empty provider object"):
-        AgentSpec(name="a", model="openrouter/moonshotai/kimi-k3", openrouter_routing={})
+        AgentSpec(harness="claude-code", name="a", model="openrouter/moonshotai/kimi-k3", openrouter_routing={})
     with pytest.raises(ValueError, match="must be a mapping"):
         AgentSpec(
+            harness="claude-code",
             name="a",
             model="openrouter/moonshotai/kimi-k3",
             openrouter_routing=["moonshotai"],
         )
     with pytest.raises(ValueError, match="cannot be combined"):
         AgentSpec(
+            harness="claude-code",
             name="a",
             model="openrouter/moonshotai/kimi-k3",
             openrouter_provider="moonshotai",
@@ -168,6 +174,24 @@ def test_openrouter_routing_round_trip_and_validation() -> None:
         )
 
 
+def test_harness_is_required_and_has_no_default():
+    """No implicit harness: naming the agent loop is the caller's choice, not an inheritance."""
+    with pytest.raises(TypeError):
+        AgentSpec(name="a", model="m")  # type: ignore[call-arg]
+
+    # ... and it does not sneak back in through deserialization
+    d = AgentSpec(name="a", model="m", harness="codex").to_dict()
+    assert AgentSpec.from_dict(d).harness == "codex"
+    del d["harness"]
+    with pytest.raises(KeyError):
+        AgentSpec.from_dict(d)
+
+
+def test_resolve_harness_refuses_an_unset_harness():
+    from agent_run.harness import resolve_harness
+
+    with pytest.raises(ValueError, match="there is no default"):
+        resolve_harness(AgentSpec(name="a", model="m", harness=""))
 @pytest.mark.parametrize(
     "codex_config",
     ["web_search=disabled", {"": True}, {"sandbox_workspace_write": {"network_access": True}}],

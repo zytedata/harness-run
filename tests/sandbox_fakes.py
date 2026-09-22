@@ -209,7 +209,7 @@ class FakeSandboxProvider:
 def make_engine(provider: FakeSandboxProvider, *, spec: AgentSpec | None = None, warm: bool = False,
                 template: str | None = None, output_bucket: str | None = "gs://out", **kw) -> backend.SandboxEngine:
     """A ``SandboxEngine`` over ``provider`` with an in-memory roster and no GCP client."""
-    spec = spec or AgentSpec(name="g", model="m")
+    spec = spec or AgentSpec(harness="claude-code", name="g", model="m")
     template = template or provider.add_template(spec.name)
     kw.setdefault("model_service_account", "agent-run-model@p.iam.gserviceaccount.com")
     kw.setdefault("roster_store", InMemoryRosterStore())

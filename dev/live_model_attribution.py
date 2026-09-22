@@ -54,7 +54,7 @@ def _openrouter_requests(events) -> list[dict]:
 
 async def check_claude(key: str | None) -> None:
     """The claude CLI reports the model it resolved in its init message."""
-    spec = AgentSpec(name="attr-claude", model=CLAUDE_MODEL, max_turns=4, max_budget_usd=0.20)
+    spec = AgentSpec(harness="claude-code", name="attr-claude", model=CLAUDE_MODEL, max_turns=4, max_budget_usd=0.20)
     events, result = await _events(spec, {"ANTHROPIC_API_KEY": key} if key else {})
     reported = _init_model(events)
     check(
@@ -71,7 +71,7 @@ async def check_claude_openrouter(model: str, key: str) -> None:
     remains available as ``cli_reported_cost_usd``.
     """
     bare = model.removeprefix("openrouter/")
-    spec = AgentSpec(name="attr-cc-or", model=model, max_turns=4, max_budget_usd=0.50)
+    spec = AgentSpec(harness="claude-code", name="attr-cc-or", model=model, max_turns=4, max_budget_usd=0.50)
     events, result = await _events(spec, {"OPENROUTER_API_KEY": key})
     reported = _init_model(events)
     check(

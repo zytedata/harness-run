@@ -1,4 +1,4 @@
-"""Prefix mentions are not proof of an effective secret-retention backstop (S15)."""
+"""Prefix mentions are not proof of an effective secret-retention backstop."""
 from copy import deepcopy
 
 import pytest

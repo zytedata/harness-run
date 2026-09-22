@@ -21,7 +21,7 @@ import traceback
 
 from agent_run import AgentSpec, sandbox
 
-PROJECT = os.environ.get("PROJECT", "my-project")
+PROJECT = os.environ.get("PROJECT", "")  # required; checked at startup, not import
 LOCATION = os.environ.get("LOCATION", "us-central1")
 SUFFIX = re.sub(r"[^a-z0-9-]", "-", (os.environ.get("SUFFIX") or getpass.getuser()).lower())
 NAME = f"agent-run-stream2t-{SUFFIX}"
@@ -49,7 +49,7 @@ async def run_turn(session, message: str, expect: str, *, resume: bool = False) 
 
 
 async def main() -> int:
-    spec = AgentSpec(name=NAME, model="claude-haiku-4-5", max_turns=8,
+    spec = AgentSpec(harness="claude-code", name=NAME, model="claude-haiku-4-5", max_turns=8,
                      max_budget_usd=1.0, checkpoint=True)
     print(f"{time.strftime('%H:%M:%S')} deploying {NAME} ...", flush=True)
     engine = sandbox.deploy(spec, PROJECT, LOCATION)
@@ -87,4 +87,6 @@ async def main() -> int:
 
 
 if __name__ == "__main__":
+    if not PROJECT:
+        sys.exit("PROJECT is required: your GCP project id")
     sys.exit(asyncio.run(main()))

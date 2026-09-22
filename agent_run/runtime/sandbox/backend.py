@@ -155,10 +155,15 @@ def _fallback_spec(name: str) -> AgentSpec:
     ``checkpoint`` (the idle stop-reason). Runs execute the image's baked spec — overlaid
     with any ``SessionConfig``/``TurnConfig`` the caller binds, which is also how the client
     recovers structured parsing and the right stop-reason without the record.
+
+    ``harness`` is left empty on purpose: without the record we do not know which CLI the
+    image bakes, and nothing on this path reads it — the worker resolves the harness from
+    the baked spec, and ``validate_harness_choice`` runs there against that spec, not this
+    one. Guessing a harness here would put a wrong answer where an absent one belongs.
     """
     from ...spec import AgentSpec
 
-    return AgentSpec(name=name, model="")
+    return AgentSpec(name=name, model="", harness="")
 
 
 def _synthetic_result(summary: str, session_id: str, event: str) -> AgentEvent:

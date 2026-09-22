@@ -1,4 +1,4 @@
-"""CAB construction must keep caller-supplied names inside string literals (S07)."""
+"""CAB construction must keep caller-supplied names inside string literals."""
 import json
 
 import pytest

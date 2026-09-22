@@ -44,6 +44,7 @@ def _ctx(spec, **kw):
 
 def test_system_prompt_inherit_appends_to_preset():
     spec = AgentSpec(
+        harness="claude-code",
         name="a", model="claude-sonnet-4-6", system_prompt=SystemPrompt.inherit(append="Be terse.")
     )
     opts = ClaudeCodeHarness().build_options(spec, _ctx(spec))
@@ -53,50 +54,50 @@ def test_system_prompt_inherit_appends_to_preset():
 
 
 def test_system_prompt_plain_string_replaces():
-    spec = AgentSpec(name="a", model="m", system_prompt="You are X.")
+    spec = AgentSpec(harness="claude-code", name="a", model="m", system_prompt="You are X.")
     opts = ClaudeCodeHarness().build_options(spec, _ctx(spec))
     assert opts.system_prompt == "You are X."
 
 
 def test_interactive_appends_suffix():
-    spec = AgentSpec(name="a", model="m")  # system_prompt None
+    spec = AgentSpec(harness="claude-code", name="a", model="m")  # system_prompt None
     opts = ClaudeCodeHarness().build_options(spec, _ctx(spec, interactive=True))
     assert opts.system_prompt["preset"] == "claude_code"
     assert "INTERACTIVE MODE" in opts.system_prompt["append"]
 
 
 def test_default_allowed_tools_when_unset_and_disallowed_passthrough():
-    spec = AgentSpec(name="a", model="m", disallowed_tools=["WebSearch"])
+    spec = AgentSpec(harness="claude-code", name="a", model="m", disallowed_tools=["WebSearch"])
     opts = ClaudeCodeHarness().build_options(spec, _ctx(spec))
     assert "Bash" in opts.allowed_tools and "Read" in opts.allowed_tools
     assert opts.disallowed_tools == ["WebSearch"]
 
 
 def test_reasoning_effort_passthrough_and_floor():
-    spec = AgentSpec(name="a", model="m", reasoning_effort="high")
+    spec = AgentSpec(harness="claude-code", name="a", model="m", reasoning_effort="high")
     assert ClaudeCodeHarness().build_options(spec, _ctx(spec)).effort == "high"
     # Codex-only levels floor to Claude's lowest; unset leaves the SDK default.
     for codex_only in ("minimal", "none"):
-        low = AgentSpec(name="a", model="m", reasoning_effort=codex_only)
+        low = AgentSpec(harness="claude-code", name="a", model="m", reasoning_effort=codex_only)
         assert ClaudeCodeHarness().build_options(low, _ctx(low)).effort == "low"
-    unset = AgentSpec(name="a", model="m")
+    unset = AgentSpec(harness="claude-code", name="a", model="m")
     assert ClaudeCodeHarness().build_options(unset, _ctx(unset)).effort is None
 
 
 def test_max_buffer_size_reaches_the_sdk_and_beats_its_1mib_default():
     # The SDK caps ONE stdout message at 1 MiB and raises inside its read loop past that,
     # killing the turn with no result; the spec's cap must actually reach the transport.
-    spec = AgentSpec(name="a", model="m")
+    spec = AgentSpec(harness="claude-code", name="a", model="m")
     assert ClaudeCodeHarness().build_options(spec, _ctx(spec)).max_buffer_size == (
         DEFAULT_MAX_BUFFER_SIZE
     )
-    raised = AgentSpec(name="a", model="m", max_buffer_size=64 * 1024 * 1024)
+    raised = AgentSpec(harness="claude-code", name="a", model="m", max_buffer_size=64 * 1024 * 1024)
     opts = ClaudeCodeHarness().build_options(raised, _ctx(raised))
     assert opts.max_buffer_size == 64 * 1024 * 1024
 
 
 def test_github_mcp_built_from_resolved_secret_only():
-    spec = AgentSpec(name="a", model="m", mcp_servers=[McpServer.github()])
+    spec = AgentSpec(harness="claude-code", name="a", model="m", mcp_servers=[McpServer.github()])
     # No token resolved → server skipped (never errors, never logs a token).
     assert ClaudeCodeHarness().build_options(spec, _ctx(spec)).mcp_servers == {}
     # Token present in resolved secrets → http MCP block with Bearer auth.
@@ -107,14 +108,14 @@ def test_github_mcp_built_from_resolved_secret_only():
 
 def test_mcp_config_is_strict():
     # Only spec.mcp_servers reaches the agent; a `.mcp.json` in the workspace does not.
-    spec = AgentSpec(name="a", model="m")
+    spec = AgentSpec(harness="claude-code", name="a", model="m")
     assert ClaudeCodeHarness().build_options(spec, _ctx(spec)).strict_mcp_config is True
 
 
 def test_hooks_passed_through():
     # PreToolUse fires under every permission mode — including bypassPermissions, which
     # shadows can_use_tool — so hooks are the seam for observing every tool call.
-    spec = AgentSpec(name="a", model="m")
+    spec = AgentSpec(harness="claude-code", name="a", model="m")
     hooks = {"PreToolUse": []}
     assert ClaudeCodeHarness().build_options(spec, _ctx(spec, hooks=hooks)).hooks is hooks
     assert ClaudeCodeHarness().build_options(spec, _ctx(spec)).hooks is None
@@ -122,21 +123,22 @@ def test_hooks_passed_through():
 
 def test_remote_mcp_passthrough():
     spec = AgentSpec(
+        harness="claude-code",
         name="a",
         model="m",
-        mcp_servers=[McpServer.remote("zyte", "https://mcp.zyte.com", {"X-Key": "v"})],
+        mcp_servers=[McpServer.remote("remote", "https://mcp.example.com", {"X-Key": "v"})],
     )
     opts = ClaudeCodeHarness().build_options(spec, _ctx(spec))
-    assert opts.mcp_servers["zyte"] == {
+    assert opts.mcp_servers["remote"] == {
         "type": "http",
-        "url": "https://mcp.zyte.com",
+        "url": "https://mcp.example.com",
         "headers": {"X-Key": "v"},
     }
 
 
 def test_agent_visible_secrets_forwarded_to_env():
     # A caller's own API key (per-invocation) plus non-secret spec.env both reach the agent env.
-    spec = AgentSpec(name="a", model="m", env={"FOO": "bar"})
+    spec = AgentSpec(harness="claude-code", name="a", model="m", env={"FOO": "bar"})
     opts = ClaudeCodeHarness().build_options(spec, _ctx(spec, secrets={"SH_APIKEY": "sekret"}))
     assert opts.env["SH_APIKEY"] == "sekret" and opts.env["FOO"] == "bar"
 
@@ -144,7 +146,7 @@ def test_agent_visible_secrets_forwarded_to_env():
 def test_caller_path_is_the_base_not_discarded():
     # Regression (eval-harness feedback issue 2): the uv-dir prepend rebuilt PATH from
     # os.environ, silently discarding a caller-supplied spec.env["PATH"].
-    spec = AgentSpec(name="a", model="m", env={"PATH": "/my/venv/bin:/usr/bin"})
+    spec = AgentSpec(harness="claude-code", name="a", model="m", env={"PATH": "/my/venv/bin:/usr/bin"})
     opts = ClaudeCodeHarness().build_options(spec, _ctx(spec))
     path = opts.env["PATH"]
     assert path.endswith(":/my/venv/bin:/usr/bin")  # caller PATH survives as the base
@@ -153,7 +155,7 @@ def test_caller_path_is_the_base_not_discarded():
 
 def test_ctx_env_layered_after_spec_env():
     # Runtime-resolved env (e.g. the local packages venv) is applied after spec.env.
-    spec = AgentSpec(name="a", model="m", env={"FOO": "spec", "BAR": "spec"})
+    spec = AgentSpec(harness="claude-code", name="a", model="m", env={"FOO": "spec", "BAR": "spec"})
     ctx = _ctx(spec, env={"FOO": "runtime", "VIRTUAL_ENV": "/w/venv"})
     opts = ClaudeCodeHarness().build_options(spec, ctx)
     assert opts.env["FOO"] == "runtime" and opts.env["BAR"] == "spec"
@@ -164,6 +166,7 @@ def test_harness_consumed_secrets_excluded_from_agent_env():
     # Repo push token + GitHub MCP token are consumed by git/MCP, so they must NOT appear as
     # environment variables the agent can read; the caller's own key still does.
     spec = AgentSpec(
+        harness="claude-code",
         name="a",
         model="m",
         repos=[RepoSource.git("https://github.com/acme/x", auth="BB_TOKEN")],
@@ -179,7 +182,7 @@ def test_harness_consumed_secrets_excluded_from_agent_env():
 
 
 def test_checkpoint_session_wiring():
-    spec = AgentSpec(name="a", model="m", checkpoint=True)
+    spec = AgentSpec(harness="claude-code", name="a", model="m", checkpoint=True)
     store = object()
     opts = ClaudeCodeHarness().build_options(spec, _ctx(spec, session_store=store))
     assert opts.session_store is store and opts.session_store_flush is True
@@ -192,7 +195,7 @@ def test_checkpoint_session_wiring():
 
 
 def test_interactive_false_omits_suffix():
-    spec = AgentSpec(name="a", model="m")  # system_prompt None
+    spec = AgentSpec(harness="claude-code", name="a", model="m")  # system_prompt None
     opts = ClaudeCodeHarness().build_options(spec, _ctx(spec, interactive=False))
     # Claude Code's own prompt, with no INTERACTIVE MODE injection.
     assert opts.system_prompt == {"type": "preset", "preset": "claude_code"}
@@ -208,7 +211,7 @@ _OR = "openrouter/moonshotai/kimi-k3"
 
 
 def test_openrouter_points_the_cli_at_openrouter():
-    spec = AgentSpec(name="a", model=_OR)
+    spec = AgentSpec(harness="claude-code", name="a", model=_OR)
     ctx = _ctx(spec, secrets={"OPENROUTER_API_KEY": "sk-or-1"})
     opts = ClaudeCodeHarness().build_options(spec, ctx)
 
@@ -228,7 +231,7 @@ def test_openrouter_points_the_cli_at_openrouter():
 
 def test_unlisted_openrouter_model_gets_no_context_window():
     """An id the table does not carry still runs; the CLI then assumes its own 200k."""
-    spec = AgentSpec(name="a", model="openrouter/some-vendor/brand-new-model")
+    spec = AgentSpec(harness="claude-code", name="a", model="openrouter/some-vendor/brand-new-model")
     opts = ClaudeCodeHarness().build_options(
         spec, _ctx(spec, secrets={"OPENROUTER_API_KEY": "sk-or-1"})
     )
@@ -251,12 +254,13 @@ def test_output_schema_uses_claude_sdk_format_and_steers_openrouter():
         "properties": {"answer": {"type": "integer"}},
         "required": ["answer"],
     }
-    claude = AgentSpec(name="a", model="claude-haiku-4-5", output_schema=schema)
+    claude = AgentSpec(harness="claude-code", name="a", model="claude-haiku-4-5", output_schema=schema)
     claude_opts = ClaudeCodeHarness().build_options(claude, _ctx(claude))
     assert claude_opts.output_format == {"type": "json_schema", "schema": schema}
     assert "FINAL MESSAGE FORMAT" not in str(claude_opts.system_prompt)
 
     openrouter = AgentSpec(
+        harness="claude-code",
         name="a",
         model=_OR,
         output_schema=schema,
@@ -276,7 +280,7 @@ def test_output_schema_uses_claude_sdk_format_and_steers_openrouter():
 
 def test_openrouter_blanks_the_auth_sources_that_outrank_the_token():
     """A deployed engine bakes CLAUDE_CODE_USE_VERTEX, which would win over the token."""
-    spec = AgentSpec(name="a", model=_OR, env={"CLAUDE_CODE_USE_VERTEX": "1"})
+    spec = AgentSpec(harness="claude-code", name="a", model=_OR, env={"CLAUDE_CODE_USE_VERTEX": "1"})
     ctx = _ctx(spec, secrets={"OPENROUTER_API_KEY": "k"})
     env = ClaudeCodeHarness().build_options(spec, ctx).env
 
@@ -291,14 +295,14 @@ def test_openrouter_blanks_the_auth_sources_that_outrank_the_token():
 
 def test_openrouter_without_a_key_raises(monkeypatch):
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
-    spec = AgentSpec(name="a", model=_OR)
+    spec = AgentSpec(harness="claude-code", name="a", model=_OR)
     with pytest.raises(RuntimeError, match="no OpenRouter credentials"):
         ClaudeCodeHarness().build_options(spec, _ctx(spec, secrets={}))
 
 
 def test_openrouter_key_is_removed_before_bash_tools():
     """The CLI receives auth, while its Bash wrapper removes it from tool processes."""
-    spec = AgentSpec(name="a", model=_OR)
+    spec = AgentSpec(harness="claude-code", name="a", model=_OR)
     assert harness_consumed_secret_names(spec) == {"OPENROUTER_API_KEY"}
     ctx = _ctx(spec, secrets={"OPENROUTER_API_KEY": "k", "MY_TOKEN": "visible"})
     env = ClaudeCodeHarness().build_options(spec, ctx).env
@@ -311,7 +315,7 @@ def test_openrouter_key_is_removed_before_bash_tools():
 
 
 def test_claude_model_is_untouched_by_any_of_this():
-    spec = AgentSpec(name="a", model="claude-haiku-4-5")
+    spec = AgentSpec(harness="claude-code", name="a", model="claude-haiku-4-5")
     env = ClaudeCodeHarness().build_options(spec, _ctx(spec)).env
     assert "ANTHROPIC_BASE_URL" not in env
     assert "ANTHROPIC_CUSTOM_MODEL_OPTION" not in env
@@ -413,7 +417,7 @@ def test_claude_models_keep_the_cli_cost():
 @pytest.mark.parametrize("provider", ["moonshotai", None])
 def test_openrouter_turns_use_the_local_proxy_on_claude(provider):
     """Pinned or not, the CLI talks to the proxy and never holds the account key."""
-    spec = AgentSpec(name="a", model=_OR, openrouter_provider=provider)
+    spec = AgentSpec(harness="claude-code", name="a", model=_OR, openrouter_provider=provider)
     opts = ClaudeCodeHarness().build_options(
         spec,
         _ctx(spec, secrets={"OPENROUTER_API_KEY": "real-key"}),
@@ -459,7 +463,7 @@ def test_unpriced_openrouter_model_reports_no_cost():
 
 
 def test_a_pinned_provider_becomes_a_closed_routing_object():
-    spec = AgentSpec(name="a", model=_OR, openrouter_provider="moonshotai")
+    spec = AgentSpec(harness="claude-code", name="a", model=_OR, openrouter_provider="moonshotai")
     assert openrouter_provider_routing(spec) == {
         "only": ["moonshotai"],
         "allow_fallbacks": False,
@@ -468,7 +472,7 @@ def test_a_pinned_provider_becomes_a_closed_routing_object():
 
 def test_a_routing_object_is_passed_through_unchanged():
     routing = {"order": ["moonshotai", "fireworks"], "allow_fallbacks": True}
-    spec = AgentSpec(name="a", model=_OR, openrouter_routing=routing)
+    spec = AgentSpec(harness="claude-code", name="a", model=_OR, openrouter_routing=routing)
     resolved = openrouter_provider_routing(spec)
 
     assert resolved == routing
@@ -476,7 +480,7 @@ def test_a_routing_object_is_passed_through_unchanged():
 
 
 def test_no_provider_preference_resolves_to_nothing():
-    assert openrouter_provider_routing(AgentSpec(name="a", model=_OR)) is None
+    assert openrouter_provider_routing(AgentSpec(harness="claude-code", name="a", model=_OR)) is None
 
 
 # -- one schema steer ---------------------------------------------------------
@@ -486,7 +490,7 @@ def test_no_provider_preference_resolves_to_nothing():
 
 
 def test_the_schema_steer_states_the_schema_for_an_openrouter_turn():
-    spec = AgentSpec(name="a", model=_OR, output_schema={"type": "object"})
+    spec = AgentSpec(harness="claude-code", name="a", model=_OR, output_schema={"type": "object"})
     steer = openrouter_schema_steer(spec)
 
     assert "FINAL MESSAGE FORMAT" in steer
@@ -498,8 +502,8 @@ def test_the_schema_steer_states_the_schema_for_an_openrouter_turn():
 @pytest.mark.parametrize(
     "spec",
     [
-        AgentSpec(name="a", model="claude-sonnet-4-5", output_schema={"type": "object"}),
-        AgentSpec(name="a", model=_OR),
+        AgentSpec(harness="claude-code", name="a", model="claude-sonnet-4-5", output_schema={"type": "object"}),
+        AgentSpec(harness="claude-code", name="a", model=_OR),
     ],
     ids=["native-model", "no-schema"],
 )

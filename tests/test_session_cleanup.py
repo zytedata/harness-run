@@ -1,4 +1,4 @@
-"""Cancellation and failed acquisition never leak the run's resources (B01/B04, sandbox edition).
+"""Cancellation and failed acquisition never leak the run's resources.
 
 * a setup failure before dispatch (token minting, a config read) leaves no refresher and
   never reaches the platform;

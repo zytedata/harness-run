@@ -51,7 +51,7 @@ Pass criteria per check: terminal result with ``error=False``, ``turns > 0``, th
 answer in the text (plus the check's own assertions). The engine (templates + sandboxes)
 is deleted in ``finally``; exit code is non-zero if any check fails.
 
-Configure via env (defaults are the shared my-project test setup):
+Configure via env (PROJECT is required; the rest have defaults):
   PROJECT, LOCATION, IMAGE_REPO, MODEL_SA (the account whose token the agent's model calls
   carry; default the toolkit's own ``agent-run-model@<project>``, the predict-only account
   ``agent-run-gcp-setup`` creates — never the operator account, whose token would hand the
@@ -83,7 +83,7 @@ import traceback
 from agent_run import AgentSpec, SessionConfig, StopReason, SystemPrompt, TurnConfig, sandbox
 from agent_run.runtime.sandbox.model_token import default_model_service_account
 
-PROJECT = os.environ.get("PROJECT", "my-project")
+PROJECT = os.environ.get("PROJECT", "")  # required; checked at startup, not import
 LOCATION = os.environ.get("LOCATION", "us-central1")
 IMAGE_REPO = os.environ.get("IMAGE_REPO") or f"{LOCATION}-docker.pkg.dev/{PROJECT}/agent-run-sandbox"
 MODEL_SA = os.environ.get("MODEL_SA") or default_model_service_account(PROJECT)
@@ -258,7 +258,7 @@ def log(label: str, msg: str) -> None:
 
 
 def _spec() -> AgentSpec:
-    return AgentSpec(name=NAME, model="claude-haiku-4-5", checkpoint=True, max_turns=8, max_budget_usd=1.0)
+    return AgentSpec(harness="claude-code", name=NAME, model="claude-haiku-4-5", checkpoint=True, max_turns=8, max_budget_usd=1.0)
 
 
 async def _drive(label: str, run, *, on_event=None):
@@ -634,4 +634,6 @@ async def main() -> int:
 
 
 if __name__ == "__main__":
+    if not PROJECT:
+        sys.exit("PROJECT is required: your GCP project id")
     sys.exit(asyncio.run(main()))

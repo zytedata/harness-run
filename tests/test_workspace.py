@@ -35,7 +35,7 @@ def _ctx(tmp_path, store, **kwargs):
     from agent_run.spec import AgentSpec
 
     return RunContext(
-        spec=AgentSpec(name="a", model="m", checkpoint=True),
+        spec=AgentSpec(harness="claude-code", name="a", model="m", checkpoint=True),
         prompt="go",
         job_dir=tmp_path / "job",
         session_id="sess-1",

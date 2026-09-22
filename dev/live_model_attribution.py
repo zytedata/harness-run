@@ -12,7 +12,7 @@ import math
 import os
 import sys
 
-from agent_run import AgentSpec, local
+from harness_run import AgentSpec, local
 
 TASK = "Reply with just the word: ok"
 CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL", "claude-haiku-4-5")

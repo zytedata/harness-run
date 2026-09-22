@@ -1,4 +1,4 @@
-"""agent-run — define and run remote/background Claude-Code agents.
+"""harness-run — define and run remote/background Claude-Code agents.
 
 Public surface (see DESIGN.md §5). Importing this package pulls in *only* stdlib;
 all third-party dependencies (claude-agent-sdk, google-adk, google-cloud-*, agentplatform,

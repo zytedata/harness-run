@@ -10,7 +10,7 @@ will keep you informed as the report is investigated and fixed.
 
 ## Scope
 
-`agent-run` runs coding agents that execute model-chosen commands, locally or in a remote sandbox.
+`harness-run` runs coding agents that execute model-chosen commands, locally or in a remote sandbox.
 Reports that are especially welcome:
 
 - a credential reaching a place the documentation says it does not (the agent's environment, an

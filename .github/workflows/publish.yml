@@ -1,6 +1,6 @@
 name: Publish to PyPI
 
-# Publishes a release to PyPI, https://pypi.org/project/agent-run/, through PyPI's Trusted
+# Publishes a release to PyPI, https://pypi.org/project/harness-run/, through PyPI's Trusted
 # Publishing (OpenID Connect): no API token is stored in this repository. PyPI is configured
 # to trust this exact workflow file in this repository when it runs in the `pypi` GitHub
 # environment; that trust is set up on the PyPI project's Publishing page, not here.
@@ -45,7 +45,7 @@ jobs:
             exit 1
           fi
           echo "version=$declared" >> "$GITHUB_OUTPUT"
-          echo "building agent-run $declared"
+          echo "building harness-run $declared"
 
       - name: Build sdist and wheel
         run: |
@@ -66,7 +66,7 @@ jobs:
     timeout-minutes: 10
     environment:
       name: pypi
-      url: https://pypi.org/project/agent-run/${{ needs.build.outputs.version }}/
+      url: https://pypi.org/project/harness-run/${{ needs.build.outputs.version }}/
     permissions:
       id-token: write  # mint the OIDC token PyPI exchanges for a short-lived upload token
     steps:

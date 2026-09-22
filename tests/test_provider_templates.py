@@ -8,8 +8,8 @@ import types
 
 import pytest
 
-from agent_run.runtime.sandbox import provider as prov
-from agent_run.runtime.sandbox.provider import AgentSandboxProvider, SandboxError
+from harness_run.runtime.sandbox import provider as prov
+from harness_run.runtime.sandbox.provider import AgentSandboxProvider, SandboxError
 
 INSTANCE = "projects/p/locations/l/reasoningEngines/1"
 

@@ -36,7 +36,7 @@ the blast radius:
 3. **Least secrets per run** — pass only what the task needs.
 
 **LLM API key.** By default `sandbox` routes the model through **Vertex** with **hourly tokens** the client
-mints from a predict-only service account (`agent-run-model@<project>`, created by `agent-run-gcp-setup`) and the
+mints from a predict-only service account (`harness-run-model@<project>`, created by `harness-run-gcp-setup`) and the
 sandbox worker serves to Claude Code from a loopback metadata server (the client pushes a fresh one every
 25 minutes while the turn runs, so long turns just work — see [Long turns](gcp-setup.md)).
 The token is not in the agent's environment, but the agent's shell can fetch it the way the CLI does — the

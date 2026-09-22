@@ -3,8 +3,8 @@ import datetime as dt
 import time
 from pathlib import Path
 
-from agent_run.events import AgentEvent
-from agent_run.runtime.sandbox import resources
+from harness_run.events import AgentEvent
+from harness_run.runtime.sandbox import resources
 
 
 def _v1_tree(root: Path, *, usage=575_750_144, limit=None, cpu_ns=3_420_000_000, meminfo_kb=1_048_576) -> Path:
@@ -120,8 +120,8 @@ def test_sample_rows_keeps_only_samples_and_parses_the_time():
 
 
 def test_run_result_carries_the_sampled_high_water_marks():
-    from agent_run.runtime._run import build_result
-    from agent_run.spec import AgentSpec
+    from harness_run.runtime._run import build_result
+    from harness_run.spec import AgentSpec
 
     spec = AgentSpec(harness="claude-code", name="a", model="m")
     ev = AgentEvent(kind="result", summary="42", raw={"subtype": "success", "num_turns": 1,

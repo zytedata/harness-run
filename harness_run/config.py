@@ -1,4 +1,4 @@
-"""Session/turn configuration overlays over a deployed :class:`~agent_run.spec.AgentSpec`.
+"""Session/turn configuration overlays over a deployed :class:`~harness_run.spec.AgentSpec`.
 
 Configuration has three scopes (README "Deploy / session / turn"):
 

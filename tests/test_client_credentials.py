@@ -5,9 +5,9 @@ from types import SimpleNamespace
 from sandbox_fakes import FakeSandboxProvider
 from sandbox_fakes import make_engine as _make_engine
 
-from agent_run import SessionConfig
-from agent_run.ports import blobstore
-from agent_run.runtime.sandbox import backend, handoff, history
+from harness_run import SessionConfig
+from harness_run.ports import blobstore
+from harness_run.runtime.sandbox import backend, handoff, history
 
 
 def test_config_operations_use_explicit_credentials(monkeypatch):

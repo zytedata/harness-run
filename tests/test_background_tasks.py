@@ -23,10 +23,10 @@ from fakes import (
     tool_result_msg,
 )
 
-from agent_run import AgentSpec
-from agent_run.harness.claude_code import ClaudeCodeHarness, _TaskTracker
-from agent_run.harness.context import RunContext
-from agent_run.harness.translate import EventTranslator
+from harness_run import AgentSpec
+from harness_run.harness.claude_code import ClaudeCodeHarness, _TaskTracker
+from harness_run.harness.context import RunContext
+from harness_run.harness.translate import EventTranslator
 
 
 def _install_fake_proxy(monkeypatch, *, cost=None, events=(), idle=True, blocked=False):
@@ -34,7 +34,7 @@ def _install_fake_proxy(monkeypatch, *, cost=None, events=(), idle=True, blocked
 
     Returns the list of constructor arguments, one entry per proxy created.
     """
-    from agent_run.harness import _openrouter_proxy
+    from harness_run.harness import _openrouter_proxy
 
     created = []
 
@@ -78,9 +78,9 @@ def _events_of(script, tmp_path, monkeypatch, spec=None, secrets=None):
     monkeypatch.setattr(claude_agent_sdk, "ClaudeSDKClient", client_cls)
     spec = spec or AgentSpec(harness="claude-code", name="a", model="m")
     if (spec.model or "").startswith("openrouter/"):
-        from agent_run.harness import _openrouter_proxy
+        from harness_run.harness import _openrouter_proxy
 
-        if _openrouter_proxy.OpenRouterProxy.__module__.startswith("agent_run"):
+        if _openrouter_proxy.OpenRouterProxy.__module__.startswith("harness_run"):
             # Every OpenRouter turn starts a proxy; keep the offline suite off sockets.
             _install_fake_proxy(monkeypatch)
     ctx = RunContext(
@@ -231,7 +231,7 @@ def test_active_reinvocation_is_not_subject_to_notification_grace(tmp_path, monk
     # Once init proves the CLI re-invoked the model, the notification grace is over. A
     # foreground tool/model step must not inherit that timeout. Record the timeout chosen
     # for each stream read so the state boundary is deterministic without sleeping.
-    import agent_run.harness.claude_code as harness_mod
+    import harness_run.harness.claude_code as harness_mod
 
     # Stream reads go through ControlledStream.next(timeout) (the stream and the operator's
     # control channel are read together); record the timeout each read was given.
@@ -385,7 +385,7 @@ def test_final_result_carries_displaced_deliverable_and_build_result_recovers_it
     assert final.kind == "result" and "Noted" in final.summary
     assert final.raw["segment_summaries"] == [_DELIVERABLE]
 
-    from agent_run.runtime._run import build_result
+    from harness_run.runtime._run import build_result
 
     result, _ = build_result(final, "sid", spec)
     assert result.structured_output == {"url": "https://rothys.com"}
@@ -536,7 +536,7 @@ def test_openrouter_run_passes_routing_to_proxy(tmp_path, monkeypatch):
 
 def test_openrouter_proxies_without_a_provider(tmp_path, monkeypatch):
     """An unpinned turn still goes through the proxy: that is where cost comes from."""
-    from agent_run.events import AgentEvent
+    from harness_run.events import AgentEvent
 
     proxy_event = AgentEvent(
         kind="status",
@@ -602,7 +602,7 @@ def test_metadata_timeout_is_reported_before_the_result(tmp_path, monkeypatch):
 
 
 def _result_event(summary, segment_summaries=None):
-    from agent_run.events import AgentEvent
+    from harness_run.events import AgentEvent
 
     raw = {"subtype": "success", "is_error": False, "num_turns": 1}
     if segment_summaries is not None:
@@ -611,7 +611,7 @@ def _result_event(summary, segment_summaries=None):
 
 
 def test_build_result_terminal_parse_wins_over_segments():
-    from agent_run.runtime._run import build_result
+    from harness_run.runtime._run import build_result
 
     spec = AgentSpec(harness="claude-code", name="a", model="m", output_schema=_SCHEMA)
     ev = _result_event('{"url": "https://final.example"}', ['{"url": "https://old.example"}'])
@@ -621,7 +621,7 @@ def test_build_result_terminal_parse_wins_over_segments():
 
 
 def test_build_result_skips_schema_invalid_segments():
-    from agent_run.runtime._run import build_result
+    from harness_run.runtime._run import build_result
 
     spec = AgentSpec(harness="claude-code", name="a", model="m", output_schema=_SCHEMA)
     ev = _result_event(
@@ -634,7 +634,7 @@ def test_build_result_skips_schema_invalid_segments():
 
 
 def test_build_result_ignores_segments_without_schema():
-    from agent_run.runtime._run import build_result
+    from harness_run.runtime._run import build_result
 
     spec = AgentSpec(harness="claude-code", name="a", model="m")
     ev = _result_event("done", ['{"url": "https://x.example"}'])

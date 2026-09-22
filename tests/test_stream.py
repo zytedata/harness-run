@@ -13,10 +13,10 @@ import time
 
 import pytest
 
-from agent_run.events import AgentEvent
-from agent_run.ports.blobstore import LocalBlobStore
-from agent_run.runtime.sandbox import stream as stream_mod
-from agent_run.runtime.sandbox.stream import MirrorStream, tail_stream
+from harness_run.events import AgentEvent
+from harness_run.ports.blobstore import LocalBlobStore
+from harness_run.runtime.sandbox import stream as stream_mod
+from harness_run.runtime.sandbox.stream import MirrorStream, tail_stream
 
 URI = "gs://bkt/events"  # store= overrides the bucket; only the prefix ("events") is used
 
@@ -218,7 +218,7 @@ def test_tail_times_out_wedged_list_and_retries(tmp_path, monkeypatch):
 def test_submit_requires_an_output_bucket():
     from sandbox_fakes import FakeSandboxProvider, make_engine
 
-    from agent_run.runtime.sandbox import backend
+    from harness_run.runtime.sandbox import backend
 
     engine = make_engine(FakeSandboxProvider(), output_bucket=None)
     with pytest.raises(ValueError, match="output bucket"):

@@ -7,7 +7,7 @@ same `AgentSpec` and `Engine`/`Session`/`Run` API as [`../minimal`](../minimal) 
 ## Prerequisites
 
 GCP setup from the top-level [GCP setup](../../docs/gcp-setup.md)
-(`agent-run-gcp-setup`: image repo, model service account, output bucket), the Claude model (`spec.model`)
+(`harness-run-gcp-setup`: image repo, model service account, output bucket), the Claude model (`spec.model`)
 **enabled in your Vertex Model Garden**, the Docker CLI logged into the registry, and a Python 3.12 env with
 the toolkit installed (`uv pip install -e .`).
 

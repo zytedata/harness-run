@@ -14,12 +14,12 @@ from pathlib import Path
 import pytest
 from sandbox_fakes import FakeSandboxProvider, ScriptedWorker, make_engine, result_event
 
-from agent_run import AgentSpec, SessionConfig, TurnConfig
-from agent_run.events import AgentEvent, RunStatus, StopReason
-from agent_run.ports.blobstore import LocalBlobStore
-from agent_run.runtime.sandbox import backend, worker as worker_mod
-from agent_run.runtime.sandbox.provider import SandboxGone
-from agent_run.runtime.sandbox.worker import Worker
+from harness_run import AgentSpec, SessionConfig, TurnConfig
+from harness_run.events import AgentEvent, RunStatus, StopReason
+from harness_run.ports.blobstore import LocalBlobStore
+from harness_run.runtime.sandbox import backend, worker as worker_mod
+from harness_run.runtime.sandbox.provider import SandboxGone
+from harness_run.runtime.sandbox.worker import Worker
 
 
 async def _await(run):
@@ -46,7 +46,7 @@ class _NullMirror:
 
 
 def _patch_harness(monkeypatch, harness_cls):
-    import agent_run.harness.claude_code as harness_mod
+    import harness_run.harness.claude_code as harness_mod
 
     monkeypatch.setattr(harness_mod, "ClaudeCodeHarness", harness_cls)
 
@@ -65,7 +65,7 @@ class _DoneHarness:
 
 def _drive(worker: Worker, body: dict) -> list[AgentEvent]:
     """Run one turn to completion through the worker's endpoints; return its events."""
-    from agent_run.runtime.sandbox.history import event_from_mirror
+    from harness_run.runtime.sandbox.history import event_from_mirror
 
     acc = worker.handle("/turn", body)
     assert acc["ok"], acc
@@ -181,7 +181,7 @@ def test_a_failed_harness_result_still_carries_the_resource_peak(tmp_path, monke
 def test_history_hides_samples_and_resource_samples_returns_rows(monkeypatch):
     from sandbox_fakes import FakeSandboxProvider, make_engine
 
-    from agent_run.runtime.sandbox import history as history_mod
+    from harness_run.runtime.sandbox import history as history_mod
 
     events = [
         AgentEvent(kind="status", summary="turn started", raw={"event": "turn_started"}),
@@ -298,7 +298,7 @@ def test_worker_prep_falls_back_to_a_clean_workspace_when_the_snapshot_is_broken
     ``provision_repos`` to trip over, and the reason reaches ``workspace_ready``."""
     from types import SimpleNamespace
 
-    from agent_run.checkpoint.workspace import snapshot
+    from harness_run.checkpoint.workspace import snapshot
 
     class HalfThenFail(LocalBlobStore):
         def get_tree(self, key, local_dir):
@@ -661,7 +661,7 @@ def test_queued_messages_when_the_dispatch_fails_land_on_the_dispatch_failed_res
 
 
 def test_send_to_a_ready_worker_that_does_not_take_it_raises_control_unavailable():
-    from agent_run import ControlUnavailable
+    from harness_run import ControlUnavailable
 
     provider = FakeSandboxProvider(lambda n: ScriptedWorker())
     engine = make_engine(provider)
@@ -755,7 +755,7 @@ def test_interrupt_before_control_ready_cancels_without_a_checkpoint():
 
 
 def test_start_session_mints_a_canonical_uuid_and_binds_the_config(monkeypatch):
-    from agent_run.runtime.sandbox import handoff
+    from harness_run.runtime.sandbox import handoff
 
     recorded = {}
     monkeypatch.setattr(handoff, "persist_session_config",
@@ -774,7 +774,7 @@ def test_start_session_mints_a_canonical_uuid_and_binds_the_config(monkeypatch):
 
 
 def test_turn_config_rides_the_body_and_is_recorded(monkeypatch):
-    from agent_run.runtime.sandbox import handoff
+    from harness_run.runtime.sandbox import handoff
 
     recorded = []
     monkeypatch.setattr(handoff, "stage_turn_config",
@@ -808,7 +808,7 @@ def test_vertex_mode_without_a_model_account_fails_before_dispatch():
 
 
 def _transcript_engine(spec, monkeypatch, tmp_path):
-    import agent_run.ports.blobstore as bs
+    import harness_run.ports.blobstore as bs
 
     blobs = bs.LocalBlobStore(str(tmp_path))
     monkeypatch.setattr(bs, "GcsBlobStore", lambda bucket, prefix, **kw: blobs)
@@ -822,7 +822,7 @@ def _attached(engine, session_id):
 
 
 def test_transcripts_read_the_id_the_worker_wrote_under(tmp_path, monkeypatch):
-    from agent_run.checkpoint.session_store import BlobSessionStore, _claude_session_id
+    from harness_run.checkpoint.session_store import BlobSessionStore, _claude_session_id
 
     engine, blobs = _transcript_engine(AgentSpec(harness="claude-code", name="g", model="m", transcript=True), monkeypatch, tmp_path)
     raw_sid = "1966652674296250368"
@@ -859,7 +859,7 @@ def test_deploy_rejects_the_local_only_workspace_argument():
 def test_worker_module_layout_does_not_shadow_the_package_exports():
     import pkgutil
 
-    from agent_run import sandbox
+    from harness_run import sandbox
 
     submodules = {m.name for m in pkgutil.iter_modules(sandbox.__path__)}
     assert not submodules & set(sandbox.__all__)

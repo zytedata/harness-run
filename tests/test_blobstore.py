@@ -7,7 +7,7 @@ import tarfile
 
 import pytest
 
-from agent_run.ports.blobstore import LocalBlobStore
+from harness_run.ports.blobstore import LocalBlobStore
 
 
 def test_put_get_bytes_round_trip(tmp_path) -> None:
@@ -72,7 +72,7 @@ def test_path_traversal_rejected(tmp_path) -> None:
 
 
 def test_parse_gcs_uri_variants() -> None:
-    from agent_run.ports.blobstore import parse_gcs_uri
+    from harness_run.ports.blobstore import parse_gcs_uri
 
     assert parse_gcs_uri("gs://bkt/some/prefix") == ("bkt", "some/prefix")
     assert parse_gcs_uri("bkt/some/prefix/") == ("bkt", "some/prefix")

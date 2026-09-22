@@ -60,7 +60,7 @@ written.
 sandbox.deploy(spec, project=..., location=...)   # build + push the image, create a template; ops/CI only
 sandbox.deploy(spec, ..., warm_pool=True, pool_size=2, pool_max_wait_s=3600)   # + a ready pool, idle life 1 h
 sandbox.deploy(spec, ..., resource_limits={"cpu": "8", "memory": "16Gi"})      # sandbox CPU/RAM (default 4 / 4Gi; max 8 vCPU)
-sandbox.deploy(spec, ..., image="…-docker.pkg.dev/proj/agent-run/my-agent:tag")     # use an image you pushed; no build
+sandbox.deploy(spec, ..., image="…-docker.pkg.dev/proj/harness-run/my-agent:tag")     # use an image you pushed; no build
 sandbox.get_engine("code-agent", project=..., location=...)   # look up by name (app code; addressing only)
 sandbox.list_engines(project=..., location=...)   # discover what's deployed: {name, resource, versions}
 engine.name, engine.version, engine.resource     # identity / template id / the template's resource name

@@ -6,7 +6,7 @@ credentials for the harness in your environment (Claude Code: the Agent SDK driv
 
 ```python
 import asyncio
-from agent_run import local
+from harness_run import local
 
 async def main():
     engine = local.deploy(spec)
@@ -24,7 +24,7 @@ The deployed spec is the *default*; a session can override parts of it without r
 on sandbox alike ([full story](configuration.md#deploy--session--turn-the-three-configuration-scopes)):
 
 ```python
-from agent_run import SessionConfig, TurnConfig
+from harness_run import SessionConfig, TurnConfig
 
 session = engine.start_session(config=SessionConfig(model="claude-opus-4-6"))   # this conversation only
 result = await session.run("…", config=TurnConfig(max_budget_usd=0.5))          # this turn only

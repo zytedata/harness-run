@@ -31,9 +31,9 @@ import json
 import sys
 from pathlib import Path
 
-from agent_run import AgentSpec, local
-from agent_run.harness import pricing
-from agent_run.harness._usage import USAGE_KEYS, from_claude_model_usage
+from harness_run import AgentSpec, local
+from harness_run.harness import pricing
+from harness_run.harness._usage import USAGE_KEYS, from_claude_model_usage
 
 OUT_DIR = Path.cwd()
 

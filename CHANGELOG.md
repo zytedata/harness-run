@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to `agent-run` are documented here.
+All notable changes to `harness-run` are documented here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning is [SemVer](https://semver.org/)-style with the usual 0.x caveat:
@@ -9,11 +9,11 @@ releases (0.X.Y) do not. Every incompatible change is listed under a
 **Backwards-incompatible** heading together with update notes describing how to
 migrate.
 
-Releases are git tags (`vX.Y.Z`) on `main`, published to [PyPI](https://pypi.org/project/agent-run/)
+Releases are git tags (`vX.Y.Z`) on `main`, published to [PyPI](https://pypi.org/project/harness-run/)
 by `.github/workflows/publish.yml` through PyPI's Trusted Publishing; install a specific release with
 
 ```
-pip install "agent-run==X.Y.Z"
+pip install "harness-run==X.Y.Z"
 ```
 
 Release checklist: update this file (move the `Unreleased` section into a new
@@ -25,7 +25,7 @@ file's section as the notes.
 
 ## 0.4.0 — 2026-09-23
 
-First public release. `agent-run` was developed as an internal library (`remote-agent-toolkit`,
+First public release. `harness-run` was developed as an internal library (`remote-agent-toolkit`,
 versions 0.1.0–0.3.1); the notes below describe this release relative to 0.3.1 for the teams
 moving over, and the PR references point at that private repository. Earlier history is in the
 git log.
@@ -46,42 +46,42 @@ git log.
   `.claude/skills`, which would have staged an agent's skills where its CLI never looks and
   started it with none of them.
 
-- **The library is renamed `remote-agent-toolkit` -> `agent-run`**, ahead of the open-source
-  release. The distribution is `agent-run`, the import root is `agent_run`, the console script
-  is `agent-run-gcp-setup`, and the `RATK_*` environment variables are now `AGENT_RUN_*`
-  (`AGENT_RUN_RESOURCE_SAMPLE_S`, `AGENT_RUN_GITHUB_MCP_TOKEN`, `AGENT_RUN_OPENROUTER_PROXY_TOKEN`,
-  `AGENT_RUN_MCP_HEADER_*`, `AGENT_RUN_METADATA_PORT`, `AGENT_RUN_WORKSPACE_ROOT`,
-  `AGENT_RUN_BAKED_SPEC`). **Update note**: change your imports (`import remote_agent_toolkit`
-  -> `import agent_run`), rename any `RATK_*` variable you set, and re-run
-  `agent-run-gcp-setup --project <id>` once per project — the GCP resources the tool creates are
+- **The library is renamed `remote-agent-toolkit` -> `harness-run`**, ahead of the open-source
+  release. The distribution is `harness-run`, the import root is `harness_run`, the console script
+  is `harness-run-gcp-setup`, and the `RATK_*` environment variables are now `HARNESS_RUN_*`
+  (`HARNESS_RUN_RESOURCE_SAMPLE_S`, `HARNESS_RUN_GITHUB_MCP_TOKEN`, `HARNESS_RUN_OPENROUTER_PROXY_TOKEN`,
+  `HARNESS_RUN_MCP_HEADER_*`, `HARNESS_RUN_METADATA_PORT`, `HARNESS_RUN_WORKSPACE_ROOT`,
+  `HARNESS_RUN_BAKED_SPEC`). **Update note**: change your imports (`import remote_agent_toolkit`
+  -> `import harness_run`), rename any `RATK_*` variable you set, and re-run
+  `harness-run-gcp-setup --project <id>` once per project — the GCP resources the tool creates are
   renamed with it and the new ones do not exist yet:
-  - the Artifact Registry Docker repo `ratk` -> `agent-run` (deploy's default `image_repo`),
-  - the model service account `ratk-model@` -> `agent-run-model@`,
-  - its custom role `ratkRuntimePredict` -> `agentRunPredict`.
+  - the Artifact Registry Docker repo `ratk` -> `harness-run` (deploy's default `image_repo`),
+  - the model service account `ratk-model@` -> `harness-run-model@`,
+  - its custom role `ratkRuntimePredict` -> `harnessRunPredict`.
 
   The old repo, account and role are left in place; delete them once nothing deploys against
   them. Images already pushed to the `ratk` repo stay valid — pass `sandbox.deploy(image=...)`
   or `image_repo=...` to keep using them.
 
-  Sandbox display names now start with `agent-run-<agent>-` instead of `ratk-<agent>-`, and the
-  sandbox host is `agent-run-sandbox-host`. The display-name prefix is how a client finds and
+  Sandbox display names now start with `harness-run-<agent>-` instead of `ratk-<agent>-`, and the
+  sandbox host is `harness-run-sandbox-host`. The display-name prefix is how a client finds and
   sweeps its own sandboxes, so sandboxes created by an older version are not swept by this one:
   they are not adopted, and they expire on their own TTL (`max_turn_s`, default 8 h) instead.
   Drain or delete them before upgrading if you would rather not pay for the overlap.
 
   One identifier is deliberately **not** renamed: the `ratk-session:` uuid5 salt in
-  `agent_run/checkpoint/session_store.py`. It is a hash input, never displayed, and its output
+  `harness_run/checkpoint/session_store.py`. It is a hash input, never displayed, and its output
   keys both the transcript blob prefix and the run-scoped GCS credential's scope, so renaming it
   would silently orphan every stored session (uuid5 is one-way — they could not be found again).
   See the note in that function if it ever has to change.
 
 - **The `gemini` run-plane namespace is renamed `sandbox`**, so the two backends are now
   `local` and `sandbox` — named for where a turn runs rather than for the vendor that hosts
-  it. `agent_run.runtime.gemini` -> `agent_run.runtime.sandbox`, `gemini.deploy` /
+  it. `harness_run.runtime.gemini` -> `harness_run.runtime.sandbox`, `gemini.deploy` /
   `gemini.get_engine` / `gemini.list_engines` -> `sandbox.*`, and `GeminiEngine` /
   `GeminiSession` -> `SandboxEngine` / `SandboxSession`. The example moves with it
-  (`examples/gemini/` -> `examples/sandbox/`). **Update note**: `from agent_run.runtime import
-  gemini` becomes `from agent_run.runtime import sandbox`; the Engine/Session/Run surface is
+  (`examples/gemini/` -> `examples/sandbox/`). **Update note**: `from harness_run.runtime import
+  gemini` becomes `from harness_run.runtime import sandbox`; the Engine/Session/Run surface is
   unchanged, so nothing else in calling code moves.
 
   Nothing persisted carries the name — deploy records have no backend field — so there is no
@@ -104,8 +104,8 @@ git log.
   looks an engine up and runs turns keeps working. What breaks:
   - `sandbox.deploy` drops `service_account`, `scoped_gcs`, `min_instances`, `max_instances`,
     `staging_bucket`, `new_engine`; adds `image_repo` (Artifact Registry Docker repo; default
-    `<location>-docker.pkg.dev/<project>/agent-run`), `image` (skip the build, use a pushed image),
-    `model_service_account` (default `agent-run-model@<project>`), `max_turn_s` (a turn's ceiling on
+    `<location>-docker.pkg.dev/<project>/harness-run`), `image` (skip the build, use a pushed image),
+    `model_service_account` (default `harness-run-model@<project>`), `max_turn_s` (a turn's ceiling on
     a sandbox, default 8 h), `internet_access`, `log`. `use_vertex`, `resource_limits`
     (`cpu` now 1–8), `warm_pool` / `pool_size` / `pool_max_wait_s`, `output_bucket`,
     `credentials` stay. Deploying needs the Docker CLI logged into the registry.
@@ -121,7 +121,7 @@ git log.
   - Session ids are always client-minted UUIDs; `list_sessions()` reads the event mirror only;
     `history()` has the mirror layer only (no platform job output, no Cloud Logging).
   - CPU/RAM self-sampling stays but moves: the worker samples its cgroup (gVisor mounts v1
-    accounting) every 20 s (`AGENT_RUN_RESOURCE_SAMPLE_S` replaces `AGENT_RESOURCE_SAMPLE_S`) and
+    accounting) every 20 s (`HARNESS_RUN_RESOURCE_SAMPLE_S` replaces `AGENT_RESOURCE_SAMPLE_S`) and
     writes the samples to the session's **event mirror only** instead of the
     `agent_run_resources` Cloud Logging log — `session.resource_samples()` reads
     them from there (rows as before: `time` + `memory_current_bytes` / `memory_limit_bytes` /
@@ -145,7 +145,7 @@ git log.
     permissions), storage on the output bucket, `artifactregistry.writer` on the image repo and
     `iam.serviceAccountTokenCreator` on the model service account; the Agent Sandbox service
     agent (`service-<number>@gcp-sa-vertex-sandbox`) needs `artifactregistry.reader` on the
-    repo. `agent-run-gcp-setup` sets exactly this up (`--model-sa`, `--repo` replace
+    repo. `harness-run-gcp-setup` sets exactly this up (`--model-sa`, `--repo` replace
     `--runtime-sa`, `--staging-bucket`). The `ports.dispatch` and `ports.eventsink` modules are
     removed.
   - **Turns longer than an hour keep model access, with no setup.** The model token is not
@@ -162,9 +162,9 @@ git log.
   - **Update notes for adopters (at the pin bump):**
     1. *Deploy prerequisites:* the Docker CLI logged into Artifact Registry
        (`docker login -u oauth2accesstoken --password-stdin <region>-docker.pkg.dev`); rerun
-       `agent-run-gcp-setup --model-sa ... --repo ...` (it creates `agent-run-model@` with the predict-only
+       `harness-run-gcp-setup --model-sa ... --repo ...` (it creates `harness-run-model@` with the predict-only
        role and grants the sandbox service agent read on the repo); `roles/iam.serviceAccountTokenCreator`
-       on `agent-run-model@` for the deployer **and every identity that runs turns** (each client mints
+       on `harness-run-model@` for the deployer **and every identity that runs turns** (each client mints
        the model token). The platform caps a template at 8 vCPU; 16 GiB is verified.
     2. *Removed `deploy()` arguments now raise* (`service_account`, `scoped_gcs`, `min_instances`,
        `max_instances`, `staging_bucket`, `new_engine`), as do unknown ones — a deploy script that
@@ -312,7 +312,7 @@ git log.
   operator account, whose impersonated token — served to the agent by the worker's loopback
   metadata server — carried that account's full project permissions, and the isolation check
   probed only the platform's metadata server, so it could not notice. The default is now
-  `agent-run-model@<project>` (`default_model_service_account`), and a new **model-token** check
+  `harness-run-model@<project>` (`default_model_service_account`), and a new **model-token** check
   fetches the loopback token mid-turn through `session.exec()` and requires it refused on
   listing the project's reasoning engines, the output bucket and its service accounts (the
   turn answering proves it is good for the model). `OUTPUT_BUCKET` is configurable too.
@@ -331,7 +331,7 @@ git log.
   worker's `/events` channel, then the mirror tail, then a synthetic error after a grace period.
 - **`engine.delete()` no longer deletes the ready sandboxes of an engine whose name extends
   this one's** (zytedata/remote-agent-toolkit#84 field report). The orphan sweep matched sandboxes by display-name *prefix*, and
-  `agent-run-x-` is a prefix of `agent-run-x-b040d27-…` — so tearing down `x` next to the revision-suffixed
+  `harness-run-x-` is a prefix of `harness-run-x-b040d27-…` — so tearing down `x` next to the revision-suffixed
   `x-b040d27` (the naming the README recommends for side-by-side toolkit revisions) emptied the
   latter's pool, whose next turn then hit `FAILED_PRECONDITION` on each stale entry and fell back
   to a cold sandbox. The sweep now matches on the sandbox's **template** (one of this engine's
@@ -345,7 +345,7 @@ git log.
 - **`wait_until_warm()` verifies the sandboxes it reports as ready.** Rostered entries that no
   longer answer `/health` (deleted by another action, OOM, reclaimed) are dropped from the roster
   and deleted, so `deploy --warm N` cannot print `ready` for a pool another action has emptied.
-- **`agent-run-gcp-setup` discovers the ADC principal on a plain `gcloud auth application-default
+- **`harness-run-gcp-setup` discovers the ADC principal on a plain `gcloud auth application-default
   login`.** It asked Google's userinfo endpoint through the project-quota session, whose
   `x-goog-user-project` header made the endpoint answer 403 for a user without
   `serviceusage.serviceUsageConsumer` on the project, so the audit demanded `--impersonator` for
@@ -436,7 +436,7 @@ git log.
   (the handle then only addresses the template and a Vertex-routed turn fails at dispatch). The
   usual cause is a `deploy` interrupted while waiting for the template to be created; the warning
   says to re-run `deploy`, which is idempotent (image and template reused, record written).
-- `agent_run.checkpoint.restore()` returns a `RestoreResult` (truthy iff a snapshot
+- `harness_run.checkpoint.restore()` returns a `RestoreResult` (truthy iff a snapshot
   existed; `.found`, `.skipped`) instead of a bare `bool`, and `BlobStore.get_tree()` returns the
   list of skipped member names instead of `None`. Truthiness checks keep working; `is True`
   comparisons do not.

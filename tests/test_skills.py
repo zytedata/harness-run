@@ -6,8 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from agent_run.skills import provision
-from agent_run.spec import SkillSource
+from harness_run.skills import provision
+from harness_run.spec import SkillSource
 
 
 def _make_skill(root: Path, name: str, body: str) -> Path:

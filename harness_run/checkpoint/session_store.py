@@ -2,9 +2,9 @@
 
 Keys by **``session_id`` alone** (ignores the SDK's cwd-derived ``project_key``) so any
 worker, any cwd can resume — the SDK's default cwd-keyed local store is fatal for
-serverless. Backed by any :class:`~agent_run.ports.blobstore.BlobStore`, so a
+serverless. Backed by any :class:`~harness_run.ports.blobstore.BlobStore`, so a
 ``LocalBlobStore`` gives local checkpointing and a ``GcsBlobStore`` gives cloud resume.
-Validated by :func:`agent_run.conformance.run_session_store_conformance`.
+Validated by :func:`harness_run.conformance.run_session_store_conformance`.
 
 Design (lifted from the PoC ``gcs_session_store.py``):
 
@@ -42,7 +42,7 @@ def _claude_session_id(session_id: str) -> str:
     and a client reading transcripts back alike.
 
     The ``ratk-session:`` salt below is FROZEN and deliberately kept through the rename to
-    ``agent-run``: it is a uuid5 input, never displayed or typed, so renaming it buys
+    ``harness-run``: it is a uuid5 input, never displayed or typed, so renaming it buys
     nothing and silently orphans stored data — the derived id is the blob path prefix
     (``sessions/<csid>/main/``) and the run-scoped GCS credential's scope prefix
     (``scoped_gcs.py``), and uuid5 is one-way, so old sessions could not be found again.

@@ -19,12 +19,12 @@ import threading
 
 from sandbox_fakes import FakeSandboxProvider, ScriptedWorker, make_engine, result_event
 
-from agent_run import AgentSpec
-from agent_run.events import AgentEvent
-from agent_run.ports.blobstore import LocalBlobStore
-from agent_run.runtime.sandbox import history
-from agent_run.runtime.sandbox.stream import MirrorStream
-from agent_run.runtime.sandbox.worker import Worker
+from harness_run import AgentSpec
+from harness_run.events import AgentEvent
+from harness_run.ports.blobstore import LocalBlobStore
+from harness_run.runtime.sandbox import history
+from harness_run.runtime.sandbox.stream import MirrorStream
+from harness_run.runtime.sandbox.worker import Worker
 
 
 def _turn_calls(provider):
@@ -153,7 +153,7 @@ def test_the_worker_reacknowledges_a_turn_id_it_knows_and_refuses_a_different_on
             await asyncio.to_thread(held.wait, 5)
             yield result_event("done")
 
-    import agent_run.harness.claude_code as harness_mod
+    import harness_run.harness.claude_code as harness_mod
 
     monkeypatch.setattr(harness_mod, "ClaudeCodeHarness", HeldHarness)
     worker = Worker(workspace_root=str(tmp_path), baked=AgentSpec(harness="claude-code", name="w", model="m"), baked_skills=None,
@@ -326,7 +326,7 @@ def _is_result_batch(data: bytes) -> bool:
 
 def _real_worker_engine(tmp_path, monkeypatch, store, provider_cls=FakeSandboxProvider):
     """A real Worker per sandbox, mirroring through ``store``; the client reads history from it too."""
-    import agent_run.harness.claude_code as harness_mod
+    import harness_run.harness.claude_code as harness_mod
 
     monkeypatch.setattr(harness_mod, "ClaudeCodeHarness", _DoneHarness)
     monkeypatch.setattr(history, "GcsBlobStore", lambda bucket, *a, **kw: store)

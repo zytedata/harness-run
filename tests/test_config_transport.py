@@ -21,10 +21,10 @@ import asyncio
 import pytest
 from sandbox_fakes import FakeSandboxProvider, make_engine
 
-from agent_run import AgentSpec, SessionConfig, SkillSource, TurnConfig
-from agent_run.ports.blobstore import LocalBlobStore
-from agent_run.runtime import local
-from agent_run.runtime.sandbox import backend, handoff, history, worker as worker_mod
+from harness_run import AgentSpec, SessionConfig, SkillSource, TurnConfig
+from harness_run.ports.blobstore import LocalBlobStore
+from harness_run.runtime import local
+from harness_run.runtime.sandbox import backend, handoff, history, worker as worker_mod
 
 
 def _patched_store(tmp_path, monkeypatch):
@@ -130,7 +130,7 @@ def test_baked_skills_are_skipped_when_the_effective_skills_differ(monkeypatch, 
         staged["sources"] = tuple(sources)
         return []
 
-    import agent_run.skills as skills_mod
+    import harness_run.skills as skills_mod
     monkeypatch.setattr(skills_mod, "provision", fake_provision)
 
     class RC:

@@ -2,7 +2,7 @@
 
 Everything below is created in your own GCP project.
 
-> **One command sets all of this up:** `agent-run-gcp-setup --project <your-project>` (installed with the
+> **One command sets all of this up:** `harness-run-gcp-setup --project <your-project>` (installed with the
 > library; plain ADC, no gcloud needed) audits a project against everything in this section, shows
 > what's missing, asks for confirmation, applies it, and re-audits. It is **additive only** and
 > idempotent — safe to run, and re-run, against existing non-empty projects. `--check` audits without
@@ -45,10 +45,10 @@ in the app's secret store (`gcloud iam service-accounts keys create key.json --i
 then point `GOOGLE_APPLICATION_CREDENTIALS` at it). A key is a long-lived credential, so prefer
 impersonation or workload identity federation where they're available, and rotate keys you do hand out.
 
-**2. The model service account** — `agent-run-model@<project>.iam.gserviceaccount.com` (created by
-`agent-run-gcp-setup`; `sandbox.deploy(model_service_account=)` names another one). The sandbox runs the model
+**2. The model service account** — `harness-run-model@<project>.iam.gserviceaccount.com` (created by
+`harness-run-gcp-setup`; `sandbox.deploy(model_service_account=)` names another one). The sandbox runs the model
 on a token minted for this account, and the agent's shell can read that token, so it holds **only** a custom
-role with `aiplatform.endpoints.predict` (`agentRunPredict`) — model calls and nothing else. Never
+role with `aiplatform.endpoints.predict` (`harnessRunPredict`) — model calls and nothing else. Never
 `roles/aiplatform.user` here: it would hand the shell every sandbox and template in the project.
 
 **Platform side**: the Google-managed **Agent Sandbox service agent**,
@@ -56,10 +56,10 @@ role with `aiplatform.endpoints.predict` (`agentRunPredict`) — model calls and
 sandbox starts and needs `roles/artifactregistry.reader` on the image repo. It gets nothing else; the
 sandbox it starts runs as a zero-permission tenant identity.
 
-**Prerequisites** (`agent-run-gcp-setup` creates them; `deploy` ensures the lifecycle rules):
+**Prerequisites** (`harness-run-gcp-setup` creates them; `deploy` ensures the lifecycle rules):
 
 - An output bucket `gs://<project>-agent-output` with uniform bucket-level access.
-- An Artifact Registry Docker repo `agent-run` in the location (`sandbox.deploy(image_repo=)` names another).
+- An Artifact Registry Docker repo `harness-run` in the location (`sandbox.deploy(image_repo=)` names another).
 - **Claude model access** — see the note below.
 - The Docker CLI on the deploying machine, logged into the registry.
 
@@ -95,25 +95,25 @@ fresh project:
 ```bash
 PROJECT=your-project; REGION=us-central1; NUMBER=$(gcloud projects describe $PROJECT --format='value(projectNumber)')
 OP="agent-runtime@$PROJECT.iam.gserviceaccount.com"        # operator SA you create
-MODEL="agent-run-model@$PROJECT.iam.gserviceaccount.com"        # model identity you create
+MODEL="harness-run-model@$PROJECT.iam.gserviceaccount.com"        # model identity you create
 OUT="gs://$PROJECT-agent-output"
 
 gcloud services enable aiplatform.googleapis.com artifactregistry.googleapis.com storage.googleapis.com \
   iamcredentials.googleapis.com --project $PROJECT
 gcloud iam service-accounts create agent-runtime --project $PROJECT
-gcloud iam service-accounts create agent-run-model --project $PROJECT
+gcloud iam service-accounts create harness-run-model --project $PROJECT
 gcloud projects add-iam-policy-binding $PROJECT --member "serviceAccount:$OP" --role roles/aiplatform.user
 ## the model identity reaches Vertex only for model calls: a custom role, never roles/aiplatform.user
-gcloud iam roles create agentRunPredict --project $PROJECT --stage GA \
-  --title "agent-run model identity: model calls only" --permissions aiplatform.endpoints.predict
+gcloud iam roles create harnessRunPredict --project $PROJECT --stage GA \
+  --title "harness-run model identity: model calls only" --permissions aiplatform.endpoints.predict
 gcloud projects add-iam-policy-binding $PROJECT --member "serviceAccount:$MODEL" \
-  --role projects/$PROJECT/roles/agentRunPredict
+  --role projects/$PROJECT/roles/harnessRunPredict
 gcloud storage buckets create $OUT --project $PROJECT --uniform-bucket-level-access
 gcloud storage buckets add-iam-policy-binding $OUT --member "serviceAccount:$OP" --role roles/storage.admin
-gcloud artifacts repositories create agent-run --repository-format=docker --location=$REGION --project $PROJECT
-gcloud artifacts repositories add-iam-policy-binding agent-run --location=$REGION --project $PROJECT \
+gcloud artifacts repositories create harness-run --repository-format=docker --location=$REGION --project $PROJECT
+gcloud artifacts repositories add-iam-policy-binding harness-run --location=$REGION --project $PROJECT \
   --member "serviceAccount:$OP" --role roles/artifactregistry.writer
-gcloud artifacts repositories add-iam-policy-binding agent-run --location=$REGION --project $PROJECT \
+gcloud artifacts repositories add-iam-policy-binding harness-run --location=$REGION --project $PROJECT \
   --member "serviceAccount:service-$NUMBER@gcp-sa-vertex-sandbox.iam.gserviceaccount.com" \
   --role roles/artifactregistry.reader
 ## who mints tokens: the operator SA mints model tokens; you impersonate the operator SA
@@ -125,5 +125,5 @@ gcloud auth configure-docker $REGION-docker.pkg.dev
 ```
 
 Then authenticate impersonating the operator SA (`gcloud auth application-default login
---impersonate-service-account=$OP`); `sandbox.deploy` pushes to the `agent-run` repo and mints model tokens
+--impersonate-service-account=$OP`); `sandbox.deploy` pushes to the `harness-run` repo and mints model tokens
 from `$MODEL` by default (pass `image_repo=` / `model_service_account=` for other names).

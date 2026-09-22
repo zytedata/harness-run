@@ -110,7 +110,7 @@ LONG_MINUTES=70 make live-smoke                        # + a turn whose one Bash
 ```
 
 [`dev/live_smoke.py`](dev/live_smoke.py) deploys **a throwaway engine from your checkout**
-(named `agent-run-smoke-<you>`: image build + push with your Docker, a template, a ready pool of
+(named `harness-run-smoke-<you>`: image build + push with your Docker, a template, a ready pool of
 one), runs Haiku turns against it, and tears everything down in `finally`:
 
 - **pool-turn** — a turn on the ready sandbox: `turn_started` must say `warm=True`, the first
@@ -141,9 +141,9 @@ Prerequisites: the GCP setup from the
 (ADC that can impersonate the model service account, Haiku enabled in Vertex Model Garden)
 and the Docker CLI logged into the registry (`docker login -u oauth2accesstoken
 --password-stdin us-central1-docker.pkg.dev` with an access token). `PROJECT` names your GCP project (required);
-`IMAGE_REPO` defaults to its `agent-run-sandbox` repo; `MODEL_SA` overrides the model
-service account (default: the toolkit's `agent-run-model@<project>`, the predict-only account
-`agent-run-gcp-setup` creates — the operator account would hand the agent the whole project, and
+`IMAGE_REPO` defaults to its `harness-run-sandbox` repo; `MODEL_SA` overrides the model
+service account (default: the toolkit's `harness-run-model@<project>`, the predict-only account
+`harness-run-gcp-setup` creates — the operator account would hand the agent the whole project, and
 the smoke's **model-token** check fails on any account whose token reaches more than the
 model).
 
@@ -158,7 +158,7 @@ the platform announces changes to Agent Sandbox or when a limit in `backend.py` 
 (`EVENTS_WAIT_S`, `EVENTS_PAGE_BYTES`, the `exec()` timeout cap) needs re-grounding.
 
 ```bash
-.venv/bin/python dev/live_limits_probe.py --image us-central1-docker.pkg.dev/<project>/agent-run-sandbox/<image>:<tag> [--long-minutes 25]
+.venv/bin/python dev/live_limits_probe.py --image us-central1-docker.pkg.dev/<project>/harness-run-sandbox/<image>:<tag> [--long-minutes 25]
 ```
 
 Findings of 2026-09-11 (us-central1, 4 CPU / 8 GiB unless noted):
@@ -316,8 +316,8 @@ the event stream — the probe that caught the stale-result replay bug) and
 - **Check for leftovers** after any failed run — sandboxes bill while they exist:
 
   ```python
-  from agent_run import sandbox
-  from agent_run.runtime.sandbox.provider import AgentSandboxProvider
+  from harness_run import sandbox
+  from harness_run.runtime.sandbox.provider import AgentSandboxProvider
   for e in sandbox.list_engines("my-project", "us-central1"):
       print(e)
   for sb in AgentSandboxProvider("my-project", "us-central1").list():

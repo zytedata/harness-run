@@ -3,11 +3,11 @@ import json
 
 import pytest
 
-from agent_run import AgentSpec, McpServer, SessionConfig
-from agent_run.config import apply_session_config
-from agent_run.harness.claude_code import ClaudeCodeHarness
-from agent_run.harness.codex import CodexHarness
-from agent_run.harness.context import RunContext
+from harness_run import AgentSpec, McpServer, SessionConfig
+from harness_run.config import apply_session_config
+from harness_run.harness.claude_code import ClaudeCodeHarness
+from harness_run.harness.codex import CodexHarness
+from harness_run.harness.context import RunContext
 
 
 @pytest.mark.parametrize("header", ["Authorization", "authorization", "Cookie", "X-API-Key"])

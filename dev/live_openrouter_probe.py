@@ -22,7 +22,7 @@ import sys
 import time
 import traceback
 
-from agent_run import AgentSpec, StopReason, local
+from harness_run import AgentSpec, StopReason, local
 
 MODELS = [
     m.strip()
@@ -36,15 +36,15 @@ MODELS = [
     if m.strip()
 ]
 
-_TOOL_INPUT = b"agent-run-openrouter-tool-check-2026-08-21"
+_TOOL_INPUT = b"harness-run-openrouter-tool-check-2026-08-21"
 EXPECTED_DIGEST = hashlib.sha256(_TOOL_INPUT).hexdigest()[:16]
 EXPECTED = EXPECTED_DIGEST + ":or0:rt0:aa0:ak0"
 TASK = (
     "Run this exact command in the shell and reply with only what it prints: "
     '`python3 -c "import hashlib, os; '
-    "h=hashlib.sha256(b'agent-run-openrouter-tool-check-2026-08-21').hexdigest()[:16]; "
+    "h=hashlib.sha256(b'harness-run-openrouter-tool-check-2026-08-21').hexdigest()[:16]; "
     "s=':or%d:rt%d:aa%d:ak%d' % tuple(int(bool(os.environ.get(k))) for k in "
-    "('OPENROUTER_API_KEY','AGENT_RUN_OPENROUTER_PROXY_TOKEN',"
+    "('OPENROUTER_API_KEY','HARNESS_RUN_OPENROUTER_PROXY_TOKEN',"
     "'ANTHROPIC_AUTH_TOKEN','ANTHROPIC_API_KEY')); "
     'print(h+s)"`'
 )
@@ -161,7 +161,7 @@ async def _check_model_once(model: str, key: str, harness: str = "codex") -> dic
     label = f"{model.removeprefix('openrouter/')} [{harness}]"
     # Tight caps: the point is the round-trip, not the model's work.
     spec = AgentSpec(
-        name="agent-run-openrouter-probe",
+        name="harness-run-openrouter-probe",
         model=model,
         harness=harness,
         max_turns=8,
@@ -258,7 +258,7 @@ async def _check_resume_once(model: str, key: str, harness: str = "codex") -> di
     """One resume pair; the verdict row for it."""
     label = f"{model.removeprefix('openrouter/')} (resume) [{harness}]"
     spec = AgentSpec(
-        name="agent-run-openrouter-resume",
+        name="harness-run-openrouter-resume",
         model=model,
         harness=harness,
         checkpoint=True,  # conversation continuity is what `send` resumes
@@ -316,7 +316,7 @@ async def _check_structured_output_once(model: str, key: str, harness: str = "co
     """``output_schema`` must yield a parsed object."""
     label = f"{model.removeprefix('openrouter/')} (schema) [{harness}]"
     spec = AgentSpec(
-        name="agent-run-openrouter-schema",
+        name="harness-run-openrouter-schema",
         model=model,
         harness=harness,
         max_turns=6,
@@ -352,7 +352,7 @@ async def _check_unpinned(model: str, key: str, harness: str) -> dict:
     """No provider pin: the turn still goes through the proxy, which is where cost is."""
     label = f"{model.removeprefix('openrouter/')} unpinned [{harness}]"
     spec = AgentSpec(
-        name="agent-run-openrouter-unpinned",
+        name="harness-run-openrouter-unpinned",
         model=model,
         harness=harness,
         system_prompt="Reply briefly.",
@@ -412,7 +412,7 @@ async def _check_routing(
     """A whole routing object reaches OpenRouter, and is only judged when it can be."""
     label = f"{model.removeprefix('openrouter/')} routing {case} [{harness}]"
     spec = AgentSpec(
-        name="agent-run-openrouter-routing",
+        name="harness-run-openrouter-routing",
         model=model,
         harness=harness,
         system_prompt="Reply briefly.",
@@ -459,7 +459,7 @@ async def _check_budget(harness: str, key: str) -> dict:
     """The exact OpenRouter charge trips the cap."""
     label = f"exact-cost budget [{harness}]"
     spec = AgentSpec(
-        name="agent-run-openrouter-budget",
+        name="harness-run-openrouter-budget",
         model=BUDGET_MODEL,
         harness=harness,
         system_prompt="Reply briefly.",

@@ -167,7 +167,7 @@ _PERMISSION_MAP = {
 
 # The env var name the github MCP bearer token rides (config references the NAME; the
 # value goes into the codex process env — never onto the argv-visible --config flags).
-_GITHUB_MCP_TOKEN_ENV = "AGENT_RUN_GITHUB_MCP_TOKEN"
+_GITHUB_MCP_TOKEN_ENV = "HARNESS_RUN_GITHUB_MCP_TOKEN"
 _GITHUB_MCP_URL = "https://api.githubcopilot.com/mcp/"
 
 # OpenRouter routing (see "OpenRouter models" in the module docstring). The `openrouter/`
@@ -176,7 +176,7 @@ _GITHUB_MCP_URL = "https://api.githubcopilot.com/mcp/"
 # with the Claude binding (see :mod:`._shared`).
 _OPENROUTER_PROVIDER = "openrouter"
 _OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
-_OPENROUTER_PROXY_KEY_ENV = "AGENT_RUN_OPENROUTER_PROXY_TOKEN"
+_OPENROUTER_PROXY_KEY_ENV = "HARNESS_RUN_OPENROUTER_PROXY_TOKEN"
 _OPENROUTER_WIRE_API = "responses"
 # OpenRouter's Responses endpoint refuses a turn with reasoning disabled, and Codex sends
 # effort "none" for a model it has no metadata for.
@@ -582,7 +582,7 @@ class CodexHarness:
                 if secret_headers:
                     references = {}
                     for header, value in secret_headers.items():
-                        env_name = f"AGENT_RUN_MCP_HEADER_{len(env)}"
+                        env_name = f"HARNESS_RUN_MCP_HEADER_{len(env)}"
                         env[env_name] = value
                         references[header] = env_name
                     table = ", ".join(f"{json.dumps(k)} = {json.dumps(v)}"

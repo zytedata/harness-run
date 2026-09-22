@@ -5,7 +5,7 @@ Backs checkpoint, workspace tar, and artifacts. Protocol is stdlib-only;
 
 ``list(prefix)`` was added to the protocol (beyond the original
 put/get/exists surface) because the Claude SDK ``SessionStore`` adapter
-(:class:`~agent_run.checkpoint.session_store.BlobSessionStore`)
+(:class:`~harness_run.checkpoint.session_store.BlobSessionStore`)
 writes append-only batch objects under a per-session prefix and must enumerate
 them in lexical order to reconstruct a transcript. Prefix listing is the one
 extra capability that need demands, so it lives on the port.

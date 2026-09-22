@@ -5,7 +5,7 @@ backend (`local` → `sandbox`) changes. This is the prod path the top-level REA
 section describes, as a runnable template.
 
 Prerequisites (see the top-level README "GCP setup & required permissions"):
-  * `agent-run-gcp-setup` done for the project (image repo, model service account, bucket), the Claude
+  * `harness-run-gcp-setup` done for the project (image repo, model service account, bucket), the Claude
     model enabled in Vertex Model Garden, and Docker logged into the registry (the deploy builds
     and pushes the agent's image).
 Configure via env (PROJECT is required; the rest have defaults):
@@ -28,7 +28,7 @@ import sys
 
 import pydantic
 
-from agent_run import AgentSpec, SystemPrompt, sandbox
+from harness_run import AgentSpec, SystemPrompt, sandbox
 
 PROJECT = os.environ.get("PROJECT", "")  # required; checked at startup, not import
 LOCATION = os.environ.get("LOCATION", "us-central1")
@@ -56,7 +56,7 @@ class Answer(pydantic.BaseModel):
 
 SPEC = AgentSpec(
     harness="claude-code",
-    name="agent-run-example",
+    name="harness-run-example",
     # A family alias enabled in your Vertex Model Garden (see the README model-access note).
     model="claude-haiku-4-5",
     system_prompt=SystemPrompt.inherit(append="Be concise. Verify your work by running code."),

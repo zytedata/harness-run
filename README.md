@@ -1,11 +1,11 @@
-# agent-run
+# harness-run
 
-[![PyPI](https://img.shields.io/pypi/v/agent-run.svg)](https://pypi.org/project/agent-run/)
-[![Python versions](https://img.shields.io/pypi/pyversions/agent-run.svg)](https://pypi.org/project/agent-run/)
-[![CI](https://github.com/zytedata/agent-run/actions/workflows/ci.yml/badge.svg)](https://github.com/zytedata/agent-run/actions/workflows/ci.yml)
-[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](https://github.com/zytedata/agent-run/blob/main/LICENSE)
+[![PyPI](https://img.shields.io/pypi/v/harness-run.svg)](https://pypi.org/project/harness-run/)
+[![Python versions](https://img.shields.io/pypi/pyversions/harness-run.svg)](https://pypi.org/project/harness-run/)
+[![CI](https://github.com/zytedata/harness-run/actions/workflows/ci.yml/badge.svg)](https://github.com/zytedata/harness-run/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](https://github.com/zytedata/harness-run/blob/main/LICENSE)
 
-`agent-run` is a Python library for running coding agents locally and in remote sandbox environments through a common API.
+`harness-run` is a Python library for running coding agents locally and in remote sandbox environments through a common API.
 
 It provides an abstraction over agent harnesses such as Claude Code and Codex, with support for multiple model providers. Your application can switch harnesses or models without being tightly coupled to one vendor's agent runtime.
 
@@ -14,27 +14,27 @@ The same `Engine` → `Session` → `Run` API works locally for development and 
 ## Install
 
 ```bash
-pip install agent-run
+pip install harness-run
 ```
 
 To also run agents locally:
 
 ```bash
-pip install "agent-run[local]"
+pip install "harness-run[local]"
 ```
 
 ## Requirements
 
 - Python 3.12 or newer.
-- Credentials for the model the agent uses: an Anthropic, OpenAI or OpenRouter API key, or Vertex AI on the sandbox. See [Getting started](https://github.com/zytedata/agent-run/blob/main/docs/getting-started.md#credentials).
-- For remote runs, a GCP project prepared with `agent-run-gcp-setup --project <your-project>`. See [GCP setup](https://github.com/zytedata/agent-run/blob/main/docs/gcp-setup.md).
+- Credentials for the model the agent uses: an Anthropic, OpenAI or OpenRouter API key, or Vertex AI on the sandbox. See [Getting started](https://github.com/zytedata/harness-run/blob/main/docs/getting-started.md#credentials).
+- For remote runs, a GCP project prepared with `harness-run-gcp-setup --project <your-project>`. See [GCP setup](https://github.com/zytedata/harness-run/blob/main/docs/gcp-setup.md).
 
 ## Example
 
 Define a coding agent explicitly using the Codex harness:
 
 ```python
-from agent_run import AgentSpec
+from harness_run import AgentSpec
 
 spec = AgentSpec(
     name="code-agent",
@@ -47,7 +47,7 @@ spec = AgentSpec(
 Run it locally:
 
 ```python
-from agent_run import local
+from harness_run import local
 
 engine = local.deploy(spec)
 session = engine.start_session()
@@ -70,11 +70,11 @@ result = await session.send(
 
 ### Run remotely
 
-The same agent can run remotely on GCP Agent Sandbox. `agent-run` handles building and deploying the agent environment and running each turn inside an isolated sandbox. Credentials are passed to each run rather than baked into the deployed agent:
+The same agent can run remotely on GCP Agent Sandbox. `harness-run` handles building and deploying the agent environment and running each turn inside an isolated sandbox. Credentials are passed to each run rather than baked into the deployed agent:
 
 ```python
 import os
-from agent_run import sandbox
+from harness_run import sandbox
 
 # Deployment is normally done by CI / ops.
 sandbox.deploy(
@@ -139,7 +139,7 @@ Skills, MCP servers, a repository to work on and extra packages are all declared
 
 ```python
 import os
-from agent_run import AgentSpec, McpServer, RepoSource, SkillSource, SystemPrompt, local
+from harness_run import AgentSpec, McpServer, RepoSource, SkillSource, SystemPrompt, local
 
 spec = AgentSpec(
     name="repo-fixer",
@@ -174,11 +174,11 @@ result = await session.run(
 )
 ```
 
-The same spec deploys unchanged to the sandbox. Every other field has a default; [Configuration](https://github.com/zytedata/agent-run/blob/main/docs/configuration.md) covers the rest, from environment variables and tool allow-lists to budgets and reasoning effort.
+The same spec deploys unchanged to the sandbox. Every other field has a default; [Configuration](https://github.com/zytedata/harness-run/blob/main/docs/configuration.md) covers the rest, from environment variables and tool allow-lists to budgets and reasoning effort.
 
 ## Features
 
-Beyond the basic example, `agent-run` supports:
+Beyond the basic example, `harness-run` supports:
 
 - Multiple agent harnesses and models — Claude Code with Claude models, Codex with OpenAI models, and either harness with models served through OpenRouter.
 - Local and remote execution through the same API, with remote runs on GCP Agent Sandbox.
@@ -194,23 +194,23 @@ Beyond the basic example, `agent-run` supports:
 
 ## Documentation
 
-Start with [Getting started](https://github.com/zytedata/agent-run/blob/main/docs/getting-started.md).
+Start with [Getting started](https://github.com/zytedata/harness-run/blob/main/docs/getting-started.md).
 
-- [Harnesses and models](https://github.com/zytedata/agent-run/blob/main/docs/harnesses-and-models.md) — Claude Code, Codex, model selection, and reasoning settings
-- [Configuration](https://github.com/zytedata/agent-run/blob/main/docs/configuration.md) — `AgentSpec`, `SessionConfig`, and `TurnConfig`
-- [Sessions and runs](https://github.com/zytedata/agent-run/blob/main/docs/runs-and-sessions.md) — multi-turn conversations, streaming, polling, resume, steering, interruption, and `exec()`
-- [Local runtime](https://github.com/zytedata/agent-run/blob/main/docs/local-runtime.md) — local development and workspaces
-- [Sandbox runtime](https://github.com/zytedata/agent-run/blob/main/docs/sandbox-runtime.md) — GCP Agent Sandbox deployment, remote execution, warm pools, and engine versions
-- [Structured output](https://github.com/zytedata/agent-run/blob/main/docs/structured-output.md)
-- [OpenRouter](https://github.com/zytedata/agent-run/blob/main/docs/openrouter.md) — models and provider routing
-- [Secrets and security](https://github.com/zytedata/agent-run/blob/main/docs/secrets-and-security.md)
-- [Observability](https://github.com/zytedata/agent-run/blob/main/docs/observability.md) — events, history, transcripts, cost, usage, and resources
-- [GCP setup](https://github.com/zytedata/agent-run/blob/main/docs/gcp-setup.md)
+- [Harnesses and models](https://github.com/zytedata/harness-run/blob/main/docs/harnesses-and-models.md) — Claude Code, Codex, model selection, and reasoning settings
+- [Configuration](https://github.com/zytedata/harness-run/blob/main/docs/configuration.md) — `AgentSpec`, `SessionConfig`, and `TurnConfig`
+- [Sessions and runs](https://github.com/zytedata/harness-run/blob/main/docs/runs-and-sessions.md) — multi-turn conversations, streaming, polling, resume, steering, interruption, and `exec()`
+- [Local runtime](https://github.com/zytedata/harness-run/blob/main/docs/local-runtime.md) — local development and workspaces
+- [Sandbox runtime](https://github.com/zytedata/harness-run/blob/main/docs/sandbox-runtime.md) — GCP Agent Sandbox deployment, remote execution, warm pools, and engine versions
+- [Structured output](https://github.com/zytedata/harness-run/blob/main/docs/structured-output.md)
+- [OpenRouter](https://github.com/zytedata/harness-run/blob/main/docs/openrouter.md) — models and provider routing
+- [Secrets and security](https://github.com/zytedata/harness-run/blob/main/docs/secrets-and-security.md)
+- [Observability](https://github.com/zytedata/harness-run/blob/main/docs/observability.md) — events, history, transcripts, cost, usage, and resources
+- [GCP setup](https://github.com/zytedata/harness-run/blob/main/docs/gcp-setup.md)
 
-For contributors, see [TESTING.md](https://github.com/zytedata/agent-run/blob/main/TESTING.md). For implementation details and platform architecture, see [DESIGN.md](https://github.com/zytedata/agent-run/blob/main/DESIGN.md). Release notes and upgrade instructions are in [CHANGELOG.md](https://github.com/zytedata/agent-run/blob/main/CHANGELOG.md).
+For contributors, see [TESTING.md](https://github.com/zytedata/harness-run/blob/main/TESTING.md). For implementation details and platform architecture, see [DESIGN.md](https://github.com/zytedata/harness-run/blob/main/DESIGN.md). Release notes and upgrade instructions are in [CHANGELOG.md](https://github.com/zytedata/harness-run/blob/main/CHANGELOG.md).
 
 ## License and provenance
 
-`agent-run` is developed by [Zyte](https://www.zyte.com) and released under the [Apache-2.0](https://github.com/zytedata/agent-run/blob/main/LICENSE) license.
+`harness-run` is developed by [Zyte](https://www.zyte.com) and released under the [Apache-2.0](https://github.com/zytedata/harness-run/blob/main/LICENSE) license.
 
 Much of the code was written with AI coding agents, chiefly Claude Code, with the maintainers directing the work and reviewing the result.

@@ -73,7 +73,7 @@ identity to ship telemetry with. What replaces them:
 type, no usage fields on the sandbox resource — checked 2026-09-16), so the worker samples **itself**: gVisor
 mounts cgroup v1 accounting and reports the template's memory limit as `MemTotal`. Three outputs:
 
-- **Per-session samples** — every 20 s (`AGENT_RUN_RESOURCE_SAMPLE_S` in the image env; `0` disables) to the
+- **Per-session samples** — every 20 s (`HARNESS_RUN_RESOURCE_SAMPLE_S` in the image env; `0` disables) to the
   session's **event mirror only**, not the live stream, so a watcher is not drowned and the record survives a
   mid-turn kill: after an OOM the last sample sits at most one interval before death. `session.history()`
   skips them (`history(include_samples=True)` keeps them); read them as rows with:

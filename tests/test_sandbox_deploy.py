@@ -13,9 +13,9 @@ import time
 import pytest
 from sandbox_fakes import FakeSandboxProvider
 
-from agent_run.ports.blobstore import LocalBlobStore
-from agent_run.runtime.sandbox import _image, backend, handoff
-from agent_run.spec import AgentSpec, SkillSource
+from harness_run.ports.blobstore import LocalBlobStore
+from harness_run.runtime.sandbox import _image, backend, handoff
+from harness_run.spec import AgentSpec, SkillSource
 
 
 def _spec(**overrides) -> AgentSpec:
@@ -32,7 +32,7 @@ def test_build_requirements_includes_base_and_spec_packages() -> None:
     assert "claude-agent-sdk==0.2.130" in reqs
     assert "uv>=0.5" in reqs and "google-cloud-storage" in reqs
     assert "pandas==2.2.*" in reqs
-    assert not any("agent-run" in r for r in reqs)  # the toolkit is COPYed, not installed
+    assert not any("harness-run" in r for r in reqs)  # the toolkit is COPYed, not installed
     assert not any(r.startswith(("google-adk", "google-cloud-aiplatform", "a2a-sdk", "cloudpickle")) for r in reqs)
 
 
@@ -63,8 +63,8 @@ def test_render_dockerfile_contract() -> None:
     assert "FROM python:3.12-slim-bookworm" in text
     assert "COPY skills /opt/toolkit/skills" in text
     assert "USER agent" in text and "EXPOSE 8080" in text
-    assert 'CMD ["python", "-m", "agent_run.runtime.sandbox.worker"]' in text
-    assert "AGENT_RUN_BAKED_SPEC=/opt/toolkit/spec.json" in text
+    assert 'CMD ["python", "-m", "harness_run.runtime.sandbox.worker"]' in text
+    assert "HARNESS_RUN_BAKED_SPEC=/opt/toolkit/spec.json" in text
     assert "COPY skills" not in _image.render_dockerfile(_spec(), has_skills=False)
 
 
@@ -84,7 +84,7 @@ def test_stage_build_context_is_complete_and_content_addressed(tmp_path: Path) -
     spec = _spec(skills=(SkillSource.local(str(src)),), packages=("httpx",))
     ctx, digest = _image.stage_build_context(spec)
     assert (ctx / "Dockerfile").is_file() and (ctx / "requirements.txt").is_file()
-    assert (ctx / "agent_run" / "runtime" / "sandbox" / "worker.py").is_file()
+    assert (ctx / "harness_run" / "runtime" / "sandbox" / "worker.py").is_file()
     assert (ctx / "skills" / "sk" / "SKILL.md").is_file()
     import json
     assert json.loads((ctx / "spec.json").read_text())["name"] == "test-agent"
@@ -101,9 +101,9 @@ def test_stage_build_context_is_complete_and_content_addressed(tmp_path: Path) -
 
 
 def test_image_uri_and_default_repo() -> None:
-    assert _image.default_image_repo("proj", "us-central1") == "us-central1-docker.pkg.dev/proj/agent-run"
-    assert _image.image_uri("r/repo/", "My Agent_1", "abc") == "r/repo/agent-run-my-agent_1:abc"
-    assert _image.image_uri("r/repo", "agent-run-smoke", "abc") == "r/repo/agent-run-smoke:abc"  # no double prefix
+    assert _image.default_image_repo("proj", "us-central1") == "us-central1-docker.pkg.dev/proj/harness-run"
+    assert _image.image_uri("r/repo/", "My Agent_1", "abc") == "r/repo/harness-run-my-agent_1:abc"
+    assert _image.image_uri("r/repo", "harness-run-smoke", "abc") == "r/repo/harness-run-smoke:abc"  # no double prefix
 
 
 def test_validate_resource_limits_rejects_malformed() -> None:
@@ -150,10 +150,10 @@ def test_deploy_creates_a_template_writes_the_record_and_returns_a_handle(record
     assert no_docker == []  # image existed: no build
     (tpl,) = provider.list_templates()
     assert tpl["display_name"] == "test-agent" and tpl["cpu"] == "8" and tpl["memory"] == "16Gi"
-    assert tpl["image_uri"].startswith("us-central1-docker.pkg.dev/proj/agent-run/agent-run-test-agent:")
+    assert tpl["image_uri"].startswith("us-central1-docker.pkg.dev/proj/harness-run/harness-run-test-agent:")
     assert engine.resource == tpl["name"] and engine.version == "t1" and engine.name == "test-agent"
     assert engine.spec == spec and engine._spec_known and engine._use_vertex
-    assert engine._model_service_account == "agent-run-model@proj.iam.gserviceaccount.com"
+    assert engine._model_service_account == "harness-run-model@proj.iam.gserviceaccount.com"
     record = handoff.load_deploy_record("gs://out", "test-agent", "t1", store=records)
     assert record["spec"] == spec.to_dict() and record["image"] == tpl["image_uri"]
     assert record["resource_limits"] == {"cpu": "8", "memory": "16Gi"} and record["warm_pool"] is False
@@ -164,7 +164,7 @@ def test_deploy_builds_when_the_image_is_missing_and_reuses_a_matching_template(
     provider = FakeSandboxProvider()
     monkeypatch.setattr(_image, "image_exists", lambda uri: False)
     first = backend.deploy(_spec(), "proj", "us-central1", output_bucket="gs://out", provider=provider)
-    assert len(no_docker) == 1 and no_docker[0].startswith("us-central1-docker.pkg.dev/proj/agent-run/")
+    assert len(no_docker) == 1 and no_docker[0].startswith("us-central1-docker.pkg.dev/proj/harness-run/")
     # Same spec, same toolkit: same image, and the newest template already serves it.
     second = backend.deploy(_spec(), "proj", "us-central1", output_bucket="gs://out", provider=provider)
     assert second.resource == first.resource and len(provider.list_templates()) == 1
@@ -213,15 +213,15 @@ def test_deploy_reuses_a_template_only_when_its_egress_flag_matches(records, no_
 
 
 def test_deploy_with_image_skips_the_build_and_fills_the_pool(records, no_docker, monkeypatch):
-    from agent_run.runtime.sandbox import roster as roster_mod
+    from harness_run.runtime.sandbox import roster as roster_mod
 
     monkeypatch.setattr(_image, "image_exists", lambda uri: pytest.fail("no registry check with image="))
     monkeypatch.setattr(roster_mod, "GcsRosterStore",
                         lambda bucket, credentials=None: roster_mod.InMemoryRosterStore())
     provider = FakeSandboxProvider()
     engine = backend.deploy(_spec(), "proj", "l", warm_pool=True, pool_size=2, pool_max_wait_s=600,
-                            output_bucket="gs://out", provider=provider, image="r/agent-run-x:custom")
-    assert provider.list_templates()[0]["image_uri"] == "r/agent-run-x:custom"
+                            output_bucket="gs://out", provider=provider, image="r/harness-run-x:custom")
+    assert provider.list_templates()[0]["image_uri"] == "r/harness-run-x:custom"
     assert len(provider.live()) == 2 and engine.wait_until_warm(timeout=1)
     for sb in provider.list():
         assert sb["ttl_s"] == 600 + backend.DEFAULT_MAX_TURN_S  # idle life + room for a turn

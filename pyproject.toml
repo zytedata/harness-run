@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agent-run"
-version = "0.3.1"
+version = "0.4.0"
 description = "Define and run remote/background coding agents (Claude Code, Codex) locally and in Gemini Enterprise Agent Platform sandboxes."
 readme = "README.md"
 requires-python = ">=3.12"
@@ -24,6 +24,13 @@ classifiers = [
     "Programming Language :: Python :: 3.13",
     "Topic :: Software Development :: Libraries",
 ]
+[project.urls]
+Homepage = "https://github.com/zytedata/agent-run"
+Documentation = "https://github.com/zytedata/agent-run/tree/main/docs"
+Changelog = "https://github.com/zytedata/agent-run/blob/main/CHANGELOG.md"
+Issues = "https://github.com/zytedata/agent-run/issues"
+Source = "https://github.com/zytedata/agent-run"
+
 # The base install covers the remote path (deploy + drive sandbox engines); the harness
 # SDKs live in the `local` extra below. Backend imports stay lazy, so
 # `import agent_run` is still fast.

@@ -2,8 +2,8 @@
 
 [![PyPI](https://img.shields.io/pypi/v/agent-run.svg)](https://pypi.org/project/agent-run/)
 [![Python versions](https://img.shields.io/pypi/pyversions/agent-run.svg)](https://pypi.org/project/agent-run/)
-[![CI](https://github.com/zytedata/remote-agent-toolkit/actions/workflows/ci.yml/badge.svg)](https://github.com/zytedata/remote-agent-toolkit/actions/workflows/ci.yml)
-[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![CI](https://github.com/zytedata/agent-run/actions/workflows/ci.yml/badge.svg)](https://github.com/zytedata/agent-run/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](https://github.com/zytedata/agent-run/blob/main/LICENSE)
 
 `agent-run` is a Python library for running coding agents locally and in remote sandbox environments through a common API.
 
@@ -26,8 +26,8 @@ pip install "agent-run[local]"
 ## Requirements
 
 - Python 3.12 or newer.
-- Credentials for the model the agent uses: an Anthropic, OpenAI or OpenRouter API key, or Vertex AI on the sandbox. See [Getting started](docs/getting-started.md#credentials).
-- For remote runs, a GCP project prepared with `agent-run-gcp-setup --project <your-project>`. See [GCP setup](docs/gcp-setup.md).
+- Credentials for the model the agent uses: an Anthropic, OpenAI or OpenRouter API key, or Vertex AI on the sandbox. See [Getting started](https://github.com/zytedata/agent-run/blob/main/docs/getting-started.md#credentials).
+- For remote runs, a GCP project prepared with `agent-run-gcp-setup --project <your-project>`. See [GCP setup](https://github.com/zytedata/agent-run/blob/main/docs/gcp-setup.md).
 
 ## Example
 
@@ -174,7 +174,7 @@ result = await session.run(
 )
 ```
 
-The same spec deploys unchanged to the sandbox. Every other field has a default; [Configuration](docs/configuration.md) covers the rest, from environment variables and tool allow-lists to budgets and reasoning effort.
+The same spec deploys unchanged to the sandbox. Every other field has a default; [Configuration](https://github.com/zytedata/agent-run/blob/main/docs/configuration.md) covers the rest, from environment variables and tool allow-lists to budgets and reasoning effort.
 
 ## Features
 
@@ -194,23 +194,23 @@ Beyond the basic example, `agent-run` supports:
 
 ## Documentation
 
-Start with [Getting started](docs/getting-started.md).
+Start with [Getting started](https://github.com/zytedata/agent-run/blob/main/docs/getting-started.md).
 
-- [Harnesses and models](docs/harnesses-and-models.md) — Claude Code, Codex, model selection, and reasoning settings
-- [Configuration](docs/configuration.md) — `AgentSpec`, `SessionConfig`, and `TurnConfig`
-- [Sessions and runs](docs/runs-and-sessions.md) — multi-turn conversations, streaming, polling, resume, steering, interruption, and `exec()`
-- [Local runtime](docs/local-runtime.md) — local development and workspaces
-- [Sandbox runtime](docs/sandbox-runtime.md) — GCP Agent Sandbox deployment, remote execution, warm pools, and engine versions
-- [Structured output](docs/structured-output.md)
-- [OpenRouter](docs/openrouter.md) — models and provider routing
-- [Secrets and security](docs/secrets-and-security.md)
-- [Observability](docs/observability.md) — events, history, transcripts, cost, usage, and resources
-- [GCP setup](docs/gcp-setup.md)
+- [Harnesses and models](https://github.com/zytedata/agent-run/blob/main/docs/harnesses-and-models.md) — Claude Code, Codex, model selection, and reasoning settings
+- [Configuration](https://github.com/zytedata/agent-run/blob/main/docs/configuration.md) — `AgentSpec`, `SessionConfig`, and `TurnConfig`
+- [Sessions and runs](https://github.com/zytedata/agent-run/blob/main/docs/runs-and-sessions.md) — multi-turn conversations, streaming, polling, resume, steering, interruption, and `exec()`
+- [Local runtime](https://github.com/zytedata/agent-run/blob/main/docs/local-runtime.md) — local development and workspaces
+- [Sandbox runtime](https://github.com/zytedata/agent-run/blob/main/docs/sandbox-runtime.md) — GCP Agent Sandbox deployment, remote execution, warm pools, and engine versions
+- [Structured output](https://github.com/zytedata/agent-run/blob/main/docs/structured-output.md)
+- [OpenRouter](https://github.com/zytedata/agent-run/blob/main/docs/openrouter.md) — models and provider routing
+- [Secrets and security](https://github.com/zytedata/agent-run/blob/main/docs/secrets-and-security.md)
+- [Observability](https://github.com/zytedata/agent-run/blob/main/docs/observability.md) — events, history, transcripts, cost, usage, and resources
+- [GCP setup](https://github.com/zytedata/agent-run/blob/main/docs/gcp-setup.md)
 
-For contributors, see [TESTING.md](TESTING.md). For implementation details and platform architecture, see [DESIGN.md](DESIGN.md). Release notes and upgrade instructions are in [CHANGELOG.md](CHANGELOG.md).
+For contributors, see [TESTING.md](https://github.com/zytedata/agent-run/blob/main/TESTING.md). For implementation details and platform architecture, see [DESIGN.md](https://github.com/zytedata/agent-run/blob/main/DESIGN.md). Release notes and upgrade instructions are in [CHANGELOG.md](https://github.com/zytedata/agent-run/blob/main/CHANGELOG.md).
 
 ## License and provenance
 
-`agent-run` is developed by [Zyte](https://www.zyte.com) and released under the [Apache-2.0](LICENSE) license.
+`agent-run` is developed by [Zyte](https://www.zyte.com) and released under the [Apache-2.0](https://github.com/zytedata/agent-run/blob/main/LICENSE) license.
 
 Much of the code was written with AI coding agents, chiefly Claude Code, with the maintainers directing the work and reviewing the result.

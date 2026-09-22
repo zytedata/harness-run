@@ -29,6 +29,7 @@ def _example_spec() -> AgentSpec:
         reasoning_effort="high",
         checkpoint=True,
         env={"FOO": "bar"},
+        codex_config={"web_search": "disabled", "sandbox_workspace_write.network_access": True},
     )
 
 
@@ -165,3 +166,12 @@ def test_openrouter_routing_round_trip_and_validation() -> None:
             openrouter_provider="moonshotai",
             openrouter_routing=routing,
         )
+
+
+@pytest.mark.parametrize(
+    "codex_config",
+    ["web_search=disabled", {"": True}, {"sandbox_workspace_write": {"network_access": True}}],
+)
+def test_codex_config_rejects_shapes_codex_cannot_take(codex_config) -> None:
+    with pytest.raises(ValueError):
+        AgentSpec(name="a", model="m", harness="codex", codex_config=codex_config)

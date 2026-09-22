@@ -163,6 +163,15 @@ def test_build_options_permission_and_prompt_mapping(tmp_path):
     assert "INTERACTIVE MODE" in dev  # suffix appended
     assert "base_instructions" not in opts.thread_args
 
+
+def test_plan_is_read_only_with_no_approvals(tmp_path):
+    from openai_codex import ApprovalMode, Sandbox
+
+    spec = AgentSpec(name="a", model="gpt-5.6-luna", harness="codex", permission_mode="plan")
+    opts = CodexHarness().build_options(spec, _ctx(tmp_path, spec))
+    assert opts.thread_args["sandbox"] is Sandbox.read_only
+    assert opts.thread_args["approval_mode"] is ApprovalMode.deny_all
+
     spec2 = AgentSpec(
         name="a", model="gpt-5.6-luna", harness="codex", system_prompt="Full replace."
     )
@@ -220,6 +229,32 @@ def test_build_options_mcp_servers(tmp_path):
     assert 'mcp_servers.zyte.http_headers={"X-K" = "v"}' in ovr
     assert 'mcp_servers.loc.command="svc"' in ovr
     assert 'mcp_servers.loc.args=["--fast"]' in ovr
+
+
+def test_build_options_codex_config_is_appended_last(tmp_path):
+    spec = AgentSpec(
+        name="a",
+        model="openrouter/moonshotai/kimi-k3",
+        harness="codex",
+        mcp_servers=[McpServer.stdio("loc", "svc")],
+        codex_config={
+            "sandbox_workspace_write.network_access": True,
+            "sandbox_workspace_write.writable_roots": ["/home/me/.cache/uv"],
+            "web_search": "disabled",
+            "model_context_window": 4096,
+        },
+    )
+    ctx = _ctx(tmp_path, spec, secrets={"OPENROUTER_API_KEY": "sk-or"})
+    ovr = list(CodexHarness().build_options(spec, ctx).codex_config.config_overrides)
+    assert ovr[-4:] == [
+        "sandbox_workspace_write.network_access=true",
+        'sandbox_workspace_write.writable_roots=["/home/me/.cache/uv"]',
+        'web_search="disabled"',
+        "model_context_window=4096",
+    ]
+    # The OpenRouter routing sets web_search too; the caller's copy comes last, so it wins.
+    assert ovr.count('web_search="disabled"') == 2
+    assert 'mcp_servers.loc.command="svc"' in ovr[:-4]
 
 
 def test_build_options_output_schema(tmp_path):

@@ -175,6 +175,13 @@ for the tag with this file's section as the notes.
 
 ### Added
 
+- **`AgentSpec.codex_config`**: extra Codex `config.toml` settings, as a mapping of dotted
+  key to value (strings, booleans, numbers, lists), passed to the `codex` harness as
+  `--config` overrides after the harness's own so they win, e.g.
+  `{"sandbox_workspace_write.network_access": True, "web_search": "disabled"}`.
+  Round-trips through `to_dict`/YAML and is a knob on `SessionConfig` and `TurnConfig`.
+  The `claude-code` harness ignores it with a `spec_warning` status event. Existing specs
+  are unaffected. ([#83])
 - **`Session.exec(command, *, cwd=None, timeout=None) -> ExecResult`** (#85): a read-only shell
   probe of the running turn's workspace, for showing the agent's work while it works (agentic-scraping
   renders the workspace's `git diff` every ~10 s in its change panel; the events cannot give that —
@@ -209,6 +216,15 @@ for the tag with this file's section as the notes.
   owner's turn ended `INTERRUPTED`) turns running under another process. `dev/live_smoke.py` runs
   those checks and takes `CPU` / `MEMORY` for the template's size (a 1 CPU template provisions in
   ~30 s where 4 CPU ones hit the platform's 30-minute deadline on 2026-09-14/15).
+
+### Changed
+
+- **`permission_mode="plan"` on the `codex` harness denies escalations**: the read-only
+  sandbox now pairs with `deny_all` instead of `auto_review`, matching
+  `codex exec --ask-for-approval never`. A `plan` run that asked to write or reach the
+  network could previously have that granted by Codex's auto-reviewer; now the request
+  is refused and the run stays read-only. Runs that need auto-reviewed escalations
+  should use `permission_mode="default"`. ([#83])
 
 ### Fixed
 
@@ -390,6 +406,8 @@ for the tag with this file's section as the notes.
   existed; `.found`, `.skipped`) instead of a bare `bool`, and `BlobStore.get_tree()` returns the
   list of skipped member names instead of `None`. Truthiness checks keep working; `is True`
   comparisons do not.
+
+[#83]: https://github.com/zytedata/remote-agent-toolkit/pull/83
 
 
 ## 0.3.1 — 2026-09-08

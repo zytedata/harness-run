@@ -48,6 +48,8 @@ Spec translation (parity notes):
                          on every turn, so resume keeps it). Codex has no ``max`` level;
                          it is mapped to ``xhigh`` with a status warning.
 * ``allowed_tools`` / ``disallowed_tools`` → no Codex equivalent; rejected before launch.
+* ``codex_config``     → ``--config key=value`` overrides, appended after the harness's
+                         own, so they win.
 * ``max_buffer_size``  → inert: it caps one NDJSON message on the Claude Agent SDK's own
                          stdout transport, and the Codex app-server SDK frames its stream
                          itself with no equivalent knob.
@@ -153,12 +155,14 @@ if TYPE_CHECKING:
 # the spec's vocabulary; this is the closest Codex semantics for each:
 # bypassPermissions (unattended default) = no sandbox, never ask; acceptEdits = write the
 # workspace freely but stay sandboxed; default = sandboxed with Codex's auto-reviewer
-# resolving escalations (headless runs must never block on a human); plan = read-only.
+# resolving escalations (headless runs must never block on a human); plan = read-only,
+# and nothing to approve: a read-only run has no escalation an auto-reviewer should be
+# able to grant.
 _PERMISSION_MAP = {
     "bypassPermissions": ("full_access", "deny_all"),
     "acceptEdits": ("workspace_write", "deny_all"),
     "default": ("workspace_write", "auto_review"),
-    "plan": ("read_only", "auto_review"),
+    "plan": ("read_only", "deny_all"),
 }
 
 # The env var name the github MCP bearer token rides (config references the NAME; the
@@ -711,6 +715,7 @@ class CodexHarness:
                 else []
             ),
             *mcp_overrides,
+            *(f"{k}={json.dumps(v)}" for k, v in (spec.codex_config or {}).items()),
         ]
         env = runtime_env(spec, ctx)
         # The app-server inherits this process's environment before applying ``env``.

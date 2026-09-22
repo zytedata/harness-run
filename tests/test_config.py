@@ -171,6 +171,16 @@ def test_openrouter_model_switches_per_turn_on_a_codex_engine():
     assert apply_turn_config(session_eff, TurnConfig(model="gpt-5.6-luna")).model == "gpt-5.6-luna"
 
 
+def test_codex_config_can_be_set_and_cleared_per_turn():
+    spec = AgentSpec(name="a", model="gpt-5.6-luna", harness="codex")
+    session_eff = apply_session_config(
+        spec, SessionConfig(codex_config={"sandbox_workspace_write.network_access": True})
+    )
+    turn_eff = apply_turn_config(session_eff, TurnConfig(codex_config={"web_search": "disabled"}))
+    assert turn_eff.codex_config == {"web_search": "disabled"}  # replaced, not merged
+    assert apply_turn_config(session_eff, TurnConfig(codex_config=None)).codex_config is None
+
+
 def test_sparse_round_trip_preserves_set_and_only_set_fields():
     cfg = SessionConfig(
         repos=[RepoSource.git("https://h/r.git", ref="heal-1", auth="tok")],

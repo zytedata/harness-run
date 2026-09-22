@@ -30,6 +30,7 @@ def _example_spec() -> AgentSpec:
         reasoning_effort="high",
         checkpoint=True,
         env={"FOO": "bar"},
+        codex_config={"web_search": "disabled", "sandbox_workspace_write.network_access": True},
     )
 
 
@@ -191,3 +192,10 @@ def test_resolve_harness_refuses_an_unset_harness():
 
     with pytest.raises(ValueError, match="there is no default"):
         resolve_harness(AgentSpec(name="a", model="m", harness=""))
+@pytest.mark.parametrize(
+    "codex_config",
+    ["web_search=disabled", {"": True}, {"sandbox_workspace_write": {"network_access": True}}],
+)
+def test_codex_config_rejects_shapes_codex_cannot_take(codex_config) -> None:
+    with pytest.raises(ValueError):
+        AgentSpec(name="a", model="m", harness="codex", codex_config=codex_config)

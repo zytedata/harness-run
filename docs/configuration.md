@@ -111,6 +111,9 @@ Beyond skills, several `AgentSpec` fields shape what the agent can do and the en
 - **`mcp_servers`** — `McpServer.github()`, `.remote(name, url, headers=...)`, `.stdio(name, command, args=...)`.
   A `github()` server's token is supplied per-invocation under a conventional name (`GH_TOKEN` /
   `GITHUB_TOKEN` / `GH_PAT`) and injected into its headers, not the agent's env.
+- **`codex_config`** — extra Codex `config.toml` settings as a `{dotted.key: value}` mapping (strings,
+  booleans, numbers, lists), for the `codex` harness only; `claude-code` ignores it with a status
+  warning. See [Codex](harnesses-and-models.md#codex).
 
 Credentials (the agent's own API keys, repo push tokens, MCP tokens) are **not** spec fields — they are
 passed at call time to `run`/`send`. See [Secrets & security](secrets-and-security.md).

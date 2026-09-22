@@ -53,8 +53,8 @@ is deleted in ``finally``; exit code is non-zero if any check fails.
 
 Configure via env (PROJECT is required; the rest have defaults):
   PROJECT, LOCATION, IMAGE_REPO, MODEL_SA (the account whose token the agent's model calls
-  carry; default the toolkit's own ``agent-run-model@<project>``, the predict-only account
-  ``agent-run-gcp-setup`` creates — never the operator account, whose token would hand the
+  carry; default the toolkit's own ``harness-run-model@<project>``, the predict-only account
+  ``harness-run-gcp-setup`` creates — never the operator account, whose token would hand the
   agent the project), SUFFIX (engine-name suffix; defaults to your username), CPU / MEMORY (the template's size, default the runtime's 4 / 4Gi — a 4 CPU
   template took the platform up to its 30-minute deadline on 2026-09-14/15; CPU=1 MEMORY=1Gi
   provisions in seconds), LONG_MINUTES, TOKEN_LIFETIME_S, KEEP=1 (skip teardown), IMPERSONATE=<service account email>
@@ -80,25 +80,25 @@ import sys
 import time
 import traceback
 
-from agent_run import AgentSpec, SessionConfig, StopReason, SystemPrompt, TurnConfig, sandbox
-from agent_run.runtime.sandbox.model_token import default_model_service_account
+from harness_run import AgentSpec, SessionConfig, StopReason, SystemPrompt, TurnConfig, sandbox
+from harness_run.runtime.sandbox.model_token import default_model_service_account
 
 PROJECT = os.environ.get("PROJECT", "")  # required; checked at startup, not import
 LOCATION = os.environ.get("LOCATION", "us-central1")
-IMAGE_REPO = os.environ.get("IMAGE_REPO") or f"{LOCATION}-docker.pkg.dev/{PROJECT}/agent-run-sandbox"
+IMAGE_REPO = os.environ.get("IMAGE_REPO") or f"{LOCATION}-docker.pkg.dev/{PROJECT}/harness-run-sandbox"
 MODEL_SA = os.environ.get("MODEL_SA") or default_model_service_account(PROJECT)
 OUTPUT_BUCKET = os.environ.get("OUTPUT_BUCKET") or f"gs://{PROJECT}-agent-output"
 SUFFIX = re.sub(r"[^a-z0-9-]", "-", (os.environ.get("SUFFIX") or getpass.getuser()).lower())
 LONG_MINUTES = float(os.environ.get("LONG_MINUTES", "0") or 0)
 TOKEN_LIFETIME_S = int(os.environ.get("TOKEN_LIFETIME_S", "0") or 0)
 if TOKEN_LIFETIME_S:
-    from agent_run.runtime.sandbox import backend as _backend
-    from agent_run.runtime.sandbox import model_token as _model_token
+    from harness_run.runtime.sandbox import backend as _backend
+    from harness_run.runtime.sandbox import model_token as _model_token
 
     _real_mint = _model_token.mint_model_token
     _model_token.mint_model_token = lambda creds, sa, lifetime_s=TOKEN_LIFETIME_S: _real_mint(creds, sa, TOKEN_LIFETIME_S)
     _backend.TOKEN_REFRESH_S = TOKEN_LIFETIME_S * 0.4
-NAME = f"agent-run-smoke-{SUFFIX}"
+NAME = f"harness-run-smoke-{SUFFIX}"
 IMPERSONATE = os.environ.get("IMPERSONATE") or None
 RESOURCE_LIMITS = (
     {"cpu": os.environ["CPU"], "memory": os.environ["MEMORY"]}
@@ -109,7 +109,7 @@ RESOURCE_LIMITS = (
 # ``exec <command>`` / ``steer <message> <message_id>`` / ``interrupt``; one JSON verdict line.
 REATTACH_PROBE = r"""
 import asyncio, json, os, sys
-from agent_run import ControlUnavailable, sandbox
+from harness_run import ControlUnavailable, sandbox
 name, project, location, sid, op = sys.argv[1:6]
 args = sys.argv[6:]
 creds = None
@@ -438,7 +438,7 @@ async def check_exec(engine, verdicts) -> None:
     agent's files in the agent's cwd; after the turn it raises ControlUnavailable."""
     label = "exec"
     try:
-        from agent_run import ControlUnavailable
+        from harness_run import ControlUnavailable
 
         session = engine.start_session()
         run = session.run("Create a file named probe.txt containing exactly the word PAPAYA in your "
@@ -539,7 +539,7 @@ async def check_model_token(engine, verdicts) -> None:
         verdicts[label] = _ok(r) and fetched and _refused(facts)
         if fetched and not _refused(facts):
             log(label, f"the model token reaches more than the model — {MODEL_SA} holds more than the "
-                       "predict-only role (run `agent-run-gcp-setup --check`)")
+                       "predict-only role (run `harness-run-gcp-setup --check`)")
     except Exception:
         log(label, "FAILED:\n" + traceback.format_exc())
         verdicts[label] = False

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from agent_run import (
+from harness_run import (
     INHERIT,
     AgentSpec,
     RepoSource,
@@ -19,7 +19,7 @@ from agent_run import (
     SystemPrompt,
     TurnConfig,
 )
-from agent_run.config import (
+from harness_run.config import (
     apply_session_config,
     apply_turn_config,
     validate_harness_choice,

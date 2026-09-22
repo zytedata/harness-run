@@ -5,8 +5,8 @@
 # it reproduces the environment the agent's tools run in, and you exercise it with the very
 # same `local.deploy(...)` code.
 #
-#   Build:  docker build -f dev/Dockerfile -t agent-run-dev [--build-arg EXTRA_PACKAGES="pandas httpx"] .
-#   Shell:  docker run --rm -it -e ANTHROPIC_API_KEY -v "$PWD":/work -w /work agent-run-dev
+#   Build:  docker build -f dev/Dockerfile -t harness-run-dev [--build-arg EXTRA_PACKAGES="pandas httpx"] .
+#   Shell:  docker run --rm -it -e ANTHROPIC_API_KEY -v "$PWD":/work -w /work harness-run-dev
 #
 # (the Makefile `parity-*` targets wrap these). Claude auth is passed in via the
 # environment (e.g. ANTHROPIC_API_KEY), matching how the deployed engine resolves it.
@@ -25,7 +25,7 @@ RUN apt-get update \
 # "uv ships as a Python requirement" contract. Copy only what the install needs.
 WORKDIR /opt/toolkit
 COPY pyproject.toml README.md ./
-COPY agent_run ./agent_run
+COPY harness_run ./harness_run
 # [local]: the parity image runs the harness in-process (parity-shell), like the engine.
 RUN pip install --no-cache-dir ".[local]"
 

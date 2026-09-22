@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from agent_run import (
+from harness_run import (
     DEFAULT_MAX_BUFFER_SIZE,
     AgentSpec,
     McpServer,
@@ -188,7 +188,7 @@ def test_harness_is_required_and_has_no_default():
 
 
 def test_resolve_harness_refuses_an_unset_harness():
-    from agent_run.harness import resolve_harness
+    from harness_run.harness import resolve_harness
 
     with pytest.raises(ValueError, match="there is no default"):
         resolve_harness(AgentSpec(name="a", model="m", harness=""))

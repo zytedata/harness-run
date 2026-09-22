@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import subprocess
 
-from agent_run import AgentSpec, RepoSource
-from agent_run.integrations.git import (
+from harness_run import AgentSpec, RepoSource
+from harness_run.integrations.git import (
     _auth_url,
     provision_repos,
     reauth_repos,

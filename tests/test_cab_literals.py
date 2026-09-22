@@ -3,7 +3,7 @@ import json
 
 import pytest
 
-from agent_run.runtime.sandbox.scoped_gcs import access_boundary, run_object_prefixes
+from harness_run.runtime.sandbox.scoped_gcs import access_boundary, run_object_prefixes
 
 
 @pytest.mark.parametrize("session_id", [

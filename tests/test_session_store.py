@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import asyncio
 
-from agent_run.checkpoint import BlobSessionStore
-from agent_run.conformance import run_session_store_conformance
-from agent_run.ports.blobstore import LocalBlobStore
+from harness_run.checkpoint import BlobSessionStore
+from harness_run.conformance import run_session_store_conformance
+from harness_run.ports.blobstore import LocalBlobStore
 
 
 def test_blob_session_store_conformance(tmp_path) -> None:

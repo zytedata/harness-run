@@ -28,5 +28,5 @@ def import_local_sdk(module: str, dist: str, what: str) -> Any:
             raise
         raise ModuleNotFoundError(
             f"{dist} is not installed. {what} needs the harness SDKs: "
-            f"install agent-run with the [local] extra."
+            f"install harness-run with the [local] extra."
         ) from exc

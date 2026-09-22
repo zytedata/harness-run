@@ -27,21 +27,21 @@ from fakes import init_msg, make_sdk_client, result_msg, tool_result_msg
 
 from claude_agent_sdk import AssistantMessage, TextBlock, ToolUseBlock
 
-from agent_run import AgentSpec, local
-from agent_run.checkpoint.session_store import BlobSessionStore
-from agent_run.conformance import run_harness_conformance
-from agent_run.control import (
+from harness_run import AgentSpec, local
+from harness_run.checkpoint.session_store import BlobSessionStore
+from harness_run.conformance import run_harness_conformance
+from harness_run.control import (
     ControlledStream,
     ControlMessage,
     LocalControlChannel,
 )
-from agent_run.events import AgentEvent, RunStatus, StopReason
-from agent_run.harness._shared import finalize_checkpoint
-from agent_run.harness.claude_code import ClaudeCodeHarness
-from agent_run.harness.codex import CodexHarness
-from agent_run.harness.context import RunContext
-from agent_run.ports.blobstore import LocalBlobStore
-from agent_run.runtime._run import build_result
+from harness_run.events import AgentEvent, RunStatus, StopReason
+from harness_run.harness._shared import finalize_checkpoint
+from harness_run.harness.claude_code import ClaudeCodeHarness
+from harness_run.harness.codex import CodexHarness
+from harness_run.harness.context import RunContext
+from harness_run.ports.blobstore import LocalBlobStore
+from harness_run.runtime._run import build_result
 
 
 async def _until(pred, what: str, timeout: float = 5.0):
@@ -565,7 +565,7 @@ def test_local_interrupt_checkpoints_and_a_later_send_resumes_from_it(tmp_path):
 
 
 def test_local_run_and_send_guards_while_a_turn_runs(tmp_path):
-    from agent_run.config import TurnConfig
+    from harness_run.config import TurnConfig
 
     harness = ControlAwareHarness()
     session = _local_engine(tmp_path, harness).start_session()

@@ -11,8 +11,8 @@ from pathlib import Path
 
 import pytest
 
-from agent_run import AgentSpec, local
-from agent_run.runtime import venv as venv_mod
+from harness_run import AgentSpec, local
+from harness_run.runtime import venv as venv_mod
 
 
 def test_provision_venv_uses_engine_python_and_surfaces_failure(monkeypatch, tmp_path):

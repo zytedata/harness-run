@@ -3,7 +3,7 @@
 Tar the per-job cwd to the BlobStore at a checkpoint; restore it on resume. The full
 uncommitted workspace (generated project files, downloaded artifacts, etc.) is captured so
 a fresh worker can resume with the files the agent already produced — conversation state is
-handled separately by :class:`~agent_run.checkpoint.session_store.BlobSessionStore`.
+handled separately by :class:`~harness_run.checkpoint.session_store.BlobSessionStore`.
 
 Lifted & generalized from the PoC ``checkpoint/workspace.py`` (DESIGN.md §8): these are thin
 wrappers over the ``BlobStore`` tree ops, which own the tar.gz mechanics. ``BlobStore`` is the

@@ -592,7 +592,7 @@ class ClaudeCodeHarness:
         the structured output when the model's reply to a stale task notification
         displaced it from the turn's final message.
 
-        Operator control (``ctx.control``, see :mod:`agent_run.control`) is
+        Operator control (``ctx.control``, see :mod:`harness_run.control`) is
         read alongside the stream. A ``steer`` is handed to the CLI with ``client.query()``
         — the CLI injects it into the model's next call (verified live: the turn continues
         and ends with one result). An ``interrupt`` calls ``client.interrupt()``; the CLI

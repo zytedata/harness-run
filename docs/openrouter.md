@@ -49,7 +49,7 @@ absent from the command's environment.
 **Exact cost** is the charge OpenRouter reports for each response. There is no estimated
 price: OpenRouter routes one model id to providers whose prices differ by up to 2.5x, so a
 per-model estimate would only match whoever served the call (the measured gap is in the
-[`pricing`](../agent_run/harness/pricing.py) module docstring). A turn OpenRouter reports no
+[`pricing`](../harness_run/harness/pricing.py) module docstring). A turn OpenRouter reports no
 charge for gets `cost_usd=None` on its result event, plus a `cost_unknown` status event, and its
 `max_budget_usd` cannot be enforced. `RunResult.cost_usd` is `float | None` and carries that same
 `None`, so an unreported charge stays apart from a turn that really was free.

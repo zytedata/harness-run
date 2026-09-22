@@ -6,10 +6,10 @@ import pytest
 from codex_fakes import agent_message, token_usage, turn_completed, turn_started
 from test_codex_harness import _events_of, _fake_rollout
 
-from agent_run import AgentSpec
-from agent_run.checkpoint.session_store import BlobSessionStore
-from agent_run.harness.context import RunContext
-from agent_run.ports.blobstore import LocalBlobStore
+from harness_run import AgentSpec
+from harness_run.checkpoint.session_store import BlobSessionStore
+from harness_run.harness.context import RunContext
+from harness_run.ports.blobstore import LocalBlobStore
 
 
 def context(tmp_path):

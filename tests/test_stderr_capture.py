@@ -13,9 +13,9 @@ import asyncio
 import pytest
 from fakes import make_sdk_client, result_msg
 
-from agent_run import AgentSpec
-from agent_run.harness.claude_code import ClaudeCodeHarness, _StderrCapture
-from agent_run.harness.context import RunContext
+from harness_run import AgentSpec
+from harness_run.harness.claude_code import ClaudeCodeHarness, _StderrCapture
+from harness_run.harness.context import RunContext
 
 
 def test_capture_appends_lazily_and_keeps_tail(tmp_path):

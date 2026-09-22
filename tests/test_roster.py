@@ -8,7 +8,7 @@ in-memory store, and the GCS store's precondition mapping over a fake storage cl
 
 from __future__ import annotations
 
-from agent_run.runtime.sandbox.roster import (
+from harness_run.runtime.sandbox.roster import (
     GcsRosterStore,
     InMemoryRosterStore,
     PoolRoster,

@@ -3,10 +3,10 @@ from pathlib import Path
 
 import pytest
 
-from agent_run import AgentSpec
-from agent_run.harness._shared import finalize_checkpoint
-from agent_run.harness.context import RunContext
-from agent_run.ports.blobstore import LocalBlobStore
+from harness_run import AgentSpec
+from harness_run.harness._shared import finalize_checkpoint
+from harness_run.harness.context import RunContext
+from harness_run.ports.blobstore import LocalBlobStore
 
 
 @pytest.mark.parametrize("operation", ["read_text", "write_text"])

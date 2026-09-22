@@ -7,10 +7,10 @@ import asyncio
 import pytest
 from sandbox_fakes import FakeSandboxProvider, ScriptedWorker
 
-from agent_run.events import AgentEvent
-from agent_run.ports.blobstore import LocalBlobStore
-from agent_run.runtime.sandbox import backend, history, stream
-from agent_run.runtime.sandbox.provider import SandboxGone
+from harness_run.events import AgentEvent
+from harness_run.ports.blobstore import LocalBlobStore
+from harness_run.runtime.sandbox import backend, history, stream
+from harness_run.runtime.sandbox.provider import SandboxGone
 
 SID = "sid-1"
 URI = "gs://out/events"
@@ -44,7 +44,7 @@ def storage(tmp_path, monkeypatch):
 def _provider_with(worker):
     provider = FakeSandboxProvider(lambda n: worker)
     template = provider.add_template("g")
-    handle = provider.create(template, ttl_s=60, display_name="agent-run-g-x")
+    handle = provider.create(template, ttl_s=60, display_name="harness-run-g-x")
     return provider, handle.name
 
 

@@ -1,6 +1,6 @@
 # Getting started
 
-`agent-run` defines a coding agent once, as an `AgentSpec`, and runs it through one API on two runtimes:
+`harness-run` defines a coding agent once, as an `AgentSpec`, and runs it through one API on two runtimes:
 `local` (in-process, for development) and `sandbox` (Google Cloud's Agent Sandbox, for production). This
 page gets a first agent running locally and points at what to read next.
 
@@ -9,7 +9,7 @@ page gets a first agent running locally and points at what to read next.
 Requires Python 3.12 or newer.
 
 ```bash
-pip install agent-run
+pip install harness-run
 ```
 
 The base install covers the **remote path** (deploying and driving sandbox engines — the sandbox image
@@ -17,7 +17,7 @@ installs the harness SDKs from its own baked requirements). Running agents **loc
 also runs the harness SDKs on your machine, so add the `local` extra:
 
 ```bash
-pip install "agent-run[local]"
+pip install "harness-run[local]"
 ```
 
 The SDKs are kept out of the base install because they are heavy and pin aggressively — `claude-agent-sdk`
@@ -43,7 +43,7 @@ deployment. [Secrets and security](secrets-and-security.md) has the full routing
 ## Define an agent
 
 ```python
-from agent_run import AgentSpec, SystemPrompt, SkillSource, McpServer
+from harness_run import AgentSpec, SystemPrompt, SkillSource, McpServer
 
 spec = AgentSpec(
     name="code-agent",
@@ -65,7 +65,7 @@ is ever baked into the deployment or shared across runs (see [Secrets & security
 For authenticated remote MCP servers and migration of credential-bearing config, see
 [runtime secret references and validation boundaries](secrets-and-security.md#runtime-secret-references-in-persistent-configuration).
 Every field except `name`, `model` and `harness` has a sensible default (see
-[`spec.py`](../agent_run/spec.py)); a three-line spec (`AgentSpec(name=..., model=..., harness=...)`) is
+[`spec.py`](../harness_run/spec.py)); a three-line spec (`AgentSpec(name=..., model=..., harness=...)`) is
 a valid agent. [Configuration](configuration.md) walks through the rest of the fields, and
 [Structured output](structured-output.md) covers `output_schema`.
 
@@ -77,7 +77,7 @@ Same `Engine` → `Session` → `Run` API as production, no GCP beyond model acc
 
 ```python
 import asyncio
-from agent_run import local
+from harness_run import local
 
 async def main():
     engine = local.deploy(spec)
@@ -96,7 +96,7 @@ The deployed spec is the *default*; a session can override parts of it without r
 `sandbox` alike:
 
 ```python
-from agent_run import SessionConfig, TurnConfig
+from harness_run import SessionConfig, TurnConfig
 
 session = engine.start_session(config=SessionConfig(model="gpt-5.6-sol"))      # this conversation only
 result = await session.run("…", config=TurnConfig(max_budget_usd=0.5))          # this turn only
@@ -109,7 +109,7 @@ field belongs to which.
 
 The same spec deploys to Agent Sandbox with `sandbox.deploy(spec, project=..., location=...)`, after which
 application code looks the engine up by name with `sandbox.get_engine(...)` and runs turns exactly as
-above. Deployment needs a prepared GCP project — one command, `agent-run-gcp-setup --project <your-project>`,
+above. Deployment needs a prepared GCP project — one command, `harness-run-gcp-setup --project <your-project>`,
 audits and applies everything — and the Docker CLI logged into the project's image registry.
 [GCP setup](gcp-setup.md) is the prerequisite; [Sandbox runtime](sandbox-runtime.md) covers deploying,
 warm pools, engine versions, and what a turn costs.

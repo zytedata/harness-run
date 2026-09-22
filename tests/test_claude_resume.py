@@ -6,11 +6,11 @@ import pytest
 from claude_agent_sdk import AssistantMessage, TextBlock
 from fakes import init_msg, make_sdk_client, result_msg, task_done_msg
 
-from agent_run import AgentSpec
-from agent_run.checkpoint.session_store import BlobSessionStore
-from agent_run.harness.claude_code import ClaudeCodeHarness
-from agent_run.harness.context import RunContext
-from agent_run.ports.blobstore import LocalBlobStore
+from harness_run import AgentSpec
+from harness_run.checkpoint.session_store import BlobSessionStore
+from harness_run.harness.claude_code import ClaudeCodeHarness
+from harness_run.harness.context import RunContext
+from harness_run.ports.blobstore import LocalBlobStore
 
 
 def noop(**kwargs):

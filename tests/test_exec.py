@@ -16,12 +16,12 @@ from typing import AsyncIterator
 import pytest
 from sandbox_fakes import FakeSandboxProvider, ScriptedWorker, make_engine, result_event
 
-from agent_run import AgentSpec, ControlUnavailable, ExecResult, local
-from agent_run.control import EXEC_TIMEOUT_RC, run_shell
-from agent_run.events import AgentEvent
-from agent_run.runtime.sandbox import backend
-from agent_run.runtime.sandbox.provider import SandboxGone
-from agent_run.runtime.sandbox.worker import Worker
+from harness_run import AgentSpec, ControlUnavailable, ExecResult, local
+from harness_run.control import EXEC_TIMEOUT_RC, run_shell
+from harness_run.events import AgentEvent
+from harness_run.runtime.sandbox import backend
+from harness_run.runtime.sandbox.provider import SandboxGone
+from harness_run.runtime.sandbox.worker import Worker
 
 # -- control.run_shell ---------------------------------------------------------------------
 
@@ -42,7 +42,7 @@ def test_run_shell_kills_the_process_group_at_the_timeout():
 
 
 def test_run_shell_caps_each_stream_and_flags_it(monkeypatch):
-    from agent_run import control
+    from harness_run import control
 
     monkeypatch.setattr(control, "EXEC_OUTPUT_CAP", 100)
     r = run_shell("head -c 500 /dev/zero | tr '\\0' x; echo short >&2", cwd=None, timeout=10)
@@ -64,7 +64,7 @@ def test_exec_result_round_trips_through_a_dict():
 
 
 def _patch_harness(monkeypatch, harness_cls):
-    import agent_run.harness.claude_code as harness_mod
+    import harness_run.harness.claude_code as harness_mod
 
     monkeypatch.setattr(harness_mod, "ClaudeCodeHarness", harness_cls)
 

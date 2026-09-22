@@ -1,4 +1,4 @@
-"""Offline tests for the GCP project-setup tool (agent-run-gcp-setup), sandbox edition.
+"""Offline tests for the GCP project-setup tool (harness-run-gcp-setup), sandbox edition.
 
 Everything runs against FakeGcp — a stand-in for the one REST seam (`GcpApi`) — so the
 audit->plan->apply->re-audit loop, the IAM policy merging, and the CLI wiring are all
@@ -12,8 +12,8 @@ import copy
 
 import pytest
 
-from agent_run.runtime.sandbox import project_setup as ps
-from agent_run.runtime.sandbox.handoff import handoff_lifecycle_rules
+from harness_run.runtime.sandbox import project_setup as ps
+from harness_run.runtime.sandbox.handoff import handoff_lifecycle_rules
 
 # ---------------------------------------------------------------------------------
 # Pure helpers
@@ -24,14 +24,14 @@ def test_sandbox_agent_email_and_repo_helpers():
     assert ps.sandbox_agent_email("123456789012") == (
         "service-123456789012@gcp-sa-vertex-sandbox.iam.gserviceaccount.com"
     )
-    assert ps.repo_resource("p", "us-central1", "agent-run") == "projects/p/locations/us-central1/repositories/agent-run"
-    assert ps.image_repo_uri("p", "us-central1", "agent-run") == "us-central1-docker.pkg.dev/p/agent-run"
+    assert ps.repo_resource("p", "us-central1", "harness-run") == "projects/p/locations/us-central1/repositories/harness-run"
+    assert ps.image_repo_uri("p", "us-central1", "harness-run") == "us-central1-docker.pkg.dev/p/harness-run"
 
 
 def test_defaults_mirror_backend_deploy_defaults():
-    # backend.deploy defaults to gs://<project>-agent-output and the `agent-run` repo; the setup
+    # backend.deploy defaults to gs://<project>-agent-output and the `harness-run` repo; the setup
     # tool must create exactly those or a plain deploy() won't find them.
-    from agent_run.runtime.sandbox import _image, model_token
+    from harness_run.runtime.sandbox import _image, model_token
 
     assert ps.default_output_bucket("proj") == "gs://proj-agent-output"
     assert ps.DEFAULT_REPO_ID == _image.DEFAULT_REPO_ID
@@ -94,7 +94,7 @@ def test_lifecycle_missing_matches_handoff_coverage_semantics():
 def test_settings_emails_and_overrides():
     cfg = ps.Settings(project="p")
     assert cfg.operator_email() == "agent-runtime@p.iam.gserviceaccount.com"
-    assert cfg.model_email() == "agent-run-model@p.iam.gserviceaccount.com"
+    assert cfg.model_email() == "harness-run-model@p.iam.gserviceaccount.com"
     assert cfg.bucket() == "gs://p-agent-output"
     cfg = ps.Settings(project="p", operator_sa_id="ops@other.iam.gserviceaccount.com",
                       model_sa_id="m@o.iam.gserviceaccount.com", output_bucket="gs://o/pre", repo_id="imgs")
@@ -121,7 +121,7 @@ NUMBER = "12345"
 LOCATION = ps.DEFAULT_LOCATION
 AGENT = f"serviceAccount:service-{NUMBER}@gcp-sa-vertex-sandbox.iam.gserviceaccount.com"
 OPERATOR = f"serviceAccount:agent-runtime@{PROJECT}.iam.gserviceaccount.com"
-MODEL = f"serviceAccount:agent-run-model@{PROJECT}.iam.gserviceaccount.com"
+MODEL = f"serviceAccount:harness-run-model@{PROJECT}.iam.gserviceaccount.com"
 PREDICT_ROLE = f"projects/{PROJECT}/roles/{ps.MODEL_PREDICT_ROLE_ID}"
 BUCKET = f"{PROJECT}-agent-output"
 
@@ -246,7 +246,7 @@ def test_audit_ready_project_is_all_ok():
     api.create_bucket(BUCKET, LOCATION, rules)
     api.create_repository(LOCATION, ps.DEFAULT_REPO_ID)
     api.create_service_account("agent-runtime", "x")
-    api.create_service_account("agent-run-model", "x")
+    api.create_service_account("harness-run-model", "x")
     api.create_role(ps.MODEL_PREDICT_ROLE_ID, "x", ps.MODEL_PREDICT_PERMISSIONS)
     ps.add_bindings(api.project_policy, [(r, OPERATOR) for r in ps.OPERATOR_PROJECT_ROLES] + [(PREDICT_ROLE, MODEL)])
     ps.add_bindings(api.bucket_policies[BUCKET], [(ps.OPERATOR_BUCKET_ROLE, OPERATOR)])
@@ -358,7 +358,7 @@ def test_model_sa_default_matches_what_deploy_uses():
 
 
 def test_verify_deploys_with_the_projects_repo_and_model_sa(monkeypatch):
-    from agent_run.runtime.sandbox import backend
+    from harness_run.runtime.sandbox import backend
 
     seen = {}
 
@@ -394,7 +394,7 @@ def test_verify_deploys_with_the_projects_repo_and_model_sa(monkeypatch):
     ok, _ = ps.verify(FakeGcp(), ps.Settings(project=PROJECT), [ps.Item("APIs", ps.OK, "d")])
     assert ok is True and seen["deleted"] is True
     assert seen["model_service_account"] == MODEL.split(":", 1)[1]
-    assert seen["image_repo"] == f"{LOCATION}-docker.pkg.dev/{PROJECT}/agent-run"
+    assert seen["image_repo"] == f"{LOCATION}-docker.pkg.dev/{PROJECT}/harness-run"
     assert seen["output_bucket"] == f"gs://{BUCKET}" and seen["warm_pool"] is True and seen["pool_size"] == 1
 
 

@@ -3,8 +3,8 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "agent-run"
-version = "0.3.1"
+name = "harness-run"
+version = "0.4.0"
 description = "Define and run remote/background coding agents (Claude Code, Codex) locally and in Gemini Enterprise Agent Platform sandboxes."
 readme = "README.md"
 requires-python = ">=3.12"
@@ -26,7 +26,7 @@ classifiers = [
 ]
 # The base install covers the remote path (deploy + drive sandbox engines); the harness
 # SDKs live in the `local` extra below. Backend imports stay lazy, so
-# `import agent_run` is still fast.
+# `import harness_run` is still fast.
 dependencies = [
     # The Agent Sandbox surface (client.sandboxes / client.runtimes) is in the 2.x client.
     "google-cloud-agentplatform>=2.1",
@@ -74,10 +74,17 @@ dev = [
 [project.scripts]
 # One-command GCP project setup for the sandbox backend (audit -> confirm -> apply);
 # see the README's "GCP setup & required permissions" section.
-agent-run-gcp-setup = "agent_run.runtime.sandbox.project_setup:main"
+harness-run-gcp-setup = "harness_run.runtime.sandbox.project_setup:main"
+
+[project.urls]
+Homepage = "https://github.com/zytedata/harness-run"
+Documentation = "https://github.com/zytedata/harness-run/tree/main/docs"
+Changelog = "https://github.com/zytedata/harness-run/blob/main/CHANGELOG.md"
+Issues = "https://github.com/zytedata/harness-run/issues"
+Source = "https://github.com/zytedata/harness-run"
 
 [tool.hatch.build.targets.wheel]
-packages = ["agent_run"]
+packages = ["harness_run"]
 
 [tool.ruff]
 line-length = 100

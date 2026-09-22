@@ -21,8 +21,8 @@ import datetime as _dt
 from typing import Any
 
 # The service account ``sandbox.deploy`` uses when ``model_service_account=`` is omitted.
-# ``agent-run-gcp-setup`` creates it with the predict-only custom role.
-DEFAULT_MODEL_SA_ID = "agent-run-model"
+# ``harness-run-gcp-setup`` creates it with the predict-only custom role.
+DEFAULT_MODEL_SA_ID = "harness-run-model"
 
 _CLOUD_PLATFORM = "https://www.googleapis.com/auth/cloud-platform"
 DEFAULT_LIFETIME_S = 3600  # IAM's default ceiling for an impersonated token

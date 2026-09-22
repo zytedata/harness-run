@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from agent_run import (
+from harness_run import (
     DEFAULT_MAX_BUFFER_SIZE,
     AgentSpec,
     McpServer,
@@ -13,15 +13,15 @@ from agent_run import (
 )
 import pytest
 
-from agent_run.events import AgentEvent
-from agent_run.harness._shared import (
+from harness_run.events import AgentEvent
+from harness_run.harness._shared import (
     harness_consumed_secret_names,
     openrouter_cost_unknown,
     openrouter_provider_routing,
     openrouter_schema_steer,
 )
-from agent_run.harness.claude_code import ClaudeCodeHarness
-from agent_run.harness.context import RunContext
+from harness_run.harness.claude_code import ClaudeCodeHarness
+from harness_run.harness.context import RunContext
 
 
 _JOB_DIR: Path

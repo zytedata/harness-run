@@ -16,8 +16,8 @@ import os
 import sys
 import tempfile
 
-from agent_run import AgentSpec, sandbox, local
-from agent_run.events import StopReason
+from harness_run import AgentSpec, sandbox, local
+from harness_run.events import StopReason
 
 TASK = (
     "Use Bash with run_in_background=true to run exactly this command: "
@@ -72,7 +72,7 @@ async def main() -> None:
         engine = local.deploy(
             AgentSpec(harness="claude-code", name="resume-probe", model="claude-haiku-4-5-20251001",
                       checkpoint=True, max_turns=12, max_budget_usd=1.0),
-            workdir=tempfile.mkdtemp(prefix="agent-run-resume-"),
+            workdir=tempfile.mkdtemp(prefix="harness-run-resume-"),
         )
     await probe(engine, secrets={} if resource else None)
 

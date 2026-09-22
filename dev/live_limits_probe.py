@@ -99,7 +99,7 @@ def create_template(label: str, cpu: str, memory: str) -> tuple[str | None, floa
     t0 = time.time()
     try:
         op = SB.templates.create(
-            name=INSTANCE, display_name=f"agent-run-limits-{label}",
+            name=INSTANCE, display_name=f"harness-run-limits-{label}",
             config={
                 "custom_container_environment": {
                     "custom_container_spec": {"image_uri": args.image},
@@ -123,7 +123,7 @@ def create_template(label: str, cpu: str, memory: str) -> tuple[str | None, floa
 
 def create_sandbox(template: str, label: str, ttl: str = "1800s", wait: bool = True) -> tuple[str, float, object]:
     t0 = time.time()
-    op = SB.create(name=INSTANCE, config={"display_name": f"agent-run-limits-{label}", "sandbox_environment_template": template,
+    op = SB.create(name=INSTANCE, config={"display_name": f"harness-run-limits-{label}", "sandbox_environment_template": template,
                                           "wait_for_completion": True, "ttl": ttl})
     sb = op.response.name
     with _CREATED:

@@ -10,7 +10,7 @@ The library validates the SDK's structured value when available and can parse JS
 ```python
 import json
 import pydantic
-from agent_run import AgentSpec, local
+from harness_run import AgentSpec, local
 
 class PriceCheck(pydantic.BaseModel):
     in_stock: bool

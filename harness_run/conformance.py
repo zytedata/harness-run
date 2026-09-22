@@ -129,7 +129,7 @@ def _check_result_contract(events: list[Any]) -> tuple[Any, Any]:
 async def run_harness_conformance(
     run_turn: Callable[[], AsyncIterator[Any]],
 ) -> None:
-    """Validate a :class:`~agent_run.harness.base.Harness` implementation (DESIGN.md §7).
+    """Validate a :class:`~harness_run.harness.base.Harness` implementation (DESIGN.md §7).
 
     *run_turn* is a zero-arg callable returning the event iterator of ONE completed turn —
     typically ``lambda: harness.run(spec, ctx)``, against a live backend or a scripted fake.
@@ -158,7 +158,7 @@ async def run_harness_conformance(
 async def run_claude_code_harness_conformance(
     run_turn: Callable[[], AsyncIterator[Any]],
 ) -> None:
-    """Validate :class:`~agent_run.harness.claude_code.ClaudeCodeHarness` (DESIGN.md §7).
+    """Validate :class:`~harness_run.harness.claude_code.ClaudeCodeHarness` (DESIGN.md §7).
 
     Everything :func:`run_harness_conformance` checks, plus what only Claude Code's SDK
     makes:
@@ -167,7 +167,7 @@ async def run_claude_code_harness_conformance(
       payload, verbatim, including the session id at ``raw["data"]["session_id"]`` — that
       is where a caller reads the id the backend actually used (and the resolved
       ``mcp_servers``). Codex's init event carries no such payload, so this check does not
-      hold for :class:`~agent_run.harness.codex.CodexHarness`.
+      hold for :class:`~harness_run.harness.codex.CodexHarness`.
     * **Verbatim usage records** — the result's ``raw["model_usage"]`` is the CLI's
       per-model record (a non-empty dict of dicts, each with a numeric ``costUSD``) — the
       complete, subagent-inclusive source the normalized ``usage`` is derived from — and

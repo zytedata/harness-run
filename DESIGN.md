@@ -1,7 +1,7 @@
-# agent-run — Design
+# harness-run — Design
 
 > Terminology: this document, and comments in the code, often say "the toolkit". That is this
-> library, `agent-run`, under the name it had while it was being designed.
+> library, `harness-run`, under the name it had while it was being designed.
 
 A Python library for **defining and running remote/background AI agents**. It distills the
 experience of two proofs-of-concept (self-healing spiders, interactive spider creation) built on
@@ -164,7 +164,7 @@ Three planes over a set of pluggable ports:
 ## 5. Public API
 
 ```python
-from agent_run import AgentSpec, SystemPrompt, SkillSource, McpServer, sandbox, local
+from harness_run import AgentSpec, SystemPrompt, SkillSource, McpServer, sandbox, local
 
 spec = AgentSpec(
     name="spider-builder",
@@ -491,8 +491,8 @@ These are facts measured live. The library encodes them so consumers inherit the
   `artifactregistry.writer` on the image repo, `iam.serviceAccountTokenCreator` on the model SA. There is
   **no per-sandbox IAM**: `aiplatform.sandboxEnvironments.execute` covers every sandbox under the host
   instance, so the client identity is the trust boundary and the roster is only a coordination device.
-- **The model identity** (`agent-run-model@`, `model_token.py`): a service account with only the
-  `agentRunPredict` custom role (`aiplatform.endpoints.predict`). The client mints its access token
+- **The model identity** (`harness-run-model@`, `model_token.py`): a service account with only the
+  `harnessRunPredict` custom role (`aiplatform.endpoints.predict`). The client mints its access token
   (an hour, IAM's default ceiling) per turn and every 25 minutes after that, pushing each one to the worker
   (`/token`). The worker never puts it in the agent's environment: it runs a loopback **metadata server**
   that speaks the GCE metadata protocol for exactly one thing, the running turn's token, and sets
@@ -649,13 +649,13 @@ stayed in `sandbox-agent-runtime` behind the seam.
 (No `src/` layer — the package sits at the repo root.)
 
 ```
-agent-run/
+harness-run/
 ├── pyproject.toml                 # runtime deps in core; the harness SDKs behind the `local` extra; dev tooling in a group
 ├── README.md                      # the public front page; the reference lives in docs/
 ├── DESIGN.md                      # this file (internal design record)
 ├── TESTING.md                     # the test ladder: offline suite, parity image, live probes
 ├── CHANGELOG.md                   # releases and the Unreleased section
-├── agent_run/
+├── harness_run/
 │   ├── __init__.py                # AgentSpec, SystemPrompt, SkillSource, McpServer, sandbox, local
 │   ├── spec.py                    # AgentSpec + value types (serializable)
 │   ├── events.py                  # AgentEvent, RunResult, RunStatus, StopReason, Run handle
@@ -689,7 +689,7 @@ agent-run/
 │   │       ├── stream.py          # the GCS event mirror (writer) + its tail (the fallback stream)
 │   │       ├── history.py         # history / list_sessions readers over the mirror
 │   │       ├── resources.py       # in-sandbox CPU/RAM sampling (cgroup) → mirror, pressure event, result
-│   │       └── project_setup.py   # agent-run-gcp-setup
+│   │       └── project_setup.py   # harness-run-gcp-setup
 │   ├── ports/
 │   │   ├── blobstore.py           # BlobStore + GcsBlobStore + LocalBlobStore
 │   │   └── secrets.py             # SecretResolver + GcpSecretResolver + EnvSecretResolver
@@ -829,7 +829,7 @@ it is off the hot path, and `deploy` does not block on it.
   Session/turn configs are written to GCS by the client for the 30-day post-mortem record, but the worker
   never reads them from there.
 - **Model credentials.** The sandbox has no Google identity, so the model token is ours to provide. The
-  client mints it by impersonating a **predict-only service account** (the `agentRunPredict` custom
+  client mints it by impersonating a **predict-only service account** (the `harnessRunPredict` custom
   role; the client needs `serviceAccountTokenCreator` on it) with a 1 h lifetime and re-pushes a fresh one
   over `/token` every 25 minutes for as long as it holds the running turn. The worker serves it from a
   loopback metadata server behind `GCE_METADATA_HOST`, so the CLI refreshes on its own and the token never
@@ -864,7 +864,7 @@ it is off the hot path, and `deploy` does not block on it.
   Platform: the Agent Sandbox service agent (`service-<number>@gcp-sa-vertex-sandbox`) needs
   `artifactregistry.reader` on the image repo. There is no per-sandbox IAM: whoever can execute on the
   instance can drive any sandbox, so the trust boundary is the client identity, and the roster is purely a
-  coordination device. `agent-run-gcp-setup` applies exactly this (§6 "Identity").
+  coordination device. `harness-run-gcp-setup` applies exactly this (§6 "Identity").
 
 ### 13.2 Platform facts and limits
 

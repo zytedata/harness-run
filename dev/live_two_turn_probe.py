@@ -19,12 +19,12 @@ import sys
 import time
 import traceback
 
-from agent_run import AgentSpec, sandbox
+from harness_run import AgentSpec, sandbox
 
 PROJECT = os.environ.get("PROJECT", "")  # required; checked at startup, not import
 LOCATION = os.environ.get("LOCATION", "us-central1")
 SUFFIX = re.sub(r"[^a-z0-9-]", "-", (os.environ.get("SUFFIX") or getpass.getuser()).lower())
-NAME = f"agent-run-stream2t-{SUFFIX}"
+NAME = f"harness-run-stream2t-{SUFFIX}"
 
 _checks: list[tuple[str, bool]] = []
 

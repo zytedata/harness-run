@@ -1,7 +1,7 @@
 """Offline stand-ins for the sandbox platform: a ``SandboxProvider`` over in-memory state.
 
 ``FakeSandboxProvider`` keeps templates and sandboxes in dicts and routes every ``call``
-to the sandbox's *worker* — either the real :class:`~agent_run.runtime.sandbox.worker.Worker`
+to the sandbox's *worker* — either the real :class:`~harness_run.runtime.sandbox.worker.Worker`
 (driven in-process, its harness faked by the test) or a :class:`ScriptedWorker` a test
 feeds events to. Failure injection: ``fail_next[path]`` makes the next calls to ``path``
 raise, ``vanish(sandbox)`` makes a sandbox answer :class:`SandboxGone`.
@@ -14,13 +14,13 @@ import time
 import uuid
 from typing import Any, Callable
 
-from agent_run.control import run_shell
-from agent_run.events import AgentEvent
-from agent_run.runtime.sandbox import backend
-from agent_run.runtime.sandbox.history import mirror_line
-from agent_run.runtime.sandbox.provider import SandboxError, SandboxGone, SandboxHandle
-from agent_run.runtime.sandbox.roster import InMemoryRosterStore
-from agent_run.spec import AgentSpec
+from harness_run.control import run_shell
+from harness_run.events import AgentEvent
+from harness_run.runtime.sandbox import backend
+from harness_run.runtime.sandbox.history import mirror_line
+from harness_run.runtime.sandbox.provider import SandboxError, SandboxGone, SandboxHandle
+from harness_run.runtime.sandbox.roster import InMemoryRosterStore
+from harness_run.spec import AgentSpec
 
 INSTANCE = "projects/p/locations/l/reasoningEngines/host"
 
@@ -211,7 +211,7 @@ def make_engine(provider: FakeSandboxProvider, *, spec: AgentSpec | None = None,
     """A ``SandboxEngine`` over ``provider`` with an in-memory roster and no GCP client."""
     spec = spec or AgentSpec(harness="claude-code", name="g", model="m")
     template = template or provider.add_template(spec.name)
-    kw.setdefault("model_service_account", "agent-run-model@p.iam.gserviceaccount.com")
+    kw.setdefault("model_service_account", "harness-run-model@p.iam.gserviceaccount.com")
     kw.setdefault("roster_store", InMemoryRosterStore())
     return backend.SandboxEngine(
         template=template, spec=spec, project="p", location="l", output_bucket=output_bucket,

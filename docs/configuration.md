@@ -26,7 +26,7 @@ additive exception — it adds onto the deployed `env`). Deploy-only facts have 
 field at all, so "different `packages` per run" is a `TypeError`, not a silent no-op.
 
 ```python
-from agent_run import RepoSource, SessionConfig, TurnConfig
+from harness_run import RepoSource, SessionConfig, TurnConfig
 
 engine = sandbox.get_engine("code-agent", project=..., location=...)
 
@@ -148,7 +148,7 @@ modify the code, then commit and push. Declare repos on the spec, naming (via `a
 secret that authenticates each one:
 
 ```python
-from agent_run import AgentSpec, RepoSource
+from harness_run import AgentSpec, RepoSource
 
 spec = AgentSpec(
     name="repo-fixer",

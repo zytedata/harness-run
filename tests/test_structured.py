@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from agent_run.structured import extract_json, parse_structured_output
+from harness_run.structured import extract_json, parse_structured_output
 
 
 def test_extract_from_fenced_block():

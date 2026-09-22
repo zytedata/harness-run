@@ -3,7 +3,7 @@ from copy import deepcopy
 
 import pytest
 
-from agent_run.runtime.sandbox.handoff import (
+from harness_run.runtime.sandbox.handoff import (
     ensure_handoff_lifecycle,
     handoff_lifecycle_rules,
 )

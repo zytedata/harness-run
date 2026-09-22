@@ -24,13 +24,6 @@ classifiers = [
     "Programming Language :: Python :: 3.13",
     "Topic :: Software Development :: Libraries",
 ]
-[project.urls]
-Homepage = "https://github.com/zytedata/harness-run"
-Documentation = "https://github.com/zytedata/harness-run/tree/main/docs"
-Changelog = "https://github.com/zytedata/harness-run/blob/main/CHANGELOG.md"
-Issues = "https://github.com/zytedata/harness-run/issues"
-Source = "https://github.com/zytedata/harness-run"
-
 # The base install covers the remote path (deploy + drive sandbox engines); the harness
 # SDKs live in the `local` extra below. Backend imports stay lazy, so
 # `import harness_run` is still fast.
@@ -82,6 +75,13 @@ dev = [
 # One-command GCP project setup for the sandbox backend (audit -> confirm -> apply);
 # see the README's "GCP setup & required permissions" section.
 harness-run-gcp-setup = "harness_run.runtime.sandbox.project_setup:main"
+
+[project.urls]
+Homepage = "https://github.com/zytedata/harness-run"
+Documentation = "https://github.com/zytedata/harness-run/tree/main/docs"
+Changelog = "https://github.com/zytedata/harness-run/blob/main/CHANGELOG.md"
+Issues = "https://github.com/zytedata/harness-run/issues"
+Source = "https://github.com/zytedata/harness-run"
 
 [tool.hatch.build.targets.wheel]
 packages = ["harness_run"]

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from remote_agent_toolkit import (
+from agent_run import (
     INHERIT,
     AgentSpec,
     RepoSource,
@@ -19,7 +19,7 @@ from remote_agent_toolkit import (
     SystemPrompt,
     TurnConfig,
 )
-from remote_agent_toolkit.config import (
+from agent_run.config import (
     apply_session_config,
     apply_turn_config,
     validate_harness_choice,

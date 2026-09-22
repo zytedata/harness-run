@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import pytest
 
-from remote_agent_toolkit.checkpoint import restore, snapshot
-from remote_agent_toolkit.ports.blobstore import LocalBlobStore
+from agent_run.checkpoint import restore, snapshot
+from agent_run.ports.blobstore import LocalBlobStore
 
 
 def test_snapshot_restore_round_trip(tmp_path) -> None:
@@ -31,8 +31,8 @@ def test_restore_missing_session_returns_false(tmp_path) -> None:
 
 
 def _ctx(tmp_path, store, **kwargs):
-    from remote_agent_toolkit.harness.context import RunContext
-    from remote_agent_toolkit.spec import AgentSpec
+    from agent_run.harness.context import RunContext
+    from agent_run.spec import AgentSpec
 
     return RunContext(
         spec=AgentSpec(name="a", model="m", checkpoint=True),
@@ -46,7 +46,7 @@ def _ctx(tmp_path, store, **kwargs):
 
 
 def test_checkpoint_snapshots_and_scrubs_the_toolkit_owned_workspace(tmp_path) -> None:
-    from remote_agent_toolkit.harness._shared import finalize_checkpoint
+    from agent_run.harness._shared import finalize_checkpoint
 
     store = LocalBlobStore(str(tmp_path / "store"))
     ctx = _ctx(tmp_path, store)
@@ -64,7 +64,7 @@ def test_checkpoint_leaves_a_caller_owned_workspace_alone(tmp_path) -> None:
     # workspace_dir is the caller's directory: it is already durable, holds files no
     # session owns, and its repos are the caller's too — so the conversation is
     # checkpointed and the files are neither archived nor rewritten.
-    from remote_agent_toolkit.harness._shared import finalize_checkpoint
+    from agent_run.harness._shared import finalize_checkpoint
 
     store = LocalBlobStore(str(tmp_path / "store"))
     theirs = tmp_path / "theirs"
@@ -121,11 +121,11 @@ def test_restore_failure_keeps_a_workspace_that_already_had_content(tmp_path) ->
 
 
 def test_try_restore_reports_the_failure_instead_of_swallowing_it(tmp_path, caplog) -> None:
-    from remote_agent_toolkit.checkpoint.workspace import try_restore, workspace_ready_event
+    from agent_run.checkpoint.workspace import try_restore, workspace_ready_event
 
     store = LocalBlobStore(str(tmp_path / "store"))
     snapshot(store, "sess-1", str(tmp_path))
-    with caplog.at_level("WARNING", logger="remote_agent_toolkit.checkpoint.workspace"):
+    with caplog.at_level("WARNING", logger="agent_run.checkpoint.workspace"):
         result, error = try_restore(_FailingMidway(store), "sess-1", str(tmp_path / "ws"))
     assert not result and error == "RuntimeError: archive aborted at member 162"
     assert "restore failed for session sess-1" in caplog.text

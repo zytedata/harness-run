@@ -1,24 +1,25 @@
-# remote-agent-toolkit — Design
+# agent-run — Design
 
 A Python library for **defining and running remote/background AI agents** at Zyte. It distills the
 experience of two proofs-of-concept (self-healing spiders, interactive spider creation) built on
-`gemini-agent-runtime` into reusable building blocks, so any team can stand up a Claude-Code-based
-agent — with custom skills, GitHub access, structured outputs, checkpoint/resume and warm starts —
+`sandbox-agent-runtime` into reusable building blocks, so any team can stand up a Claude-Code-based
+agent — with custom skills, GitHub access, structured outputs, checkpoint/resume and ready sandboxes —
 without re-learning the platform's sharp edges.
 
-> Status: **design**. This document is the agreed architecture and roadmap. Code is being scaffolded
-> against it. The README (team-facing onboarding) grows alongside the code, phase by phase (see §11).
+> Status: **the design as built.** This document describes the current architecture and the platform
+> contracts it encodes; the README is the team-facing onboarding doc and the CHANGELOG records what changed
+> between releases.
 
 ---
 
 ## 1. Goals & non-goals
 
 **Goals**
-- Let a team define an agent **declaratively** and run it both **locally** (dev) and **remotely** on
-  **Gemini Agent Runtime** (prod) through *one* API — local deploy is first-class, not an afterthought.
+- Let a team define an agent **declaratively** and run it both **locally** (dev) and **remotely** in a
+  **Google Agent Sandbox** (prod; §13) through *one* API — local deploy is first-class, not an afterthought.
 - Cover the use-cases in the requirements doc: background long-running jobs (self-heal, QA, analysis)
   *and* interactive, human-in-the-loop jobs (requirement-building, prompt-driven setup).
-- Bake in the hard-won platform knowledge (latency, checkpointing, warm pool, IAM, build constraints)
+- Bake in the hard-won platform knowledge (latency, checkpointing, the ready pool, IAM, image contracts)
   so consumers inherit it for free.
 - Be a **source of knowledge**, not just code: the README + design docs explain *why*.
 
@@ -31,9 +32,9 @@ without re-learning the platform's sharp edges.
   `openrouter_routing` carries OpenRouter's whole `provider` object, either one on the spec, a
   session or a single turn.
   The prefix keeps model selection per turn and preserves compatibility with existing engine configs.
-- Non-GCP backends. We design the **ports** (storage, events, dispatch, secrets) as protocols, but ship
-  GCP adapters (GCS, Cloud Logging, Pub/Sub, Secret Manager) plus local/in-memory adapters for dev.
-- Replacing Scrapy-Cloud / monitoring logic — that stays in `gemini-agent-runtime` behind the seam.
+- Non-GCP backends. We design the **ports** (storage, secrets, the sandbox provider) as protocols, but ship
+  GCP adapters (GCS, Agent Sandbox) plus local/in-memory adapters for dev.
+- Replacing Scrapy-Cloud / monitoring logic — that stays in `sandbox-agent-runtime` behind the seam.
 
 ---
 
@@ -45,18 +46,17 @@ without re-learning the platform's sharp edges.
 |---|---|---|
 | What | Server-hosted agent harness exposed as REST (`/v1/agents`, `/v1/sessions`) | Client library (`claude_agent_sdk`) that drives the Claude Code loop in-process |
 | Runs where | Anthropic infra (loop + sandbox container) | **Your** process / container |
-| On our platform? | ❌ Not offered on Vertex/Bedrock/Foundry | ✅ via `AnthropicVertex` model access on Gemini Agent Runtime |
+| On our platform? | ❌ Not offered on Vertex/Bedrock/Foundry | ✅ via `AnthropicVertex` model access from our own container (Agent Sandbox) |
 | Object model | Versioned `Agent` → `Environment` → `Session` → events | `query()` / `ClaudeAgentOptions` / `SessionStore` |
 
-**Decision:** build on the **Claude Agent SDK** (the only Claude harness runnable on Gemini Agent
-Runtime, via `AnthropicVertex` model access), and **borrow CMA's API shape** as the conceptual template.
+**Decision:** build on the **Claude Agent SDK** (the only Claude harness runnable in our own container on
+Google's platform, via `AnthropicVertex` model access), and **borrow CMA's API shape** as the conceptual template.
 We cannot host *on* CMA.
 
-> **Naming.** We call the platform **Gemini Agent Runtime** — Google's recent rename of what was
-> "Vertex AI Agent Engine". The public namespace is **`gemini.*`** (`gemini.deploy`, `gemini.get_engine`).
-> The underlying Google Python SDK is imported as `agentplatform` / `google-cloud-aiplatform` — the
-> `vertexai` namespace was renamed to `agentplatform` in aiplatform 1.154 and now emits a
-> `FutureWarning` on `Client()`; that's an internal detail, not part of our surface.
+> **Naming.** The remote backend runs in **Agent Sandbox**, the sandbox-environment feature of Google's
+> Gemini Enterprise Agent Platform (§13). The public namespace is **`sandbox.*`** (`sandbox.deploy`,
+> `sandbox.get_engine`). The underlying Google Python SDK is `google-cloud-agentplatform` 2.x
+> (`client.sandboxes` / `client.runtimes`); that's an internal detail, not part of our surface.
 
 What we borrow from CMA / the SDK (things our PoC did implicitly or not at all):
 - **Versioned agent-definition vs. run** split → control plane / data plane.
@@ -79,29 +79,27 @@ in the public surface.
 
 1. **Declarative, serializable agent definition.** An `AgentSpec` is data; it can live in code or YAML,
    be version-controlled, diffed in CI, and deployed reproducibly.
-2. **Local / remote parity.** `local.deploy(spec)` (in-process ADK) and `gemini.deploy(spec)` /
-   `gemini.get_engine(name)` return the *same* `Engine` + `Session` surface. Develop and test locally,
-   ship remotely, **zero code change** — swap `local` ↔ `gemini`. Local uses filesystem/in-memory port
+2. **Local / remote parity.** `local.deploy(spec)` (in-process) and `sandbox.deploy(spec)` /
+   `sandbox.get_engine(name)` return the *same* `Engine` + `Session` surface. Develop and test locally,
+   ship remotely, **zero code change** — swap `local` ↔ `sandbox`. Local uses filesystem/in-memory port
    adapters, so it needs no GCP beyond model access.
 3. **Deploy is rare; lookup-and-run is the hot path.** App code addresses a deployed engine **by name**
-   (optionally a version) via `gemini.get_engine(...)` and never triggers a deploy. `gemini.deploy(...)`
+   (optionally a version) via `sandbox.get_engine(...)` and never triggers a deploy. `sandbox.deploy(...)`
    is an ops/CI action.
-4. **Ports & adapters.** Every platform dependency is a protocol with a concrete adapter. Storage, event
-   sink, dispatch transport, secret resolver, session store, harness — all swappable.
-5. **Secrets are per-invocation; never pickle secrets/paths.** Agent Engine cloudpickles the agent, so
+4. **Ports & adapters.** Every platform dependency is a protocol with a concrete adapter. Storage, secret
+   resolver, session store, harness, sandbox provider — all swappable.
+5. **Secrets are per-invocation; never bake secrets/paths.** The spec is baked into the sandbox image, so
    `AgentSpec` carries no secrets at all — credentials are passed as a `name → value` map to `run`/`send`,
-   scoped to that one turn (nothing baked, nothing shared across tenants). Values never ride the invocation
-   payload either (the platform persists a job's input verbatim; Pub/Sub retains unacked messages): they are
-   staged at a **per-invocation GCS object** the worker fetches (and deletes only at the end of a completed
-   turn — the platform re-runs a crashed attempt with the same payload, so the object must survive for the
-   retry; a client completion-cleanup and a 1-day lifecycle rule back it up); only the pointer travels. The
+   scoped to that one turn (nothing baked, nothing shared across tenants). The values travel in the turn's
+   HTTPS body to the worker and nowhere else: nothing is persisted by the platform or written to GCS. The
    harness routes each secret to its consumer — a repo's `auth` token into git `origin`, a GitHub MCP token
    into headers, the rest into the agent's env — and checkpoint snapshots are credential-scrubbed.
 6. **Encode the platform contracts as defaults, document the why.** The deploy path applies the known-good
    settings automatically (see §6) and every one is explained.
 7. **Interactive = checkpoint-and-resume, not a blocking call.** No long-lived `ask_human` tool. The agent
-   ends a turn with a question → the run checkpoints and releases its worker → the human's answer resumes it
-   on a warm worker. One mechanism, stateless workers, survives worker death, doesn't fight the >10-min limit.
+   ends a turn with a question → the run checkpoints and releases its sandbox → the human's answer resumes it
+   on a ready sandbox. One mechanism, stateless workers, survives worker death, and no sandbox bills while
+   a human thinks.
 
 ---
 
@@ -112,36 +110,36 @@ Three planes over a set of pluggable ports:
 ```
  DEFINITION plane        DEPLOY plane (ops/CI)         RUN plane (app code)
  ────────────────        ─────────────────────        ──────────────────────────────
-  AgentSpec        ──▶    gemini.deploy(spec)          gemini.get_engine(name[, ver]) ─┐
+  AgentSpec        ──▶    sandbox.deploy(spec)          sandbox.get_engine(name[, ver]) ─┐
   (declarative,           → versioned engine,          local.deploy(spec)              │
    serializable;            encodes platform           → Engine                        ▼
    code or YAML)            contracts §6                  · start_session()  → Session
                                                           · get_session(id)  → Session  (re-attach/poll)
                          local.deploy(spec) ─────────▶    Session
-                         (in-process ADK,                   · run(msg) → Run :
+                         (in-process,                       · run(msg) → Run :
                           same Engine/Session API)              await Run      → RunResult   (wait)
                                                                 async for ev   → AgentEvent  (stream)
                                                                 Run.done/status              (poll)
-                                                            · send(msg) / interrupt()
+                                                            · send(msg) / interrupt() / exec()
                                                             · status / stop_reason
                                                             · resume / fork
 
  PORTS (protocols; concrete adapters shipped — GCP for prod, local/in-memory for dev)
  ────────────────────────────────────────────────────────────────────────────────────
-  Harness            ClaudeCodeHarness                  (the Agent SDK binding)
-  BlobStore          GcsBlobStore   | LocalBlobStore    (checkpoint, workspace tar, artifacts)
-  EventSink          CloudLoggingSink | InMemorySink    (the only near-real-time async channel; tailed)
-  DispatchTransport  PubSubDispatch | InMemoryDispatch  (warm-pool dispatch + atomic claim)
-  SessionStore       GcsSessionStore                    (Claude SDK protocol, keyed by session_id)
+  Harness            ClaudeCodeHarness | CodexHarness       (the coding-agent loop)
+  BlobStore          GcsBlobStore | LocalBlobStore          (checkpoint, workspace tar, event mirror, records)
+  SandboxProvider    AgentSandboxProvider | fakes (tests)   (create / call / delete a container; templates)
+  ControlChannel     an in-process queue on the turn's loop (fed by send() locally, by /control in the sandbox)
+  SessionStore       BlobSessionStore                       (Claude SDK protocol, keyed by session_id)
   SecretResolver     GcpSecretResolver | EnvSecretResolver  (secret name → value, at runtime)
 ```
 
 - **Harness** is the abstraction over "a coding agent loop." `ClaudeCodeHarness` wraps the Agent SDK
   `query()`, builds `ClaudeAgentOptions` from the `AgentSpec`, translates SDK messages → generic
-  `AgentEvent`s, and runs as an ADK `BaseAgent` so it can deploy to Agent Engine. This is the generalized
-  `ClaudeCodeAgent` from the PoC.
-- **Engine** is the deployed (or local) agent handle. `gemini.deploy(spec)` registers an engine under
-  `spec.name` and returns a `GeminiEngine`; `gemini.get_engine(name[, version])` looks one up without
+  `AgentEvent`s; the sandbox worker (`runtime/sandbox/worker.py`) drives it inside the container exactly as
+  `local` does in-process. This is the generalized `ClaudeCodeAgent` from the PoC.
+- **Engine** is the deployed (or local) agent handle. `sandbox.deploy(spec)` registers an engine under
+  `spec.name` and returns a `SandboxEngine`; `sandbox.get_engine(name[, version])` looks one up without
   deploying; `local.deploy(spec)` returns a `LocalEngine`. All expose `start_session()` and
   `get_session(id)`.
 - **Session** is the run-plane object with the CMA-style lifecycle:
@@ -154,15 +152,16 @@ Three planes over a set of pluggable ports:
   `stop_reason="interrupted"`, checkpoint taken, so the session is resumable (`control.py`; issue #44).
   Every delivered message is a `user` event, the acknowledgement that the model has it.
 - **Run** is the handle returned by `session.run(msg)` — awaitable (→ `RunResult`), async-iterable
-  (→ `AgentEvent`s), and pollable (`done` / `status` / `result`). For `gemini`, "stream" = tail the
-  `EventSink`; "await" = wait for the terminal result event; "poll" = check the latest logged status.
+  (→ `AgentEvent`s), and pollable (`done` / `status` / `result`). For `sandbox`, "stream" = long-poll the
+  worker's `/events` (the GCS event mirror is the fallback); "await" = wait for the terminal result event;
+  "poll" = check the run's status.
 
 ---
 
 ## 5. Public API
 
 ```python
-from remote_agent_toolkit import AgentSpec, SystemPrompt, SkillSource, McpServer, gemini, local
+from agent_run import AgentSpec, SystemPrompt, SkillSource, McpServer, sandbox, local
 
 spec = AgentSpec(
     name="spider-builder",
@@ -189,10 +188,10 @@ print(result.text, result.structured_output, result.cost_usd)
 ```python
 # ── PROD ──────────────────────────────────────────────────────────────────────────────────────────
 # Ops / CI deploys once (rare):
-gemini.deploy(spec, project="my-project", location="us-central1", warm_pool=True)
+sandbox.deploy(spec, project="my-project", location="us-central1", warm_pool=True)
 
 # App code looks the engine up by name (optionally a version) and runs — it never deploys:
-engine = gemini.get_engine("spider-builder")               # latest deployed version
+engine = sandbox.get_engine("spider-builder")               # latest deployed version
 session = engine.start_session()
 result = await session.run("/scrape https://books.toscrape.com title, price")   # default: wait for the result
 ```
@@ -218,9 +217,9 @@ result = run.result
 # re-attach later / elsewhere by session id, then poll or continue
 session = engine.get_session(session_id)
 if session.status == "idle" and session.stop_reason == "needs_input":
-    await session.send("yes, that schema looks right")     # resumes via checkpoint on a warm worker
+    await session.send("yes, that schema looks right")     # resumes via checkpoint on a ready sandbox
 
-# enumerate past sessions and read a finished one's record (gemini)
+# enumerate past sessions and read a finished one's record (sandbox)
 for info in engine.list_sessions():                        # newest first
     past = engine.get_session(info["session_id"])
     events = past.history()                                # persisted AgentEvents, oldest first
@@ -230,25 +229,23 @@ for info in engine.list_sessions():                        # newest first
 **Managing deployed engines** (control plane):
 
 ```python
-gemini.deploy(spec, project=..., location=...)   # create / update; mints a new version
-gemini.get_engine("spider-builder")              # serving version (app code default)
-gemini.get_engine("spider-builder", version=3)   # pin a version (an assertion — see below)
-gemini.list_engines(project=..., location=...)   # discover what's deployed
-engine.versions()                                # list versions of one engine
-engine.set_traffic(3) / engine.set_traffic()     # roll back to a version / back to always-latest
+sandbox.deploy(spec, project=..., location=...)   # create / update; mints a new version when the image or resources change
+sandbox.get_engine("spider-builder")              # newest version (app code default)
+sandbox.get_engine("spider-builder", version=3)   # pin a version (routes to that template)
+sandbox.list_engines(project=..., location=...)   # discover what's deployed
+engine.versions() / engine.revisions()           # list versions of one engine (newest first) / their metadata
+engine.delete_version(3) / engine.delete()       # retire one version / the whole engine (its ready pool included)
 engine.name, engine.version, engine.resource     # identity / underlying resource name
 ```
 
-Engine identity maps `spec.name` → a stable engine (Agent Engine `display_name`); each `deploy` mints a
-new version. App code pins or takes latest; it does not deploy.
+Engine identity maps `spec.name` → a stable engine (the template `display_name`); each `deploy` that changes
+the image or the resources mints a new version. App code pins or takes latest; it does not deploy.
 
-A **version is an Agent Runtime runtime revision** (`…/reasoningEngines/{id}/runtimeRevisions/{rev}`):
-`deploy` updates the engine of that display name and the platform mints an immutable revision, with the
-engine's traffic config deciding which one serves. One platform constraint shapes the API: `asyncQuery` —
-the toolkit's entire run plane — exists on the **engine** only (a revision has `query`/`streamQuery` but no
-async form), so a run always lands on the serving revision. Version pinning is therefore an *assertion*
-(`get_engine(version=…)` fails unless that revision is the one serving) and moving traffic is an explicit
-ops action (`engine.set_traffic`), not a per-caller routing choice.
+A **version is a sandbox template** (`…/reasoningEngines/{host}/sandboxEnvironmentTemplates/{id}`, displayed
+under `spec.name`): `deploy` creates a new immutable template whenever the image or resources differ from
+the newest one, and `get_engine(name)` resolves the newest, `get_engine(name, version=)` a specific one.
+A pin **routes** — any template can be dispatched to — so a pinned handle keeps running its version after a
+newer deploy; "serving" simply means "newest", and there is no traffic configuration.
 
 **Key types** (sketch — finalized in `spec.py` / `runtime/base.py`):
 
@@ -265,7 +262,8 @@ ops action (`engine.set_traffic`), not a per-caller routing choice.
   `name`/`version`/`resource`.
 - `Session` — `run(msg, secrets=)`, `send(msg, secrets=, interrupt=, message_id=)` (idle: resume;
   running: steer or interrupt-and-continue, same `Run`), `interrupt()` (interrupt and stop, resumable),
-  `status`, `stop_reason`, `last_result`, `history()`, `fork()`.
+  `exec(command)` (a read-only shell probe into the running turn's workspace), `status`, `stop_reason`,
+  `last_result`, `history()`, `fork()`.
 - `Run` — `__await__` (→ `RunResult`), `__aiter__` (→ `AgentEvent`s), `done`, `status`, `result`.
 - `AgentEvent` — `kind`, `summary`, `raw`; cost/usage carried on the terminal event.
 - `RunResult` — `text`, `structured_output`, `is_error`, `num_turns`, `cost_usd` (`float | None`;
@@ -283,45 +281,38 @@ ops action (`engine.set_traffic`), not a per-caller routing choice.
 - **Claude CLI stderr is captured** (`jobs/<sid>/stderr.log`, capped, beside — not inside — the agent
   workspace). The SDK pipes stderr only when a callback is registered; without one, `ProcessError`'s
   "Check stderr output for details" promises output nobody captured. On a CLI-exit failure the tail is
-  surfaced as a `claude_stderr` status event (reaches Cloud Logging on gemini) and embedded in the error.
+  surfaced as a `claude_stderr` status event (in the event mirror on sandbox) and embedded in the error.
 
 ---
 
 ## 6. Execution model & platform contracts (the hard-won knowledge)
 
-These are facts measured during the PoC. The library encodes them so consumers inherit them for free.
+These are facts measured live. The library encodes them so consumers inherit them for free.
 
-**Execution paths on Gemini Agent Runtime**
-- **Async `run_query_job`** — long-running (validated 64.5 min; supports up to 7 days). But **~2.5 min
-  per-job worker provisioning**, and it is *per job*, not a one-time cold start. **No config knob reduces
-  it** — image size, `container_concurrency`, `min_instances` were all ruled out. The genai
-  `Client().agent_engines` surface exposes only `run_query_job` / `check_query_job` / `cancel_query_job`.
-- **Sync `stream_query`** — a warm instance returns in **~3–9 s**, but has a **~600 s per-request ceiling**
-  and lives only on the classic `agentplatform.agent_engines.get(name)` surface.
-- **Warm pool** — the way to get fast *and* long: pre-warmed jobs blocked on an inbound channel.
-  Dispatch→result measured **~5.4 s** with pre-warm. See below.
+**The execution path**
+- **An Agent Sandbox custom container per turn** — the harness in a gVisor sandbox behind Google's
+  authenticated HTTP proxy: dispatch→first event ~1.3 s, →result ~4–7 s on a ready sandbox (measured live
+  2026-09-11 by `make live-smoke`), ~20 s create→result without one, and no Google identity in the
+  container. One sandbox per turn, deleted at the terminal event; multi-turn continuity rides the
+  checkpoint. The platform's ceilings (8 vCPU max, ~5 min per proxied call, ~1 MB request / ~2 MB
+  response bodies, TTL up to 30 d) are measured, not documented — see TESTING.md, "The limits probe".
 
-**Warm pool (the `DispatchTransport` + worker loop)**
-- A job submitted with a `__POOL_WAIT__` sentinel blocks pulling **its own** Pub/Sub subscription: a
-  random, filtered subscription the client created in `fill_pool` and named only in that worker's job
-  input (per-worker dispatch; `runtime/gemini/pool.py`). The control plane claims one idle worker off
-  the pool's roster (client-owned GCS objects under `pool/`, `roster.py`; atomic via a
-  generation-precondition delete) and publishes the turn addressed to that worker alone. The
-  dispatched message may carry a resume directive and is processed as a normal turn. Why per worker:
-  `roles/pubsub.subscriber` is consume-by-name only, so a shell in one worker cannot reach another
-  worker's channel, and a channel only ever carries the one turn its worker was addressed (README,
-  "The runtime identity is reachable by the agent"). Engines deployed before this (a shared
-  `AGENT_POOL_SUBSCRIPTION` in their env) are still driven the old competing-consumers way, with a warning.
-- The worker emits **heartbeats** while idle (the async executor kills silent jobs) and **pre-warms**
-  during the wait (the Logging/GCS channels) so post-assignment setup is small. Its first event on a
-  turn is `turn_started`; the client's pickup watchdog re-dispatches to another worker if it never comes.
-- On dispatch, the control plane refills the pool so a warm worker is ready for the next turn; a turn
-  that finds no idle worker spawns one for itself (cold latency, never a stranded turn).
-- An idle worker **expires** after `AGENT_POOL_MAX_WAIT_S` (deploy-configurable via
-  `pool_max_wait_s`; default a day) and is not replaced — refill is dispatch-driven only.
+**The ready pool (`roster.py`)**
+- `deploy(warm_pool=True)` creates N sandboxes from the new template, waits until each answers `/health`
+  (12–33 s: route propagation, the container is already running) and records them in the **roster**:
+  client-owned GCS objects under `pool/<template>/idle/`, claimed atomically (generation-precondition
+  delete) so several client processes share one pool. A turn takes the oldest ready sandbox, POSTs the
+  turn to it and refills the pool in the background; the roster is empty → the turn creates a sandbox for
+  itself (~20 s), never a stranded turn.
+- A sandbox's **TTL is set at creation and cannot be extended** (an exec does not reset it — measured), so
+  pool sandboxes are created with `pool_max_wait_s + max_turn_s` of life and the roster entry expires at
+  `pool_max_wait_s`: one claimed at the end of its idle life still has `max_turn_s` for the turn. An
+  expired entry is pruned and its sandbox deleted; nothing is replaced automatically except after a dispatch.
+- The roster is a coordination device, not a security boundary: there is no per-sandbox IAM, so whoever can
+  execute on the host instance can drive any sandbox, and the client identity is the trust boundary.
 
 **Checkpoint / resume**
-- Conversation: the Claude SDK `SessionStore` (append/load) + `resume=session_id`. Our `GcsSessionStore`
+- Conversation: the Claude SDK `SessionStore` (append/load) + `resume=session_id`. Our `BlobSessionStore`
   keys by **`session_id` alone** (ignores `project_key`) so **any worker, any cwd** can resume — the
   default cwd-keyed local store is fatal for serverless.
 - Workspace: tar the agent workspace to GCS; restore on resume. Pin the Claude session id up front via
@@ -340,7 +331,7 @@ These are facts measured during the PoC. The library encodes them so consumers i
   because callers collect artifacts from the job dir. Prompt disclaimers ("stay in your current directory")
   fight the path instead of fixing it. The leaf also keeps `jobs/<sid>/` itself free for session
   bookkeeping the agent shouldn't see. Derived in ONE place (`RunContext.workspace`); callers use the
-  `Session.workspace` accessor (local: host `Path`, created on access, seed-before/collect-after; gemini:
+  `Session.workspace` accessor (local: host `Path`, created on access, seed-before/collect-after; sandbox:
   raises — the filesystem is remote) instead of hand-building `workdir/jobs/<sid>`. `local.deploy(spec,
   workspace=...)` swaps that leaf for a caller-owned directory: a per-session path is a per-session system
   prompt, so suites of short sessions pay prompt-cache creation on every one of them (measured 2x on a
@@ -353,129 +344,65 @@ These are facts measured during the PoC. The library encodes them so consumers i
   bookkeeping (`stderr.log`, the codex home, `list_sessions()`) that never was agent-visible.
 - **Finalize inline at the terminal `result` event.** The async executor **stops draining the generator
   after the result event**, so post-loop checkpoint/artifact code is dead in-cloud — it must run as a
-  side-effect at the terminal event, with Cloud Logging as the reliable emit channel.
+  side-effect at the terminal event (the worker's `/events` record and the mirror are the channels).
 
-**Observability**
-- Async `run_query_job` surfaces **no** stderr, **no** stack traces, and only coarse (~12 min) GCS flushes.
-  **The GCS event mirror is the live channel** (`stream.py`): the worker streams every surfaced event
-  into small JSONL batch objects under `events/<sid>/` (~0.5 s cadence; a terminal `result` flushes
-  immediately), and the client tails the object listing — lexical name order == chronological,
-  list-after-write is strongly consistent (no ingestion lag), and GCS has no restrictive read cap, so
-  tens of concurrent streamed runs are a non-event. The same objects ARE the durable history
-  (`Session.history()` reads them) — one record, two roles. It is the ONLY live channel: engines
-  deployed before streaming wrote the mirror at end-of-turn, so against them a turn's events all
-  arrive in one batch with the terminal result (correct, just not live) and `wait_until_warm`
-  times out soft — redeploy them.
-- **Cloud Logging is emit-only**: every worker still writes the per-step `remote_agent_toolkit_steps`
-  log (labelled by `session_id`) because debugging and alerting need an indexed, queryable,
-  cross-session store — but no client run depends on it. Its READ path is capped at
-  **60 `entries.list` requests/min PER PROJECT** (fixed; Google says not raisable), which is why
-  it was dropped as a data plane (`CloudLoggingSink` has no `tail`). The only remaining log read is
-  the bounded one-shot history backstop (`CloudLoggingSink.read`, `read_history` layer 3 — sessions
-  older than mirroring); it retries 429s with backoff inside its timeout.
-- **Cloud Trace spans per turn** (the console's Agent Platform *Traces* tab). The platform's ADK
-  auto-instrumentation can't see inside the Claude subprocess, so the worker rebuilds the structure from
-  the `AgentEvent` stream (`gemini/tracing.TurnTracer`): a root `invoke_agent` span per turn (parented
-  under ADK's `invocation` span; result status/usage/cost, `gen_ai.conversation.id` = session id — what
-  groups turns in the console's session view) + one `execute_tool` child per tool call with real
-  durations (opened on `tool_use`, closed on the paired `tool_result`); messages/thinking are span
-  events. The load-bearing platform fact (pinned by a standalone repro,
-  `~/zyte/agent-runtime-tracing-repro/`, shared with Google): **the platform initializes OTel in
-  query-job workers — a real `TracerProvider` with exporter and `cloud.resource_id` resource — but never
-  flushes it on the job path**; the sync serving path force-flushes per query stream, while a job worker
-  is torn down with the batch buffer unexported (identical stock-ADK engine: sync span exports, job span
-  never). So `TurnTracer.close()` does a bounded `force_flush` at the end of every turn — that flush is
-  the whole workaround; without it no toolkit span ever reaches Cloud Trace. History: an initial
-  `ensure_export_pipe` (self-installed OTLP provider for a no-op ambient provider) was REMOVED after the
-  probe evidence — exported spans carry the platform's `service.instance.id=<hex>-<pid>` resource stamp,
-  not ours, so every cloud worker already has the platform's provider and the pipe never fired;
-  resurrect from git history only if the platform ever ships job workers without one. The default RE
-  service-agent role suffices for the export. INCIDENT LOG (2026-08-03..06, root-caused 08-06): every
-  worker span/metrics batch 403'd (`Failed to export span batch code: 403`) on engines deployed from
-  environments whose gcloud/ADC default project wasn't the deploy target. ROOT CAUSE: `AdkApp.__init__`
-  snapshots `initializer.global_config.project` into its pickled `_tmpl_attrs`; the worker sets
-  `GOOGLE_CLOUD_PROJECT` from the pickle and telemetry export routes to THAT project — a pickled
-  `other-project` (the org-wide gcloud default) made the RE service agent attempt cross-project writes,
-  hence 403 Forbidden, persistently, on every engine deployed from such a machine (and only those —
-  which made it look like server-side per-engine state keyed on creation time for three days).
-  Settled by an artifact-bisect ladder, each step one variable: byte-identical redeploy of a broken
-  engine's staged artifacts under a different creator → still 403 (artifact-borne, not
-  creation-context); model swap both directions → no effect; installed-version matrix across
-  broken/clean builds → identical versions on both sides (packages ruled out); `pickletools.dis` diff
-  of the two pickles → `project: other-project` vs `project: my-project`; byte-patching ONLY that
-  string in the broken pickle → clean. Earlier theories disproven en route: IAM grants (telemetry
-  writer roles — inert), exporter version pins (release-timing coincidence), server-side incident
-  windows (the "windows" were just who deployed from which laptop). FIX: `build_adk_app` pins the
-  deploy target via `aiplatform.init(project=..., location=...)` before constructing the app and hard-
-  fails if the pickle captured anything else. Debugging surfaces that settled it: engine build logs
-  land under the engine's `reasoning_engine_id` in Cloud Logging (diff `Successfully installed` sets;
-  compare assembly-image digests), staged artifacts are readable in the staging bucket (the pickle's
-  strings are cleartext — `pickletools.dis`), and beware time-confounded canaries — always re-run the
-  BROKEN configuration (ideally the broken ARTIFACT, ideally byte-identically) before declaring a fix
-  causal.
-  Strictly best-effort: `TurnTracer` never
-  raises — a tracing failure must not take a run down. Span values are truncated summaries (same text as
-  the log/mirror; no new exposure surface). Traces are diagnostics; `history()` is the record.
-  Live-validated facts: **Cloud Trace ingestion lag ~5–10 min** (poll patiently before declaring spans
-  lost; since 2026-08-04 the v1 read API returns NOTHING for new spans — they live in the new
-  telemetry-backed store, console-only — and it never exposed span exception records);
-  **one trace per turn** — every turn runs in its own query job (cold submits one; a warm pool
-  worker claims exactly one turn, processes it, exits), so a turn's spans nest under that job's ADK
-  wrapper spans and a multi-turn session spans several traces, stitched by `gen_ai.conversation.id`
-  (what keys the console's session view).
-- **Content capture: tried and REMOVED (2026-07-17)** — don't re-add without the platform gap closing.
-  A `deploy(capture_content=True)` default briefly baked the console's "prompt-response collection" env
-  vars (`OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=EVENT_ONLY` +
-  `OTEL_SEMCONV_STABILITY_OPT_IN=gen_ai_latest_experimental` — a per-ENGINE setting, patchable on a live
-  engine via REST `updateMask=spec.deployment_spec.env`) and had `TurnTracer` put `rat.prompt` /
-  `rat.final_text` on the turn span (that part worked, live-verified). Removed because the headline
-  purpose failed: the console's *session conversation* panel is fed by the platform capture
-  instrumentation's content logs, which never materialize for query-job executions (the job-path
-  telemetry gap above), so it stayed "No chat conversation data" and the feature over-promised. Security review stands for a future revisit: no new
-  exposure class (secret values never ride prompts/payloads; the text already persists to the
-  log/mirror), but Google's setting also logs `user.id` (consent caveat).
-- **Known residual Traces-UI gaps (2026-07-17, platform-side; parked — revisit with Google support).**
-  (1) *"(Missing span ID …)" placeholder node*: ADK's outermost runner span is never exported — it only
-  ends after our turn-end `force_flush` has already run (a flush exports ended spans only), and the
-  platform tears the worker down before any later export. Cosmetic: our turn/tool spans are complete
-  underneath.
-  (2) *Session conversation tab shows "No chat conversation data"*: see the content-capture entry above
-  — the platform's content logs never materialize on the job path; for warm turns the ADK session's
-  user event is the `__POOL_WAIT__` sentinel anyway (the real prompt rides the dispatch payload). Emitting their
-  undocumented content-log format ourselves was judged too brittle; full prompts/outputs live in
-  `session.history()`.
-- **ADK events must carry `invocation_id`** (`ctx.invocation_id`, threaded through `to_adk_event`): the
-  runner appends every non-partial event (our terminal result) to the platform session service, whose
-  API rejects events without it (400, surfaced as an exception on the job's trace — invisible before
-  tracing existed; it fired on every turn ever, after the client already had its result).
-- **Every tail poll is bounded** (the logging client has no per-call timeout; a dead connection
-  otherwise wedges `list_entries` forever — observed live). Transient failures ride out; a run of
-  consecutive failures surfaces the error.
-- **Cold runs get a job watchdog**: after ~60 s of stream silence the client probes
-  `check_query_job(job_name)`; once the job is terminal (+~120 s grace) with the tail still silent, the
-  client first tries to **recover the real result from the GCS event mirror** (written by the worker at
-  turn end, no ingestion lag — this rescued a live run whose log entries took >8 min to become
-  queryable), and only synthesizes an explained error result when no durable terminal record exists.
-  Warm turns have no per-turn job handle (the turn runs in whichever pool worker claimed it) — bounded
-  polls only.
-- **Cloud Logging ingestion lag can exceed several minutes** (observed live) — the mirror, not the log,
-  is the reliable record; the log is the low-latency *usually*-fast channel.
-- **A young query-job operation is not cancellable** (`FAILED_PRECONDITION` for roughly its first
-  minutes); external cancels/interrupts may need retries. The in-cloud **Bash tool default timeout is
-  120 s** — long commands need an explicit timeout or backgrounding.
+**Observability (one record — the events)**
+- **The worker's `/events` is the live channel**: the client long-polls it (held until new events exist,
+  paged under ~1 MB because the proxy caps a response at ~2 MB — measured), so an event is seen within one
+  proxy round trip (~0.2 s) of its emission. **The GCS event mirror is the durable record** (`stream.py`):
+  the worker streams every surfaced event into small JSONL batch objects under `events/<sid>/` with the
+  run-scoped token (~0.5 s cadence; a terminal `result` flushes immediately) — what `Session.history()`
+  reads and the client's **fallback stream** when the sandbox stops answering (delivered events are
+  skipped; a sandbox that is gone and left no terminal record ends the run with an explained
+  `sandbox_unreachable` result after a 30 s grace).
+- **No Cloud Logging, no Cloud Trace.** The sandbox has no logging identity, and one record is enough: the
+  mirror holds every event of every turn, and the TESTING.md debugging recipes read it.
+- **CPU / memory come from inside the sandbox** (`resources.py`): the platform exposes nothing about a
+  sandbox's resources from outside (no Monitoring metric type, no usage fields on the resource; checked
+  2026-09-16), but gVisor mounts cgroup v1 accounting inside and reports the template's memory limit as
+  `MemTotal`. The worker samples both every 20 s into the turn's **event mirror only** (`resource_sample`
+  rows; `Session.resource_samples()` reads them back, `history()` skips them unless asked), emits one
+  visible **memory-pressure status event** the first time usage crosses the pressure fraction, and stamps
+  the peak, the limit and the CPU time into the terminal result (`RunResult.resources`). An OOM shows up
+  as the worker going unreachable mid-turn, with the last sample at most one interval before death.
 
-**Turn control (steer / interrupt a running turn; `control.py`, `runtime/gemini/control.py`)**
-- A query job has no inbound channel other than cancel, and a pool worker stops pulling its
-  subscription once it has claimed a turn. The inbox is therefore a **GCS prefix** next to the other
-  handoff objects: the client writes `control/<sid>/<epoch_ms>-<seq>-<id>.json`
-  (`{"op": "steer"|"interrupt"|"stop", "message", "message_id"}`), the worker polls it every ~1.5 s
-  while the harness runs, hands each message over in key order and deletes it, and records the id at
-  `control-delivered/<sid>/<id>` so a retried send (a client that adopted the session) is dropped.
-  Same bucket and identity as the event mirror; identical cold and warm; ~2 s latency (chat speed);
-  works from any process holding the session id. The worker announces it with a `control_ready` event
-  and the client refuses (`ControlUnavailable`) to write for a revision whose env has no
-  `AGENT_CONTROL_GCS`. Pub/Sub (per-worker addressed subscriptions, sub-second) was the alternative;
-  the transport sits behind the `ControlChannel` protocol so it can replace the inbox later.
+**Failure semantics (the client owns liveness; there are no platform retries)**
+- **A sandbox that stops answering** — the proxy fails `DIRECT_MAX_FAILURES` polls in a row, or the
+  platform says it is gone (TTL, OOM, deleted elsewhere) — switches the stream to the mirror tail; a gone
+  sandbox that left no terminal record ends the run with an explained `sandbox_unreachable` error result
+  after a 30 s grace. **A dispatch that no sandbox takes** (three attempts, moving on only from a sandbox
+  that definitely never accepted the turn — gone before the call reached it, or refusing — and deleting it)
+  ends the run with `dispatch_failed`. **A `/turn` call whose answer was lost** (proxy timeout, 5xx) may
+  hide an acceptance — the worker answers as soon as the turn's thread runs — so it is settled with the
+  *same* sandbox first: acceptance is idempotent per turn id, the worker re-acknowledges a turn it knows,
+  and only a definitive refusal moves on. When that sandbox cannot be asked any more (vanished, or silent
+  for `DISPATCH_RECONCILE_S`), the run ends with `dispatch_uncertain` naming the sandbox, which is deleted
+  (stopping whatever it started). Neither hangs, and a turn is never replayed on a second sandbox while the
+  first may be running it. **The terminal result is durable before it is visible**: the worker writes it
+  to the mirror (awaited, bounded) before serving it on `/events`, so the client deletes the sandbox only
+  once the record holds the result; when that write fails (dead run-scoped token, storage outage) the
+  live copy carries `mirror: "failed"` and the client writes the line itself, before the delete.
+- **`interrupt()`** posts `stop` to `/control` and waits for the harness's normal end of turn (checkpoint,
+  `INTERRUPTED` result); the fallback — no `control_ready` yet, or no answer within the timeout — cancels the
+  driver and **deletes the sandbox**, which is the cancel (and stops the billing). A hand-over still in
+  flight cannot be stopped (the dispatch thread claims, then POSTs): the run is marked abandoned and the
+  sandbox the dispatch lands on — claimed, or already running the turn — is deleted the moment it lands.
+- **The client dying** leaves the sandbox to its TTL (`max_turn_s` for an on-demand sandbox,
+  `pool_max_wait_s + max_turn_s` for a pool one): the platform's backstop.
+- The in-sandbox **Bash tool default timeout is 120 s** (Claude Code's own) — long commands need an explicit
+  timeout (`BASH_DEFAULT_TIMEOUT_MS` in `spec.env`) or backgrounding.
+
+**Turn control (steer / interrupt / probe a running turn; `control.py`, the worker's `/control` and `/exec`)**
+- The client POSTs `{"op": "steer"|"interrupt"|"stop", "message", "message_id"}` to the sandbox worker's
+  `/control` through the platform's proxy (~0.3 s); the worker feeds it to the harness's `ControlChannel`
+  (an asyncio queue on the turn's loop) and dedupes on `message_id`. The worker announces the channel with a
+  `control_ready` event; until then the client **queues** the message in the session (it does not yet know
+  which sandbox took the turn, or the worker has not built its channel) and a housekeeping thread posts the
+  queue in order the moment `control_ready` is observed on the stream — so `send()` never refuses a message
+  during the dispatch window (~1 s from the pool, 15–25 s on a fresh sandbox; agentic-scraping's inbox
+  flushes pending user messages exactly then). Messages still queued when the turn ends (dispatch failed,
+  sandbox died) are dropped and counted on `RunResult.warning`; `interrupt()` drops the queue and posts its
+  `stop` directly. `ControlUnavailable` is left for a *ready* worker that did not take the message.
 - **What the harnesses do (verified live, 2026-09-04).** Claude Code: a `query()` on the streaming
   client mid-turn is injected into the model's next call and the turn ends with one result; the CLI
   never echoes it, so the harness emits the `user` event and proves delivery the way it tracks
@@ -486,137 +413,105 @@ These are facts measured during the PoC. The library encodes them so consumers i
   follow-up `query()`. Codex: `turn/steer` is native (the model sees it after its current step);
   `interrupt()` yields `turn/completed status=interrupted`, after which a new `thread.turn()` on the same
   thread continues the run.
+- **`exec()` is the read-only probe** (`Session.exec(command, cwd=, timeout=) -> ExecResult`, #85): the
+  client POSTs `{"turn_id", "command", "cwd", "timeout"}` to the worker's `/exec`, which runs it under
+  `/bin/bash -c` in the running turn's workspace (the agent's cwd) through `control.run_shell` — the same
+  function `local` runs on the host, so the output cap (500 000 characters per stream, `truncated` flagged)
+  and the timeout semantics (killed, `returncode` 124) are identical. Only a running turn can be probed
+  (the sandbox is deleted at the terminal event; `local` keeps the rule for parity): before the sandbox is
+  known `exec()` waits for dispatch, afterwards it raises `ControlUnavailable`. The timeout is capped at
+  240 s on `sandbox` because the proxy cuts a call at ~300 s. Motivation: agentic-scraping renders the
+  workspace's `git diff` every ~10 s while the coding agent works — exact and harness-independent, which
+  the events (paths only on Codex, context-free old/new strings on Claude Code) are not.
+- **A re-attached session adopts its turn running under another process** (`SandboxSession._attach`).
+  `get_session(id)` in a fresh process holds no run; the first `send()` / `interrupt()` / `exec()` /
+  `run()` / `current_run` / `busy` / `last_result` reads the mirror once — the last `turn_started` marker without a `result` after it names the
+  turn and its sandbox (every event is stamped with both, #80; the sandbox name is rebuilt from the
+  engine template's host instance) and whether `control_ready` was announced — and builds a `DrivenRun`
+  over the same `_stream_turn` the owner uses (the worker replays the whole turn from `since=0`, then
+  streams; the mirror tail is the fallback). From there the session behaves as the owner's: steer,
+  stop, probe, `last_result` — and `Session.current_run` (protocol) hands the adopter the `Run`
+  itself, so it consumes the events instead of polling. Ownership rules: the adopter runs its own run-scoped token refresher (the
+  owner may be dead; the worker reads the record back), deletes the sandbox `ADOPTED_RELEASE_DELAY_S`
+  (10 s) after the result so a still-alive owner can drain its last events first (its `/events` call is
+  served from memory the moment the result lands, and the mirror holds the result anyway), and an
+  adopter whose event loop shuts down without an explicit `cancel()` (a poller exiting) releases
+  nothing — the turn goes on under its owner. The check is one-shot per session object: a session
+  started in the process never has a foreign turn, and a `get_session` one that found none resumes as
+  before.
 - **`interrupt()` is a stop, not a cancel.** The turn's normal end-of-turn path runs (snapshot,
   transcript, terminal result with `StopReason.INTERRUPTED`, accounting kept), so the interrupted turn's
-  workspace changes are in the checkpoint the next `send()` restores. `cancel_query_job` remains the
-  fallback when the worker never announced the inbox or does not stop within the timeout; the result's
+  workspace changes are in the checkpoint the next `send()` restores. Deleting the sandbox is the
+  fallback when the worker never announced its channel or does not stop within the timeout; the result's
   `warning` says so.
 
 **Persistence / job history (what survives a run, and where)**
-- **Mirrored events** — the worker buffers every surfaced `AgentEvent` and flushes one
-  `events/<sid>/<epoch_ms>.jsonl` per turn to the output bucket. The canonical durable history: the only
-  session-keyed record for **warm** turns (their platform job output goes to a throwaway pool path) and the
-  only layer keeping **all** turns of a multi-turn session. Read via `session.history()`.
-- **Platform job output** — `jobs/<sid>.jsonl` (+ `<sid>_input.jsonl`), written by the platform for each
-  cold job. Per-job: a resume under the same session **overwrites** it. ⚠️ the input file persists the
-  query verbatim — which is why per-invocation secrets never ride the invocation payload (see §3.5): they
-  are staged at a per-invocation `invocation-secrets/<sid>-<nonce>.json` object the worker fetches and
-  deletes at the end of a completed turn (retry-safe; a 1-day lifecycle rule reaps orphans).
-- **Session/turn configs** — run-time configuration is typed by the lifetime of what it configures
-  (README "Deploy / session / turn"): a `SessionConfig` binds ONCE at `start_session(config=)` and is
-  persisted at the session's stable `session-config/<sid>.json` key (every turn's payload points at
-  it; `get_session` re-attach reads it back and accepts no substitute — the session's world is
-  created on turn 1 and snapshot-restored after, so a mid-conversation change could not be honored);
-  a `TurnConfig` rides one `run()`/`send()` as a nonce-keyed `turn-config/<sid>-<nonce>.json` (cold
-  directives `AGENT_SESSION_CONFIG_GCS=` / `AGENT_TURN_CONFIG_GCS=`). The worker merges deploy-baked
-  ← session ← turn, validates the harness choice against the image's baked CLIs, executes the
-  result, and echoes it as an `effective_spec` event — the ground-truth record for post-mortem and
-  replay. Config objects are non-secret by construction (inline `user:token@` repo URLs are refused
-  at config construction) and are KEPT (30-day lifecycle rule) rather than deleted like secrets. A
-  missing config, an unknown config field, or an unbaked harness FAILS the turn — never a silent
-  fall-back to the baked spec. With no configs, nothing is staged and the turn runs the deploy-baked
-  spec exactly as before. Session/turn parameters (target repo/ref, model, prompt variant, budgets)
-  thus need no engine redeploy; deploy-time-only fields (`packages`, harness availability) still
-  come from the deployment, and baked skills serve as a staging fast path only while the effective
-  `skills` match the baked declaration.
-- **Cloud Logging** — the per-step log, bounded by log-bucket retention (~30 days default).
+- **Events mirror** — `events/<sid>/*.jsonl` under the output bucket, written by the worker as the turn runs
+  (the durable record and the fallback live channel); `Session.history()` reads it, `list_sessions()`
+  enumerates it (bucket-wide). Every event carries its `turn_id`, so a re-attached session's back-to-back
+  turns never replay each other's results (#80).
+- **Configs** — the session's `SessionConfig` at a stable key (`session-config/<sid>.json`, what re-attach
+  reads back; a re-attacher cannot substitute one) and each turn's `TurnConfig` nonce-keyed; both also ride
+  the turn body, so the worker never reads them from GCS. Kept 30 days. Only a definite "no such object"
+  means the session has no config: a permission error, a timeout or a malformed record fails the re-attach
+  instead of silently running the baked spec, and the next attempt re-reads.
+- **Deploy record** — `deploys/<name>/<template>.json`: the spec and settings a template was deployed with,
+  so a `get_engine` handle knows the baked spec and the model identity. Kept.
+- **Token objects** — `invocation-secrets/<sid>-gcs-token.json`: the run-scoped GCS token's refresh object
+  (a value; deleted at turn end, reaped after a day).
 - **Checkpoints** — transcript + workspace tar under `checkpoints/`, keyed by (mapped) session id.
-- `engine.list_sessions()` merges the GCS layers (bucket-wide) with the engine's ADK sessions;
-  `session.history()` reads mirror → job output → Cloud Logging, first hit wins;
-  `session.last_result` reconstructs from the terminal history event for re-attached sessions.
-- Session ids: cold = ADK `sessions.create` (numeric); warm = client-minted UUID. The Claude/checkpoint
-  side always uses a canonical UUID (`uuid5` of a non-UUID sid — the CLI rejects non-UUID session ids);
-  the raw sid keys Cloud Logging and the GCS records.
+- Session ids are client-minted canonical UUIDs (the Claude CLI rejects non-UUID session ids; a non-UUID id
+  maps through `uuid5`). Nothing is persisted by the platform: no job input, no job output, no platform
+  session.
 
-**Deploy contracts (applied automatically by `gemini.deploy`)**
-- **uv ships as a Python requirement** + its bin dir prepended to PATH — **build-script filesystem changes
-  do NOT persist** into the runtime container (only `git` survives from the base image).
-- **glibc base, Python 3.12** — the `claude-agent-sdk` wheel ships a self-contained glibc ELF `claude`
-  binary; no Alpine/musl; SDK supports Python ≤3.13.
-- `a2a-sdk>=0.3.4,<0.4` (1.x incompatible with ADK 2.3.0).
-- **Platform-critical pins live in-tree** (`runtime/gemini/constraints.txt`, pip `-c` semantics) —
-  engines resolve requirements at BUILD time, so unpinned deps mean two deploys of one commit can differ.
-  `build_requirements` merges the constraints client-side (the build offers no hook for a real `-c` file:
-  extra_packages extract only at container runtime, after pip has run) and fails fast on an unsatisfiable
-  merge with `spec.packages`. The pickle-coupled packages (aiplatform/cloudpickle/pydantic — the engine
-  build unpickles the AdkApp the deploy venv pickles) are additionally checked against the deploy venv by
-  `verify_deploy_env()`. Refresh = bump pin(s) + canary deploy + live turn + clean telemetry, one
-  reviewed diff.
-- Only `/tmp` is writable → agent cwd under `/tmp/agent-jobs/<session-id>/workspace` (see the
-  workspace-leaf contract below).
-- `IS_SANDBOX=1` to allow `bypassPermissions` under root.
-- `NUM_WORKERS=1`: the platform's serving harness (`/code/app`, uvicorn, in the container base image —
-  independent of the SDK version) defaults to `os.cpu_count() + 1` worker *processes*, sized to the
-  host node rather than the container's CPU limit (10–11 seen live), each importing the whole stack
-  privately via the spawn start method: ~300 MiB apiece, ~3 GiB of the default 4Gi before our code ran
-  (measured 2026-09-03). A query job serves one request per container, so one worker loses nothing and
-  brings the idle baseline to ~450 MiB (cold and warm verified) and startup CPU from minutes to seconds.
-- `min_instances=0` (the default): the toolkit is async-only, where every job provisions its own worker —
-  a standing container serves only the unused sync path while billing continuously. (`>=1` would matter
-  only for real long *sync* jobs; min=0 SIGTERM-recycles a sync container ~2.5 min.)
-- `resource_limits` (deploy kwarg, optional): container CPU/memory; the platform default is
-  `{"cpu": "4", "memory": "4Gi"}` — that 4Gi is shared by the harness CLI, the ADK app, subagents, and
-  everything the agent's tools spawn, and memory-heavy turn work (dependency builds, whole-project
-  imports) can OOM-kill the worker mid-turn (observed live 2026-07-28/29; the job runner then replays
-  the turn from scratch). Raise memory, not cpu, for headroom (the platform's own baseline is pinned
-  by `NUM_WORKERS=1` above; before that it scaled with the node's CPU count). Deploy memory-heavy agents with e.g. `{"cpu": "4", "memory": "16Gi"}`
-  (memory max `32Gi`; cpu one of 1/2/4/6/8).
+**Deploy contracts (applied automatically by `sandbox.deploy`; `_image.py`)**
+- **The image**: `python:3.12-slim-bookworm` (glibc — the `claude-agent-sdk` wheel ships a self-contained
+  glibc ELF `claude` binary; no Alpine/musl), `git`, `curl`, build tools; the base requirements
+  (`claude-agent-sdk` pin, `openai-codex` when the Codex harness is baked, `google-cloud-storage`, `uv`, …)
+  merged with `spec.packages` (an unsatisfiable merge fails before the build); the toolkit package copied
+  from the deploying venv (the image runs THIS toolkit revision — client and image are one wire contract);
+  the resolved skills flat under `/opt/toolkit/skills`; the spec at `/opt/toolkit/spec.json`; a non-root
+  `agent` user (uid 1000; the sandbox requires non-root); `/workspace`; the worker as `CMD` on port 8080.
+- **The tag is a content digest** of the whole build context, so an unchanged spec from an unchanged
+  toolkit skips the build (`docker manifest inspect`) and a deploy whose image and resources match the
+  newest template is a no-op. Docker CLI + a registry login are the deploy's prerequisites; the platform
+  does not build for us.
+- **Template**: the image, `ports=[8080]`, `resources` requests = limits = `resource_limits` (default
+  4 CPU / 4 GiB; the platform refuses more than 8 vCPU; 16 GiB verified), `egress_control_config.internet_access`.
+  `customContainerSpec` carries only `imageUri` — no command, args or env — so everything per run arrives
+  over HTTP after creation.
 
-**Identity / IAM (two identities)**
-- Deploy/operator = the **impersonated SA** (publish, read logs, submit jobs, mint the run-scoped
-  tokens). *All* runtime resource access (GCS, Pub/Sub, Logging, Vertex) authorizes against the
-  **runtime identity**, not the operator SA. Granting the operator SA a role does nothing for the
-  running job. The README's "GCP setup & required permissions" lists every grant per identity.
-- **The runtime identity is reachable from the agent's shell** (found and verified live 2026-09-02,
-  `dev/live_isolation_probe.py`; PR #41). The worker container runs everything as one user (`appuser`,
-  PID 1 included, `/proc/1/environ` readable), and the harness authenticates to Vertex through the
-  metadata server, so a child shell gets the runtime identity's token with one HTTP call. There is no
-  second user and no firewall in the container, so nothing in the worker can hide the metadata server.
-  Before the fix the default identity (the Agent Runtime service agent, shared by every engine in the
-  project) held `objectAdmin` on the shared output bucket, so from any run a shell could: read every
-  other in-flight run's staged secrets (`invocation-secrets/`, plain JSON until its turn ends —
-  **critical**), read every run's transcripts, workspace snapshots, configs and persisted job inputs and
-  overwrite another run's checkpoint (**high**), write a fake terminal `result` into another session's
-  event mirror (**high**), spend on Vertex outside the run budget (**medium**), forge ops log lines
-  (**low**), and in warm mode pull the shared dispatch subscription and take another run's turn
-  (**critical**: the message carries the run's pointers and, with run-scoped tokens alone, its token).
-- **Fix 1: run-scoped GCS tokens** (`runtime/gemini/scoped_gcs.py`). The client mints one downscoped
-  token per turn (a Credential Access Boundary: this bucket, only the run's own prefixes — secrets,
-  configs, events mirror, checkpoints, artifacts), hands it over with the invocation (last directive line
-  cold, payload field warm), refreshes it while the run lives by overwriting one object under the run's
-  secrets prefix, and the worker does all GCS work with it via the `GcsBlobStore` process default. The
-  runtime identity then needs, on the output bucket, only conditional `objectCreator` +
-  `legacyObjectReader` on `jobs/` (the platform's job runner reads the job input by exact name and writes
-  the job output as the runtime identity) plus `objectCreator` on `events/ratk-` (pool readiness markers).
-- **Fix 2: per-worker dispatch** (warm pool bullets above; `pool.py`, `roster.py`). Never grant the
-  runtime identity anything under `pool/`: the roster there decides where a turn goes.
-- **Fix 3: a custom runtime service account** (`gemini.deploy(..., service_account=)`; omitted, the deploy
-  runs the engine as `ratk-runtime@<project>`, checked to exist before the build, and there is no way to
-  deploy as the platform default). The default
-  service agent's Google-managed project role `roles/aiplatform.reasoningEngineServiceAgent` carries
-  `storage.objects.get/list` on every bucket in the project, and a bucket binding cannot take a project
-  permission away (verified 2026-09-02). A custom account holds only what is granted (verified
-  2026-09-03/04: shared bucket 403 on every prefix, project bucket list 403, Vertex operations list 403,
-  the turn itself fine on the run token). Role set: a custom role with only `aiplatform.endpoints.predict`
-  (never `roles/aiplatform.user`, which carries `aiplatform.operations.list` = every run's job id, and
-  `reasoningEngines.*`), `logging.logWriter`, `serviceusage.serviceUsageConsumer` (the job runner
-  downloads the job input with a quota project on the request; without it the job dies before any
-  worker event, with the 403 only in Cloud Logging), `telemetry.metricsWriter` / `tracesWriter`,
-  `pubsub.subscriber` (warm pools; consume-by-name only, which is what makes per-worker subscription
-  names capabilities), `storage.objectViewer` on the staging bucket, the conditional output-bucket
-  bindings above. The deployer needs `iam.serviceAccountUser` on it. Alternatives set aside: an Agent
-  Identity (`identity_type=AGENT_IDENTITY`, per-engine SPIFFE principal; should work the same way, not
-  verified, and cannot hold legacy bucket roles), an output bucket in another project (works but leaves
-  the service agent's project-wide read in place and moves the bucket), an IAM deny policy (needs
-  `iam.denyAdmin`).
-- **What stays reachable** with the runtime identity's token: Vertex model spend outside the run
-  budget, Cloud Logging writes, the run's own persisted job input. Background jobs get a fresh sandbox
-  per job (verified 2026-09-03: concurrent sessions on one engine, different `boot_id`s), so a background
-  process left by one run cannot survive into another.
-- **Migration** has no fixed date: redeploy every engine from a revision with `scoped_gcs.py` (the
-  deploy names the runtime service account by default), upgrade clients alongside (mixed versions run on the runtime identity: unfixed
-  but working), then remove the service agent's `objectAdmin` on the bucket and `roles/aiplatform.user`
-  on the project, and re-run the isolation probe against a production engine (every list/read 403).
+**Identity / IAM (two identities, and the sandbox has none)**
+- **The client identity** (an impersonated operator SA, or the caller's own) is the whole control plane:
+  `roles/aiplatform.user` on the project (sandbox + template permissions, the host `reasoningEngine`),
+  `roles/storage.admin` on the output bucket (records, roster, minting the run-scoped tokens),
+  `artifactregistry.writer` on the image repo, `iam.serviceAccountTokenCreator` on the model SA. There is
+  **no per-sandbox IAM**: `aiplatform.sandboxEnvironments.execute` covers every sandbox under the host
+  instance, so the client identity is the trust boundary and the roster is only a coordination device.
+- **The model identity** (`agent-run-model@`, `model_token.py`): a service account with only the
+  `agentRunPredict` custom role (`aiplatform.endpoints.predict`). The client mints its access token
+  (an hour, IAM's default ceiling) per turn and every 25 minutes after that, pushing each one to the worker
+  (`/token`). The worker never puts it in the agent's environment: it runs a loopback **metadata server**
+  that speaks the GCE metadata protocol for exactly one thing, the running turn's token, and sets
+  `GCE_METADATA_HOST` / `CLAUDE_CODE_USE_VERTEX=1` for the CLI — whose Google auth then fetches the token as
+  it would on a VM and re-fetches it when less than five minutes remain (verified with the CLI 2026-09-16:
+  a two-step turn crossing that threshold re-read the token and finished). So a turn's model access lasts as
+  long as some client process holds the session — the starter or an adopter (`_attach`) — with no org
+  policy and no long-lived credential.
+- **The sandbox has no usable Google identity** (verified live 2026-09-10 and by every `live-smoke` run):
+  the metadata server answers with a tenant-project workload identity that is 403 on the project's storage,
+  Vertex and resource manager. So what the agent's shell can reach is exactly what the turn brought: the
+  run-scoped GCS token (its own prefixes), the model token (predict only), the turn's own secrets.
+- **The platform side**: the Agent Sandbox service agent (`service-<number>@gcp-sa-vertex-sandbox`) needs
+  `artifactregistry.reader` on the image repo to pull the image. Nothing else is granted to Google.
+- **Run-scoped GCS tokens** (`scoped_gcs.py`): the client mints one downscoped token per turn (a Credential
+  Access Boundary: this bucket, only the run's own prefixes — configs, events mirror, checkpoints,
+  artifacts; one list clause, the transcript dir), sends it with its expiry in the turn body, refreshes it
+  while the run lives by overwriting one object under the run's prefix, and the worker does all GCS work
+  with it via the `GcsBlobStore` process default. The worker fetches each replacement WITH its current
+  token, so it refreshes no later than a ten-minute horizon before the expiry it knows, and reports a token
+  it can no longer renew once (three consecutive failures), not on every retry. STS caps a minted token at
+  ~10.7k chars including the caller's own, so list clauses are kept to one.
 
 ---
 
@@ -632,8 +527,8 @@ Each is a `typing.Protocol`; concrete adapters ship for prod (GCP) and dev (loca
   alongside their stream through `control.ControlledStream` and act on steer / interrupt / stop
   messages the same way (§6 "Turn control").
 - **`ControlChannel`** — the harness side of turn control: `receive()` blocks for the next operator
-  message. Adapters: `LocalControlChannel` (in-process queue, `local`) and `GcsControlChannel` (the
-  worker polling the GCS inbox, `gemini`). A **conformance suite**
+  message. One adapter, `LocalControlChannel` (an in-process queue on the turn's loop): `local` feeds it
+  from `send()` directly, the sandbox worker from its `/control` endpoint. A **conformance suite**
   (`run_harness_conformance`) pins what embedders read off `AgentEvent.raw` across every backend: an
   init status event and the terminal result's spend/turn count. `run_claude_code_harness_conformance`
   layers Claude Code's stricter promise on top — the init payload's session id — which Codex's init
@@ -678,7 +573,10 @@ Each is a `typing.Protocol`; concrete adapters ship for prod (GCP) and dev (loca
   `cost_usd` (`price_source="openrouter"`). The Claude Code binding also keeps the CLI's own figure
   as `cli_reported_cost_usd`; the Codex CLI reports no USD at all, so it has none to keep. These
   models are never priced from the table, and a turn OpenRouter reports no charge for reports none.
-  The budget is measured against that total, and the proxy answers 402 once the cap is spent.
+  The budget is measured against that total, and the proxy answers 402 once the cap is spent; a zero
+  budget admits no request at all. This is admission between responses, not a hard spending ceiling:
+  concurrent requests can pass it together, and a response without a known cost adds nothing to the
+  total.
 - **Background-task semantics are honored** (eval feedback: a model armed the Monitor tool and ended its
   turn — correct, trained behavior — and the one-shot `query()` tore the CLI down, firing the advertised
   notification into the void; the run was scored no-deliverable). The CLI itself re-invokes the model when
@@ -701,40 +599,29 @@ Each is a `typing.Protocol`; concrete adapters ship for prod (GCP) and dev (loca
   immediately — never wait on tasks a dead conversation can't consume. This also kills the poll tax:
   a well-behaved agent no longer burns a turn per `sleep 60; tail crawl.log` poll during a long crawl.
 - **`BlobStore`** — `put_bytes / get_bytes / put_tree / get_tree / exists / list / delete`. Adapters:
-  `GcsBlobStore`, `LocalBlobStore`. Backs checkpoint, workspace, event mirrors, the secrets handoff,
+  `GcsBlobStore`, `LocalBlobStore`. Backs checkpoint, workspace, the event mirror, the records,
   artifacts.
-- **`EventSink`** — `emit(event)` (write side, runtime) + `tail(session_id, since)` (live read side) +
-  `read(session_id)` (one-shot history read). Adapters: `CloudLoggingSink`, `InMemorySink`.
-- **`DispatchTransport`** — `publish(message, attributes)` + `claim(timeout)` (an addressed per-worker
-  pull; plain competing-consumers only for legacy shared-subscription pools). Adapters:
-  `PubSubDispatch`, `InMemoryDispatch`.
+- **`SandboxProvider`** — the one platform seam of the remote runtime (§13.5): `create(template, ttl)`,
+  `call(handle, path, body, timeout)`, `delete`, `list`, plus template create/list/delete at deploy.
+  Adapters: `AgentSandboxProvider` (Agent Sandbox over the 2.x SDK), fakes in the test suite.
 - **`SecretResolver`** — `resolve(name) -> value`, a *control-plane* helper for callers who keep secret
   values in env/Secret Manager and need to build the per-invocation `secrets` dict (the runtime itself
-  receives values via the staged GCS handoff, §3.5). Adapters: `EnvSecretResolver` (implemented),
+  receives values in the turn body, §3.5). Adapters: `EnvSecretResolver` (implemented),
   `GcpSecretResolver` (stub).
 - **`SessionStore`** — the Claude SDK protocol (`append` / `load` / `list_subkeys`). Adapter:
-  `GcsSessionStore` (keyed by `session_id`). A **conformance suite** (`run_session_store_conformance`)
+  `BlobSessionStore` (keyed by `session_id`). A **conformance suite** (`run_session_store_conformance`)
   validates any implementation.
 
 ---
 
-## 8. What lifts from the PoC
+## 8. Origins
 
-| Capability | PoC source | Disposition |
-|---|---|---|
-| ADK wrapper + run loop | `agent.py` (`ClaudeCodeAgent`) | → `harness/claude_code.py` (generalized) |
-| Event translation | `event_mapping.py` | → `harness/translate.py` (GENERIC) |
-| Checkpoint / resume | `checkpoint/` | → `checkpoint/` over `BlobStore` |
-| Warm pool | `pool.py` + worker loop | → `runtime/gemini/pool.py` + `DispatchTransport` |
-| Skills staging | `skills.py` | → `skills.py` (configurable sources) |
-| Git / GitHub MCP | `git_repo.py`, `_mcp_servers` | → `integrations/` |
-| Artifacts | `artifacts.py` | → over `BlobStore` |
-| Cost tracking | result metadata passthrough | → `RunResult` |
-| Config / runtime resolution | `config.py` | → `AgentSpec` + resolvers |
-| Deploy | `deploy/deploy_agent_engine.py` | → `runtime/gemini/_deploy.py` (contracts encoded) |
-| Control-plane dispatch + log tail | `scrape_cli.py` | → `Session` / `EventSink.tail` |
-| **Scrapy Cloud, monitoring, scrape prompts** | `selfheal/`, `_INTERACTIVE_SUFFIX` | **stay in gemini-agent-runtime** behind the seam |
-| Probes, scratch, `gh_pat.txt` | `scratch_minimal/`, probes | **dropped** |
+The toolkit distilled the `sandbox-agent-runtime` proofs-of-concept. What was lifted and generalized: the
+Claude Code run loop (`harness/claude_code.py`), the event translation (`harness/translate.py`),
+checkpoint/resume (`checkpoint/` over `BlobStore`), skills staging (`skills.py`, configurable sources), git
+clone + token injection and the GitHub MCP attach (`integrations/`), artifacts, cost tracking on the result,
+and the config/runtime resolution that became `AgentSpec`. Scrapy Cloud, monitoring and the scrape prompts
+stayed in `sandbox-agent-runtime` behind the seam.
 
 ---
 
@@ -745,12 +632,12 @@ Each is a `typing.Protocol`; concrete adapters ship for prod (GCP) and dev (loca
    now ships behind `spec.harness`; see §7.)
 2. **Definition API** — **declarative `AgentSpec` + `deploy()`** (control-plane / data-plane split), not an
    imperative builder or thin functions.
-3. **First milestone** — a **minimal generic (non-Zyte) example agent** run local + on Gemini Agent Runtime,
-   proving the core API + deploy + warm pool with the least surface, before porting a real PoC.
-4. **Local deploy is first-class** — `local.deploy(spec)` mirrors `gemini` exactly (same Engine/Session
+3. **First milestone** — a **minimal generic (non-Zyte) example agent** run local + remote, proving the core
+   API + deploy + the ready pool with the least surface, before porting a real PoC.
+4. **Local deploy is first-class** — `local.deploy(spec)` mirrors `sandbox` exactly (same Engine/Session
    API), so the dev loop and the prod loop are the same code.
-5. **App code looks up engines, never deploys** — `gemini.get_engine(name[, version])` is the hot path;
-   `gemini.deploy(...)` is ops/CI.
+5. **App code looks up engines, never deploys** — `sandbox.get_engine(name[, version])` is the hot path;
+   `sandbox.deploy(...)` is ops/CI.
 
 ---
 
@@ -759,54 +646,63 @@ Each is a `typing.Protocol`; concrete adapters ship for prod (GCP) and dev (loca
 (No `src/` layer — the package sits at the repo root.)
 
 ```
-remote-agent-toolkit/
-├── pyproject.toml                 # all deps in core (no extras); dev tooling in a dependency group
-├── README.md                      # team onboarding (grows each phase, §11); the only user-facing doc
+agent-run/
+├── pyproject.toml                 # runtime deps in core; the harness SDKs behind the `local` extra; dev tooling in a group
+├── README.md                      # team onboarding; the only user-facing doc
 ├── DESIGN.md                      # this file (internal design record)
-├── remote_agent_toolkit/
-│   ├── __init__.py                # AgentSpec, SystemPrompt, SkillSource, McpServer, gemini, local
+├── TESTING.md                     # the test ladder: offline suite, parity image, live probes
+├── CHANGELOG.md                   # releases and the Unreleased section
+├── agent_run/
+│   ├── __init__.py                # AgentSpec, SystemPrompt, SkillSource, McpServer, sandbox, local
 │   ├── spec.py                    # AgentSpec + value types (serializable)
 │   ├── events.py                  # AgentEvent, RunResult, RunStatus, StopReason, Run handle
-│   ├── control.py                 # ControlMessage, ControlChannel, LocalControlChannel, ControlledStream
+│   ├── control.py                 # ControlMessage, ControlChannel, LocalControlChannel, ControlledStream, run_shell
+│   ├── structured.py              # structured-output parsing fallback
 │   ├── harness/
 │   │   ├── base.py                # Harness protocol (+ resolve_harness in __init__)
-│   │   ├── claude_code.py         # ClaudeCodeHarness (drives a ClaudeSDKClient stream; ADK-free)
+│   │   ├── context.py             # RunContext — the per-run inputs a runtime hands the harness
+│   │   ├── claude_code.py         # ClaudeCodeHarness (drives a ClaudeSDKClient stream)
 │   │   ├── codex.py               # CodexHarness (drives an openai-codex AsyncCodex app-server)
 │   │   ├── _shared.py             # policy shared by the bindings (secret routing, env, checkpoint)
 │   │   ├── _openrouter_proxy.py   # per-run localhost proxy for openrouter/ models (both bindings)
+│   │   ├── _usage.py              # the normalized whole-turn usage record
 │   │   ├── pricing.py             # LiteLLM price lookup + baked OpenAI fallbacks, context windows
 │   │   └── translate.py           # Claude SDK message → AgentEvent (codex's lives in codex.py)
 │   ├── runtime/
 │   │   ├── base.py                # Engine + Session protocol + state machine + Run handle
+│   │   ├── _run.py                # DrivenRun — the shared, backend-agnostic Run handle
 │   │   ├── local.py               # local.deploy / local.run -> LocalEngine
 │   │   ├── venv.py                # per-engine uv venv for spec.packages on local
-│   │   └── gemini/
-│   │       ├── backend.py         # deploy(), get_engine(), list_engines(), GeminiEngine
-│   │       ├── _deploy.py         # packaging + contracts (uv/glibc/IS_SANDBOX/...)
-│   │       │                      #   (underscored: `deploy.py` would shadow gemini.deploy)
-│   │       ├── adk_agent.py       # the deployed ADK BaseAgent wrapping the harness
-│   │       ├── translate.py       # AgentEvent → ADK Event
-│   │       ├── handoff.py         # GCS staging of per-invocation secrets (retry-safe cleanup)
-│   │       ├── control.py         # the GCS control inbox (client write, worker poll, dedupe)
-│   │       ├── history.py         # durable event mirror + history/list_sessions readers
-│   │       ├── tracing.py         # AgentEvent stream → Cloud Trace spans (TurnTracer)
-│   │       ├── resources.py       # worker CPU/RAM self-sampling (OOM forensics)
-│   │       └── pool.py            # WarmPool worker side
+│   │   └── sandbox/
+│   │       ├── backend.py         # deploy(), get_engine(), list_engines(), SandboxEngine, SandboxSession
+│   │       ├── provider.py        # SandboxProvider seam + AgentSandboxProvider (the platform adapter)
+│   │       ├── worker.py          # the in-container worker: /health /turn /events /control /token /exec
+│   │       ├── _image.py          # Dockerfile generation, content-digest tag, docker build/push
+│   │       │                      #   (underscored: `deploy.py` would shadow sandbox.deploy)
+│   │       ├── model_token.py     # the predict-only model identity's per-turn token
+│   │       ├── scoped_gcs.py      # the run-scoped GCS token (mint / refresh / worker credentials)
+│   │       ├── roster.py          # the ready pool's idle-sandbox roster (GCS, atomic claim)
+│   │       ├── handoff.py         # the GCS records: configs, deploy record, lifecycle rules
+│   │       ├── stream.py          # the GCS event mirror (writer) + its tail (the fallback stream)
+│   │       ├── history.py         # history / list_sessions readers over the mirror
+│   │       ├── resources.py       # in-sandbox CPU/RAM sampling (cgroup) → mirror, pressure event, result
+│   │       └── project_setup.py   # agent-run-gcp-setup
 │   ├── ports/
 │   │   ├── blobstore.py           # BlobStore + GcsBlobStore + LocalBlobStore
-│   │   ├── eventsink.py           # EventSink + CloudLoggingSink + InMemorySink
-│   │   ├── dispatch.py            # DispatchTransport + PubSubDispatch + InMemoryDispatch
 │   │   └── secrets.py             # SecretResolver + GcpSecretResolver + EnvSecretResolver
 │   ├── checkpoint/
-│   │   ├── session_store.py       # GcsSessionStore (Claude SDK protocol)
+│   │   ├── session_store.py       # BlobSessionStore (Claude SDK protocol)
 │   │   └── workspace.py           # snapshot / restore over BlobStore
 │   ├── integrations/
 │   │   ├── git.py                 # clone + PAT injection
 │   │   └── github.py              # GitHub MCP attach + (optional) REST helpers
 │   ├── skills.py                  # discover + provision from SkillSource[]
-│   └── conformance.py             # SessionStore/BlobStore conformance test
+│   └── conformance.py             # SessionStore / Harness conformance suites
 ├── examples/
-│   └── minimal/                   # the first-milestone generic example agent
+│   ├── minimal/                   # the generic example agent, local
+│   └── sandbox/                    # deploy + run on the sandbox runtime
+├── dev/                           # the parity image and the paid live probes (dev/README.md)
+├── docs/                          # notes referenced from the README
 └── tests/
 ```
 
@@ -817,21 +713,21 @@ remote-agent-toolkit/
 The **README grows with the code** — each phase leaves the README runnable for what's shipped, rather than
 saving all onboarding docs for the end.
 
-- **P0 — Scaffold.** Repo skeleton (no `src/`), `pyproject` (all deps in core; dev tooling in a dependency
-  group), the port & harness protocols as real signatures, the conformance harness, CI.
-  *README:* skeleton + install + the headline example as the north-star target.
+- **P0 — Scaffold.** Repo skeleton (no `src/`), `pyproject`, the port & harness protocols as real signatures,
+  the conformance harness, CI. *README:* skeleton + install + the headline example as the north-star target.
+  (Done.)
 - **P1 — Generic core + local.** `ClaudeCodeHarness`, checkpoint/SessionStore, skills, git/github,
   artifacts, `AgentSpec`, `local.deploy`/`local.run` with filesystem/in-memory adapters.
   *Gate:* the generic example runs in-process. *README:* the **local quickstart** works end-to-end
-  (define → `local.deploy` → `run` / stream / poll).
-- **P2 — Gemini backend + warm pool + deploy.** `gemini.deploy` (contracts encoded) + `gemini.get_engine`
-  / `list_engines`; the engine handle & `Session` state machine; `WarmPool` over Pub/Sub; Cloud-Logging
-  tailing; structured outputs. Permissions runbook.
-  *First-milestone gate:* **the minimal generic example runs locally *and* on Gemini Agent Runtime with a
-  warm start.** *README:* the **deploy quickstart** + engine management.
+  (define → `local.deploy` → `run` / stream / poll). (Done.)
+- **P2 — Sandbox backend + ready pool + deploy.** `sandbox.deploy` (contracts encoded) + `sandbox.get_engine`
+  / `list_engines`; the engine handle & `Session` state machine; the ready pool; the event channel;
+  structured outputs. Permissions runbook. (Done, on Agent Sandbox — §13.)
+  *First-milestone gate:* **the minimal generic example runs locally *and* remotely with a warm start.**
+  *README:* the **deploy quickstart** + engine management.
 - **P3 — Onboarding polish.** Examples, the platform-notes appendix, conformance docs, README polish
   (troubleshooting, IAM runbook link, the "why" sections).
-- **P4 — Migrate the PoC.** `gemini-agent-runtime` depends on the toolkit; re-implement self-heal +
+- **P4 — Migrate the PoC.** `sandbox-agent-runtime` depends on the toolkit; re-implement self-heal +
   interactive spider on top; delete the lifted code; `scrapy` becomes an extra there.
 
 ---
@@ -842,35 +738,192 @@ saving all onboarding docs for the end.
   (precedence on name collision, per-source ref pinning) is specified in P1 but the merge policy needs a
   decision. (P1 ships **last-source-wins**.)
 - **Baked engine dependencies** — `AgentSpec.packages` means "the agent's starting Python packages" on
-  BOTH backends: `gemini.deploy` encodes them via the uv-via-requirements contract; `local.deploy`
-  resolves them into a per-engine venv (uv, engine-contract Python 3.12) activated in the agent env.
-  (Decided after eval-harness feedback: a spec field silently meaning different things per backend broke
-  local/remote parity; a Docker-based local mode was rejected — it would trade away the in-process fast
-  dev loop that `local` exists for, and uv's cache makes the venv path near-instant.)
+  BOTH backends: `sandbox.deploy` bakes them into the image with uv; `local.deploy` resolves them into a
+  per-engine venv (uv, engine-contract Python 3.12) activated in the agent env. (Decided after eval-harness
+  feedback: a spec field silently meaning different things per backend broke local/remote parity; a
+  Docker-based local mode was rejected — it would trade away the in-process fast dev loop that `local`
+  exists for, and uv's cache makes the venv path near-instant.)
 - **Local parity with the engine image** — *Python package* parity is handled by the venv above; full
   OS-level parity (base OS, glibc, system tools) is the `dev/` parity image's job (install/dependency
-  issues debugged on the laptop instead of through ~10-min cloud rebuilds).
-- **Quota-free event streaming — BUILT (2026-08, `stream.py`; the channel is described in §6).** The
-  Cloud Logging tail shared one fixed 60-reads/min budget per project, so live-event latency degraded
-  as concurrent runs grew (tens of agents ⇒ ~30 s batches); the incremental GCS mirror removed that
-  wall. Alternatives considered and rejected, for the record: Cloud Logging's streaming `tail` API
-  (hard cap of 10 concurrent tail sessions per project, also fixed — a wall below "tens of agents");
-  a log sink → Pub/Sub fan-out (works, but new infra + per-client subscription lifecycle + every
-  client receives all sessions' traffic); per-process tail multiplexing (helps one client with many
-  sessions, not many clients); the platform's native streams — sync `streamQuery` and A2A
-  `tasks/subscribe` — which live on the serving path (~10-min ceiling, standing-container billing),
-  not the async-job path the run plane is built on; and managed `sessions.events`, which would lean on
-  the platform session machinery that broke under us on 2026-07-28 (and our events are deliberately
-  `partial`, i.e. not appended). Worth raising in the existing Google query-job telemetry thread: a
-  native progress-stream for `asyncQuery` would let us delete this channel entirely.
+  issues debugged on the laptop instead of through a deploy).
 - **Structured outputs — BUILT (2026-08).** Both harnesses send the schema through the CLI's own
   structured-output option and keep "parse the last JSON block" only as a fallback. OpenRouter turns
   also get the schema in the prompt, because OpenRouter accepts the schema but leaves enforcement to
   the model. Still open: confirming Vertex model support per model.
 - **Outcomes / rubrics** — CMA's iterate-until-graded "definition of done" is attractive for autonomous
   background work; candidate post-P4 capability (a `verify=Rubric(...)` on `AgentSpec`).
-- **Second harness** — codex (subprocess) or a custom LLMNL harness behind the `Harness` protocol; the
-  seam exists from P0, the binding is future.
 - **Non-GCP backends** — the ports are protocols; an AWS/Azure adapter set is possible but unscheduled.
 - **Scheduled runs** — CMA-style cron `deployments` (each firing = a session) could wrap deploy+session
   for recurring jobs (e.g. self-heal monitoring); future.
+- **Other sandbox providers** — the platform surface the runtime needs is small (§13.5); no plan, but the
+  `SandboxProvider` seam keeps the door open.
+- **A platform-wide spending ceiling** — `max_budget_usd` is enforced per harness and per run (between
+  model responses; the OpenRouter proxy refuses requests once the cap is spent). A hard ceiling across
+  concurrent runs, subagents and every provider would need provider-side prepaid limits or a budget
+  authority in front of them; not designed.
+
+---
+
+## 13. Sandbox runtime
+
+The `sandbox` backend runs each turn in a **Gemini Enterprise Agent Platform Agent Sandbox custom
+container**: our image, behind Google's authenticated HTTP proxy, on gVisor, with **no usable Google
+identity** inside (the metadata server answers with a tenant-project workload identity that is 403 on
+everything in our project — verified), and created from a **pre-warmed pool Google keeps per template**, so
+a sandbox is assigned in ~2 s. The platform's part is small and the toolkit owns the rest — dispatch,
+events, checkpoints, control, secrets — over HTTP and an object store (§13.5). `runtime/sandbox/` is the
+implementation; `provider.py` is the only module that talks to the platform.
+
+**Measured (2026-09-11, `make live-smoke`, 4 CPU / 8 GiB, Haiku, `checkpoint=True`)**: deploy 81 s (image
+build 32 s on a warm Docker cache, push 13 s, template 18 s, pool fill 15 s); pool turn **1.3 s to the first
+event, 6.6 s to the result**; fresh-sandbox turns 15–23 s to the first event, 22–28 s to the result; a steer
+delivered into a running turn and acknowledged; checkpoint resume restored on a new sandbox. Provisioning a
+4 CPU template takes anywhere from 8 s to ~4 min depending on the platform's capacity at that minute
+(ten sequential creates measured 78–241 s with seven other templates active; one 30-minute stall observed);
+it is off the hot path, and `deploy` does not block on it.
+
+### 13.1 Architecture
+
+```
+ DEPLOY (ops/CI)                                RUN (app code; the client IS the control plane)
+ ───────────────                                ────────────────────────────────────────────────
+ sandbox.deploy(spec)                            sandbox.get_engine(name) → Engine
+   docker build (Dockerfile = toolkit + harness    start_session() → Session
+     CLIs + baked skills + spec.packages)          run(msg):
+   push → Artifact Registry                          1. claim a READY sandbox off the roster (GCS,
+   create SandboxEnvironmentTemplate                    precondition delete — roster.py)
+     (image, ports=[8080], resources, egress)           or create one (~20 s) when the roster is empty
+   pre-create N sandboxes, wait /health,             2. POST /turn {spec overlay, prompt, secrets,
+     record them in the roster                          run-scoped GCS token, model token}
+   template name  ⇔  engine version                  3. stream: long-poll /events (0.2 s/call);
+                                                        the GCS event mirror is the fallback
+ IN THE CONTAINER (worker.py)                        4. background: refill the roster (create + warm)
+   HTTP on :8080 behind Google's authenticated       5. at the terminal event: delete the sandbox
+   proxy: /health /turn /events /control /token /exec
+   one turn per sandbox process; the harness
+   runs exactly as under local.deploy;
+   events → GCS mirror with the run-scoped
+   token; checkpoint tar → GCS
+```
+
+- **Deploy = image + template.** `sandbox.deploy` builds the image from a generated Dockerfile (the
+  `dev/Dockerfile` contract: Debian, Python 3.12, git, uv, the toolkit with the baked harness CLIs, resolved
+  skills, `spec.packages`), pushes it to an Artifact Registry repo in the project, and creates a template
+  named `<spec.name>` with the image, `ports=[8080]`, `resources` (`resource_limits`) and
+  `egress_control_config.internet_access=True`. Templates are immutable, so **a template is a version** (the
+  image tag is the toolkit+spec digest); `get_engine(name)` resolves the newest template of that display
+  name, `version=` pins one. Cutover = create the new template, fill its pool, then drain and delete the old
+  one. Needs Docker on the deploying machine — the platform does not build for us.
+- **The client is the whole control plane.** There is no server-side component of ours: the client claims
+  or creates the sandbox, hands it the turn, streams its events, refreshes its tokens and deletes it.
+  `roster.py` is the ready-sandbox roster (its `expires_at` = sandbox create time + TTL, which the platform
+  enforces — exec does not extend it). The parent "instance" (`reasoningEngine`) is an empty resource
+  created once per project/location (sandboxes must hang off one).
+- **Turn protocol.** One `POST /turn` carries everything: the effective spec overlay (deploy-baked ←
+  session ← turn merged client-side, echoed back as `effective_spec`), the prompt, the per-invocation
+  **secrets**, the **run-scoped GCS token** with its expiry (`scoped_gcs.py`: the worker refreshes from
+  the token object under the run's prefix), and the **model token**. Nothing is persisted by the platform.
+  Session/turn configs are written to GCS by the client for the 30-day post-mortem record, but the worker
+  never reads them from there.
+- **Model credentials.** The sandbox has no Google identity, so the model token is ours to provide. The
+  client mints it by impersonating a **predict-only service account** (the `agentRunPredict` custom
+  role; the client needs `serviceAccountTokenCreator` on it) with a 1 h lifetime and re-pushes a fresh one
+  over `/token` every 25 minutes for as long as it holds the running turn. The worker serves it from a
+  loopback metadata server behind `GCE_METADATA_HOST`, so the CLI refreshes on its own and the token never
+  sits in the agent's environment (§6 "Identity"). The agent's shell can fetch it from that loopback
+  server, as the CLI does — but it is predict-only and hourly. `use_vertex=False` (API-key mode) and
+  OpenRouter work unchanged (the key rides `secrets`).
+- **Events: direct by default, mirror as the record.** The live stream a `Run` consumes comes straight from
+  the worker: `POST /events {since, wait}` **long-polls** — the worker holds the request until new events
+  exist or `wait` seconds pass, so a streaming client issues one call per event batch, not a fixed-cadence
+  poll, and sees an event within one proxy round trip (~0.2 s) of its emission. The worker also writes the
+  **GCS event mirror** with the run-scoped token (`stream.py`) as the **durable record**: `history()`,
+  `list_sessions()`, `last_result` of a finished session, and the fallback stream when the sandbox is
+  unreachable (turn finished and sandbox deleted; a proxy error — the client switches to the mirror tail
+  and back). Every event is stamped with the turn and the sandbox, so a client that re-attaches mid-turn
+  (`get_session(sid)`) finds the sandbox and long-polls directly too (§6 "Turn control").
+- **Control (steer / interrupt / stop / probe).** `/control` and `/exec` on the worker, sub-second, no
+  polling loop in the worker (§6 "Turn control").
+- **Checkpoint / resume / interactive.** Transcript + workspace tar to GCS at the terminal event, restored
+  on the next turn's sandbox. A sandbox is deleted at turn end — it bills while it exists — so multi-turn
+  continuity rides the checkpoint. Native sandbox **snapshots** (disk + memory) were considered and set
+  aside on purpose, not only for maturity: a snapshot restores **only onto the identical image**, and we
+  update agents (new template) far more often than we retire old sessions — a job checkpointed on one
+  revision must resume on the next one, which the tar does and a snapshot cannot. Revisit only if the
+  platform lifts the same-image restriction.
+- **Liveness.** No platform retries and no job handle: the client owns it. The `/events` long-poll doubles
+  as the health check during a turn, a turn-level deadline bounds it, and the sandbox TTL (set at creation
+  to the max turn length + margin) is the backstop for a client that dies. Deleting a sandbox is the
+  cancel. A startup sweep deletes stale sandboxes of our display-name prefix that no roster entry or live
+  run claims.
+- **IAM.** Client: `roles/aiplatform.user` on the project (the sandbox and template permissions), bucket
+  rights, `serviceAccountTokenCreator` on the predict-only account, Artifact Registry writer for deploys.
+  Platform: the Agent Sandbox service agent (`service-<number>@gcp-sa-vertex-sandbox`) needs
+  `artifactregistry.reader` on the image repo. There is no per-sandbox IAM: whoever can execute on the
+  instance can drive any sandbox, so the trust boundary is the client identity, and the roster is purely a
+  coordination device. `agent-run-gcp-setup` applies exactly this (§6 "Identity").
+
+### 13.2 Platform facts and limits
+
+Container facts that shape the design: the readiness lag after a create is **route propagation, not boot**
+(at first answer a fresh sandbox's PID 1 had been running since template creation — the pool started it),
+so it only affects refill; the template's declared `ports` are the only ones the proxy forwards;
+`customContainerSpec` has **only `imageUri`** (no command, args or env) so everything per-run arrives over
+HTTP after creation; pause/resume broke the sandbox when probed and is not used; egress is an
+all-or-nothing `internet_access` flag; the Kubernetes API server answers (401) from inside the sandbox
+(reported to Google; no impact on us); there is **no per-sandbox IAM** (`aiplatform.sandboxEnvironments.execute`
+covers every sandbox under the parent instance); the shell/custom-container surface is **v1beta1** on the
+2.x `agentplatform` SDK (`client.sandboxes`, `client.runtimes`).
+
+The platform's ceilings are undocumented and were measured (2026-09-11, `dev/live_limits_probe.py`;
+the table is in TESTING.md, "The limits probe"): TTL 1 h to 30 d accepted; 8 vCPU / 16 GiB is the largest
+template (16 CPU refused); ~1 MB request and ~2 MB response bodies through the proxy (the worker pages
+`/events` under 1 MB); one proxied call is cut at ~600 s (the client's long-poll holds 20 s, `exec()` is
+capped at 240 s); 50 calls/s on ten threads without a 429; ten concurrent creates in 7.5 s wall. Re-run the
+probe when the platform announces changes or a constant in `backend.py` / `worker.py` needs re-grounding.
+
+### 13.3 Cost
+
+$0.085/vCPU-h + $0.009/GiB-h, billed per sandbox while it exists. A ready sandbox bills like any other, so
+delete at turn end (the runtime does) and size the ready pool + `pool_max_wait_s` to the dispatch pattern.
+The template's Google-side pre-warmed pool is not documented and **verified unbilled (2026-09-17)**: ten
+idle 4 CPU / 4 GiB templates with no sandbox ever created from them were kept for a full billing day and
+the project's Agent Platform Compute / Memory lines went *down* that day (54.71 vCPU-h / 144.64 GiB-h,
+below the allocation of the ready-pool sandboxes alive that day), where billed pools would have added
+~960–1900 GiB-h. So a cold engine (image + template, no sandbox) bills only for image storage, however
+many engines exist. Should Google ever start billing the pool, the fallback is to create the template on
+first use and reap it when idle. Sandbox billing itself comes out at or below allocation. Still delete
+engine versions nobody runs: each ACTIVE template competes for provisioning capacity.
+
+### 13.4 Risks and open items
+
+- **Preview surface** (v1beta1). Readiness lag before the proxy routes (12–31 s; the first call can 502);
+  pause/resume unusable; API names moved between SDK 1.x and 2.x. Mitigation: the ready pool hides the
+  lag; we never pause; the SDK is pinned `>=2.1`.
+- **No per-sandbox IAM**: the instance is the trust boundary. One instance per project/location is fine
+  while all callers are one tenant; multi-tenant callers would need one instance (and client identity)
+  each.
+- **Google-side pool.** Persistent (two sandboxes created from a 34-hour-old template both had a PID 1
+  that was 34 hours old: Google keeps at least two template-sized containers running per ACTIVE template
+  from creation on) and unbilled (§13.3). Its size is not exposed or tunable — worth asking Google. Inside,
+  an idle pool container is a gVisor pod with no CFS quota and `MemTotal` = the template's memory, using
+  37 MB RSS and 7 CPU-seconds in 34 h, so the risk is a pricing decision, not physics.
+- **Provisioning capacity.** Template creation varies from seconds to minutes with the platform's capacity
+  and the number of ACTIVE templates (§13 intro); hundreds of templates would need parallel creates
+  measured. `deploy` does not block on the template; `get_engine` skips FAILED and PROVISIONING ones.
+- **Resource visibility from outside** — none (§6 "Observability"); an OOM is the worker going unreachable,
+  reported as an explained error with the last in-sandbox sample at most 20 s before death.
+- **Snapshot restore** (memory + disk): set aside — same-image restriction (§13.1, checkpoint bullet).
+
+### 13.5 The provider seam
+
+The runtime asks the platform for four things only: *create a container from an image with N CPU / M GiB
+and internet egress, reach an HTTP port on it through an authenticated proxy, delete it, and enforce a TTL*.
+Everything else — dispatch, events, checkpoints, control, secrets — is ours over HTTP and an object store.
+That is the shape of every hosted code-sandbox product (Cloud Run jobs, E2B, Modal, Daytona, Fly machines,
+…), so the runtime keeps the provider-specific part behind one small port, `SandboxProvider`
+(`create(template, ttl) -> handle`, `call(handle, path, body, timeout)`, `delete`, `list`, plus template
+create/list/delete at deploy), with the Agent Sandbox adapter (`AgentSandboxProvider`) as the first and only
+implementation and in-memory fakes behind it in the test suite. No other provider is planned; the point is
+to not pay later for coupling we do not need now, and to keep the worker image provider-agnostic (it already
+is: a Dockerfile and an HTTP server).

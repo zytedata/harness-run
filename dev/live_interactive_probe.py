@@ -32,8 +32,8 @@ import sys
 import tempfile
 import time
 
-from remote_agent_toolkit import AgentSpec, local
-from remote_agent_toolkit.events import RunStatus, StopReason
+from agent_run import AgentSpec, local
+from agent_run.events import RunStatus, StopReason
 
 MODELS = {"claude-code": "claude-haiku-4-5-20251001", "codex": "gpt-5.6-luna"}
 
@@ -105,7 +105,7 @@ async def probe(harness: str) -> Check:
     check = Check(harness)
     spec = AgentSpec(name=f"ctl-{harness}", model=MODELS[harness], harness=harness,
                      checkpoint=True, max_turns=20, max_budget_usd=1.0)
-    workdir = tempfile.mkdtemp(prefix=f"ratk-ctl-{harness}-")
+    workdir = tempfile.mkdtemp(prefix=f"agent-run-ctl-{harness}-")
     engine = local.deploy(spec, workdir=workdir)
     session = engine.start_session()
     secrets = {k: os.environ[k] for k in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY") if k in os.environ}

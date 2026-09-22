@@ -13,9 +13,9 @@ import asyncio
 import pytest
 from fakes import make_sdk_client, result_msg
 
-from remote_agent_toolkit import AgentSpec
-from remote_agent_toolkit.harness.claude_code import ClaudeCodeHarness, _StderrCapture
-from remote_agent_toolkit.harness.context import RunContext
+from agent_run import AgentSpec
+from agent_run.harness.claude_code import ClaudeCodeHarness, _StderrCapture
+from agent_run.harness.context import RunContext
 
 
 def test_capture_appends_lazily_and_keeps_tail(tmp_path):
@@ -57,7 +57,7 @@ def _drive(script, tmp_path, monkeypatch):
 def test_cli_crash_surfaces_stderr_tail(tmp_path, monkeypatch):
     # A non-zero CLI exit raises out of the stream; the harness must surface what the
     # CLI said: a status event with the tail (reaches the stream / Cloud Logging on
-    # gemini) and the tail + log path embedded in the raised error.
+    # sandbox) and the tail + log path embedded in the raised error.
     script = [
         lambda c: c.options.stderr("node: something went wrong"),
         lambda c: c.options.stderr("Error: ENOMEM at finish line"),

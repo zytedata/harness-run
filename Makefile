@@ -1,12 +1,12 @@
 # Developer convenience targets. The `parity-*` targets build/run a dev image that mirrors
-# the Gemini Agent Runtime install contract (see dev/Dockerfile and dev/README.md), so
-# dependency/install issues surface locally instead of via ~10-min cloud rebuilds.
+# the sandbox image's install contract (see dev/Dockerfile and dev/README.md), so
+# dependency/install issues surface locally before a deploy.
 
 VENV ?= .venv
-IMAGE ?= ratk-dev
+IMAGE ?= agent-run-dev
 PACKAGES ?=
 
-.PHONY: test test-serial lint live-smoke live-revisions live-pool-cutover live-openrouter live-openrouter-remote live-attribution live-usage live-interactive chat parity-build parity-shell parity-check
+.PHONY: test test-serial lint live-smoke live-openrouter live-openrouter-remote live-attribution live-usage live-interactive chat parity-build parity-shell parity-check
 
 # Parallel by default: the suite is dominated by a few deliberate poll-cadence tests, so
 # -n auto takes it from ~55s to ~40s and keeps scaling as tests are added. Use test-serial
@@ -20,20 +20,11 @@ test-serial:
 lint:
 	$(VENV)/bin/ruff check .
 
-# Live validation on real Gemini Agent Runtime (throwaway engines, torn down after).
-# Costs real money + ~10 min; see TESTING.md for when it's required and how to configure.
+# Live validation on the real sandbox platform (a throwaway engine, torn down after).
+# Costs a few cents + ~5 min (image build included); needs Docker logged into the registry.
+# See TESTING.md for when it's required and how to configure. LONG_MINUTES=n adds a long turn.
 live-smoke:
 	$(VENV)/bin/python dev/live_smoke.py
-
-# Live check of the revision control plane (deploy-as-update, traffic rollback, pinning).
-# Two SEQUENTIAL builds — ~10 min; run it when you touch deploy/versioning.
-live-revisions:
-	$(VENV)/bin/python dev/live_revisions.py
-
-# Live check of the warm-pool redeploy cutover (issue #38): two SEQUENTIAL builds + two
-# pool fills — ~20 min, costs real money; run it when you touch the pool/dispatch plumbing.
-live-pool-cutover:
-	$(VENV)/bin/python dev/live_pool_cutover_probe.py
 
 # Live check of the OpenRouter models on both harnesses (local runtime, no cloud).
 # COSTS REAL MONEY and needs OPENROUTER_API_KEY — run it by hand, sparingly, never in CI.
@@ -42,10 +33,9 @@ live-pool-cutover:
 live-openrouter:
 	$(VENV)/bin/python dev/live_openrouter_probe.py
 
-# Same models on Gemini Agent Runtime, plus the remote-only visibility surface
-# (effective_spec echo, resource samples, memory peak, history, traces). One throwaway
-# engine serves all four models (model is a per-turn knob), deleted in `finally`.
-# COSTS REAL MONEY and takes ~8-15 min, mostly for the engine build. Checks run
+# Same models on the sandbox runtime, plus the remote-only visibility surface
+# (effective_spec echo, history). One throwaway engine serves all four models (model is a
+# per-turn knob), deleted in `finally`. COSTS REAL MONEY and takes ~5-10 min. Checks run
 # concurrently. Give it a generous timeout — by hand, never in CI.
 live-openrouter-remote:
 	$(VENV)/bin/python dev/live_openrouter_remote_probe.py
@@ -89,7 +79,7 @@ parity-shell:
 
 # Sanity check (no model call): confirm the toolkit imports and uv is present in the image.
 parity-check:
-	docker run --rm $(IMAGE) python -c "import remote_agent_toolkit, shutil, sys; \
+	docker run --rm $(IMAGE) python -c "import agent_run, shutil, sys; \
 print('python', sys.version.split()[0]); \
 print('toolkit import OK'); \
 print('uv on PATH:', shutil.which('uv') is not None)"

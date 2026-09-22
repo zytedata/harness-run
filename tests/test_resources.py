@@ -1,200 +1,132 @@
-"""Worker CPU/RAM self-sampling (resources.py): cgroup readers, sampler, turn wiring.
-
-Why it exists: job containers run in a Google tenant project, so platform metrics and OOM
-kills are invisible from the user project — the worker samples itself and ships the record
-to Cloud Logging, where it survives a mid-turn kill.
-"""
-
-from __future__ import annotations
-
-import asyncio
+"""In-sandbox CPU/RAM sampling (runtime/sandbox/resources.py): reads, the sampler, the rows."""
+import datetime as dt
 import time
+from pathlib import Path
 
-from remote_agent_toolkit import AgentSpec
-from remote_agent_toolkit.events import AgentEvent
-from remote_agent_toolkit.runtime.gemini import adk_agent, resources
-
-
-def _write(root, rel, text):
-    p = root / rel
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(text)
+from agent_run.events import AgentEvent
+from agent_run.runtime.sandbox import resources
 
 
-def _cgroup_v2(root, current="1073741824", peak="2147483648", limit="4294967296"):
-    _write(root, "memory.current", current)
-    _write(root, "memory.peak", peak)
-    _write(root, "memory.max", limit)
-    _write(root, "cpu.stat", "usage_usec 5000000\nuser_usec 4000000\n")
+def _v1_tree(root: Path, *, usage=575_750_144, limit=None, cpu_ns=3_420_000_000, meminfo_kb=1_048_576) -> Path:
+    (root / "memory").mkdir(parents=True)
+    (root / "cpuacct").mkdir()
+    (root / "memory" / "memory.usage_in_bytes").write_text(f"{usage}\n")
+    # gVisor: the v1 limit file reads as "unlimited"; the template's limit shows as MemTotal.
+    (root / "memory" / "memory.limit_in_bytes").write_text(f"{limit if limit is not None else 9223372036854775807}\n")
+    (root / "cpuacct" / "cpuacct.usage").write_text(f"{cpu_ns}\n")
+    meminfo = root / "meminfo"
+    meminfo.write_text(f"MemTotal:        {meminfo_kb} kB\nMemFree:          485748 kB\n")
+    return meminfo
 
 
-def test_read_usage_cgroup_v2(tmp_path):
-    _cgroup_v2(tmp_path)
-    assert resources.read_usage(tmp_path) == {
-        "memory_current_bytes": 1 << 30,
-        "memory_peak_bytes": 2 << 30,
-        "memory_limit_bytes": 4 << 30,
-        "cpu_usec": 5_000_000,
-    }
-    # An unlimited cgroup reports "max": the limit key is simply absent (no pressure math).
-    _write(tmp_path, "memory.max", "max")
-    assert "memory_limit_bytes" not in resources.read_usage(tmp_path)
+def test_read_usage_v1_as_gvisor_mounts_it_takes_the_limit_from_meminfo(tmp_path):
+    meminfo = _v1_tree(tmp_path)
+    assert resources.read_usage(tmp_path, meminfo) == {
+        "memory_current_bytes": 575_750_144, "memory_limit_bytes": 1 << 30, "cpu_usec": 3_420_000}
 
 
-def test_read_usage_cgroup_v1_and_empty(tmp_path):
-    _write(tmp_path, "memory/memory.usage_in_bytes", str(1 << 30))
-    _write(tmp_path, "memory/memory.max_usage_in_bytes", str(2 << 30))
-    # v1 encodes "unlimited" as a huge sentinel — treated as no limit.
-    _write(tmp_path, "memory/memory.limit_in_bytes", str(1 << 62))
-    _write(tmp_path, "cpuacct/cpuacct.usage", "5000000000")  # ns -> usec
-    usage = resources.read_usage(tmp_path)
-    assert usage["memory_current_bytes"] == 1 << 30
-    assert usage["memory_peak_bytes"] == 2 << 30
-    assert "memory_limit_bytes" not in usage
-    assert usage["cpu_usec"] == 5_000_000
-    assert resources.read_usage(tmp_path / "nothing-here") == {}  # no cgroup -> no data
+def test_read_usage_v1_prefers_a_real_cgroup_limit_and_peak(tmp_path):
+    meminfo = _v1_tree(tmp_path, limit=2 << 30)
+    (tmp_path / "memory" / "memory.max_usage_in_bytes").write_text("700000000\n")
+    usage = resources.read_usage(tmp_path, meminfo)
+    assert usage["memory_limit_bytes"] == 2 << 30 and usage["memory_peak_bytes"] == 700_000_000
 
 
-def test_sampler_samples_pressure_once_and_enriches(tmp_path):
-    _cgroup_v2(tmp_path, current=str(4 << 30), peak=str(4 << 30), limit=str(4 << 30))
-    side, main = [], []
-    sampler = resources.ResourceSampler(
-        "sid-1", side_emit=side.append, on_event=main.append, sample_s=0.01, root=tmp_path
-    ).start()
-    for _ in range(200):  # a few sampling periods
-        if len(side) >= 3:
-            break
-        time.sleep(0.01)
-    sampler.stop()
-
-    assert side and side[0].raw["event"] == "resource_sample"
-    assert side[0].raw["memory_current_bytes"] == 4 << 30
-    # 100% of the limit crossed the 85% threshold — exactly ONE visible pressure event.
-    assert [e.raw["event"] for e in main] == ["memory_pressure"]
-    assert "resource_limits" in main[0].summary  # points at the deploy-time fix
-
-    raw: dict = {}
-    sampler.enrich_result(raw)
-    assert raw == {
-        "memory_peak_bytes": 4 << 30, "memory_limit_bytes": 4 << 30, "cpu_usec": 5_000_000,
-    }
+def test_read_usage_v2(tmp_path):
+    (tmp_path / "memory.current").write_text("123\n")
+    (tmp_path / "memory.peak").write_text("456\n")
+    (tmp_path / "memory.max").write_text("max\n")
+    (tmp_path / "cpu.stat").write_text("usage_usec 9000\nuser_usec 8000\n")
+    assert resources.read_usage(tmp_path, tmp_path / "absent-meminfo") == {
+        "memory_current_bytes": 123, "memory_peak_bytes": 456, "cpu_usec": 9000}
 
 
-def test_sampler_no_pressure_below_threshold(tmp_path):
-    _cgroup_v2(tmp_path, current=str(1 << 30), peak=str(1 << 30), limit=str(4 << 30))
-    side, main = [], []
-    sampler = resources.ResourceSampler(
-        "sid-2", side_emit=side.append, on_event=main.append, sample_s=0.01, root=tmp_path
-    ).start()
-    for _ in range(100):
-        if side:
-            break
-        time.sleep(0.01)
-    sampler.stop()
-    assert side and not main  # samples flow; 25% of the limit stays quiet
+def test_read_usage_with_nothing_readable_is_empty(tmp_path):
+    assert resources.read_usage(tmp_path / "nope", tmp_path / "nope2") == {}
 
 
-def test_start_sampler_disabled_or_no_cgroup(tmp_path, monkeypatch):
-    _cgroup_v2(tmp_path)
-    monkeypatch.setenv("AGENT_RESOURCE_SAMPLE_S", "0")
-    assert resources.start_sampler("sid", on_event=lambda e: None, root=tmp_path) is None
-    monkeypatch.setenv("AGENT_RESOURCE_SAMPLE_S", "not-a-number")
-    assert resources.start_sampler("sid", on_event=lambda e: None, root=tmp_path) is None
-    monkeypatch.delenv("AGENT_RESOURCE_SAMPLE_S")
-    # Readable cgroup + default cadence -> a live sampler (stopped right away).
-    sampler = resources.start_sampler(
-        "sid", on_event=lambda e: None, side_sink=type("S", (), {"emit": lambda self, e: None})(),
-        root=tmp_path,
-    )
+def _wait(pred, timeout=3.0):
+    deadline = time.time() + timeout
+    while not pred() and time.time() < deadline:
+        time.sleep(0.005)
+    return pred()
+
+
+def test_sampler_mirrors_samples_warns_once_on_pressure_and_enriches_the_result(tmp_path):
+    meminfo = _v1_tree(tmp_path, usage=100 << 20, meminfo_kb=1_048_576)  # 100 MiB of 1 GiB
+    mirrored, streamed = [], []
+    sampler = resources.start_sampler("s" * 32, on_event=streamed.append, sample_emit=mirrored.append,
+                                      sample_s=0.01, root=tmp_path, meminfo=meminfo)
     assert sampler is not None
+    try:
+        assert _wait(lambda: len(mirrored) >= 2)
+        first = mirrored[0]
+        assert first.kind == "status" and first.raw["event"] == "resource_sample"
+        assert first.raw["memory_current_bytes"] == 100 << 20 and first.raw["memory_limit_bytes"] == 1 << 30
+        assert dt.datetime.fromisoformat(first.raw["at"]).tzinfo is not None
+        assert "mem 100MiB/1024MiB" in first.summary
+        assert streamed == []  # nothing on the live stream below the threshold
+
+        (tmp_path / "memory" / "memory.usage_in_bytes").write_text(f"{900 << 20}\n")  # 88 %
+        assert _wait(lambda: len(streamed) == 1)
+        (tmp_path / "memory" / "memory.usage_in_bytes").write_text(f"{950 << 20}\n")
+        assert _wait(lambda: any(e.raw.get("memory_current_bytes") == 950 << 20 for e in mirrored))
+        assert len(streamed) == 1  # warned once
+        pressure = streamed[0]
+        assert pressure.raw["event"] == "memory_pressure" and "memory pressure: 900MiB of 1024MiB (88%)" in pressure.summary
+    finally:
+        sampler.stop()
+    # The result takes one last sample: a spike after the final periodic one still counts.
+    (tmp_path / "memory" / "memory.usage_in_bytes").write_text(f"{990 << 20}\n")
+    (tmp_path / "cpuacct" / "cpuacct.usage").write_text("5000000000\n")
+    before = len(mirrored)
+    raw = {"subtype": "success"}
+    sampler.enrich_result(raw)
+    assert raw["memory_peak_bytes"] == 990 << 20 and raw["memory_limit_bytes"] == 1 << 30 and raw["cpu_usec"] == 5_000_000
+    assert raw["subtype"] == "success" and len(mirrored) == before + 1
+
+
+def test_sampler_is_off_when_disabled_or_nothing_is_readable(tmp_path, monkeypatch):
+    meminfo = _v1_tree(tmp_path)
+    assert resources.start_sampler("s", on_event=lambda e: None, sample_emit=None, sample_s=0, root=tmp_path, meminfo=meminfo) is None
+    assert resources.start_sampler("s", on_event=lambda e: None, sample_emit=None, sample_s=1, root=tmp_path / "x", meminfo=tmp_path / "y") is None
+    monkeypatch.setenv(resources.SAMPLE_S_ENV, "0")
+    assert resources.start_sampler("s", on_event=lambda e: None, sample_emit=None, root=tmp_path, meminfo=meminfo) is None
+    monkeypatch.setenv(resources.SAMPLE_S_ENV, "not-a-number")
+    assert resources.start_sampler("s", on_event=lambda e: None, sample_emit=None, root=tmp_path, meminfo=meminfo) is None
+    monkeypatch.setenv(resources.SAMPLE_S_ENV, "0.01")
+    got = []
+    sampler = resources.start_sampler("s", on_event=lambda e: None, sample_emit=got.append, root=tmp_path, meminfo=meminfo)
+    assert sampler is not None and _wait(lambda: len(got) >= 1)
     sampler.stop()
-    # No cgroup at all -> disabled (e.g. local/dev containers without the mount).
-    assert resources.start_sampler(
-        "sid", on_event=lambda e: None, root=tmp_path / "missing"
-    ) is None
 
 
-def test_run_turn_stamps_peak_into_result(tmp_path, monkeypatch):
-    """End-to-end: the sampler enriches the terminal result raw with the memory peak."""
-    from remote_agent_toolkit.ports.eventsink import InMemorySink
-
-    monkeypatch.setenv("AGENT_JOBS_ROOT", str(tmp_path / "jobs"))
-    monkeypatch.chdir(tmp_path)  # no baked skills dir on the lookup paths
-    cg = tmp_path / "cg"
-    _cgroup_v2(cg, current=str(2 << 30), peak=str(3 << 30), limit=str(4 << 30))
-    monkeypatch.setenv("AGENT_RESOURCE_SAMPLE_S", "0.01")
-    # Route the sampler at the fake cgroup + a capturing side sink.
-    real_start = resources.start_sampler
-    side_events = []
-
-    def patched_start(session_id, on_event, side_sink=None, root=None):
-        return real_start(
-            session_id, on_event,
-            side_sink=type("S", (), {"emit": lambda self, e: side_events.append(e)})(),
-            root=cg,
-        )
-
-    monkeypatch.setattr(resources, "start_sampler", patched_start)
-
-    class SlowDoneHarness:
-        async def run(self, spec, rc):
-            await asyncio.sleep(0.15)  # a few sampling periods
-            yield AgentEvent(kind="result", summary="done",
-                             raw={"subtype": "success", "is_error": False})
-
-    import remote_agent_toolkit.harness.claude_code as harness_mod
-    import remote_agent_toolkit.ports.eventsink as eventsink_mod
-    monkeypatch.setattr(harness_mod, "ClaudeCodeHarness", SlowDoneHarness)
-    monkeypatch.setattr(eventsink_mod, "CloudLoggingSink",
-                        lambda **kw: InMemorySink(session_id="77"))
-
-    spec = AgentSpec(name="w", model="m")
-    agent = adk_agent.build_agent(spec)
-
-    async def drive():
-        return [ev async for ev in agent._run_turn(spec, "77", "go", None)]
-
-    events = asyncio.run(drive())
-    result = events[-1]
-    assert result.custom_metadata["kind"] == "result"
-    raw = result.custom_metadata["raw"]
-    assert raw["memory_peak_bytes"] == 3 << 30
-    assert raw["memory_limit_bytes"] == 4 << 30
-    assert side_events and side_events[0].raw["event"] == "resource_sample"
-
-
-def test_sample_rows_maps_entries_and_skips_noise():
-    from datetime import datetime, timezone
-    from types import SimpleNamespace
-
-    t0 = datetime(2026, 7, 29, 11, 46, 56, tzinfo=timezone.utc)
-    entries = [
-        SimpleNamespace(timestamp=t0, payload={
-            "raw": {"event": "resource_sample", "memory_current_bytes": 2 << 30,
-                    "memory_limit_bytes": 4 << 30, "cpu_usec": 76_200_000},
-        }),
-        SimpleNamespace(timestamp=t0, payload={"raw": {"event": "memory_pressure"}}),  # not a sample
-        SimpleNamespace(timestamp=t0, payload="plain text"),  # malformed -> skipped
+def test_sample_rows_keeps_only_samples_and_parses_the_time():
+    events = [
+        AgentEvent(kind="status", summary="turn started", raw={"event": "turn_started"}),
+        AgentEvent(kind="status", summary="resource sample", raw={
+            "event": "resource_sample", "at": "2026-09-16T17:00:00+00:00", "turn_id": "t",
+            "memory_current_bytes": 5, "memory_limit_bytes": 10, "cpu_usec": 7}),
+        AgentEvent(kind="status", summary="memory pressure", raw={"event": "memory_pressure", "memory_current_bytes": 9}),
+        AgentEvent(kind="status", summary="resource sample", raw={"event": "resource_sample", "at": "garbage", "cpu_usec": 8}),
+        AgentEvent(kind="result", summary="42", raw={"memory_peak_bytes": 9}),
     ]
-    rows = resources._sample_rows(entries)
-    assert rows == [{
-        "time": t0, "memory_current_bytes": 2 << 30,
-        "memory_limit_bytes": 4 << 30, "cpu_usec": 76_200_000,
-    }]
+    rows = resources.sample_rows(events)
+    assert rows == [
+        {"time": dt.datetime(2026, 9, 16, 17, tzinfo=dt.UTC), "memory_current_bytes": 5, "memory_limit_bytes": 10, "cpu_usec": 7},
+        {"time": None, "cpu_usec": 8},
+    ]
+    assert [resources.is_sample(e) for e in events] == [False, True, False, True, False]
 
 
-def test_session_resource_samples_delegates(monkeypatch):
-    from remote_agent_toolkit.runtime.gemini import backend
+def test_run_result_carries_the_sampled_high_water_marks():
+    from agent_run.runtime._run import build_result
+    from agent_run.spec import AgentSpec
 
-    calls = {}
-
-    def fake_read_samples(session_id, project=None, credentials=None):
-        calls.update(session_id=session_id, project=project)
-        return [{"time": "t", "memory_current_bytes": 1}]
-
-    monkeypatch.setattr(resources, "read_samples", fake_read_samples)
-    engine = backend.GeminiEngine(resource="r/reasoningEngines/1", spec=AgentSpec(name="a", model="m"),
-                                  project="proj-x", location="us-central1")
-    session = backend.GeminiSession(engine, "sid-7")  # re-attach by id: no GCP calls
-    assert session.resource_samples() == [{"time": "t", "memory_current_bytes": 1}]
-    assert calls == {"session_id": "sid-7", "project": "proj-x"}
+    spec = AgentSpec(name="a", model="m")
+    ev = AgentEvent(kind="result", summary="42", raw={"subtype": "success", "num_turns": 1,
+                                                     "memory_peak_bytes": 600, "memory_limit_bytes": 1000, "cpu_usec": 5})
+    result, _ = build_result(ev, "sid", spec)
+    assert result.resources == {"memory_peak_bytes": 600, "memory_limit_bytes": 1000, "cpu_usec": 5}
+    bare, _ = build_result(AgentEvent(kind="result", summary="42", raw={"subtype": "success", "memory_peak_bytes": True}), "sid", spec)
+    assert bare.resources is None

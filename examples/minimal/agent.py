@@ -2,8 +2,8 @@
 
 Defines an :class:`AgentSpec` (no Zyte specifics), deploys it with ``local.deploy``, and
 runs one task — streaming progress events, then reading the structured result. The same
-spec + ``Engine``/``Session`` API runs on Gemini Agent Runtime via ``gemini`` (swap
-``local`` → ``gemini.deploy`` / ``gemini.get_engine`` — see the top-level README).
+spec + ``Engine``/``Session`` API runs remotely, in a Google Agent Sandbox, via ``sandbox``
+(swap ``local`` → ``sandbox.deploy`` / ``sandbox.get_engine`` — see the top-level README).
 
 Prerequisites and how to run: see this directory's ``README.md``. In short (Python 3.12,
 toolkit installed, Claude Code auth available in your environment)::
@@ -17,7 +17,7 @@ import asyncio
 
 import pydantic
 
-from remote_agent_toolkit import AgentSpec, SystemPrompt, local
+from agent_run import AgentSpec, SystemPrompt, local
 
 
 class PrimeReport(pydantic.BaseModel):

@@ -2,8 +2,8 @@
 
 A tiny, generic (non-Zyte) agent that proves the core API end-to-end: define an
 `AgentSpec`, `local.deploy` it, run one task, stream events, and read a structured result.
-The same spec runs on Gemini Agent Runtime by swapping `local` → `gemini.deploy` /
-`gemini.get_engine` (see the top-level README; roadmap in DESIGN.md §11).
+The same spec runs remotely, in a Google Agent Sandbox, by swapping `local` → `sandbox.deploy` /
+`sandbox.get_engine` (see the top-level README and [`../sandbox`](../sandbox)).
 
 [`agent.py`](agent.py) asks the agent to write `is_prime(n)`, run it on 2–10, and report a
 `{checked, primes}` JSON object — exercising the `Write` + `Bash` tools and structured
@@ -34,7 +34,7 @@ the final text, the parsed `PrimeReport`, and the turn/cost summary.
 
 ## What it shows
 
-- **Declarative spec** → `local.deploy` → `start_session` → `run` (same API as `gemini`).
+- **Declarative spec** → `local.deploy` → `start_session` → `run` (same API as `sandbox`).
 - **Streaming** a `Run` with `async for` (also awaitable, and pollable via `run.done`).
 - **Structured output** — `output_schema=PrimeReport` parses the final message into a
   validated pydantic model on `result.structured_output`.

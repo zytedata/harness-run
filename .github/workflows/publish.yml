@@ -1,7 +1,7 @@
 name: Publish to internal PyPI
 
 # Publishes the package to Zyte's internal PyPI, https://pypi.internal.example/simple/, so
-# that Scrapy Cloud builds and other consumers can `pip install remote-agent-toolkit`
+# that Scrapy Cloud builds and other consumers can `pip install agent-run`
 # instead of pulling this private git repo (which Scrapy Cloud builds cannot do).
 #
 # The index is a static site served from the S3 bucket `pkgrepo.internal.example`; the
@@ -15,7 +15,7 @@ name: Publish to internal PyPI
 #   * a tag `vX.Y.Z`   -> version X.Y.Z, which must equal `version` in pyproject.toml
 #   * a push to `main` -> a dev build X.Y.Z.dev<run number>, where X.Y.Z is the pyproject
 #                         version. A dev build sorts BEFORE the release of the same version,
-#                         so `pip install remote-agent-toolkit` never picks one up by
+#                         so `pip install agent-run` never picks one up by
 #                         accident; pin it exactly (==X.Y.Z.devN) to use it.
 
 on:
@@ -60,7 +60,7 @@ jobs:
             grep -q "^version = \"${version}\"$" pyproject.toml
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "publishing remote-agent-toolkit $version"
+          echo "publishing agent-run $version"
 
       - name: Build sdist and wheel
         run: |
@@ -81,4 +81,4 @@ jobs:
           for f in dist/*; do
             uvx --from awscli aws s3 ls "s3://pkgrepo.internal.example/python/packages/$(basename "$f")" | grep -q "$(basename "$f")"
           done
-          echo "published remote-agent-toolkit ${{ steps.version.outputs.version }}; the index lists it at https://pypi.internal.example/simple/remote-agent-toolkit/ within a few minutes"
+          echo "published agent-run ${{ steps.version.outputs.version }}; the index lists it at https://pypi.internal.example/simple/agent-run/ within a few minutes"

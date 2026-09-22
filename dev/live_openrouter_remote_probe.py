@@ -1,4 +1,4 @@
-"""Paid Gemini Agent Runtime check for OpenRouter on both harnesses.
+"""Paid remote (Agent Sandbox) check for OpenRouter on both harnesses.
 
 One throwaway engine contains both CLIs. It checks every model's basic and structured-output
 turns on both harnesses. It also checks resume, budgets, provider selection, whole routing
@@ -11,7 +11,7 @@ checks and on SIGTERM/SIGINT, including an interrupt during the deploy itself (t
 engine object yet in that window, so it is deleted by name). ``KEEP=1`` leaves it running
 for debugging.
 
-Set ``PROJECT``, ``LOCATION``, ``SUFFIX``, ``IMPERSONATE_SA``, ``MAX_INSTANCES``, or
+Set ``PROJECT``, ``LOCATION``, ``SUFFIX``, ``IMPERSONATE_SA``, or
 ``SERIAL=1`` as needed. ``OPENROUTER_PROVIDER`` overrides the provider used by the checks;
 this is mainly useful when ``MODELS`` contains one model.
 ``OPENROUTER_ALTERNATE_PROVIDER`` overrides the second provider in the routing checks.
@@ -30,12 +30,12 @@ import sys
 import time
 import traceback
 
-from remote_agent_toolkit import AgentSpec, SessionConfig, StopReason, TurnConfig, gemini
+from agent_run import AgentSpec, SessionConfig, StopReason, TurnConfig, sandbox
 
 PROJECT = os.environ.get("PROJECT", "my-project")
 LOCATION = os.environ.get("LOCATION", "us-central1")
 SUFFIX = re.sub(r"[^a-z0-9-]", "-", (os.environ.get("SUFFIX") or getpass.getuser()).lower())
-NAME = f"ratk-openrouter-{SUFFIX}"
+NAME = f"agent-run-openrouter-{SUFFIX}"
 
 MODELS = [
     m.strip()
@@ -53,7 +53,6 @@ BAKED_MODEL = "openrouter/deepseek/deepseek-v4-flash"
 RESUME_MODEL = "openrouter/z-ai/glm-5.3"
 TOKEN = "BANANA-77"
 # Room for the concurrent checks; the default of 1 would serialize them.
-MAX_INSTANCES = int(os.environ.get("MAX_INSTANCES", "8"))
 # Both harnesses are checked remotely. claude-code matters most here: a deployed engine
 # bakes CLAUDE_CODE_USE_VERTEX, which outranks the OpenRouter token, so this is where the
 # harness blanking that switch is proven on real infrastructure.
@@ -123,15 +122,15 @@ def _looks_like(provider: str | None, slug: str) -> bool:
     return provider is not None and norm(provider) == norm(slug.split("/", 1)[0])
 
 
-_TOOL_INPUT = b"ratk-openrouter-tool-check-2026-08-21"
+_TOOL_INPUT = b"agent-run-openrouter-tool-check-2026-08-21"
 EXPECTED_DIGEST = hashlib.sha256(_TOOL_INPUT).hexdigest()[:16]
 EXPECTED = EXPECTED_DIGEST + ":or0:rt0:aa0:ak0"
 TASK = (
     "Run this exact command in the shell and reply with only what it prints: "
     '`python3 -c "import hashlib, os; '
-    "h=hashlib.sha256(b'ratk-openrouter-tool-check-2026-08-21').hexdigest()[:16]; "
+    "h=hashlib.sha256(b'agent-run-openrouter-tool-check-2026-08-21').hexdigest()[:16]; "
     "s=':or%d:rt%d:aa%d:ak%d' % tuple(int(bool(os.environ.get(k))) for k in "
-    "('OPENROUTER_API_KEY','RATK_OPENROUTER_PROXY_TOKEN',"
+    "('OPENROUTER_API_KEY','AGENT_RUN_OPENROUTER_PROXY_TOKEN',"
     "'ANTHROPIC_AUTH_TOKEN','ANTHROPIC_API_KEY')); "
     'print(h+s)"`'
 )
@@ -430,88 +429,31 @@ async def _check_budget(engine, key: str, harness: str) -> None:
 
 
 async def _check_visibility(session, final_raw: dict, expect_model: str, harness: str) -> None:
-    """The remote-only surface: resource samples, memory peak, history, traces."""
-    samples = await asyncio.to_thread(session.resource_samples)
-    check(
-        f"resource_samples returns worker CPU/RAM [{harness}]",
-        bool(samples),
-        f"{len(samples)} sample(s)" + (f", keys={sorted(samples[-1])[:4]}" if samples else ""),
-    )
-    # Stamped onto the terminal event's raw by the worker's cgroup sampler.
-    peak = final_raw.get("memory_peak_bytes")
-    check(f"memory_peak_bytes stamped on the result [{harness}]", peak is not None, f"peak={peak}")
-
+    """The remote-only surface: the durable history the mirror keeps."""
     history = await asyncio.to_thread(session.history)
     check(
         f"history replays the turn's events [{harness}]",
-        bool(history),
+        bool(history) and any(e.kind == "result" for e in history),
         f"{len(history)} event(s)",
     )
 
-    ok, note = await asyncio.to_thread(_trace_check, session.session_id, expect_model)
-    if ok is None:
-        skip(f"Cloud Trace root span carries the model and cost [{harness}]", note)
-    else:
-        check(f"Cloud Trace root span carries the model and cost [{harness}]", ok, note)
-
-
-def _trace_check(session_id: str, expect_model: str) -> tuple[bool | None, str]:
-    """Find THIS session's root span and confirm what it reports.
-
-    The project is shared, so the lookup uses this session id. The root span must name the
-    OpenRouter model and carry a cost (``runtime/gemini/tracing.py``).
-
-    Returns ``(None, reason)`` when the optional reader library isn't installed — a
-    missing dev-only dependency is not a parity failure. Install it with
-    ``uv pip install google-cloud-trace`` to turn this into a real check.
-    """
-    try:
-        from google.cloud import trace_v1
-    except ImportError:
-        return None, "google-cloud-trace not installed (console: engine → Traces tab)"
-    try:
-        client = trace_v1.TraceServiceClient()
-        deadline = time.time() + 120  # spans land a little after the turn
-        while True:
-            for tr in client.list_traces(
-                request={
-                    "project_id": PROJECT,
-                    "filter": "span:invoke_agent",
-                    "view": trace_v1.ListTracesRequest.ViewType.COMPLETE,
-                    "page_size": 50,
-                }
-            ):
-                for span in tr.spans:
-                    labels = dict(span.labels)
-                    if labels.get("gen_ai.conversation.id") != str(session_id):
-                        continue
-                    model = labels.get("gen_ai.request.model")
-                    cost = labels.get("rat.cost_usd")
-                    note = f"model={model} cost={cost} turns={labels.get('rat.num_turns')}"
-                    return (model == expect_model and cost is not None), note
-            if time.time() > deadline:
-                return False, f"no root span for session {session_id} within 120s"
-            time.sleep(15)
-    except Exception as exc:  # noqa: BLE001 — a read failure is worth reporting, not raising
-        return False, f"Cloud Trace read failed: {type(exc).__name__}: {str(exc)[:120]}"
-
 
 _TORN_DOWN = False
-_ENGINE = None  # set as soon as gemini.deploy returns; read by the signal handler
+_ENGINE = None  # set as soon as sandbox.deploy returns; read by the signal handler
 _CREDENTIALS = None  # set before the handler goes on, so a delete by name can authenticate
 
 
 def _delete_by_name() -> str | None:
     """Delete the engine when the run never got a handle for it. ``None`` if it went.
 
-    An interrupt during ``gemini.deploy`` leaves no engine object, but the platform may
+    An interrupt during ``sandbox.deploy`` leaves no engine object, but the platform may
     already have created the engine, and it bills while it exists. ``NAME`` is fixed, so
     look the engine up by it and delete it. On failure return the reason as one line: the
     common case is that the deploy had not created anything yet, and a full traceback for
     that would bury the message that matters.
     """
     try:
-        gemini.get_engine(NAME, PROJECT, LOCATION, credentials=_CREDENTIALS).delete()
+        sandbox.get_engine(NAME, PROJECT, LOCATION, credentials=_CREDENTIALS).delete()
         return None
     except Exception as exc:  # noqa: BLE001 — best effort; the caller says what to do
         return f"{type(exc).__name__}: {str(exc)[:200]}"
@@ -523,7 +465,7 @@ def _teardown() -> None:
     SIGTERM and SIGINT can end the process before ``finally`` runs. The signal handler and
     this idempotent function ensure the engine is deleted once.
 
-    Before ``gemini.deploy`` returns there is no engine object, so that window deletes by
+    Before ``sandbox.deploy`` returns there is no engine object, so that window deletes by
     name instead.
     """
     global _TORN_DOWN
@@ -563,8 +505,9 @@ def _teardown() -> None:
 def _install_signal_teardown() -> None:
     """On SIGTERM/SIGINT: delete the engine, then exit non-zero.
 
-    Installed BEFORE ``gemini.deploy``, because that call is the longest part of the run
-    (5-10 min) and the process is routinely wrapped in a ``timeout`` or interrupted. An
+    Installed BEFORE ``sandbox.deploy``, because that call is the longest part of the run
+    (the image build, then a template create the platform has taken up to 30 min over) and
+    the process is routinely wrapped in a ``timeout`` or interrupted. An
     interrupt during the deploy would otherwise leave a billing engine behind with nothing
     printed. There is no engine object yet in that window, so ``_teardown`` falls back to
     deleting by name.
@@ -618,15 +561,11 @@ async def main() -> int:
 
     try:
         _ENGINE = engine = await asyncio.to_thread(
-            gemini.deploy,
+            sandbox.deploy,
             spec,
             PROJECT,
             LOCATION,
             credentials=credentials,
-            # The checks run concurrently, so the engine needs room to serve them in
-            # parallel; with the default max_instances=1 they queue and the probe is back
-            # to ~40 min.
-            max_instances=MAX_INSTANCES,
         )
         print(f"{time.strftime('%H:%M:%S')} deployed in {time.time() - t0:.0f}s", flush=True)
         # Every check uses an independent session. Resume remains sequential inside its

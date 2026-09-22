@@ -3,15 +3,20 @@ name: Publish to PyPI
 # Publishes a release to PyPI, https://pypi.org/project/harness-run/, through PyPI's Trusted
 # Publishing (OpenID Connect): no API token is stored in this repository. PyPI is configured
 # to trust this exact workflow file in this repository when it runs in the `pypi` GitHub
-# environment; that trust is set up on the PyPI project's Publishing page, not here.
+# environment; that trust is set up on the PyPI project's Publishing page, not here. TestPyPI
+# trusts the same file in the `testpypi` environment.
 #
 # A release is a tag `vX.Y.Z` on `main`, and X.Y.Z must equal `version` in pyproject.toml
 # (the build job refuses otherwise; see the release checklist at the top of CHANGELOG.md).
-# Plain pushes publish nothing.
+# Plain pushes publish nothing. Running the workflow by hand (workflow_dispatch) publishes the
+# checked-out version to TestPyPI instead, as a dry run of the release path:
+#   pip install -i https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ harness-run==X.Y.Z
+# TestPyPI never accepts the same version twice, so a repeated dry run needs a version bump.
 
 on:
   push:
     tags: ["v[0-9]*"]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -40,7 +45,7 @@ jobs:
           set -euo pipefail
           declared=$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')
           tag="${GITHUB_REF_NAME#v}"
-          if [[ "$tag" != "$declared" ]]; then
+          if [[ "$GITHUB_REF_TYPE" == "tag" && "$tag" != "$declared" ]]; then
             echo "::error::tag $GITHUB_REF_NAME does not match pyproject version $declared; bump the version first (CHANGELOG.md, release checklist)"
             exit 1
           fi
@@ -61,6 +66,7 @@ jobs:
           if-no-files-found: error
 
   publish:
+    if: github.ref_type == 'tag'
     needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -76,3 +82,23 @@ jobs:
           path: dist/
       - name: Upload to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
+
+  publish-testpypi:
+    if: github.event_name == 'workflow_dispatch'
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/project/harness-run/${{ needs.build.outputs.version }}/
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - name: Upload to TestPyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/

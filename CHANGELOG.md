@@ -36,6 +36,18 @@ pip install -i https://test.pypi.org/simple/ --extra-index-url https://pypi.org/
 
 TestPyPI never accepts the same version twice, so a second rehearsal needs a version bump.
 
+## Unreleased
+
+### Added
+
+- `AgentSpec.env` accepts `None` values, which remove the variable from the environment of the
+  agent's shell commands, even when the host environment or a per-run secret sets it (Codex: shell
+  environment policy `exclude`; Claude Code: a Bash tool wrapper). Useful to hide a variable, such as
+  an API key, from the agent during an evaluation; it is not a security control, since the harness
+  process still holds the value. ([#3])
+
+[#3]: https://github.com/zytedata/harness-run/pull/3
+
 ## 0.4.0 — 2026-09-23
 
 First public release.

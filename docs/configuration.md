@@ -107,7 +107,12 @@ Beyond skills, several `AgentSpec` fields shape what the agent can do and the en
   own (Claude: `minimal`/`none` → `low`; Codex: `max` → `xhigh`, with a status warning).
 - **`env`** — extra **non-secret** environment variables for the agent's tool subprocess (config flags,
   etc.). Values live in the spec and are baked into the deployed engine, so never put secrets here — pass
-  those per-invocation (see [Secrets & security](secrets-and-security.md)).
+  those per-invocation (see [Secrets & security](secrets-and-security.md)). A `None` value (YAML `null`)
+  removes the variable from the environment of the agent's shell commands, whether the host environment
+  or a per-run secret set it. That keeps the agent's environment predictable, e.g. to hide an API key
+  during an evaluation. It is not a security boundary: the harness process still holds the value, and
+  code the agent runs could still find it there or on disk. A value the agent must never see should not
+  be on the machine or passed to the run at all.
 - **`mcp_servers`** — `McpServer.github()`, `.remote(name, url, headers=...)`, `.stdio(name, command, args=...)`.
   A `github()` server's token is supplied per-invocation under a conventional name (`GH_TOKEN` /
   `GITHUB_TOKEN` / `GH_PAT`) and injected into its headers, not the agent's env.

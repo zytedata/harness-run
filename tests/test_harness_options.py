@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 from harness_run import (
@@ -162,6 +163,25 @@ def test_ctx_env_layered_after_spec_env():
     assert opts.env["VIRTUAL_ENV"] == "/w/venv"
 
 
+def test_spec_env_none_unsets_the_variable_for_bash_tools(monkeypatch):
+    monkeypatch.setenv("ZYTE_API_KEY", "ambient")
+    spec = AgentSpec(harness="claude-code", name="a", model="m", env={"ZYTE_API_KEY": None})
+    opts = ClaudeCodeHarness().build_options(spec, _ctx(spec, secrets={"ZYTE_API_KEY": "s"}))
+    assert "ZYTE_API_KEY" not in opts.env
+    wrapper = opts.env["CLAUDE_CODE_SHELL_PREFIX"]
+    out = subprocess.run(
+        [wrapper, 'echo "${ZYTE_API_KEY-unset}"'], capture_output=True, text=True, check=True
+    )
+    assert out.stdout == "unset\n"
+
+
+def test_ctx_env_overrides_a_spec_env_unset():
+    spec = AgentSpec(harness="claude-code", name="a", model="m", env={"VIRTUAL_ENV": None})
+    opts = ClaudeCodeHarness().build_options(spec, _ctx(spec, env={"VIRTUAL_ENV": "/w/venv"}))
+    assert opts.env["VIRTUAL_ENV"] == "/w/venv"
+    assert "CLAUDE_CODE_SHELL_PREFIX" not in opts.env
+
+
 def test_harness_consumed_secrets_excluded_from_agent_env():
     # Repo push token + GitHub MCP token are consumed by git/MCP, so they must NOT appear as
     # environment variables the agent can read; the caller's own key still does.
@@ -311,7 +331,7 @@ def test_openrouter_key_is_removed_before_bash_tools():
     wrapper = Path(env["CLAUDE_CODE_SHELL_PREFIX"])
     assert wrapper.stat().st_mode & 0o777 == 0o700
     body = wrapper.read_text()
-    assert "unset ANTHROPIC_AUTH_TOKEN OPENROUTER_API_KEY" in body
+    assert "-u ANTHROPIC_AUTH_TOKEN -u OPENROUTER_API_KEY" in body
 
 
 def test_claude_model_is_untouched_by_any_of_this():

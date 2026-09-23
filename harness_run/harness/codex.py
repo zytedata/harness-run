@@ -145,6 +145,7 @@ from ._shared import (
     openrouter_schema_steer,
     run_with_openrouter_proxy,
     runtime_env,
+    unset_env_names,
 )
 
 if TYPE_CHECKING:
@@ -692,10 +693,12 @@ class CodexHarness:
         mcp_overrides, mcp_env = self._mcp_overrides(spec, ctx)
         model = spec.model or ""
         openrouter = model.startswith(OPENROUTER_PREFIX)
+        env = runtime_env(spec, ctx)
         # The agent's shell env: Codex filters *KEY*/*SECRET*/*TOKEN*-named vars from the
         # shell by default — the opposite of the toolkit's contract (the caller's own
         # secrets ARE for the agent). Lift the default excludes, but keep the ones the
-        # harness consumes itself out of the shell explicitly.
+        # harness consumes itself out of the shell explicitly, along with those the spec
+        # unsets and unrelated ambient model credentials the caller did not pass on.
         overrides = [
             # A login shell can source ~/.bashrc and restore credentials removed below.
             # The toolkit supplies PATH and caller-owned env explicitly.
@@ -704,6 +707,8 @@ class CodexHarness:
             "shell_environment_policy.exclude=" + json.dumps(sorted({
                 "OPENAI_API_KEY", OPENROUTER_KEY_ENV, _OPENROUTER_PROXY_KEY_ENV,
                 _GITHUB_MCP_TOKEN_ENV, *mcp_env, *harness_consumed_secret_names(spec),
+                *unset_env_names(spec, ctx),
+                *({"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"} - env.keys()),
             })),
             *(
                 self._openrouter_overrides(
@@ -717,13 +722,6 @@ class CodexHarness:
             *mcp_overrides,
             *(f"{k}={json.dumps(v)}" for k, v in (spec.codex_config or {}).items()),
         ]
-        env = runtime_env(spec, ctx)
-        # The app-server inherits this process's environment before applying ``env``.
-        # Clear unrelated ambient model credentials unless the caller explicitly included
-        # them in the spec/runtime environment for the agent to use.
-        for name in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"):
-            if name not in env:
-                env[name] = ""
         env["CODEX_HOME"] = str(codex_home)
         env.update(mcp_env)
 

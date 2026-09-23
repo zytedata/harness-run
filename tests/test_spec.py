@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from harness_run import (
@@ -46,6 +48,11 @@ def test_agentspec_coerces_lists_to_tuples() -> None:
     assert isinstance(spec.repos, tuple)
     assert isinstance(spec.mcp_servers, tuple)
     assert isinstance(spec.allowed_tools, tuple)
+
+
+def test_agentspec_env_unset_round_trip() -> None:
+    spec = AgentSpec(harness="codex", name="a", model="m", env={"ZYTE_API_KEY": None, "A": "1"})
+    assert AgentSpec.from_dict(json.loads(json.dumps(spec.to_dict()))).env == spec.env
 
 
 def test_reposource_auth_round_trip() -> None:

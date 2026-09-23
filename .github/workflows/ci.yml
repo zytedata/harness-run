@@ -10,6 +10,11 @@ on:
     branches: [main]  # PRs are covered by the pull_request trigger — no double runs
   pull_request:
 
+# Pin the GITHUB_TOKEN to least privilege in the file itself (CI only reads the repo;
+# without this block the scopes follow the repository's "Workflow permissions" setting).
+permissions:
+  contents: read
+
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true

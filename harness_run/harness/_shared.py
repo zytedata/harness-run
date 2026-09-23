@@ -100,7 +100,9 @@ def runtime_env(spec: AgentSpec, ctx: RunContext) -> dict[str, str]:
     """Env forwarded to the agent subprocess: agent-visible secrets + spec/runtime env + uv PATH.
 
     Layering (later wins): per-invocation secrets → ``spec.env`` (caller's static config)
-    → ``ctx.env`` (runtime-resolved, e.g. the local deploy-time packages venv). Only the
+    → ``ctx.env`` (runtime-resolved, e.g. the local deploy-time packages venv). A ``None``
+    in ``spec.env`` drops the name from the layers below it; the harness must also remove
+    it from the ambient environment (see :func:`unset_env_names`). Only the
     caller's own secrets land here — those consumed by the harness (repo push tokens,
     GitHub MCP token, the model-auth keys) are routed to git/MCP/the model provider and
     excluded, so they never appear as environment variables the agent can read.
@@ -112,8 +114,11 @@ def runtime_env(spec: AgentSpec, ctx: RunContext) -> dict[str, str]:
     _assert_non_secret_env(spec.env)
     consumed = harness_consumed_secret_names(spec)
     env: dict[str, str] = {k: v for k, v in ctx.secrets.items() if k not in consumed}
-    if spec.env:
-        env.update(spec.env)
+    for name, value in (spec.env or {}).items():
+        if value is None:
+            env.pop(name, None)
+        else:
+            env[name] = value
     if ctx.env:
         env.update(ctx.env)
     # Ensure `uv` is on the agent's shell PATH. uv is a Python dependency, but its
@@ -133,6 +138,11 @@ def runtime_env(spec: AgentSpec, ctx: RunContext) -> dict[str, str]:
         base = env.get("PATH") or os.environ.get("PATH", "")
         env["PATH"] = ":".join(path_dirs) + (f":{base}" if base else "")
     return env
+
+
+def unset_env_names(spec: AgentSpec, ctx: RunContext) -> set[str]:
+    """Names ``spec.env`` unsets, which the harness removes from the agent's shell."""
+    return {k for k, v in (spec.env or {}).items() if v is None} - set(ctx.env or {})
 
 
 # -- OpenRouter ---------------------------------------------------------------

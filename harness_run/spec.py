@@ -23,9 +23,11 @@ from typing import Any, Literal, Mapping
 DEFAULT_MAX_BUFFER_SIZE = 32 * 1024 * 1024
 
 
-def _assert_non_secret_env(env: Mapping[str, str] | None) -> None:
+def _assert_non_secret_env(env: Mapping[str, str | None] | None) -> None:
     """Catch common credential fields, not arbitrary secrets hidden in free-form text."""
-    for name in env or {}:
+    for name, value in (env or {}).items():
+        if value is None:
+            continue
         upper = name.upper()
         if upper in {"API_KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIALS"} or upper.endswith(
             ("_API_KEY", "_TOKEN", "_SECRET", "_PASSWORD", "_CREDENTIALS")
@@ -381,7 +383,8 @@ class AgentSpec:
             the spec and are baked into the deployed engine image, so they are visible to
             anyone who can read the deployment. Secrets are NOT declared here; they are passed
             per-invocation to ``run``/``send`` (see ``secrets=`` on the run plane) so nothing
-            sensitive is ever baked or shared across runs.
+            sensitive is ever baked or shared across runs. A ``None`` value removes that
+            variable from the agent's shell commands instead.
         packages: Python package requirement specifiers (e.g. ``"pandas==2.2.*"``) the agent
             starts with, on BOTH backends: ``sandbox.deploy`` bakes them into the engine image;
             ``local.deploy`` resolves them into a per-engine venv (via ``uv``, Python pinned to
@@ -408,7 +411,7 @@ class AgentSpec:
     transcript: bool = False
     interactive: bool | None = None
     output_schema: Any = None
-    env: Mapping[str, str] | None = field(default=None)
+    env: Mapping[str, str | None] | None = field(default=None)
     packages: tuple[str, ...] = ()
     harnesses: tuple[str, ...] = ()
     openrouter_provider: str | None = None

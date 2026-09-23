@@ -40,10 +40,11 @@ model and harness pairings finish cleanly at the protocol level without answerin
 from __future__ import annotations
 
 import asyncio
+import shlex
 from collections import deque
 from enum import Enum
 from pathlib import Path
-from typing import Any, AsyncIterator, Sequence, TYPE_CHECKING
+from typing import Any, AsyncIterator, Iterable, Sequence, TYPE_CHECKING
 
 from ..control import ControlledStream, ControlMessage
 from ..events import AgentEvent
@@ -65,6 +66,7 @@ from ._shared import (
     openrouter_schema_steer,
     run_with_openrouter_proxy,
     runtime_env,
+    unset_env_names,
 )
 
 __all__ = ["ClaudeCodeHarness", "DEFAULT_ALLOWED_TOOLS", "harness_consumed_secret_names"]
@@ -85,10 +87,19 @@ DEFAULT_ALLOWED_TOOLS = ("Read", "Write", "Edit", "Bash", "Glob", "Grep", "TodoW
 # proxy's own lifecycle are shared with the Codex binding (see :mod:`._shared`).
 # The Anthropic-compatible base: the CLI appends /v1/messages itself.
 _OPENROUTER_ANTHROPIC_BASE = "https://openrouter.ai/api"
-_OPENROUTER_SHELL_WRAPPER = """#!/bin/sh
-unset ANTHROPIC_AUTH_TOKEN OPENROUTER_API_KEY
-exec /bin/bash -c "$1"
-"""
+_OPENROUTER_SHELL_UNSET = ("ANTHROPIC_AUTH_TOKEN", OPENROUTER_KEY_ENV)
+
+
+def _write_shell_wrapper(path: Path, unset: Iterable[str]) -> Path:
+    """Write a ``CLAUDE_CODE_SHELL_PREFIX`` executable that drops *unset* from Bash tools.
+
+    The CLI passes each Bash tool command to this executable as its sole argument, so the
+    variables stay in the CLI's own environment.
+    """
+    args = " ".join(f"-u {shlex.quote(name)}" for name in sorted(unset))
+    path.write_text(f'#!/bin/sh\nexec env {args} /bin/bash -c "$1"\n', encoding="utf-8")
+    path.chmod(0o700)
+    return path
 
 
 def _openrouter_env(
@@ -427,14 +438,15 @@ class ClaudeCodeHarness:
         model = spec.model or ""
         openrouter = model.startswith(OPENROUTER_PREFIX)
         env = runtime_env(spec, ctx)
+        unset = unset_env_names(spec, ctx)
         if openrouter:
             api_key = openrouter_api_key(ctx)
             if not api_key:
                 raise missing_openrouter_key_error("claude-code")
             ctx.job_dir.mkdir(parents=True, exist_ok=True)
-            shell_wrapper = ctx.job_dir / "openrouter-shell"
-            shell_wrapper.write_text(_OPENROUTER_SHELL_WRAPPER, encoding="utf-8")
-            shell_wrapper.chmod(0o700)
+            shell_wrapper = _write_shell_wrapper(
+                ctx.job_dir / "openrouter-shell", {*unset, *_OPENROUTER_SHELL_UNSET}
+            )
             env.update(
                 _openrouter_env(
                     model,
@@ -445,6 +457,11 @@ class ClaudeCodeHarness:
             )
             # The CLI wants the provider-relative id; the prefix is the toolkit's own.
             model = model[len(OPENROUTER_PREFIX) :]
+        elif unset:
+            ctx.job_dir.mkdir(parents=True, exist_ok=True)
+            env["CLAUDE_CODE_SHELL_PREFIX"] = str(
+                _write_shell_wrapper(ctx.job_dir / "unset-env-shell", unset)
+            )
 
         return ClaudeAgentOptions(
             cwd=str(ctx.workspace),

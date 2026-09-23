@@ -918,22 +918,33 @@ def test_openrouter_key_rides_env_never_argv(tmp_path):
     )
 
 
-def test_codex_blanks_unrelated_ambient_model_credentials(tmp_path, monkeypatch):
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "ambient-secret")
-    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "ambient-token")
+def _shell_excludes(opts):
+    (override,) = [
+        o for o in opts.codex_config.config_overrides
+        if o.startswith("shell_environment_policy.exclude=")
+    ]
+    return json.loads(override.split("=", 1)[1])
+
+
+def test_codex_excludes_unrelated_ambient_model_credentials(tmp_path):
     spec = _or_spec()
     ctx = _ctx(tmp_path, spec, secrets={"OPENROUTER_API_KEY": "k"})
-    env = CodexHarness().build_options(spec, ctx).codex_config.env
+    excludes = _shell_excludes(CodexHarness().build_options(spec, ctx))
+    assert {"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"} <= set(excludes)
 
-    assert env["ANTHROPIC_API_KEY"] == ""
-    assert env["ANTHROPIC_AUTH_TOKEN"] == ""
-
-    spec = _or_spec()
     ctx = _ctx(tmp_path, spec, secrets={"OPENROUTER_API_KEY": "k",
                                       "ANTHROPIC_API_KEY": "agent-owned"})
-    assert CodexHarness().build_options(spec, ctx).codex_config.env["ANTHROPIC_API_KEY"] == (
-        "agent-owned"
-    )
+    opts = CodexHarness().build_options(spec, ctx)
+    assert opts.codex_config.env["ANTHROPIC_API_KEY"] == "agent-owned"
+    assert "ANTHROPIC_API_KEY" not in _shell_excludes(opts)
+
+
+def test_spec_env_none_excludes_the_variable_from_the_shell(tmp_path):
+    spec = _or_spec(env={"ZYTE_API_KEY": None})
+    ctx = _ctx(tmp_path, spec, secrets={"OPENROUTER_API_KEY": "k", "ZYTE_API_KEY": "s"})
+    opts = CodexHarness().build_options(spec, ctx)
+    assert "ZYTE_API_KEY" not in opts.codex_config.env
+    assert "ZYTE_API_KEY" in _shell_excludes(opts)
 
 
 def test_openrouter_defaults_reasoning_effort(tmp_path):

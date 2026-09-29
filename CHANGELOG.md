@@ -52,9 +52,10 @@ TestPyPI never accepts the same version twice, so a second rehearsal needs a ver
   shutting down whose job another worker takes over. Without it, a run ending in the process that
   started it still deletes the sandbox. Returns `False`, changing nothing, when there is no turn to
   leave (including while the turn is still being handed to a sandbox); `local` sessions always
-  return `False`, since a local turn ends with its process.
+  return `False`, since a local turn ends with its process. ([#5])
 
 [#3]: https://github.com/zytedata/harness-run/pull/3
+[#5]: https://github.com/zytedata/harness-run/pull/5
 
 ## 0.4.0 — 2026-09-23
 

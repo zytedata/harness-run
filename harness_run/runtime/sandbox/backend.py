@@ -102,6 +102,14 @@ ADOPTED_RELEASE_DELAY_S = 10.0
 # interrupt() on a just-adopted turn gives the worker's replayed ``control_ready`` this long to
 # arrive before falling back to the cancel (the mirror may lag the worker by a flush).
 ADOPTED_READY_WAIT_S = 10.0
+# detach() on a turn its worker has just taken waits this long for the dispatch thread to
+# finish returning, so the run's end does not take the hand-over for one still in flight.
+DETACH_SETTLE_S = 5.0
+# The warning on the run of a session that detached its turn (``SandboxSession.detach``).
+DETACHED_NOTE = (
+    "detached: the turn goes on in its sandbox for a process that re-attaches by session id "
+    "(engine.get_session) to adopt"
+)
 # Client-side refresh cadence for the run's tokens (source tokens last an hour).
 TOKEN_REFRESH_S = 25 * 60
 # A model-token push the worker did not take is retried this soon: the CLI re-reads its
@@ -642,6 +650,7 @@ class SandboxSession:
         # and adopts that turn (``_attach``). Never set for a session started in this process.
         self._foreign_check = not config_resolved
         self._adopted = False  # the current run is another process's turn, adopted here
+        self._detached = False  # the current run's turn is left to another process (detach())
         self._refresh_stop: threading.Event | None = None  # stops the GCS token refresher
         self._gcs_token_expiry: str | None = None
         self._model_token_expiry: Any = None  # when the turn's model access ends
@@ -1255,10 +1264,14 @@ class SandboxSession:
         self._status = RunStatus.IDLE
         run = self._current_run
         adopted, self._adopted = self._adopted, False
-        # An adopter whose event loop shut down without asking to stop the turn (a poller
-        # exiting): the turn goes on under the process that started it — its sandbox and
-        # its token record stay.
-        walked_away = adopted and run is not None and run.cancelled and run.cancel_note is None
+        detached, self._detached = self._detached, False
+        # The turn goes on without this process — its sandbox and its token record stay — when
+        # this session left it to another process (``detach()``, the owner or an adopter), or
+        # when an adopter's event loop shut down without asking to stop it (a poller exiting:
+        # the turn goes on under the process that started it).
+        walked_away = run is not None and run.cancelled and (
+            detached or (adopted and run.cancel_note is None)
+        )
         self._stop_refresh(keep_record=walked_away)
         dropped = self._drop_pending_control()
         if dropped:
@@ -1342,7 +1355,8 @@ class SandboxSession:
         """Adopt this session's turn running under **another** process, if the mirror records one.
 
         A re-attached session (``engine.get_session(id)`` in a fresh process — a poller, or a
-        worker adopting a job whose owner died mid-turn) holds no run, but the turn's worker
+        worker adopting a job whose owner died mid-turn or left it with :meth:`detach`) holds
+        no run, but the turn's worker
         is reachable all the same: every mirrored event names its turn and sandbox
         (``raw.turn_id`` / ``raw.worker``, stamped by the worker), so the last
         ``turn_started`` marker with no ``result`` after it is a turn still running there —
@@ -1352,7 +1366,8 @@ class SandboxSession:
         :attr:`last_result` lands at its end. The adopter also runs the run-scoped GCS token
         refresh (the owner may be gone) and deletes the sandbox at the result —
         ``ADOPTED_RELEASE_DELAY_S`` after it, in case the owner is still draining events; an
-        adopter whose loop merely shuts down leaves the turn to its owner (``_on_complete``).
+        adopter whose loop merely shuts down leaves the turn to its owner (``_on_complete``),
+        and one that detaches it leaves it to the next adopter.
 
         One mirror read (or none, given ``events`` a caller already read), on the first call
         of a ``get_session`` session (a session started here never has a foreign turn).
@@ -1522,6 +1537,50 @@ class SandboxSession:
             await run.task
         except asyncio.CancelledError:
             pass
+
+    def detach(self) -> bool:
+        """Leave the running turn to another process (``runtime.base.Session.detach``).
+
+        The turn goes on in its sandbox. This session's run ends at once, as an error result
+        whose ``warning`` is :data:`DETACHED_NOTE`; the sandbox is not deleted and the token
+        record stays. A session re-attached by id (``engine.get_session``) adopts the turn on
+        first access (:meth:`_attach`), runs the token refresh from then on and deletes the
+        sandbox at the result: the hand-over an adopter whose loop shuts down already makes,
+        here asked for by the process that started the turn (an adopter may detach too).
+
+        Adopt it while the turn's tokens last. They are re-minted every ``TOKEN_REFRESH_S``
+        (25 min) and each lasts an hour, so a detached turn keeps storage and model access
+        for at least 35 minutes with no refresher. A turn nobody adopts runs to its end,
+        and its sandbox bills until the platform deletes it at its TTL (``max_turn_s``).
+
+        From here this session behaves like one re-attached by id: its next ``run()`` /
+        ``send()`` looks for the turn in the mirror first, so it steers the turn while it
+        still runs and never starts a second one next to it.
+
+        ``False``, changing nothing, when there is no turn to leave: nothing running, a run
+        this process does not drive (no event loop started it), or a turn still being handed
+        to a sandbox — no worker has it yet, so there is nothing to adopt, and a run
+        cancelled then deletes whatever the hand-over lands on, as before.
+        """
+        run = self._current_run
+        if run is None or run.done or run.task is None:
+            return False
+        slot = self._dispatch_slot
+        if slot is not None:
+            with slot.lock:
+                handed = self._sandbox is not None  # published under the lock once a worker took it
+            # The dispatch thread publishes the sandbox, then returns and sets ``finished``:
+            # wait for that, or _on_complete would take the hand-over for one in flight.
+            if not handed or not slot.finished.wait(DETACH_SETTLE_S):
+                return False
+        elif self._sandbox is None:
+            return False
+        self._detached = True
+        self._foreign_check = True
+        run.cancel(note=DETACHED_NOTE)
+        logger.info("session %s: turn %s detached, left running on %s",
+                    self._session_id, self._turn_id, self._sandbox)
+        return True
 
     # -- records ------------------------------------------------------------------
 

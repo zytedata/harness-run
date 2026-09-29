@@ -120,6 +120,16 @@ result = await session.send(
 )
 ```
 
+A process that has to stop while a turn is still running, such as a worker shutting down, can leave the turn to another process instead of ending it:
+
+```python
+session.detach()  # this process stops driving the turn; it keeps running in its sandbox
+
+# later, in another process:
+run = engine.get_session(session_id).current_run  # adopts the running turn
+result = await run
+```
+
 Want Claude Code instead? The application-level API stays the same. On GCP Agent Sandbox, Claude models are called through Vertex AI by default, so these runs need no API key at all:
 
 ```python

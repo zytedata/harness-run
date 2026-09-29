@@ -442,6 +442,17 @@ These are facts measured live. The library encodes them so consumers inherit the
   nothing — the turn goes on under its owner. The check is one-shot per session object: a session
   started in the process never has a foreign turn, and a `get_session` one that found none resumes as
   before.
+- **The owner can leave its turn to another process** (`Session.detach()`). For a process that has to
+  stop while its turn still runs, such as a worker shutting down whose job another worker takes over.
+  Without it, the owner's run ending (cancelled, or its event loop shutting down) deletes the sandbox
+  and so ends the turn: right for a process that quits, and the default. `detach()` ends this
+  session's run at once (an error result whose `warning` says it was detached) but keeps the sandbox
+  and the token record, as an adopter walking away does; the next `get_session(id)` adopts the turn
+  and deletes the sandbox at its result. It returns `False`, changing nothing, when there is no turn
+  to leave: nothing running, or the hand-over to a sandbox still in flight, when no worker has the
+  turn yet and nothing could adopt it. A detached session behaves like a re-attached one from then on:
+  its next `run()` / `send()` reads the mirror first, so it steers the turn while it still runs
+  instead of starting a second one. `local` returns `False`: a local turn ends with its process.
 - **`interrupt()` is a stop, not a cancel.** The turn's normal end-of-turn path runs (snapshot,
   transcript, terminal result with `StopReason.INTERRUPTED`, accounting kept), so the interrupted turn's
   workspace changes are in the checkpoint the next `send()` restores. Deleting the sandbox is the
@@ -500,7 +511,9 @@ These are facts measured live. The library encodes them so consumers inherit the
   it would on a VM and re-fetches it when less than five minutes remain (verified with the CLI 2026-09-16:
   a two-step turn crossing that threshold re-read the token and finished). So a turn's model access lasts as
   long as some client process holds the session — the starter or an adopter (`_attach`) — with no org
-  policy and no long-lived credential.
+  policy and no long-lived credential. A turn left with `detach()` runs on the tokens it holds (each
+  re-minted every 25 minutes and valid for an hour, so at least 35 minutes remain) until an adopter's
+  refresher takes over.
 - **The sandbox has no usable Google identity** (verified live 2026-09-10 and by every `live-smoke` run):
   the metadata server answers with a tenant-project workload identity that is 403 on the project's storage,
   Vertex and resource manager. So what the agent's shell can reach is exactly what the turn brought: the

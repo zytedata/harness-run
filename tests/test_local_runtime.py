@@ -75,6 +75,23 @@ def test_await_returns_result_and_stages_skills(tmp_path):
     assert session.stop_reason == StopReason.END_TURN  # non-checkpoint clean turn
 
 
+def test_detach_on_local_is_false_and_the_turn_runs_on(tmp_path):
+    """A local turn runs in this process's harness, so no other process could adopt it."""
+    spec = AgentSpec(harness="claude-code", name="demo", model="m")
+    engine = local.deploy(spec, workdir=str(tmp_path / "wd"))
+    engine._harness = FakeHarness([AgentEvent(kind="message", summary="working"), _result_ev(text="final")])
+    session = engine.start_session()
+    assert session.detach() is False  # nothing ran yet
+
+    async def go():
+        run = session.run("build it")
+        assert session.detach() is False  # running here, and it stays here
+        return await run
+
+    result = asyncio.run(go())
+    assert result.text == "final" and result.is_error is False
+
+
 def test_async_iter_streams_events(tmp_path):
     spec = AgentSpec(harness="claude-code", name="demo", model="m")  # no skills
     engine = local.deploy(spec, workdir=str(tmp_path / "wd"))

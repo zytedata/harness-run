@@ -29,7 +29,7 @@ def _spec(**overrides) -> AgentSpec:
 
 def test_build_requirements_includes_base_and_spec_packages() -> None:
     reqs = _image.build_requirements(_spec(packages=["pandas==2.2.*"]))
-    assert "claude-agent-sdk==0.2.130" in reqs
+    assert "claude-agent-sdk==0.2.162" in reqs
     assert "uv>=0.5" in reqs and "google-cloud-storage" in reqs
     assert "pandas==2.2.*" in reqs
     assert not any("harness-run" in r for r in reqs)  # the toolkit is COPYed, not installed

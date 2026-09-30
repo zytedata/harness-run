@@ -47,8 +47,8 @@ dependencies = [
 # conflicting pins (claude-agent-sdk requires mcp<2, which blocks apps on the mcp 2.x
 # SDK; openai-codex bundles the codex CLI binary).
 local = [
-    "claude-agent-sdk==0.2.130",  # matches the image pin; validated on both runtimes
-    "openai-codex==0.147.0",  # custom-provider config used by the OpenRouter route
+    "claude-agent-sdk==0.2.162",  # matches the image pin; validated on both runtimes
+    "openai-codex==0.159.2",  # custom-provider config used by the OpenRouter route
 ]
 
 # Dev tooling lives in a dependency group (PEP 735), not an install extra: `pip install
@@ -58,8 +58,8 @@ local = [
 dev = [
     # The suite exercises both harnesses, so the dev group carries the `local` extra's
     # SDKs too — keep these two lines in lockstep with [project.optional-dependencies].
-    "claude-agent-sdk==0.2.130",
-    "openai-codex==0.147.0",
+    "claude-agent-sdk==0.2.162",
+    "openai-codex==0.159.2",
     "pytest",
     "pytest-asyncio",
     # Pinned to the CI-green series: 0.16 added rules (RUF022, UP035/41, S110, ...)

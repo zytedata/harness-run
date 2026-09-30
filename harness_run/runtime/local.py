@@ -369,6 +369,12 @@ class LocalSession:
         except asyncio.CancelledError:
             pass
 
+    def detach(self) -> bool:
+        """Always ``False`` (``runtime.base.Session.detach``): a local turn runs in this
+        process's harness and ends with it, so there is nothing another process could adopt.
+        Nothing changes; the running turn, if any, keeps running here."""
+        return False
+
     @property
     def status(self) -> RunStatus:
         return self._status

@@ -132,6 +132,25 @@ class Session(Protocol):
         """
         ...
 
+    def detach(self) -> bool:
+        """Leave the running turn to another process: stop driving it here, let it go on.
+
+        For a process that has to stop while its turn is still running — a worker shutting
+        down whose job another worker takes over — and wants the turn to finish rather than
+        end with it. This session's run ends at once, as an error result whose ``warning``
+        says it was detached; the turn keeps running, and a session re-attached by id in
+        another process (:meth:`Engine.get_session`) adopts it on first access
+        (:attr:`current_run`) and drives it to its result. Without it, a run ending in the
+        process that started it (cancelled, or its event loop shutting down) ends the turn.
+        On ``sandbox``, adopt it within about 35 minutes: nothing refreshes the turn's tokens
+        until then, and once they expire the turn is lost while its sandbox bills until its TTL.
+
+        ``True`` when a running turn was left to another process; ``False``, changing
+        nothing, when there was none to leave — nothing running, the turn not yet handed to
+        its worker, or a backend whose turns cannot outlive this process (``local``).
+        """
+        ...
+
     async def exec(
         self, command: str, *, cwd: str | None = None, timeout: float | None = None
     ) -> ExecResult:
@@ -190,10 +209,10 @@ class Session(Protocol):
         The same object :meth:`run` / :meth:`send` returned: iterate it for the events,
         await it for the result. Its point is the session that did **not** start the
         turn — on ``sandbox`` a session re-attached in another process (a worker adopting
-        a job whose owner died mid-turn) adopts the turn still running there on its first
-        access (one storage read; ``None`` when nothing runs), and this hands the adopter
-        that run so it consumes the events exactly as the owner would, instead of
-        polling :attr:`last_result`.
+        a job whose owner died mid-turn, or left it with :meth:`detach`) adopts the turn
+        still running there on its first access (one storage read; ``None`` when nothing
+        runs), and this hands the adopter that run so it consumes the events exactly as the
+        owner would, instead of polling :attr:`last_result`.
         """
         ...
 

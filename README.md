@@ -103,7 +103,7 @@ session_id = session.session_id
 
 With `warm_pool=True`, a ready sandbox is kept available for low-latency execution. Small turns typically start in about a second and can complete in a few seconds.
 
-Another process can later re-attach to the session and continue the conversation:
+Another process can later re-attach to the session and continue the conversation. If a turn is still running there, the re-attached session adopts it and drives it to its result. A process that has to stop mid-turn, such as a worker shutting down, can call `session.detach()` to leave the turn running for the next process instead of ending it.
 
 ```python
 engine = sandbox.get_engine(
@@ -113,6 +113,10 @@ engine = sandbox.get_engine(
 )
 
 session = engine.get_session(session_id)
+
+run = session.current_run  # a turn still running there, e.g. one left by session.detach()
+if run is not None:
+    result = await run
 
 result = await session.send(
     "Add type hints and explain the time complexity.",

@@ -48,11 +48,13 @@ TestPyPI never accepts the same version twice, so a second rehearsal needs a ver
 - `Session.detach()` leaves a running turn to another process. The session's run ends at once, but
   the turn keeps running in its sandbox: the sandbox is not deleted and the token record stays, and a
   session re-attached by id (`engine.get_session`) adopts the turn on first access and deletes the
-  sandbox at its result. For a process that has to stop while its turn runs, such as a worker
-  shutting down whose job another worker takes over. Without it, a run ending in the process that
-  started it still deletes the sandbox. Returns `False`, changing nothing, when there is no turn to
-  leave (including while the turn is still being handed to a sandbox); `local` sessions always
-  return `False`, since a local turn ends with its process. ([#5])
+  sandbox at its result. Adopt it within about 35 minutes: nothing refreshes the turn's tokens until
+  then, and once they expire the turn is lost while its sandbox bills until the platform TTL. For a
+  process that has to stop while its turn runs, such as a worker shutting down whose job another
+  worker takes over. Without it, a run ending in the process that started it still deletes the
+  sandbox. Returns `False`, changing nothing, when there is no turn to leave (including while the
+  turn is still being handed to a sandbox); `local` sessions always return `False`, since a local
+  turn ends with its process. ([#5])
 
 [#3]: https://github.com/zytedata/harness-run/pull/3
 [#5]: https://github.com/zytedata/harness-run/pull/5

@@ -142,6 +142,8 @@ class Session(Protocol):
         another process (:meth:`Engine.get_session`) adopts it on first access
         (:attr:`current_run`) and drives it to its result. Without it, a run ending in the
         process that started it (cancelled, or its event loop shutting down) ends the turn.
+        On ``sandbox``, adopt it within about 35 minutes: nothing refreshes the turn's tokens
+        until then, and once they expire the turn is lost while its sandbox bills until its TTL.
 
         ``True`` when a running turn was left to another process; ``False``, changing
         nothing, when there was none to leave — nothing running, the turn not yet handed to

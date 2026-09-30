@@ -427,7 +427,7 @@ def test_a_turn_its_owner_detaches_goes_on_and_an_adopter_finishes_it(tmp_path, 
         assert session.detach() is True
         left = await run  # the owner's run ends at once
         assert left.is_error and left.warning == backend.DETACHED_NOTE
-        assert not session.busy and session._refresh_stop is None
+        assert session._current_run is None and session._refresh_stop is None  # holds nothing now
         owner._join_background()
         assert provider.deleted == [] and token_deletes == []  # the sandbox and the token record stay
         adopted = adopter.current_run
@@ -502,6 +502,43 @@ def test_detach_while_the_turn_is_still_being_handed_over_changes_nothing(tmp_pa
     assert provider.deleted == _turn_calls(provider)  # deleted once it landed, as for any cancel
 
 
+def test_detach_after_a_hand_over_ended_in_an_unknown_state_changes_nothing(tmp_path, monkeypatch):
+    """A hand-over that ended in an unknown state still references its sandbox, so that the failed
+    run deletes it; no worker may have taken the turn and nothing in the mirror points to it. A
+    ``detach()`` landing after that publish, before the run sees the failure, must not keep it."""
+    _Bucket(tmp_path, monkeypatch)
+    provider = FakeSandboxProvider(lambda n: ScriptedWorker())
+    owner = make_engine(provider)
+    session = owner.start_session()
+    reached, go_on = threading.Event(), threading.Event()
+    handed: list[str] = []
+
+    def uncertain(sandbox, body):
+        handed.append(sandbox)
+        reached.set()
+        go_on.wait(5)
+        raise backend.DispatchUncertain(f"{sandbox} stopped answering")
+
+    monkeypatch.setattr(session, "_hand_over", uncertain)
+
+    async def go():
+        run = session.run("go")
+        while not reached.is_set():
+            await asyncio.sleep(0.005)
+        slot = session._dispatch_slot
+        go_on.set()
+        # No await from here on: the dispatch publishes the sandbox and fails, and the run has
+        # not seen the failure yet, since this event loop is busy right here.
+        assert slot.finished.wait(5) and session._sandbox == handed[0]
+        assert session.detach() is False and not session._detached
+        return await run
+
+    r = asyncio.run(go())
+    owner._join_background()
+    assert r.is_error and "unknown state" in r.text
+    assert provider.deleted == handed  # the failed run deleted it, as before
+
+
 def test_detach_with_no_turn_running_changes_nothing(tmp_path, monkeypatch):
     _Bucket(tmp_path, monkeypatch)
     session = make_engine(FakeSandboxProvider()).start_session()  # workers answer every turn at once
@@ -540,6 +577,54 @@ def test_after_detach_the_owner_steers_the_turn_instead_of_starting_another(tmp_
     owner._join_background()
     assert r.text == "done" and len(_turn_calls(provider)) == 1  # no second turn was started
     assert provider.deleted == [sandbox]  # released once, at the result
+
+
+@pytest.mark.parametrize("access", ["busy", "current_run", "last_result", "exec", "interrupt"])
+def test_after_detach_every_accessor_adopts_the_turn_back(tmp_path, monkeypatch, access):
+    """A detached session is like one re-attached by id for every accessor, not only ``run()``
+    and ``send()``: each finds the turn in the mirror and adopts it, and the turn's result lands
+    on ``last_result``, while the detached run itself keeps the detached error."""
+    bucket = _Bucket(tmp_path, monkeypatch)
+
+    def on_control(w, body):
+        if body["op"] == "stop":
+            w.emit(result_event("stopped", subtype="interrupted"))
+            w.finish()
+
+    provider = FakeSandboxProvider(lambda n: ScriptedWorker(on_control=on_control))
+    owner = make_engine(provider)
+    session = owner.start_session()
+
+    async def go():
+        run, w, turn_id = await _owner_turn(provider, session, bucket)
+        w.workspace = str(tmp_path)
+        assert session.detach() is True
+        left = await run
+        if access == "busy":
+            assert session.busy
+        elif access == "current_run":
+            assert session.current_run is not None
+        elif access == "last_result":
+            assert session.last_result is None  # the turn still runs: adopted, no result yet
+        elif access == "exec":
+            assert (await session.exec("pwd", timeout=5)).stdout.strip() == str(tmp_path)
+        else:
+            await session.interrupt(timeout=5)
+            assert w.controls[-1]["op"] == "stop" and w.controls[-1]["turn_id"] == turn_id
+        adopted = session._current_run
+        assert adopted is not None and adopted is not run
+        if access != "interrupt":
+            assert session._adopted and session._refresh_stop is not None
+            w.emit(result_event("done"))
+            w.finish()
+        await adopted
+        return left, _sandbox_of(w)
+
+    left, sandbox = asyncio.run(go())
+    owner._join_background()
+    assert left.warning == backend.DETACHED_NOTE
+    assert session.last_result.text == ("stopped" if access == "interrupt" else "done")
+    assert len(_turn_calls(provider)) == 1 and provider.deleted == [sandbox]  # one turn, one delete
 
 
 @pytest.mark.parametrize("events, expected", [

@@ -448,11 +448,17 @@ These are facts measured live. The library encodes them so consumers inherit the
   and so ends the turn: right for a process that quits, and the default. `detach()` ends this
   session's run at once (an error result whose `warning` says it was detached) but keeps the sandbox
   and the token record, as an adopter walking away does; the next `get_session(id)` adopts the turn
-  and deletes the sandbox at its result. It returns `False`, changing nothing, when there is no turn
-  to leave: nothing running, or the hand-over to a sandbox still in flight, when no worker has the
-  turn yet and nothing could adopt it. A detached session behaves like a re-attached one from then on:
-  its next `run()` / `send()` reads the mirror first, so it steers the turn while it still runs
-  instead of starting a second one. `local` returns `False`: a local turn ends with its process.
+  and deletes the sandbox at its result. Adopt it within about 35 minutes: nothing refreshes the
+  turn's tokens meanwhile, and once they expire (35 to 60 minutes after the last refresh, §6
+  "Identity") the agent loses model access mid-turn and the worker can no longer mirror its result or
+  write its checkpoint, so the turn is lost while its sandbox bills until the platform TTL. It returns
+  `False`, changing nothing, when there is no turn to leave: nothing running, or no worker has the
+  turn yet (the hand-over to a sandbox still in flight, or one that ended in an unknown state, whose
+  sandbox the failed run deletes), so nothing could adopt it. A detached session behaves like a
+  re-attached one from then on: its next `busy` / `current_run` / `last_result` / `run()` / `send()`
+  / `exec()` / `interrupt()` reads the mirror first and adopts the turn while it still runs, so it
+  steers that turn instead of starting a second one. `local` returns `False`: a local turn ends with
+  its process.
 - **`interrupt()` is a stop, not a cancel.** The turn's normal end-of-turn path runs (snapshot,
   transcript, terminal result with `StopReason.INTERRUPTED`, accounting kept), so the interrupted turn's
   workspace changes are in the checkpoint the next `send()` restores. Deleting the sandbox is the
@@ -512,8 +518,9 @@ These are facts measured live. The library encodes them so consumers inherit the
   a two-step turn crossing that threshold re-read the token and finished). So a turn's model access lasts as
   long as some client process holds the session — the starter or an adopter (`_attach`) — with no org
   policy and no long-lived credential. A turn left with `detach()` runs on the tokens it holds (each
-  re-minted every 25 minutes and valid for an hour, so at least 35 minutes remain) until an adopter's
-  refresher takes over.
+  re-minted every 25 minutes and valid for an hour, so 35 to 60 minutes remain) until an adopter's
+  refresher takes over; with no adopter by then it loses model and storage access mid-flight and is
+  lost, while its sandbox bills until the TTL.
 - **The sandbox has no usable Google identity** (verified live 2026-09-10 and by every `live-smoke` run):
   the metadata server answers with a tenant-project workload identity that is 403 on the project's storage,
   Vertex and resource manager. So what the agent's shell can reach is exactly what the turn brought: the

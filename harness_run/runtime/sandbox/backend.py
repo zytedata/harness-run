@@ -143,12 +143,17 @@ class _Dispatch:
     a background job waits for the dispatch to land and deletes whatever sandbox it holds —
     claimed, or already running the turn — instead of leaving it running unowned until the
     platform TTL.
+
+    ``accepted`` says a worker took the turn, which is what ``detach()`` needs to know. The
+    session's ``_sandbox`` does not say it: a hand-over that ended in an unknown state
+    (:class:`DispatchUncertain`) publishes it too, so that the failed run deletes that sandbox.
     """
 
     def __init__(self) -> None:
         self.lock = threading.Lock()
         self.sandbox: str | None = None  # the sandbox held right now (claimed or accepted)
         self.abandoned = False
+        self.accepted = False  # a worker took the turn (set under the lock, never unset)
         self.finished = threading.Event()
 
 
@@ -1165,6 +1170,7 @@ class SandboxSession:
                     with slot.lock:
                         if not slot.abandoned:
                             self._sandbox = sandbox
+                            slot.accepted = True
                     return sandbox
                 last = f"{sandbox.rsplit('/', 1)[-1]} did not take the turn"
                 with slot.lock:
@@ -1272,6 +1278,13 @@ class SandboxSession:
         walked_away = run is not None and run.cancelled and (
             detached or (adopted and run.cancel_note is None)
         )
+        if walked_away and detached:
+            # Left with detach(): this session is now like one re-attached by id, so every
+            # accessor (busy, current_run, last_result, exec, interrupt, run, send) looks for the
+            # turn in the mirror (_attach) instead of stopping at this finished run. The run
+            # itself still returns the detached result.
+            self._current_run = None
+            self._last_result, self._stop_reason = None, None
         self._stop_refresh(keep_record=walked_away)
         dropped = self._drop_pending_control()
         if dropped:
@@ -1548,19 +1561,24 @@ class SandboxSession:
         sandbox at the result: the hand-over an adopter whose loop shuts down already makes,
         here asked for by the process that started the turn (an adopter may detach too).
 
-        Adopt it while the turn's tokens last. They are re-minted every ``TOKEN_REFRESH_S``
-        (25 min) and each lasts an hour, so a detached turn keeps storage and model access
-        for at least 35 minutes with no refresher. A turn nobody adopts runs to its end,
-        and its sandbox bills until the platform deletes it at its TTL (``max_turn_s``).
+        Adopt it within about 35 minutes. The turn's tokens are re-minted every
+        ``TOKEN_REFRESH_S`` (25 min) and each lasts an hour, so with no refresher a detached
+        turn keeps storage and model access for 35 to 60 minutes. After that the agent loses
+        model access mid-turn and the worker can no longer mirror its result or write its
+        checkpoint: the turn is lost, while its sandbox bills until the platform deletes it
+        at its TTL (``max_turn_s``).
 
-        From here this session behaves like one re-attached by id: its next ``run()`` /
-        ``send()`` looks for the turn in the mirror first, so it steers the turn while it
-        still runs and never starts a second one next to it.
+        From here this session behaves like one re-attached by id: its next ``busy``,
+        ``current_run``, ``last_result``, ``run()``, ``send()``, ``exec()`` or
+        ``interrupt()`` looks for the turn in the mirror first and adopts it while it still
+        runs, so it steers that turn and never starts a second one next to it. The detached
+        run's own result stays the detached error.
 
         ``False``, changing nothing, when there is no turn to leave: nothing running, a run
-        this process does not drive (no event loop started it), or a turn still being handed
-        to a sandbox — no worker has it yet, so there is nothing to adopt, and a run
-        cancelled then deletes whatever the hand-over lands on, as before.
+        this process does not drive (no event loop started it), or a turn no worker has
+        taken — still being handed to a sandbox, or a hand-over that ended in an unknown
+        state. There is nothing to adopt then, and the run's end deletes whatever sandbox the
+        hand-over holds, as before.
         """
         run = self._current_run
         if run is None or run.done or run.task is None:
@@ -1568,8 +1586,8 @@ class SandboxSession:
         slot = self._dispatch_slot
         if slot is not None:
             with slot.lock:
-                handed = self._sandbox is not None  # published under the lock once a worker took it
-            # The dispatch thread publishes the sandbox, then returns and sets ``finished``:
+                handed = slot.accepted  # a worker took the turn (an uncertain hand-over's sandbox is not enough)
+            # The dispatch thread marks the hand-over accepted, then returns and sets ``finished``:
             # wait for that, or _on_complete would take the hand-over for one in flight.
             if not handed or not slot.finished.wait(DETACH_SETTLE_S):
                 return False

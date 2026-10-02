@@ -59,6 +59,15 @@ TestPyPI never accepts the same version twice, so a second rehearsal needs a ver
 [#3]: https://github.com/zytedata/harness-run/pull/3
 [#5]: https://github.com/zytedata/harness-run/pull/5
 
+### Changed
+
+- The bundled harness CLIs move to their current releases: `openai-codex` 0.159.2 (codex-cli
+  0.159.2) and `claude-agent-sdk` 0.2.162 (Claude Code 2.1.285), in the `local` extra, the dev
+  group and the sandbox image's requirements. These versions know the models released in
+  September 2026 (gpt-6.1-sol, claude-sonnet-5-5, claude-opus-5-5). ([#6])
+
+[#6]: https://github.com/zytedata/harness-run/pull/6
+
 ## 0.4.0 — 2026-09-23
 
 First public release.

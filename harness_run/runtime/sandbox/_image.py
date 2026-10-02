@@ -31,14 +31,14 @@ if TYPE_CHECKING:
 
 # What every sandbox image installs besides the toolkit itself.
 BASE_REQUIREMENTS: tuple[str, ...] = (
-    "claude-agent-sdk==0.2.130",  # keep in lockstep with pyproject (the [local] extra)
+    "claude-agent-sdk==0.2.162",  # keep in lockstep with pyproject (the [local] extra)
     "google-cloud-storage",  # the event mirror / checkpoints on the run-scoped token
     "google-auth",
     "uv>=0.5",  # the agent installs more at run time with uv
     "pyyaml",
     "jsonschema",
 )
-CODEX_REQUIREMENT = "openai-codex==0.147.0"  # keep in lockstep with pyproject
+CODEX_REQUIREMENT = "openai-codex==0.159.2"  # keep in lockstep with pyproject
 
 PYTHON_VERSION = "3.12"
 IMAGE_USER = "agent"

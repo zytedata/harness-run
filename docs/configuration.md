@@ -183,6 +183,11 @@ Bitbucket **API token** (`https://<account>:<token>@bitbucket.org/...`). Without
 scrubbed from `.git/config` before any checkpoint snapshot (then re-embedded on resume from the freshly
 supplied secret). To let the agent open PRs, also add `McpServer.github()`.
 
+The token goes only into an `https://` URL, or an `http://` one whose host is `127.0.0.1` or `[::1]` (a
+forge running locally for development; never the name `localhost`). A URL with userinfo, a query, a
+fragment, a backslash or whitespace gets no token either. Such repos are cloned read-only, as without
+`auth`.
+
 > **Push auth is reachable by the agent — scope it, don't rely on hiding it.** To `git push`, the token
 > must be usable by the agent (it can read `.git/config`). The real defense is a **scoped, short-lived**
 > credential — a GitHub App installation token limited to the target repo, a Bitbucket repository/workspace

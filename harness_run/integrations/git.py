@@ -25,6 +25,8 @@ import re
 import subprocess
 import tempfile
 from pathlib import Path
+from typing import NamedTuple
+from urllib.parse import urlsplit, urlunsplit
 
 # Host substring -> the userinfo *username* git wants alongside a token over HTTPS. The token
 # is the password. Default (unmatched host) is GitHub's scheme, the most common.
@@ -35,12 +37,55 @@ _HOST_AUTH_USER = (
 )
 _DEFAULT_AUTH_USER = "x-access-token"
 
-# Strips any ``user[:pass]@`` userinfo from an https URL (redaction / credential scrubbing).
-_USERINFO_RE = re.compile(r"(https://)[^/@\s]+@")
+# Strips any ``user[:pass]@`` userinfo from an http(s) URL (redaction / credential scrubbing).
+_USERINFO_RE = re.compile(r"(https?://)[^/@\s]+@")
+
+# The only hosts a token may reach over plain http: the loopback interface, where a forge
+# runs for local development. IP literals only: a resolver decides what "localhost" is.
+# Everywhere else token auth stays https-only.
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1"})
 
 
-def _auth_user_for(url: str) -> str:
-    host = url[len("https://"):].split("/", 1)[0].lower()
+class _TokenURL(NamedTuple):
+    """The parts of a git URL a token may be embedded in (:func:`_token_url`)."""
+
+    scheme: str
+    host: str  # lowercased; an IPv6 literal without its brackets
+    port: int | None
+    path: str
+
+
+def _token_url(url: str) -> _TokenURL | None:
+    """``url``'s parts, when a token may be embedded in it: https, or http to a loopback host.
+
+    One standard parse (``urlsplit``, which ends the host at ``/``, ``?`` and ``#`` as git
+    does) decides the host, and :func:`_auth_url` builds the authenticated URL from those same
+    parts, so the host that was checked is the host git connects to. A URL whose host parsers
+    could read differently gets no token: userinfo already in the URL, a query, a fragment, a
+    backslash, whitespace, a malformed port.
+    """
+    if any(c == "\\" or c.isspace() for c in url):
+        return None
+    try:
+        u = urlsplit(url)
+        port = u.port  # raises on a malformed port
+    except ValueError:
+        return None
+    if u.username is not None or u.password is not None or u.query or u.fragment:
+        return None
+    if not u.hostname:
+        return None
+    if u.scheme == "https" or (u.scheme == "http" and u.hostname in _LOOPBACK_HOSTS):
+        return _TokenURL(u.scheme, u.hostname, port, u.path)
+    return None
+
+
+def _token_url_ok(url: str) -> bool:
+    """Whether a token may be embedded in ``url`` (:func:`_token_url`)."""
+    return _token_url(url) is not None
+
+
+def _auth_user_for(host: str) -> str:
     for needle, user in _HOST_AUTH_USER:
         if needle in host:
             return user
@@ -48,17 +93,23 @@ def _auth_user_for(url: str) -> str:
 
 
 def _auth_url(url: str, token: str, user: str | None = None) -> str:
-    """Embed ``token`` into an https git ``url`` as ``https://<user>:<token>@host/...``.
+    """Embed ``token`` into an https git ``url`` as ``https://<user>:<token>@host/...`` (or an
+    http one to a loopback host: a forge running locally). Refuses any URL :func:`_token_url`
+    refuses, and builds the result from that parse.
 
     ``user`` overrides the userinfo username; when ``None`` a host-appropriate default is used
     (GitHub ``x-access-token``, Bitbucket ``x-token-auth``, GitLab ``oauth2``). Set ``user`` for
     schemes that pair the token with a real account name — e.g. a Bitbucket **API token**, which
     authenticates as ``https://<account>:<token>@bitbucket.org/...``.
     """
-    if not url.startswith("https://"):
-        raise ValueError(f"only https git URLs supported for token auth, got: {url}")
-    user = user or _auth_user_for(url)
-    return f"https://{user}:{token}@{url[len('https://'):]}"
+    t = _token_url(url)
+    if t is None:
+        raise ValueError("token auth needs an https git URL (or http to 127.0.0.1 or [::1]) "
+                         f"with no userinfo, query or fragment, got: {url}")
+    user = user or _auth_user_for(t.host)
+    host = f"[{t.host}]" if ":" in t.host else t.host
+    port = f":{t.port}" if t.port is not None else ""
+    return urlunsplit((t.scheme, f"{user}:{token}@{host}{port}", t.path, "", ""))
 
 
 def redact(text: str, token: str | None) -> str:
@@ -131,8 +182,9 @@ def provision_repos(
     """Clone each ``RepoSource`` in ``repos`` into ``job_dir`` before the agent runs.
 
     Each repo's ``auth`` names a per-invocation secret; when that secret is present and the URL
-    is HTTPS, the clone is token-authenticated (push-ready, host-aware, with a commit identity),
-    otherwise it's a plain read-only clone (fine for public repos). Honors each source's ``ref``.
+    is HTTPS (or HTTP to a loopback host), the clone is token-authenticated (push-ready,
+    host-aware, with a commit identity), otherwise it's a plain read-only clone (fine for public
+    repos). Honors each source's ``ref``.
     Returns the cloned directory names (under ``job_dir``).
     """
     if not repos:
@@ -142,7 +194,7 @@ def provision_repos(
     for repo in repos:
         dest = Path(job_dir) / repo_name(repo.url)
         token = secrets.get(repo.auth) if getattr(repo, "auth", None) else None
-        use_token = token if (token and repo.url.startswith("https://")) else None
+        use_token = token if (token and _token_url_ok(repo.url)) else None
         clone(repo.url, ref=repo.ref, dest=dest, token=use_token,
               auth_user=getattr(repo, "auth_user", None))
         if use_token:  # configure a commit identity so the agent can commit + push
@@ -165,7 +217,7 @@ def reauth_repos(job_dir: Path, repos, secrets: dict | None = None) -> list[str]
     names: list[str] = []
     for repo in repos:
         token = secrets.get(repo.auth) if getattr(repo, "auth", None) else None
-        if not (token and repo.url.startswith("https://")):
+        if not (token and _token_url_ok(repo.url)):
             continue
         dest = Path(job_dir) / repo_name(repo.url)
         if not (dest / ".git").is_dir():
@@ -181,7 +233,7 @@ def reauth_repos(job_dir: Path, repos, secrets: dict | None = None) -> list[str]
 def scrub_repo_tokens(job_dir) -> int:
     """Strip embedded credentials from every ``.git/config`` under ``job_dir`` in place.
 
-    Rewrites any ``https://<user>:<token>@host/...`` remote URL to ``https://host/...`` so a
+    Rewrites any ``http(s)://<user>:<token>@host/...`` remote URL to ``http(s)://host/...`` so a
     checkpoint snapshot never captures a token. Returns the number of config files changed.
     Raises on an unreadable/unwritable config: callers must not archive a workspace
     whose credential scrub could not be completed. Idempotent on success. Error text

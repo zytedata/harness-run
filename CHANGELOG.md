@@ -38,6 +38,14 @@ TestPyPI never accepts the same version twice, so a second rehearsal needs a ver
 
 ## Unreleased
 
+### Backwards-incompatible
+
+- A repo URL with userinfo (`https://account@host/...`), a query, a fragment, a backslash or
+  whitespace no longer gets the `auth` token: it is cloned read-only, as without `auth`. Before, the
+  token was inserted into the URL as text, and where the URL already had userinfo the result could
+  not authenticate. Update notes: pass the plain clone URL, and an account name the token pairs with
+  as `auth_user` (for a Bitbucket API token, the account from the clone URL Bitbucket shows).
+
 ### Added
 
 - `AgentSpec.env` accepts `None` values, which remove the variable from the environment of the
@@ -53,6 +61,10 @@ TestPyPI never accepts the same version twice, so a second rehearsal needs a ver
   started it still deletes the sandbox. Returns `False`, changing nothing, when there is no turn to
   leave (including while the turn is still being handed to a sandbox); `local` sessions always
   return `False`, since a local turn ends with its process. ([#5])
+- A repo's `auth` token also works with a forge running locally for development: an `http://` URL
+  whose host is `127.0.0.1` or `[::1]` gets the token too (plain http stays refused for every other
+  host, and the name `localhost`). The checkpoint scrub removes tokens from `http://` remotes as
+  well.
 
 [#3]: https://github.com/zytedata/harness-run/pull/3
 [#5]: https://github.com/zytedata/harness-run/pull/5

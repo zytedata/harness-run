@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import subprocess
 
+import pytest
+
 from harness_run import AgentSpec, RepoSource
 from harness_run.integrations.git import (
     _auth_url,
@@ -32,6 +34,51 @@ def test_auth_url_is_host_aware():
     # An explicit user overrides the host default — the Bitbucket API-token scheme
     # (`https://<account>:<token>@bitbucket.org/...`).
     assert _auth_url("https://bitbucket.org/o/r", "T", "alice") == "https://alice:T@bitbucket.org/o/r"
+
+
+def test_auth_url_allows_plain_http_only_to_loopback():
+    # A forge run locally for development serves plain http on the loopback interface;
+    # a token may go there, and nowhere else over http.
+    assert (_auth_url("http://127.0.0.1:3300/o/r.git", "T")
+            == "http://x-access-token:T@127.0.0.1:3300/o/r.git")
+    assert _auth_url("http://127.0.0.1/o/r", "T", "bot") == "http://bot:T@127.0.0.1/o/r"
+    assert _auth_url("http://[::1]:3300/o/r", "T") == "http://x-access-token:T@[::1]:3300/o/r"
+    for url in ("http://git.acme.io/o/r", "http://127.0.0.1.evil.io/o/r",
+                "http://evil.io/127.0.0.1/o/r", "git://127.0.0.1/o/r",
+                # a name, not the interface: a resolver decides what "localhost" is
+                "http://localhost/o/r", "http://localhost.evil.io/o/r"):
+        with pytest.raises(ValueError, match="https"):
+            _auth_url(url, "T")
+
+
+@pytest.mark.parametrize("url", [
+    # git ends the host at "#" and "?", so the host here is evil.io, whatever follows the "@"
+    "http://evil.io#@127.0.0.1/o/r.git",
+    "http://evil.io?@127.0.0.1/o/r.git",
+    "https://evil.io#@github.com/o/r.git",
+    # userinfo already in the URL: the token would sit beside someone else's credentials
+    "http://127.0.0.1@evil.io/o/r", "https://u:p@github.com/o/r",
+    # shapes parsers disagree on
+    "http://evil.io\\@127.0.0.1/o/r", "http://127.0.0.1 /o/r", "http://127.0.0.1:x/o/r",
+    "https://github.com/o/r?ref=main",
+])
+def test_auth_url_refuses_urls_whose_host_is_ambiguous(url):
+    with pytest.raises(ValueError, match="https"):
+        _auth_url(url, "T")
+
+
+def test_provision_repos_sends_the_token_only_over_https_or_loopback_http(tmp_path, monkeypatch):
+    from harness_run.integrations import git
+
+    sent = []
+    monkeypatch.setattr(git, "clone",
+                        lambda url, *, ref, dest, token, auth_user: sent.append(token))
+    monkeypatch.setattr(git, "_set_commit_identity", lambda *a: None)
+    repos = [RepoSource.git(u, auth="T")
+             for u in ("https://h/o/a", "http://127.0.0.1:3300/o/b", "http://h/o/c",
+                       "http://localhost/o/d", "http://h#@127.0.0.1/o/e")]
+    provision_repos(tmp_path, repos, {"T": "SEKRET"})
+    assert sent == ["SEKRET", "SEKRET", None, None, None]
 
 
 def _git(cwd, *args):
@@ -89,3 +136,19 @@ def test_scrub_and_reauth_round_trip(tmp_path):
     scrub_repo_tokens(job)
     assert reauth_repos(job, repos, {}) == []
     assert _origin(repo) == url
+
+
+def test_scrub_and_reauth_round_trip_over_loopback_http(tmp_path):
+    # The same round trip for a forge on the loopback interface: the scrub must catch
+    # http userinfo too, or a checkpoint snapshot would capture the token.
+    job = tmp_path / "job"
+    repo = job / "project-1"
+    repo.mkdir(parents=True)
+    _git(repo, "init", "-q")
+    url = "http://127.0.0.1:3300/org-1/project-1.git"
+    _git(repo, "remote", "add", "origin", _auth_url(url, "SEKRET", "bot-1"))
+    assert scrub_repo_tokens(job) == 1
+    assert _origin(repo) == url
+    repos = (RepoSource.git(url, auth="FORGE_TOKEN", auth_user="bot-1"),)
+    assert reauth_repos(job, repos, {"FORGE_TOKEN": "SEKRET2"}) == ["project-1"]
+    assert _origin(repo) == "http://bot-1:SEKRET2@127.0.0.1:3300/org-1/project-1.git"

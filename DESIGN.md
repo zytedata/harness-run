@@ -494,8 +494,12 @@ These are facts measured live. The library encodes them so consumers inherit the
   `agent` user (uid 1000; the sandbox requires non-root); `/workspace`; the worker as `CMD` on port 8080.
 - **The tag is a content digest** of the whole build context, so an unchanged spec from an unchanged
   toolkit skips the build (`docker manifest inspect`) and a deploy whose image and resources match the
-  newest template is a no-op. Docker CLI + a registry login are the deploy's prerequisites; the platform
-  does not build for us.
+  newest template is a no-op. The context's file modes are normalised before hashing and building
+  (0755 directories and executables, 0644 files), so the deployer's umask can neither change the digest nor
+  leave the spec unreadable by the `agent` user (`COPY` keeps the context's modes).
+  **The template references the image by registry digest** (`<repo>/<name>@sha256:…`), not by the tag:
+  a tag is mutable, and nodes that cached an image under it keep serving that image after the tag moves.
+  Docker CLI + a registry login are the deploy's prerequisites; the platform does not build for us.
 - **Template**: the image, `ports=[8080]`, `resources` requests = limits = `resource_limits` (default
   4 CPU / 4 GiB; the platform refuses more than 8 vCPU; 16 GiB verified), `egress_control_config.internet_access`.
   `customContainerSpec` carries only `imageUri` — no command, args or env — so everything per run arrives

@@ -301,8 +301,9 @@ def deploy(
     Builds the agent's container image (the toolkit with the baked harness CLIs, the
     resolved skills, ``spec.packages`` and the spec itself — ``_image.py``), pushes it to
     ``image_repo`` (default: the ``harness-run`` Artifact Registry repo of the project/location),
-    and creates an immutable **sandbox template** displayed as ``spec.name`` with the image,
-    ``resource_limits`` and internet egress. **A template is a version**: ``get_engine(name)``
+    and creates an immutable **sandbox template** displayed as ``spec.name`` with the image
+    (referenced by its registry digest, so a later push under the same tag can never reach
+    it), ``resource_limits`` and internet egress. **A template is a version**: ``get_engine(name)``
     resolves the newest one, ``version=`` pins one. A deploy whose image and resources match
     the newest template is a no-op that returns the existing version. Pass ``image=`` to
     skip the build and use an image you pushed yourself.
@@ -339,6 +340,7 @@ def deploy(
         default_image_repo,
         image_exists,
         image_uri,
+        resolve_digest,
         stage_build_context,
         validate_resource_limits,
     )
@@ -392,6 +394,14 @@ def deploy(
             say(f"image {image} already in the registry; skipping the build")
         else:
             build_and_push(context, image, log=say)
+        # Pin the template to what the registry serves under the tag right now: a tag can
+        # be moved to another image while nodes keep serving what they cached under it.
+        pinned = resolve_digest(image)
+        if pinned:
+            say(f"image {image} is {pinned.rsplit('@', 1)[1]}")
+            image = pinned
+        else:
+            say(f"could not resolve the registry digest of {image}; the template references the tag")
 
     provider = provider or _default_provider(project, location, credentials)
     existing = provider.list_templates(display_name=spec.name)

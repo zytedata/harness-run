@@ -68,6 +68,22 @@ TestPyPI never accepts the same version twice, so a second rehearsal needs a ver
 
 [#6]: https://github.com/zytedata/harness-run/pull/6
 
+### Fixed
+
+- The sandbox image no longer depends on the deployer's umask. The build context's files and
+  directories inherited it, `COPY` kept those modes, and under `umask 077` every turn failed
+  with `PermissionError: ... '/opt/toolkit/spec.json'`, since the worker runs as the non-root
+  `agent` user. The staged context now gets normalised modes (0755 directories and executables,
+  0644 files), and the content digest covers the executable bit. ([#9])
+- `sandbox.deploy` pins the template to the image's registry digest (`<repo>/<name>@sha256:…`)
+  instead of the tag. A rebuild that pushed a different image under an unchanged tag (the modes
+  case above, where the content digest could not tell) created a new template whose sandboxes
+  still ran the image nodes had cached under that tag. The first redeploy of an unchanged spec
+  after this change mints one new template version, since the image reference changes form;
+  `image=` references you pass yourself are used as given. ([#9])
+
+[#9]: https://github.com/zytedata/harness-run/pull/9
+
 ## 0.4.0 — 2026-09-23
 
 First public release.

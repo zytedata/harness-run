@@ -209,7 +209,9 @@ installs besides the library (the `claude-agent-sdk` pin that ships the `claude`
 the Codex harness is baked, `google-cloud-storage`, `uv`, …). Your `packages` merge with these — a pin that
 contradicts the base fails fast at deploy, before the build. The image tag is a content digest of the whole
 build context (the library's source, the spec, the requirements, the Dockerfile), so a deploy of an unchanged
-spec from an unchanged library finds its image in the registry and skips the build.
+spec from an unchanged library finds its image in the registry and skips the build. The template then
+references the image by its registry digest (`@sha256:…`), so a tag that is later moved to another image
+cannot change what deployed sandboxes run.
 
 **`local` honors `packages` too**: `local.deploy` resolves them into a per-engine venv (via `uv`, with the
 engine contract's Python 3.12 — uv provisions the interpreter if your machine lacks it) and activates it in

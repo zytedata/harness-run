@@ -6,9 +6,11 @@ the deploy record goes to a ``LocalBlobStore``.
 
 from __future__ import annotations
 
-from pathlib import Path
-
+import json
+import os
+import subprocess
 import time
+from pathlib import Path
 
 import pytest
 from sandbox_fakes import FakeSandboxProvider
@@ -100,6 +102,80 @@ def test_stage_build_context_is_complete_and_content_addressed(tmp_path: Path) -
     assert not (ctx2 / "skills").exists() and "COPY skills" not in (ctx2 / "Dockerfile").read_text()
 
 
+def _modes(root: Path) -> dict[str, int]:
+    return {str(p.relative_to(root)): p.stat().st_mode & 0o777 for p in root.rglob("*") if not p.is_symlink()}
+
+
+def test_stage_build_context_modes_do_not_depend_on_the_umask(tmp_path: Path) -> None:
+    """Field report: deploying under ``umask 077`` baked a 0600 spec.json and 0700 skill dirs
+    into the image; the worker (the non-root ``agent`` user) could not read its own spec."""
+    src = tmp_path / "src"
+    (src / "sk").mkdir(parents=True)
+    (src / "sk" / "SKILL.md").write_text("s")
+    (src / "sk" / "run.sh").write_text("#!/bin/sh\n")
+    (src / "sk" / "run.sh").chmod(0o700)
+    spec = _spec(skills=(SkillSource.local(str(src)),))
+    old = os.umask(0o077)
+    try:
+        ctx, digest = _image.stage_build_context(spec)
+    finally:
+        os.umask(old)
+    modes = _modes(ctx)
+    assert modes["spec.json"] == 0o644 and modes["requirements.txt"] == 0o644 and modes["Dockerfile"] == 0o644
+    assert modes["skills"] == 0o755 and modes["skills/sk"] == 0o755 and modes["skills/sk/SKILL.md"] == 0o644
+    assert modes["skills/sk/run.sh"] == 0o755  # executables stay executable, but become readable
+    assert all(m in (0o644, 0o755) for m in modes.values()), {k: oct(m) for k, m in modes.items() if m not in (0o644, 0o755)}
+    # Same content under a permissive umask: same context, same digest.
+    old = os.umask(0o022)
+    try:
+        ctx2, digest2 = _image.stage_build_context(spec)
+    finally:
+        os.umask(old)
+    assert digest2 == digest and _modes(ctx2) == modes
+    # The exec bit is content: a script that stops being executable is a different image.
+    (src / "sk" / "run.sh").chmod(0o600)
+    _, digest3 = _image.stage_build_context(spec)
+    assert digest3 != digest
+
+
+def test_repo_of_strips_only_the_tag() -> None:
+    assert _image.repo_of("us-central1-docker.pkg.dev/p/r/harness-run-x:abc") == "us-central1-docker.pkg.dev/p/r/harness-run-x"
+    assert _image.repo_of("localhost:5000/harness-run-x:abc") == "localhost:5000/harness-run-x"
+    assert _image.repo_of("localhost:5000/harness-run-x") == "localhost:5000/harness-run-x"
+
+
+def test_resolve_digest_asks_the_registry_and_falls_back(monkeypatch) -> None:
+    uri = "r.example/p/repo/harness-run-x:abc"
+    sha = "sha256:" + "a" * 64
+    answers: dict[str, tuple[int, str]] = {}
+
+    def fake_run(cmd, *, capture=False):
+        key = cmd[1] if cmd[1] != "buildx" else "buildx"
+        code, out = answers.get(key, (1, ""))
+        return subprocess.CompletedProcess(cmd, code, stdout=out, stderr="")
+
+    monkeypatch.setattr(_image, "_run", fake_run)
+    monkeypatch.setattr(_image.shutil, "which", lambda name: "/usr/bin/docker")
+    # buildx imagetools answers: that is the digest.
+    answers = {"buildx": (0, sha + "\n")}
+    assert _image.resolve_digest(uri) == f"r.example/p/repo/harness-run-x@{sha}"
+    # No buildx: a single-manifest `docker manifest inspect -v` object.
+    answers = {"manifest": (0, json.dumps({"Ref": uri, "Descriptor": {"digest": sha}}))}
+    assert _image.resolve_digest(uri) == f"r.example/p/repo/harness-run-x@{sha}"
+    # ... or a one-entry list, as newer CLIs print it.
+    answers = {"manifest": (0, json.dumps([{"Ref": uri, "Descriptor": {"digest": sha}}]))}
+    assert _image.resolve_digest(uri) == f"r.example/p/repo/harness-run-x@{sha}"
+    # A multi-platform index has no digest here; unparsable or failing output resolves to None.
+    answers = {"manifest": (0, json.dumps([{"Descriptor": {"digest": sha}}, {"Descriptor": {"digest": sha}}]))}
+    assert _image.resolve_digest(uri) is None
+    answers = {"manifest": (0, "not json")}
+    assert _image.resolve_digest(uri) is None
+    answers = {}
+    assert _image.resolve_digest(uri) is None
+    monkeypatch.setattr(_image.shutil, "which", lambda name: None)
+    assert _image.resolve_digest(uri) is None
+
+
 def test_image_uri_and_default_repo() -> None:
     assert _image.default_image_repo("proj", "us-central1") == "us-central1-docker.pkg.dev/proj/harness-run"
     assert _image.image_uri("r/repo/", "My Agent_1", "abc") == "r/repo/harness-run-my-agent_1:abc"
@@ -138,7 +214,33 @@ def no_docker(monkeypatch):
     built = []
     monkeypatch.setattr(_image, "image_exists", lambda uri: True)
     monkeypatch.setattr(_image, "build_and_push", lambda ctx, uri, log=None: built.append(uri) or uri)
+    monkeypatch.setattr(_image, "resolve_digest", lambda uri: None)  # the tag fallback; see the digest test
     return built
+
+
+def test_deploy_pins_the_template_to_the_registry_digest(records, no_docker, monkeypatch):
+    """Field report: a rebuild pushed a different image under the same content tag (the modes
+    fix above; the digest could not tell), the new template named the tag, and its sandboxes
+    kept running the image nodes had cached under it. The template names the digest now."""
+    sha = "sha256:" + "b" * 64
+    resolved = []
+    monkeypatch.setattr(_image, "resolve_digest", lambda uri: resolved.append(uri) or f"{_image.repo_of(uri)}@{sha}")
+    provider = FakeSandboxProvider()
+    spec = _spec()
+    engine = backend.deploy(spec, "proj", "us-central1", provider=provider)
+    assert resolved and resolved[0].startswith("us-central1-docker.pkg.dev/proj/harness-run/harness-run-test-agent:")
+    tpl = provider.templates[engine.resource]
+    assert tpl["image_uri"] == f"us-central1-docker.pkg.dev/proj/harness-run/harness-run-test-agent@{sha}"
+    record = handoff.load_deploy_record("gs://proj-agent-output", "test-agent", engine.version, store=records)
+    assert record["image"] == tpl["image_uri"]  # the record names the same reference
+    # An unchanged spec resolves to the same digest: the newest template is reused, no new version.
+    again = backend.deploy(spec, "proj", "us-central1", provider=provider)
+    assert again.resource == engine.resource and len(provider.templates) == 1
+    # A tag the registry re-pointed at another image is a different digest: a new version.
+    other = "sha256:" + "c" * 64
+    monkeypatch.setattr(_image, "resolve_digest", lambda uri: f"{_image.repo_of(uri)}@{other}")
+    third = backend.deploy(spec, "proj", "us-central1", provider=provider)
+    assert third.resource != engine.resource and provider.templates[third.resource]["image_uri"].endswith(other)
 
 
 def test_deploy_creates_a_template_writes_the_record_and_returns_a_handle(records, no_docker):

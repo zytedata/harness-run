@@ -40,6 +40,7 @@ model and harness pairings finish cleanly at the protocol level without answerin
 from __future__ import annotations
 
 import asyncio
+import math
 import shlex
 from collections import deque
 from enum import Enum
@@ -88,6 +89,31 @@ DEFAULT_ALLOWED_TOOLS = ("Read", "Write", "Edit", "Bash", "Glob", "Grep", "TodoW
 # The Anthropic-compatible base: the CLI appends /v1/messages itself.
 _OPENROUTER_ANTHROPIC_BASE = "https://openrouter.ai/api"
 _OPENROUTER_SHELL_UNSET = ("ANTHROPIC_AUTH_TOKEN", OPENROUTER_KEY_ENV)
+
+
+def _trusted_claude_cost(event: AgentEvent) -> float | None:
+    """Accept the CLI total only when every contributing model has a list price.
+
+    An older CLI can assign a fallback price to an unknown model. Its total then
+    includes that invented amount, even if other models in the turn are priced.
+    """
+    model_usage = (event.raw or {}).get("model_usage")
+    if not isinstance(model_usage, dict) or not model_usage:
+        return None
+    if any(
+        not isinstance(usage, dict)
+        or usage.get("costBasis") != "list"
+        or isinstance(usage.get("costUSD"), bool)
+        or not isinstance(usage.get("costUSD"), (int, float))
+        or not math.isfinite(usage["costUSD"])
+        or usage["costUSD"] < 0
+        for usage in model_usage.values()
+    ):
+        return None
+    cost = event.cost_usd
+    if isinstance(cost, bool) or not isinstance(cost, (int, float)):
+        return None
+    return float(cost) if math.isfinite(cost) and cost >= 0 else None
 
 
 def _write_shell_wrapper(path: Path, unset: Iterable[str]) -> Path:
@@ -473,9 +499,9 @@ class ClaudeCodeHarness:
             skills="all",
             permission_mode=spec.permission_mode,
             max_turns=spec.max_turns,
-            # Claude Code prices unknown models with its own fallback rates. OpenRouter
-            # can differ by orders of magnitude, so its native cap would stop valid runs.
-            # `_final_result` checks OpenRouter's exact streamed charge instead.
+            # The CLI's own cap is used for native Claude; it runs before the
+            # result's costBasis becomes available. OpenRouter's fallback price can
+            # differ by orders of magnitude, so its cap uses exact proxy charges.
             max_budget_usd=None if openrouter else spec.max_budget_usd,
             # The SDK's own default is 1 MiB per stdout message, and it raises from inside
             # the read loop when a message exceeds it — the turn ends with no result and
@@ -547,6 +573,14 @@ class ClaudeCodeHarness:
             if event.raw is not None:
                 event.raw["cli_reported_cost_usd"] = event.cost_usd
             event.cost_usd = None
+        else:
+            trusted_cost = _trusted_claude_cost(event)
+            if trusted_cost is None:
+                if event.raw is not None:
+                    event.raw["cli_reported_cost_usd"] = event.cost_usd
+                event.cost_usd = None
+            else:
+                event.cost_usd = trusted_cost
         if (
             openrouter
             and event.summary == "(no final text)"
@@ -702,6 +736,23 @@ class ClaudeCodeHarness:
                 yield event
             if is_openrouter and proxy_cost_usd() is None:
                 yield openrouter_cost_unknown(spec.model)
+            if (
+                not is_openrouter
+                and _trusted_claude_cost(result_event) is None
+                and (
+                    result_event.cost_usd is not None
+                    or (result_event.raw or {}).get("model_usage")
+                )
+            ):
+                yield AgentEvent(
+                    kind="status",
+                    summary=(
+                        "Claude Code did not provide a verifiable list-priced total; "
+                        "cost_usd is unknown; the CLI may have enforced max_budget_usd "
+                        "using an untrusted price"
+                    ),
+                    raw={"event": "cost_unknown", "model": spec.model},
+                )
             if fin is not None:
                 yield fin
             yield self._final_result(

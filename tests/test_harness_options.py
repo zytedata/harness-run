@@ -426,12 +426,47 @@ def test_claude_no_final_text_is_left_alone():
     assert out.raw["is_error"] is False
 
 
-def test_claude_models_keep_the_cli_cost():
-    """Only the OpenRouter path is touched; Claude's own number is authoritative."""
-    event = AgentEvent(kind="result", summary="done", cost_usd=0.42, usage={}, raw={})
+def test_claude_models_keep_list_priced_cli_cost():
+    event = AgentEvent(
+        kind="result",
+        summary="done",
+        cost_usd=0.42,
+        usage={},
+        raw={"model_usage": {"claude-sonnet": {"costBasis": "list", "costUSD": 0.42}}},
+    )
     out = ClaudeCodeHarness()._final_result(event, turns_total=1, openrouter=False)
     assert out.cost_usd == 0.42
     assert "cli_reported_cost_usd" not in out.raw
+
+
+@pytest.mark.parametrize("basis", ["unknown", None])
+def test_claude_untrusted_cost_is_not_reported(basis):
+    event = AgentEvent(
+        kind="result",
+        summary="done",
+        cost_usd=0.676,
+        usage={},
+        raw={
+            "subtype": "success",
+            "is_error": False,
+            "model_usage": {
+                "claude-sonnet": {"costBasis": basis, "costUSD": 0.67},
+                "claude-haiku": {"costBasis": "list", "costUSD": 0.006},
+            },
+        },
+    )
+    out = ClaudeCodeHarness()._final_result(event, turns_total=1)
+    assert out.cost_usd is None
+    assert out.raw["cli_reported_cost_usd"] == 0.676
+    assert out.raw["subtype"] == "success"
+    assert "price_source" not in out.raw
+
+
+def test_claude_cost_without_model_usage_is_unknown():
+    event = AgentEvent(kind="result", summary="done", cost_usd=0.42, usage={}, raw={})
+    out = ClaudeCodeHarness()._final_result(event, turns_total=1)
+    assert out.cost_usd is None
+    assert out.raw["cli_reported_cost_usd"] == 0.42
 
 
 @pytest.mark.parametrize("provider", ["moonshotai", None])

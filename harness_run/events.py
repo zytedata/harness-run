@@ -79,9 +79,11 @@ class RunResult:
             subagent (Task/collab-agent) calls are NOT counted, matching what
             ``max_turns`` caps.
         cost_usd: Total spend for the run, or ``None`` when the spend is unknown:
-            the harness could not price the model, or OpenRouter reported no charge.
-            A ``cost_unknown`` status event fires in that case and ``max_budget_usd``
-            could not be enforced. ``0.0`` means the run really was free.
+            the harness could not price the model, Claude Code's CLI used a non-list
+            fallback price, or OpenRouter reported no charge. A ``cost_unknown`` status
+            event fires in that case. OpenRouter cannot enforce ``max_budget_usd``
+            without a charge; Claude Code's native CLI may have enforced it using an
+            untrusted fallback price. ``0.0`` means the run really was free.
         usage: Normalized token accounting for the WHOLE turn — subagent sessions and
             background-task re-invocation segments included — identical in shape and
             meaning on every harness (see ``harness/_usage.py``). A flat dict whose

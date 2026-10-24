@@ -94,8 +94,9 @@ Beyond skills, several `AgentSpec` fields shape what the agent can do and the en
 - **`allowed_tools` / `disallowed_tools`** — tool allow/deny lists. Unset `allowed_tools` defaults to a
   coding-agent set (`Read, Write, Edit, Bash, Glob, Grep, TodoWrite`); the `Skill` tool is enabled
   automatically when skills are present.
-- **`max_turns` / `max_budget_usd`** — hard caps on loop length and spend (the run ends with the matching
-  stop reason).
+- **`max_turns` / `max_budget_usd`** — limits on loop length and spend (the run ends with the matching
+  stop reason). For Claude Code, a CLI without a list price may apply a fallback price to the
+  budget; see [Harnesses and models](harnesses-and-models.md#claude-code).
 - **`max_buffer_size`** — bytes allowed in a single message read from the Claude Code CLI's stdout
   (default 32 MiB; `claude-code` only). One oversized message — a `Read` of a large image arrives
   base64-encoded, and a big tool result is one line — kills the turn with no result at all, so raise this

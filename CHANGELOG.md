@@ -78,8 +78,12 @@ TestPyPI never accepts the same version twice, so a second rehearsal needs a ver
   create` does), reported as its own row, `sandbox service agent`, a FIX item in `--check` while
   the grant is missing. Should the grant still fail, the error names the gcloud command to run,
   and a failing fix now ends the run with its message instead of a traceback. ([#8])
+- Claude Code results no longer report the CLI's fallback USD estimate when any model in
+  `model_usage` lacks a list price. The raw CLI figure is retained for diagnosis, and a
+  `cost_unknown` status warns that a native CLI budget cutoff may still have used it. ([#7])
 
 [#8]: https://github.com/zytedata/harness-run/pull/8
+[#7]: https://github.com/zytedata/harness-run/issues/7
 
 ## 0.4.0 — 2026-09-23
 

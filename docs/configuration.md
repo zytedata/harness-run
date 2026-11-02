@@ -3,7 +3,7 @@
 An agent is configured at three scopes: the `AgentSpec` it is deployed with, a `SessionConfig` bound
 when a session starts, and a `TurnConfig` passed to each turn. This page covers the scopes, then the
 spec fields that shape the agent's environment: tools, budgets, environment variables, MCP servers,
-git repositories, and pre-installed packages.
+skills, git repositories, and pre-installed packages.
 
 ## Deploy / session / turn: the three configuration scopes
 
@@ -69,7 +69,8 @@ The contracts behind this:
   the image; a session selects among what is baked (`AgentSpec(harnesses=("claude-code",
   "codex"))` bakes both CLIs so sessions can pick either). Baked skills are reused as a
   staging fast path when the effective `skills` match the deployed ones; a differing
-  declaration resolves from its own sources at run time.
+  declaration resolves from its own sources at run time, as does every session of an engine
+  deployed with `skills_resolution="session"` (see [Skills](#skills)).
 * **No credentials in configs**: config objects are persisted and kept for debugging, so
   `SessionConfig` refuses a `RepoSource.url` embedding
   `user:token@` at construction — name the token via `RepoSource(auth=..., auth_user=...)`
@@ -145,6 +146,66 @@ spec = AgentSpec(
 (Alternatively the agent can start long work with the Bash tool's `run_in_background` and poll it.) Also
 tunable: `BASH_MAX_OUTPUT_LENGTH` for commands with very large output.
 
+
+## Skills
+
+Skills are `<name>/SKILL.md` folders ([Agent Skills](https://agentskills.io)) staged into the
+agent's working directory where its harness discovers them (`.claude/skills` for Claude Code,
+`.agents/skills` for Codex). Declare where they come from on the spec, as a list so a base set
+and overrides can be layered (later sources win on a name collision):
+
+```python
+from harness_run import AgentSpec, SkillSource
+
+spec = AgentSpec(
+    name="entry-builder",
+    model="claude-sonnet-4-6",
+    skills=[
+        SkillSource.git("https://github.com/zytedata/claude-skills", ref="0.2.0"),    # public, pinned
+        SkillSource.git("https://git.example/acme/tools", ref="main", subdir="skills",
+                        auth="SKILLS_TOKEN"),                                         # private, tracking a branch
+    ],
+    skills_resolution="session",
+)
+```
+
+- **`SkillSource.git(url, ref=None, subdir="skills", auth=None, auth_user=None)`** clones `url`
+  (at `ref`: a branch, tag or commit; the default branch when unset) and reads the skill folders
+  under `subdir`. `auth` names the per-invocation secret holding the token for a private
+  repository, with the same contract as `RepoSource.auth`: the value comes from
+  `run(secrets={"SKILLS_TOKEN": ...})` on every turn, never from the spec. The token is used for
+  the clone only; the clone is discarded once the folders are copied out, so neither the agent's
+  workspace nor its environment carries it. A named secret that a turn does not supply fails
+  the turn, with no anonymous retry. `SkillSource.local(path)` reads a directory on the machine
+  that resolves the source.
+- **`skills_resolution`** (spec, `sandbox` only) says when the sources are resolved.
+  `"deploy"` (default) resolves them on the deploying machine, with its git credentials, and
+  bakes the result into the image: a skill change is a redeploy, and every session runs the
+  deploy-time snapshot (a `SessionConfig(skills=...)` that differs from the deployed declaration
+  is the exception; the worker resolves it on the session's first turn). `"session"` bakes no
+  skills: every session's first turn resolves the effective sources on the worker, so pushing to
+  the skill repository changes what the next session runs, with no redeploy, and a session can
+  pin its own ref through `SessionConfig(skills=[...])`. Git sources only (`deploy` rejects a
+  `local` one, which the sandbox could not read). Later turns of the session run the skills its
+  first turn resolved: the workspace, skills included, is restored from the checkpoint. The
+  `local` runtime always resolves per run and ignores the field.
+- **Provenance.** Whatever resolved the skills records what each source resolved to, with the
+  commit of a git source: on the `workspace_ready` status event (`skill_sources`), on the
+  terminal result (`RunResult.skill_sources`, also reconstructed by `session.last_result` and
+  from `session.history()`), and in `.harness-run-sources.json` next to the staged folders, so a
+  restored workspace reports the resolution its first turn made. With a floating ref this is
+  how a run's skill version is known afterwards:
+
+  ```python
+  result = await session.run("build the entry", secrets={"SKILLS_TOKEN": token})
+  for source in result.skill_sources or ():
+      print(source["url"], source["ref"], source["commit"], source["skills"])
+  ```
+
+A source that stages nothing (a wrong `subdir`, an empty repository), a clone that fails and a
+missing `auth` secret all fail the turn as configuration errors; skills are never silently
+skipped or served stale. On a ready-pool sandbox a session-time resolution adds the clone to the
+first turn (a few seconds for a small repository); the baked fast path costs nothing.
 
 ## Cloning a git repo
 

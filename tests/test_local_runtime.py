@@ -588,3 +588,26 @@ def test_transcript_only_send_does_not_resume(tmp_path):
 
     assert resume_sid_of(AgentSpec(harness="claude-code", name="d", model="m", transcript=True), "t") is None
     assert resume_sid_of(AgentSpec(harness="claude-code", name="d", model="m", checkpoint=True), "c") is not None
+
+
+def test_local_result_carries_the_skills_provenance_and_passes_secrets_to_staging(tmp_path, monkeypatch):
+    import harness_run.skills as skills_mod
+
+    seen = {}
+    real_provision = skills_mod.provision
+
+    def spying_provision(sources, dest, subdir=".claude/skills", secrets=None, *, sources_record=None):
+        seen["secrets"] = dict(secrets or {})
+        return real_provision(sources, dest, subdir, secrets, sources_record=sources_record)
+
+    monkeypatch.setattr(skills_mod, "provision", spying_provision)
+    spec = AgentSpec(harness="claude-code", name="demo", model="m", skills=[SkillSource.local(_skill_src(tmp_path))])
+    engine = local.deploy(spec, workdir=str(tmp_path / "wd"))
+    engine._harness = FakeHarness([_result_ev(text="final")])
+
+    async def go():
+        return await engine.start_session().run("build it", secrets={"SKILLS_TOKEN": "s3cret"})
+
+    result = asyncio.run(go())
+    assert seen["secrets"] == {"SKILLS_TOKEN": "s3cret"}
+    assert result.skill_sources == [{"kind": "local", "path": str(tmp_path / "skills_src"), "skills": ["demo"]}]

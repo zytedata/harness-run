@@ -36,9 +36,10 @@ CODEX_MODEL_AUTH_KEYS = ("OPENAI_API_KEY", OPENROUTER_KEY_ENV)
 def harness_consumed_secret_names(spec: AgentSpec) -> set[str]:
     """Secret names the *harness* consumes on the agent's behalf, so they stay OUT of its env.
 
-    A repo's ``auth`` token is embedded into ``origin`` (git uses it), and a GitHub MCP's token
-    goes into the server's headers — neither needs to be a plain environment variable the agent
-    (or a prompt-injection) can read. The Codex binding additionally consumes its model-auth
+    A repo's ``auth`` token is embedded into ``origin`` (git uses it), a skill source's ``auth``
+    token authenticates its staging clone, and a GitHub MCP's token goes into the server's
+    headers — none needs to be a plain environment variable the agent (or a prompt-injection)
+    can read. The Codex binding additionally consumes its model-auth
     keys: ``OPENAI_API_KEY`` (routed to ``codex login``) and ``OPENROUTER_API_KEY`` (routed to
     the OpenRouter provider config). Codex lists both whichever model the turn runs, so passing
     one the turn doesn't use still doesn't leak it into the agent's shell. The Claude binding
@@ -48,6 +49,8 @@ def harness_consumed_secret_names(spec: AgentSpec) -> set[str]:
     agent's own to use.
     """
     names: set[str] = {r.auth for r in spec.repos if getattr(r, "auth", None)}
+    # A skill source's clone token is used by the staging clone only (then the clone is gone).
+    names.update(s.auth for s in spec.skills if getattr(s, "auth", None))
     for server in spec.mcp_servers:
         names.update((server.header_secrets or {}).values())
     if any(m.kind == "github" for m in spec.mcp_servers):

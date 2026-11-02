@@ -72,6 +72,12 @@ class SkillSource:
     * ``"builtin"`` — a named, library-provided skill bundle ``name``.
 
     A list of sources allows a base + extra sources (multi-source skills, DESIGN.md §12).
+
+    A private git source names its token via ``auth`` (``auth_user`` for schemes that pair
+    the token with an account name), the same contract as :class:`RepoSource`: the name
+    of a per-invocation secret passed to ``run``/``send``, never the value. The token is
+    used for the clone only and the clone is discarded once the skill folders are copied
+    out, so it reaches neither the agent's workspace nor its environment.
     """
 
     kind: Literal["git", "local", "builtin"]
@@ -80,11 +86,28 @@ class SkillSource:
     path: str | None = None
     name: str | None = None
     subdir: str = "skills"
+    auth: str | None = None
+    auth_user: str | None = None
 
     @classmethod
-    def git(cls, url: str, ref: str | None = None, subdir: str = "skills") -> SkillSource:
-        """Skills from a git repository ``url`` (optionally pinned to ``ref``)."""
-        return cls(kind="git", url=url, ref=ref, subdir=subdir)
+    def git(
+        cls,
+        url: str,
+        ref: str | None = None,
+        subdir: str = "skills",
+        auth: str | None = None,
+        auth_user: str | None = None,
+    ) -> SkillSource:
+        """Skills from a git repository ``url`` (optionally pinned to ``ref``).
+
+        ``auth`` names the per-invocation secret holding the token that authenticates the
+        clone of a private repository; ``auth_user`` overrides the userinfo username (default:
+        host-based). Omit both for public repositories. The secret is needed wherever the
+        source is resolved at run time (``skills_resolution="session"``, a ``SessionConfig``
+        override, the ``local`` runtime); a deploy-time bake uses the deployer's own git
+        credentials instead.
+        """
+        return cls(kind="git", url=url, ref=ref, subdir=subdir, auth=auth, auth_user=auth_user)
 
     @classmethod
     def local(cls, path: str) -> SkillSource:
@@ -98,7 +121,7 @@ class SkillSource:
 
     def to_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {"kind": self.kind, "subdir": self.subdir}
-        for f in ("url", "ref", "path", "name"):
+        for f in ("url", "ref", "path", "name", "auth", "auth_user"):
             v = getattr(self, f)
             if v is not None:
                 d[f] = v
@@ -113,6 +136,8 @@ class SkillSource:
             path=d.get("path"),
             name=d.get("name"),
             subdir=d.get("subdir", "skills"),
+            auth=d.get("auth"),
+            auth_user=d.get("auth_user"),
         )
 
 
@@ -390,6 +415,15 @@ class AgentSpec:
             ``local.deploy`` resolves them into a per-engine venv (via ``uv``, Python pinned to
             the engine contract's 3.12) activated in the agent's environment. Either way the
             agent can still install more at runtime via ``uv``.
+        skills_resolution: When ``skills`` are resolved from their sources on ``sandbox``.
+            ``"deploy"`` (default) resolves them on the deploying machine and bakes the
+            result into the image, so a skill change costs a redeploy. ``"session"`` bakes
+            nothing: every session's first turn resolves the effective skills (the spec's, or
+            a ``SessionConfig`` override) on the worker, so a skill repository can move
+            without a redeploy; later turns of the session keep that resolution (the
+            workspace is restored from the checkpoint). Git sources only: a ``local`` source
+            cannot be read from inside a sandbox. ``local`` ignores the field (it always
+            resolves per run).
     """
 
     name: str
@@ -417,10 +451,15 @@ class AgentSpec:
     openrouter_provider: str | None = None
     openrouter_routing: Mapping[str, Any] | None = None
     codex_config: Mapping[str, Any] | None = None
+    skills_resolution: Literal["deploy", "session"] = "deploy"
 
     def __post_init__(self) -> None:
         # Coerce list args to frozen-hashable tuples without breaking frozen-ness.
         _assert_non_secret_env(self.env)
+        if self.skills_resolution not in ("deploy", "session"):
+            raise ValueError(
+                f"skills_resolution must be 'deploy' or 'session' (got {self.skills_resolution!r})"
+            )
         object.__setattr__(self, "skills", tuple(self.skills))
         object.__setattr__(self, "repos", tuple(self.repos))
         object.__setattr__(self, "mcp_servers", tuple(self.mcp_servers))
@@ -528,6 +567,8 @@ class AgentSpec:
             d["openrouter_routing"] = dict(self.openrouter_routing)
         if self.codex_config is not None:
             d["codex_config"] = dict(self.codex_config)
+        if self.skills_resolution != "deploy":
+            d["skills_resolution"] = self.skills_resolution
         return d
 
     @classmethod
@@ -573,6 +614,7 @@ class AgentSpec:
                 dict(d["openrouter_routing"]) if d.get("openrouter_routing") is not None else None
             ),
             codex_config=dict(d["codex_config"]) if d.get("codex_config") is not None else None,
+            skills_resolution=d.get("skills_resolution", "deploy"),
         )
 
     def to_yaml(self) -> str:

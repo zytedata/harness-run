@@ -255,8 +255,13 @@ newer deploy; "serving" simply means "newest", and there is no traffic configura
 - `AgentSpec` — the declarative definition. Serializable (`to_dict` / `AgentSpec.from_yaml`).
 - `SystemPrompt.inherit(append=...)` — inherit the harness's built-in
   system prompt and append. A plain `str` replaces it entirely.
-- `SkillSource` — `.git(url, ref=)`, `.local(path)`, `.builtin(name)`; a list allows base + extra sources
-  (multi-source skills, §12). Resolved & staged at deploy/run time.
+- `SkillSource` — `.git(url, ref=, subdir=, auth=, auth_user=)`, `.local(path)`, `.builtin(name)`; a list
+  allows base + extra sources (multi-source skills, §12). `auth` names a per-invocation secret for a private
+  repository (the `RepoSource` contract). Resolved & staged at deploy time (`skills_resolution="deploy"`, the
+  default: baked into the sandbox image) or on each session's first turn (`"session"`: nothing baked, the
+  worker clones with the turn's secrets; a skill push needs no redeploy). What each source resolved to (the
+  commit) is recorded on `workspace_ready`, on the terminal result (`RunResult.skill_sources`) and next to
+  the staged folders, so a restored workspace still reports it.
 - `McpServer` — `.github()`, `.remote(name, url)`, `.stdio(...)`; credentials come from the per-invocation
   `secrets`, not here.
 - `RepoSource` — `.git(url, ref=, auth=, auth_user=)`; cloned into the cwd before the agent runs, push-ready
@@ -490,7 +495,8 @@ These are facts measured live. The library encodes them so consumers inherit the
   (`claude-agent-sdk` pin, `openai-codex` when the Codex harness is baked, `google-cloud-storage`, `uv`, …)
   merged with `spec.packages` (an unsatisfiable merge fails before the build); the toolkit package copied
   from the deploying venv (the image runs THIS toolkit revision — client and image are one wire contract);
-  the resolved skills flat under `/opt/toolkit/skills`; the spec at `/opt/toolkit/spec.json`; a non-root
+  the resolved skills flat under `/opt/toolkit/skills` with their provenance record (none when the spec
+  resolves skills at session start); the spec at `/opt/toolkit/spec.json`; a non-root
   `agent` user (uid 1000; the sandbox requires non-root); `/workspace`; the worker as `CMD` on port 8080.
 - **The tag is a content digest** of the whole build context, so an unchanged spec from an unchanged
   toolkit skips the build (`docker manifest inspect`) and a deploy whose image and resources match the
@@ -760,6 +766,12 @@ saving all onboarding docs for the end.
 - **Multi-source skills** — `SkillSource[]` is designed for base + extra sources; the resolver/merge
   (precedence on name collision, per-source ref pinning) is specified in P1 but the merge policy needs a
   decision. (P1 ships **last-source-wins**.)
+- **Skills at session start** — `skills_resolution="session"` moves resolution from the image bake to the
+  session's first turn (issue #1), so skill iteration decouples from agent releases. Not done from that
+  issue: pre-cloning the spec's git sources into a ready-pool sandbox while it idles (fetch + checkout at
+  claim instead of a clone) — a cold clone of a small skill repository costs seconds, so it waits for a
+  measured need. A "skills bundle" pushed to the output bucket was considered and rejected as a second
+  source of truth; git is where skills live and are reviewed.
 - **Baked engine dependencies** — `AgentSpec.packages` means "the agent's starting Python packages" on
   BOTH backends: `sandbox.deploy` bakes them into the image with uv; `local.deploy` resolves them into a
   per-engine venv (uv, engine-contract Python 3.12) activated in the agent env. (Decided after eval-harness
@@ -831,7 +843,8 @@ it is off the hot path, and `deploy` does not block on it.
 
 - **Deploy = image + template.** `sandbox.deploy` builds the image from a generated Dockerfile (the
   `dev/Dockerfile` contract: Debian, Python 3.12, git, uv, the toolkit with the baked harness CLIs, resolved
-  skills, `spec.packages`), pushes it to an Artifact Registry repo in the project, and creates a template
+  skills unless `skills_resolution="session"`, `spec.packages`), pushes it to an Artifact Registry repo in the
+  project, and creates a template
   named `<spec.name>` with the image, `ports=[8080]`, `resources` (`resource_limits`) and
   `egress_control_config.internet_access=True`. Templates are immutable, so **a template is a version** (the
   image tag is the toolkit+spec digest); `get_engine(name)` resolves the newest template of that display

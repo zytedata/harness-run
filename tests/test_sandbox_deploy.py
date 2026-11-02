@@ -326,3 +326,50 @@ def test_deploy_reports_template_progress_and_retires_failed_versions(records, n
     engine._join_background()
     assert any("PROVISIONING" in line for line in lines) and any("is ACTIVE" in line for line in lines)
     assert failed in provider.deleted_templates  # the failed attempt is retired with the previous versions
+
+
+def test_session_skills_resolution_bakes_no_skills(tmp_path: Path) -> None:
+    """``skills_resolution="session"``: the image carries no skills, so a skill change is no redeploy."""
+    import json
+
+    spec = _spec(skills=(SkillSource.git("https://h/skills.git", ref="main", auth="SKILLS_TOKEN"),),
+                 skills_resolution="session")
+    assert _image.stage_skills(spec, str(tmp_path / "dest")) == [] and not (tmp_path / "dest").exists()
+    ctx, digest = _image.stage_build_context(spec)  # no clone attempted: nothing to resolve at deploy
+    assert not (ctx / "skills").exists() and "COPY skills" not in (ctx / "Dockerfile").read_text()
+    assert json.loads((ctx / "spec.json").read_text())["skills_resolution"] == "session"
+    # The sources ride the baked spec, so the worker knows what to resolve (the token's name only).
+    baked_skills = json.loads((ctx / "spec.json").read_text())["skills"]
+    assert baked_skills == [{"kind": "git", "subdir": "skills", "url": "https://h/skills.git", "ref": "main",
+                             "auth": "SKILLS_TOKEN"}]
+    # A different ref is a different spec, but the image contents do not depend on the repository.
+    _, other = _image.stage_build_context(_spec(skills=(SkillSource.git("https://h/skills.git", ref="v2"),),
+                                                skills_resolution="session"))
+    assert other != digest
+
+
+def test_deploy_rejects_session_resolution_of_a_local_source_before_any_side_effect(records, no_docker, tmp_path):
+    provider = FakeSandboxProvider()
+    spec = _spec(skills=(SkillSource.local(str(tmp_path)),), skills_resolution="session")
+    with pytest.raises(ValueError, match="must be a git repository"):
+        backend.deploy(spec, "p", "l", provider=provider)
+    with pytest.raises(ValueError, match="must be a git repository"):
+        backend.deploy(spec, "p", "l", provider=provider, image="repo/img@sha256:" + "0" * 64)  # no build either
+    assert provider.list_templates() == [] and no_docker == []
+
+
+def test_stage_skills_records_the_deploy_time_provenance(tmp_path: Path) -> None:
+    from harness_run.skills import read_sources
+
+    src = tmp_path / "src"
+    (src / "my-skill").mkdir(parents=True)
+    (src / "my-skill" / "SKILL.md").write_text("hello skill")
+    _image.stage_skills(_spec(skills=(SkillSource.local(str(src)),)), str(tmp_path / "dest"))
+    assert read_sources(tmp_path / "dest") == [{"kind": "local", "path": str(src), "skills": ["my-skill"]}]
+    # The record is a file next to the folders: the context's mode normalisation and the
+    # worker's folder discovery both leave it alone.
+    ctx, _ = _image.stage_build_context(_spec(skills=(SkillSource.local(str(src)),)))
+    assert (ctx / "skills" / ".harness-run-sources.json").is_file()
+    from harness_run.skills import discover_skill_names
+
+    assert discover_skill_names(ctx / "skills") == ["my-skill"]

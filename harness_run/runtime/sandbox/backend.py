@@ -299,7 +299,8 @@ def deploy(
     """Deploy ``spec`` as a sandbox template, minting a **new version** (ops/CI action).
 
     Builds the agent's container image (the toolkit with the baked harness CLIs, the
-    resolved skills, ``spec.packages`` and the spec itself — ``_image.py``), pushes it to
+    resolved skills unless ``spec.skills_resolution == "session"``, ``spec.packages`` and
+    the spec itself — ``_image.py``), pushes it to
     ``image_repo`` (default: the ``harness-run`` Artifact Registry repo of the project/location),
     and creates an immutable **sandbox template** displayed as ``spec.name`` with the image,
     ``resource_limits`` and internet egress. **A template is a version**: ``get_engine(name)``
@@ -341,6 +342,7 @@ def deploy(
         image_uri,
         stage_build_context,
         validate_resource_limits,
+        validate_session_skills,
     )
     if kwargs:
         removed = sorted(k for k in kwargs if k in _DEPLOY_REMOVED_KWARGS)
@@ -368,6 +370,7 @@ def deploy(
             raise ValueError(f"{label} must be a positive, finite number of seconds; got {value!r}")
     limits = dict(resource_limits) if resource_limits else dict(DEFAULT_RESOURCE_LIMITS)
     validate_resource_limits(limits)
+    validate_session_skills(spec)
     if model:
         spec = dataclasses.replace(spec, model=model)
     output_bucket = output_bucket or f"gs://{project}-agent-output"

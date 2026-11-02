@@ -164,40 +164,39 @@ def render_dockerfile(spec: AgentSpec, *, has_skills: bool) -> str:
 def stage_skills(spec: AgentSpec, dest_dir: str) -> list[str]:
     """Resolve ``spec.skills`` into a FLAT ``dest_dir`` of skill folders; return the names.
 
-    Each staged entry is a directory containing ``SKILL.md``. The flat layout is what the
-    worker's baked-skills fast path provisions from (``worker._find_baked_skills``). Per
-    ``SkillSource.kind``: ``local`` copies from ``path``; ``git`` clones ``url`` at ``ref``
-    and reads ``<clone>/<subdir>``; ``builtin`` is not shipped yet. Last source wins on a
-    name collision (matches ``skills.provision``).
+    Each staged entry is a directory containing ``SKILL.md``; next to them
+    ``skills.SOURCES_FILE`` records what each source resolved to (the commit of a git
+    source), which the worker's baked fast path reports as the skills' provenance. The flat
+    layout is what that fast path provisions from (``worker.find_baked_skills``). A git
+    source is cloned with the deployer's own git credentials (``auth`` is a run-time
+    contract). Last source wins on a name collision (``skills.stage_sources``). Returns
+    ``[]`` without touching ``dest_dir`` when the spec declares no skills or resolves them
+    at session start (``skills_resolution="session"``): the image then carries none.
     """
-    from ...skills import discover_skill_names
+    from ...skills import stage_sources
 
-    dest = Path(dest_dir)
-    dest.mkdir(parents=True, exist_ok=True)
-    staged: set[str] = set()
+    if not spec.skills or spec.skills_resolution == "session":
+        return []
+    return stage_sources(spec.skills, Path(dest_dir)).names
+
+
+def validate_session_skills(spec: AgentSpec) -> None:
+    """Reject a ``skills_resolution="session"`` spec the worker could not resolve.
+
+    A ``local`` source is a path on the deploying machine; nothing of it reaches the
+    sandbox when the image bakes no skills, so the first turn would fail there. Fail at
+    deploy instead.
+    """
+    if spec.skills_resolution != "session":
+        return
     for source in spec.skills:
-        if source.kind == "local":
-            if not source.path:
-                raise ValueError("local SkillSource requires a path")
-            src_dir = Path(source.path)
-        elif source.kind == "git":
-            if not source.url:
-                raise ValueError("git SkillSource requires a url")
-            from ...integrations import git
-
-            clone_dir = git.clone(source.url, ref=source.ref)
-            src_dir = clone_dir / source.subdir
-        elif source.kind == "builtin":
-            raise NotImplementedError("builtin skills not shipped yet")
-        else:
-            raise ValueError(f"unknown SkillSource kind: {source.kind!r}")
-        for name in discover_skill_names(src_dir):
-            dst = dest / name
-            if dst.exists():
-                shutil.rmtree(dst)
-            shutil.copytree(src_dir / name, dst)
-            staged.add(name)
-    return sorted(staged)
+        if source.kind != "git":
+            raise ValueError(
+                f"skills_resolution='session' resolves skills inside the sandbox, so every "
+                f"source must be a git repository; {source.kind!r} source "
+                f"{source.path or source.name!r} cannot be reached from there (bake it with "
+                "skills_resolution='deploy', or publish it to a git repository)"
+            )
 
 
 def _toolkit_package_dir() -> Path:

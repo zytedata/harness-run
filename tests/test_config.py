@@ -239,3 +239,10 @@ def test_harness_selection_is_validated_against_the_image():
     bad = apply_session_config(single, SessionConfig(harness="codex"))
     with pytest.raises(ValueError, match="not baked into this engine"):
         validate_harness_choice(single, bad)
+
+
+def test_session_config_refuses_a_skill_source_url_with_embedded_credentials():
+    with pytest.raises(ValueError, match="SkillSource.url .* embeds credentials"):
+        SessionConfig(skills=[SkillSource.git("https://bot:tok@h/skills.git")])
+    # A named secret is the supported shape, and a local source has no URL to check.
+    SessionConfig(skills=[SkillSource.git("https://h/skills.git", auth="SKILLS_TOKEN"), SkillSource.local("/x")])

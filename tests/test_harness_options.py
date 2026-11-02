@@ -529,3 +529,15 @@ def test_the_schema_steer_states_the_schema_for_an_openrouter_turn():
 )
 def test_the_schema_steer_is_empty_when_it_does_not_apply(spec):
     assert openrouter_schema_steer(spec) == ""
+
+
+def test_skill_source_auth_is_a_harness_consumed_secret():
+    """A skill clone token is used by staging only, so it never reaches the agent's env."""
+    from harness_run import SkillSource
+
+    spec = AgentSpec(harness="claude-code", name="a", model="claude-sonnet-4-6",
+                     skills=[SkillSource.git("https://h/s", auth="SKILLS_TOKEN")])
+    assert harness_consumed_secret_names(spec) == {"SKILLS_TOKEN"}
+    ctx = _ctx(spec, secrets={"SKILLS_TOKEN": "s3cret", "MY_TOKEN": "visible"})
+    env = ClaudeCodeHarness().build_options(spec, ctx).env
+    assert env["MY_TOKEN"] == "visible" and "SKILLS_TOKEN" not in env

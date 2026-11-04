@@ -101,6 +101,13 @@ class RunResult:
             inside its container (``sandbox``): ``memory_peak_bytes``,
             ``memory_limit_bytes``, ``cpu_usec`` — whichever were readable. ``None``
             when nothing was sampled (``local``, sampling disabled, no cgroup).
+        skill_sources: The provenance of the skills the turn ran with, one entry per
+            declared ``SkillSource`` in order: for a git source ``{"kind": "git", "url",
+            "ref", "commit", "subdir", "skills": [...]}`` with the commit the ref resolved
+            to, for a local one ``{"kind": "local", "path", "skills": [...]}``. On a later
+            turn of a session it is what the first turn resolved (the workspace is
+            restored). ``None`` when the turn staged no skills, or ended before the
+            workspace was ready.
     """
 
     text: str | None
@@ -114,3 +121,4 @@ class RunResult:
     artifacts: tuple[str, ...] = field(default=())
     warning: str | None = None
     resources: dict[str, int] | None = None
+    skill_sources: list[dict] | None = None

@@ -38,7 +38,29 @@ TestPyPI never accepts the same version twice, so a second rehearsal needs a ver
 
 ## Unreleased
 
+### Backwards-incompatible
+
+- `harness_run.skills.provision()` returns a `StagedSkills` (`names`, `sources`) instead of
+  the list of staged skill names, so the names come back as `.names`. A caller that iterated the
+  return value (`for name in provision(...)`) reads `provision(...).names` now. ([#11])
+
+[#11]: https://github.com/zytedata/harness-run/pull/11
+
 ### Added
+
+- Skills can be resolved at session start instead of being baked into the sandbox image:
+  `AgentSpec(skills_resolution="session")` bakes no skills, and every session's first turn resolves the
+  effective sources (the spec's, or a `SessionConfig(skills=...)` override) on the worker, so a push to
+  the skill repository changes what the next session runs with no redeploy; later turns of the session
+  keep the first turn's resolution through the restored workspace. The default `"deploy"` keeps today's
+  behaviour. `SkillSource.git(..., auth="SKILLS_TOKEN", auth_user=...)` names a per-invocation secret
+  for a private skill repository, with the `RepoSource.auth` contract (the value comes from
+  `run(secrets=...)`; a named secret a turn does not supply fails the turn), and the clone is discarded
+  after staging so the token reaches neither the workspace nor the agent's environment. Every resolution
+  records what each source resolved to, with the commit of a git source: `workspace_ready` gains
+  `skill_sources`, the terminal result carries it as `RunResult.skill_sources` (also from
+  `session.last_result` and `history()`), and `.harness-run-sources.json` next to the staged folders
+  lets a restored workspace report it. A git `ref` may now be a commit id. ([#1])
 
 - `AgentSpec.env` accepts `None` values, which remove the variable from the environment of the
   agent's shell commands, even when the host environment or a per-run secret sets it (Codex: shell
@@ -56,6 +78,7 @@ TestPyPI never accepts the same version twice, so a second rehearsal needs a ver
   turn is still being handed to a sandbox); `local` sessions always return `False`, since a local
   turn ends with its process. ([#5])
 
+[#1]: https://github.com/zytedata/harness-run/issues/1
 [#3]: https://github.com/zytedata/harness-run/pull/3
 [#5]: https://github.com/zytedata/harness-run/pull/5
 

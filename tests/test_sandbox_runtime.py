@@ -865,3 +865,103 @@ def test_worker_module_layout_does_not_shadow_the_package_exports():
     assert not submodules & set(sandbox.__all__)
     assert callable(sandbox.deploy)
     assert Path(worker_mod.__file__).name == "worker.py"
+
+
+# ---------------------------------------------------------------- skills resolved at session start
+
+
+def _skill_dir(root: Path, name: str, body: str = "x") -> Path:
+    (root / name).mkdir(parents=True)
+    (root / name / "SKILL.md").write_text(body)
+    return root
+
+
+def test_worker_resolves_session_skills_from_their_sources_and_stamps_the_result(tmp_path, monkeypatch):
+    """``skills_resolution="session"``: the spec's sources are resolved on the worker with the turn's
+    secrets, whatever the image carries, and the provenance rides ``workspace_ready`` and the result."""
+    from harness_run import SkillSource
+    import harness_run.skills as skills_mod
+
+    staged = {}
+    fresh = _skill_dir(tmp_path / "fresh", "wkdb", "from the repo")
+    real_stage = skills_mod.stage_sources
+
+    def fake_stage(sources, dest_root, secrets=None, *, sources_record=None):
+        staged["sources"], staged["secrets"] = tuple(sources), dict(secrets or {})
+        result = real_stage((SkillSource.local(str(fresh)),), dest_root)
+        record = [{"kind": "git", "url": sources[0].url, "ref": sources[0].ref, "commit": "c" * 40,
+                   "subdir": "skills", "skills": result.names}]
+        skills_mod.write_sources(dest_root, record)
+        return skills_mod.StagedSkills(names=result.names, sources=record)
+
+    monkeypatch.setattr(skills_mod, "stage_sources", fake_stage)
+    _DoneHarness.seen = []
+    _patch_harness(monkeypatch, _DoneHarness)
+    source = SkillSource.git("https://h/skills.git", ref="main", auth="SKILLS_TOKEN")
+    baked = AgentSpec(harness="claude-code", name="w", model="m", skills=[source], skills_resolution="session")
+    worker = _real_worker_factory(tmp_path, baked)("s1")
+    worker._baked_skills = _skill_dir(tmp_path / "baked", "wkdb", "stale, baked at deploy")  # must be ignored
+
+    events = _drive(worker, _body(secrets={"SKILLS_TOKEN": "s3cret"}))
+
+    assert staged["sources"] == (source,) and staged["secrets"] == {"SKILLS_TOKEN": "s3cret"}
+    _spec, rc = _DoneHarness.seen[0]
+    assert (rc.workspace / ".claude" / "skills" / "wkdb" / "SKILL.md").read_text() == "from the repo"
+    ready = next(e for e in events if (e.raw or {}).get("event") == "workspace_ready").raw
+    assert ready["skills"] == ["wkdb"] and ready["skill_sources"][0]["commit"] == "c" * 40
+    result = events[-1]
+    assert result.kind == "result" and result.raw["skill_sources"] == ready["skill_sources"]
+    from harness_run.runtime._run import build_result
+
+    assert build_result(result, "sid-1", baked)[0].skill_sources == ready["skill_sources"]
+
+
+def test_worker_fails_the_turn_loudly_when_a_skill_auth_secret_is_missing(tmp_path, monkeypatch):
+    from harness_run import SkillSource
+
+    _patch_harness(monkeypatch, _DoneHarness)
+    baked = AgentSpec(harness="claude-code", name="w", model="m", skills_resolution="session",
+                      skills=[SkillSource.git("https://h/skills.git", auth="SKILLS_TOKEN")])
+    worker = _real_worker_factory(tmp_path, baked)("s1")
+    events = _drive(worker, _body(secrets={}))
+    assert events[-1].kind == "result" and events[-1].raw["is_error"] is True
+    assert "SKILLS_TOKEN" in events[-1].summary and "git clone" not in events[-1].summary
+
+
+def test_worker_baked_fast_path_reports_the_deploy_time_provenance(tmp_path):
+    from types import SimpleNamespace
+
+    from harness_run.skills import write_sources
+
+    baked_dir = _skill_dir(tmp_path / "baked", "wkdb")
+    record = [{"kind": "git", "url": "https://h/s", "ref": "1.0", "commit": "d" * 40, "subdir": "skills",
+               "skills": ["wkdb"]}]
+    write_sources(baked_dir, record)
+    rc = SimpleNamespace(resume_sid=None, blobs=None, workspace=tmp_path / "ws", secrets={},
+                         spec=AgentSpec(harness="claude-code", name="w", model="m"))
+    ready = worker_mod._prepare_workspace(rc, prefer_baked_skills=True, baked_dir=baked_dir)
+    assert ready["skills"] == ["wkdb"] and ready["skill_sources"] == record
+
+
+def test_worker_restored_workspace_reports_the_first_turns_resolution(tmp_path):
+    """Later turns of a session run the skills its first turn resolved (the restored workspace),
+    and say which."""
+    from types import SimpleNamespace
+
+    from harness_run.checkpoint.workspace import snapshot
+    from harness_run.skills import write_sources
+
+    first = tmp_path / "first"
+    _skill_dir(first / ".claude" / "skills", "wkdb", "resolved on turn 1")
+    record = [{"kind": "git", "url": "https://h/s", "ref": "main", "commit": "e" * 40, "subdir": "skills",
+               "skills": ["wkdb"]}]
+    write_sources(first / ".claude" / "skills", record)
+    blobs = LocalBlobStore(str(tmp_path / "store"))
+    snapshot(blobs, "sid", str(first))
+
+    rc = SimpleNamespace(resume_sid="sid", blobs=blobs, workspace=tmp_path / "ws", secrets={},
+                         spec=AgentSpec(harness="claude-code", name="w", model="m", checkpoint=True,
+                                        skills_resolution="session"))
+    ready = worker_mod._prepare_workspace(rc, prefer_baked_skills=False)
+    assert ready["restored"] is True and ready["skill_sources"] == record
+    assert (tmp_path / "ws" / ".claude" / "skills" / "wkdb" / "SKILL.md").read_text() == "resolved on turn 1"

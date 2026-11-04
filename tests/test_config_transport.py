@@ -126,9 +126,12 @@ def test_get_engine_spec_kwarg_is_a_clear_error():
 def test_baked_skills_are_skipped_when_the_effective_skills_differ(monkeypatch, tmp_path):
     staged = {}
 
-    def fake_provision(sources, workspace, subdir):
+    def fake_provision(sources, workspace, subdir, secrets=None, *, sources_record=None):
+        from harness_run.skills import StagedSkills
+
         staged["sources"] = tuple(sources)
-        return []
+        staged["secrets"] = secrets
+        return StagedSkills(names=[], sources=[])
 
     import harness_run.skills as skills_mod
     monkeypatch.setattr(skills_mod, "provision", fake_provision)
@@ -142,6 +145,7 @@ def test_baked_skills_are_skipped_when_the_effective_skills_differ(monkeypatch, 
 
     worker_mod._prepare_workspace(RC(), prefer_baked_skills=False, baked_dir=tmp_path / "baked")
     assert staged["sources"] == RC.spec.skills  # the effective spec's own sources
+    assert staged["secrets"] is RC.secrets  # with the turn's secrets, for a source's ``auth``
     worker_mod._prepare_workspace(RC(), prefer_baked_skills=True, baked_dir=tmp_path / "baked")
     assert staged["sources"][0].kind == "local" and staged["sources"][0].path == str(tmp_path / "baked")
 

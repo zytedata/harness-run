@@ -206,3 +206,25 @@ def test_resolve_harness_refuses_an_unset_harness():
 def test_codex_config_rejects_shapes_codex_cannot_take(codex_config) -> None:
     with pytest.raises(ValueError):
         AgentSpec(name="a", model="m", harness="codex", codex_config=codex_config)
+
+
+def test_skillsource_auth_round_trip() -> None:
+    s = SkillSource.git("https://git.example/org/skills", ref="1.0", auth="SKILLS_TOKEN", auth_user="bot")
+    assert (s.auth, s.auth_user) == ("SKILLS_TOKEN", "bot")
+    assert SkillSource.from_dict(s.to_dict()) == s
+    public = SkillSource.git("https://github.com/zytedata/claude-skills")
+    assert public.auth is None and "auth" not in public.to_dict() and "auth_user" not in public.to_dict()
+    # A pre-auth serialized source still loads.
+    assert SkillSource.from_dict({"kind": "git", "url": "https://h/s", "subdir": "skills"}).auth is None
+
+
+def test_agentspec_skills_resolution_round_trip_and_validation() -> None:
+    spec = AgentSpec(harness="claude-code", name="a", model="m")
+    assert spec.skills_resolution == "deploy"
+    assert "skills_resolution" not in spec.to_dict()  # the default leaves existing specs (and image digests) alone
+    assert AgentSpec.from_dict(spec.to_dict()).skills_resolution == "deploy"
+    session = AgentSpec(harness="claude-code", name="a", model="m", skills_resolution="session")
+    assert session.to_dict()["skills_resolution"] == "session"
+    assert AgentSpec.from_dict(session.to_dict()) == session
+    with pytest.raises(ValueError, match="skills_resolution"):
+        AgentSpec(harness="claude-code", name="a", model="m", skills_resolution="never")  # type: ignore[arg-type]

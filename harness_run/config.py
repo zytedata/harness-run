@@ -72,15 +72,24 @@ def _assert_repos_credential_free(repos: Sequence[RepoSource]) -> None:
     The worker gets configs in the turn body, and the client also writes them to GCS as
     the 30-day post-mortem record — so they must never carry secret values.
     """
+    _assert_urls_credential_free("RepoSource", (repo.url for repo in repos))
+
+
+def _assert_skills_credential_free(skills: Sequence[SkillSource]) -> None:
+    """The :func:`_assert_repos_credential_free` rule for git ``SkillSource`` URLs."""
+    _assert_urls_credential_free("SkillSource", (s.url for s in skills if s.kind == "git" and s.url))
+
+
+def _assert_urls_credential_free(owner: str, urls) -> None:
     from urllib.parse import urlsplit
 
-    for repo in repos:
-        parts = urlsplit(repo.url)
+    for url in urls:
+        parts = urlsplit(url)
         if parts.username or parts.password:
             raise ValueError(
-                f"RepoSource.url for {parts.hostname or repo.url!r} embeds credentials; "
+                f"{owner}.url for {parts.hostname or url!r} embeds credentials; "
                 "configs are staged per invocation and kept for debugging, so they must "
-                "be credential-free. Name the token via RepoSource(auth=..., "
+                f"be credential-free. Name the token via {owner}(auth=..., "
                 "auth_user=...) and pass its value in run(secrets={...}) instead."
             )
 
@@ -202,7 +211,9 @@ class SessionConfig(_ConfigBase):
         repos: The repos cloned into the session's workspace on its first turn.
         skills: Skill sources for the session. REPLACES the deployed declaration (no
             merging); on sandbox, the deploy-baked skills stay a staging fast path only
-            while this declaration matches them.
+            while this declaration matches them (and the engine was deployed with
+            ``skills_resolution="deploy"``); otherwise the worker resolves the sources on
+            the session's first turn, with any ``auth`` secret from ``run(secrets=...)``.
         mcp_servers: MCP servers attached to the agent for this session.
         system_prompt: The conversation's framing, re-applied to the harness on every
             turn. Same semantics as the spec: a plain ``str`` replaces the harness's
@@ -252,6 +263,8 @@ class SessionConfig(_ConfigBase):
             object.__setattr__(self, name, _tuple_or_inherit(getattr(self, name)))
         if self.repos is not INHERIT and self.repos is not None:
             _assert_repos_credential_free(self.repos)
+        if self.skills is not INHERIT and self.skills is not None:
+            _assert_skills_credential_free(self.skills)
         if self.extra_env is not INHERIT and self.extra_env is not None:
             _assert_non_secret_env(self.extra_env)
             object.__setattr__(self, "extra_env", dict(self.extra_env))

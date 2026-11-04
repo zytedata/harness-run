@@ -93,7 +93,11 @@ def try_restore(
 
 
 def workspace_ready_event(
-    result: RestoreResult, error: str | None, skills: list[str], repos: list[str]
+    result: RestoreResult,
+    error: str | None,
+    skills: list[str],
+    repos: list[str],
+    skill_sources: list[dict] | None = None,
 ) -> dict:
     """The ``workspace_ready`` status event both runtimes emit before the first turn event.
 
@@ -101,6 +105,9 @@ def workspace_ready_event(
     on a resume, ``restore_error`` tells a failed restore (the workspace is fresh, as after
     ``checkpoint=False``) from a session that simply had no snapshot (``None``).
     ``skipped`` lists snapshot members that were left out as unsafe to extract.
+    ``skill_sources`` is the skills' provenance (``skills.StagedSkills.sources``: the
+    commit each git source resolved to), on a restored workspace the one its first turn
+    recorded; ``None`` when the turn staged no skills and found no record.
     """
     restored = bool(result)
     detail = f"restored={restored}"
@@ -114,6 +121,7 @@ def workspace_ready_event(
         "restore_error": error,
         "skipped": list(result.skipped),
         "skills": skills,
+        "skill_sources": skill_sources,
         "repos": repos,
         "summary": (
             f"workspace ready ({detail}, skills staged={len(skills)}, "

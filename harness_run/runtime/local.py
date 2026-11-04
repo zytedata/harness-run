@@ -290,7 +290,12 @@ class LocalSession:
         async def factory() -> AsyncIterator[AgentEvent]:
             prep = await asyncio.to_thread(engine._prepare_workspace, ctx, resume_sid is not None)
             yield AgentEvent(kind="status", summary=prep["summary"], raw=prep)
+            skill_sources = prep.get("skill_sources")
             async for event in engine._harness_for(spec).run(spec, ctx):
+                if event.kind == "result" and skill_sources is not None:
+                    # Same stamp as the sandbox worker's: RunResult.skill_sources on every runtime.
+                    event.raw = {**(event.raw or {})}
+                    event.raw.setdefault("skill_sources", skill_sources)
                 yield event
 
         run = DrivenRun(factory, self._session_id, spec, on_complete=self._on_complete)
@@ -488,6 +493,8 @@ class LocalEngine:
         """
         from ..checkpoint.workspace import RestoreResult, try_restore, workspace_ready_event
 
+        from ..skills import provision, read_sources, skills_subdir
+
         restored, restore_error = RestoreResult(found=False), None
         if is_resume and ctx.workspace_dir is None and ctx.blobs is not None and ctx.resume_sid:
             # A failed restore leaves no half-extracted files behind (restore cleans up), so
@@ -495,7 +502,9 @@ class LocalEngine:
             restored, restore_error = try_restore(ctx.blobs, ctx.resume_sid, str(ctx.workspace))
         names: list[str] = []
         repos: list[str] = []
+        skill_sources: list[dict] | None = None
         if restored:
+            skill_sources = read_sources(ctx.workspace / skills_subdir(ctx.spec.harness))
             # The snapshot was credential-scrubbed; re-embed push tokens from this turn's secrets.
             if ctx.spec.repos:
                 from ..integrations.git import reauth_repos
@@ -504,16 +513,15 @@ class LocalEngine:
         else:
             ctx.workspace.mkdir(parents=True, exist_ok=True)
             if ctx.spec.skills:
-                from ..skills import provision, skills_subdir
-
-                names = provision(
-                    ctx.spec.skills, str(ctx.workspace), skills_subdir(ctx.spec.harness)
+                staged = provision(
+                    ctx.spec.skills, str(ctx.workspace), skills_subdir(ctx.spec.harness), ctx.secrets,
                 )
+                names, skill_sources = staged.names, staged.sources
             if ctx.spec.repos:
                 from ..integrations.git import provision_repos
 
                 repos = provision_repos(ctx.workspace, ctx.spec.repos, ctx.secrets)
-        return workspace_ready_event(restored, restore_error, names, repos)
+        return workspace_ready_event(restored, restore_error, names, repos, skill_sources)
 
     # -- Engine protocol -------------------------------------------------------
 

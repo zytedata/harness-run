@@ -73,11 +73,18 @@ def build_result(result_ev: AgentEvent, session_id: str, spec: AgentSpec) -> tup
         usage=result_ev.usage,
         session_id=raw.get("session_id") or session_id,
         resources=_resources(raw),
+        skill_sources=_skill_sources(raw),
     )
     return result, stop_reason_for(raw, spec.checkpoint)
 
 
 _RESOURCE_KEYS = ("memory_peak_bytes", "memory_limit_bytes", "cpu_usec")
+
+
+def _skill_sources(raw: dict) -> list[dict] | None:
+    """The skills' provenance the runtime stamped on a result event's ``raw`` (``None`` if none)."""
+    found = raw.get("skill_sources")
+    return [dict(s) for s in found if isinstance(s, dict)] if isinstance(found, list) else None
 
 
 def _resources(raw: dict) -> dict[str, int] | None:

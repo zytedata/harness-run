@@ -171,11 +171,14 @@ def _prepare_workspace(rc: Any, prefer_baked_skills: bool = True, baked_dir: Pat
     """Restore a prior workspace (resume) or stage skills + clone repos into a fresh cwd. Sync.
 
     ``prefer_baked_skills=False`` resolves ``rc.spec.skills`` from their sources at run time
-    instead of ``baked_dir`` (the deploy-baked dir) — when the effective spec's skills differ
-    from the baked ones (including declaring none).
+    (with the turn's secrets for any ``auth``) instead of ``baked_dir`` (the deploy-baked
+    dir) — when the effective spec's skills differ from the baked ones (including
+    declaring none), or the engine resolves skills at session start. The baked fast path
+    reports the provenance the deploy recorded next to the baked folders; a restored
+    workspace reports the one its first turn wrote into it.
     """
     from ...checkpoint.workspace import RestoreResult, try_restore, workspace_ready_event
-    from ...skills import provision, skills_subdir
+    from ...skills import provision, read_sources, skills_subdir
     from ...spec import SkillSource
 
     restored, restore_error = RestoreResult(found=False), None
@@ -183,7 +186,9 @@ def _prepare_workspace(rc: Any, prefer_baked_skills: bool = True, baked_dir: Pat
         restored, restore_error = try_restore(rc.blobs, rc.resume_sid, str(rc.workspace))
     names: list[str] = []
     repos: list[str] = []
+    skill_sources: list[dict] | None = None
     if restored:
+        skill_sources = read_sources(rc.workspace / skills_subdir(rc.spec.harness))
         if rc.spec.repos:
             from ...integrations.git import reauth_repos
 
@@ -191,14 +196,22 @@ def _prepare_workspace(rc: Any, prefer_baked_skills: bool = True, baked_dir: Pat
     else:
         rc.workspace.mkdir(parents=True, exist_ok=True)
         baked = baked_dir if prefer_baked_skills else None
-        sources = (SkillSource.local(str(baked)),) if baked else rc.spec.skills
-        if sources:
-            names = provision(sources, str(rc.workspace), skills_subdir(rc.spec.harness))
+        if baked:
+            staged = provision(
+                (SkillSource.local(str(baked)),), str(rc.workspace), skills_subdir(rc.spec.harness),
+                sources_record=read_sources(baked),
+            )
+            names, skill_sources = staged.names, staged.sources
+        elif rc.spec.skills:
+            staged = provision(
+                rc.spec.skills, str(rc.workspace), skills_subdir(rc.spec.harness), rc.secrets,
+            )
+            names, skill_sources = staged.names, staged.sources
         if rc.spec.repos:
             from ...integrations.git import provision_repos
 
             repos = provision_repos(rc.workspace, rc.spec.repos, rc.secrets)
-    return workspace_ready_event(restored, restore_error, names, repos)
+    return workspace_ready_event(restored, restore_error, names, repos, skill_sources)
 
 
 def _line(event: AgentEvent) -> dict:
@@ -397,7 +410,9 @@ class Worker:
         except Exception as exc:  # noqa: BLE001 — wrong-config runs must fail loudly
             terminal_error(f"{str(exc)[:300]}; failing the turn")
             return
-        if session_cfg_dict or turn_cfg_dict:
+        if baked.skills_resolution == "session":
+            prefer_baked_skills = False  # the image bakes none; every session resolves its own
+        elif session_cfg_dict or turn_cfg_dict:
             prefer_baked_skills = spec.to_dict().get("skills") == baked.to_dict().get("skills")
 
         secrets = {str(k): str(v) for k, v in (body.get("secrets") or {}).items()}
@@ -472,10 +487,16 @@ class Worker:
             **({"meminfo": self._resource_meminfo} if self._resource_meminfo is not None else {}),
         )
 
+        skill_sources: list[dict] | None = None
+
         def enriched(event: AgentEvent) -> AgentEvent:
-            if sampler is not None and event.kind == "result":
+            if event.kind == "result":
                 event.raw = dict(event.raw or {})
-                sampler.enrich_result(event.raw)
+                if sampler is not None:
+                    sampler.enrich_result(event.raw)
+                if skill_sources is not None:
+                    # The skills' provenance rides the terminal result too (RunResult.skill_sources).
+                    event.raw.setdefault("skill_sources", skill_sources)
             return event
 
         saw_result = False
@@ -509,6 +530,7 @@ class Worker:
                 _prepare_workspace, rc, prefer_baked_skills, self.baked_skills()
             )
             prep["scoped_gcs"] = bool(token)
+            skill_sources = prep.get("skill_sources")
             surface(AgentEvent(kind="status", summary=prep["summary"], raw=prep))
 
             async for event in resolve_harness(spec).run(spec, rc):

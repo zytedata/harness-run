@@ -22,6 +22,7 @@ stdlib ``subprocess``; no third-party import.
 from __future__ import annotations
 
 import re
+import shutil
 import subprocess
 import tempfile
 from pathlib import Path
@@ -96,9 +97,31 @@ def clone(
         cmd += ["--branch", ref, "--depth", "1"]
     cmd += [target, str(dest)]
     proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.returncode != 0 and ref and _looks_like_commit(ref):
+        # ``--branch`` takes a branch or tag only; a commit pin needs a full clone + checkout.
+        shutil.rmtree(dest, ignore_errors=True)
+        proc = subprocess.run(["git", "clone", target, str(dest)], capture_output=True, text=True)
+        if proc.returncode == 0:
+            proc = subprocess.run(
+                ["git", "checkout", "--detach", "-q", ref], cwd=str(dest), capture_output=True, text=True,
+            )
     if proc.returncode != 0:
         raise RuntimeError("git clone failed: " + redact(proc.stderr, token)[:500])
     return dest
+
+
+def _looks_like_commit(ref: str) -> bool:
+    return 7 <= len(ref) <= 40 and all(c in "0123456789abcdef" for c in ref.lower())
+
+
+def head_commit(repo_dir: Path) -> str:
+    """The full commit id ``repo_dir``'s HEAD points at (provenance of a resolved source)."""
+    proc = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=str(repo_dir), capture_output=True, text=True,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError("git rev-parse failed: " + proc.stderr[:300])
+    return proc.stdout.strip()
 
 
 def provision_repo(

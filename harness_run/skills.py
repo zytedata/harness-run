@@ -190,7 +190,12 @@ def write_sources(skills_dir: Path, record: list[dict]) -> None:
 
 
 def read_sources(skills_dir: Path | None) -> list[dict] | None:
-    """The provenance record staged under ``skills_dir``, or ``None`` when there is none."""
+    """The provenance record staged under ``skills_dir``, or ``None`` when there is none.
+
+    The file lives in the workspace, which the agent can edit: what a restored workspace
+    reports is as trustworthy as the agent. The first turn's ``workspace_ready`` event
+    carries the resolution the worker made itself.
+    """
     if skills_dir is None:
         return None
     path = Path(skills_dir) / SOURCES_FILE

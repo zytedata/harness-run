@@ -193,8 +193,10 @@ spec = AgentSpec(
   commit of a git source: on the `workspace_ready` status event (`skill_sources`), on the
   terminal result (`RunResult.skill_sources`, also reconstructed by `session.last_result` and
   from `session.history()`), and in `.harness-run-sources.json` next to the staged folders, so a
-  restored workspace reports the resolution its first turn made. With a floating ref this is
-  how a run's skill version is known afterwards:
+  restored workspace reports the resolution its first turn made. That file sits in the
+  workspace, where the agent can edit it, so the provenance a restored workspace reports is as
+  trustworthy as the agent; the first turn's `workspace_ready` event is the record the worker
+  wrote itself. With a floating ref this is how a run's skill version is known afterwards:
 
   ```python
   result = await session.run("build the entry", secrets={"SKILLS_TOKEN": token})

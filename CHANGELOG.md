@@ -38,6 +38,14 @@ TestPyPI never accepts the same version twice, so a second rehearsal needs a ver
 
 ## Unreleased
 
+### Backwards-incompatible
+
+- `harness_run.skills.provision()` returns a `StagedSkills` (`names`, `sources`) instead of
+  the list of staged skill names, so the names come back as `.names`. A caller that iterated the
+  return value (`for name in provision(...)`) reads `provision(...).names` now. ([#11])
+
+[#11]: https://github.com/zytedata/harness-run/pull/11
+
 ### Added
 
 - Skills can be resolved at session start instead of being baked into the sandbox image:

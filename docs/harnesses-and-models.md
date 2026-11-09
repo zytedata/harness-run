@@ -24,9 +24,9 @@ engine.start_session(config=SessionConfig(harness="codex"))   # selects among wh
 
 Model ids are free-form strings passed to the harness — any id the underlying CLI accepts works, so a
 new model needs no library release. `max_budget_usd` is enforced against a different number per
-harness: Claude Code reports its own spend, the OpenAI ids listed above are priced offline by the
-library, and OpenRouter ids use the charge OpenRouter reports. The four OpenRouter models listed
-above have been validated live on both harnesses.
+harness: Claude Code reports its own spend when every model has a list price, the OpenAI ids listed
+above are priced offline by the library, and OpenRouter ids use the charge OpenRouter reports.
+The four OpenRouter models listed above have been validated live on both harnesses.
 
 ## Claude Code
 
@@ -37,6 +37,13 @@ needed; locally, `ANTHROPIC_API_KEY` or a logged-in `claude` CLI both work.
 ```python
 spec = AgentSpec(name="code-agent", model="claude-sonnet-4-6", harness="claude-code")
 ```
+
+The Claude Code CLI can assign fallback prices to models missing from its catalogue. The
+result's `cost_usd` is therefore reported only when every `model_usage` entry has
+`costBasis="list"`. Otherwise `cost_usd=None`, the CLI's figure remains in
+`raw["cli_reported_cost_usd"]`, and a `cost_unknown` status warns about the untrusted
+price. The native CLI still enforces `max_budget_usd` before reporting `costBasis`, so
+an older CLI can stop early on its fallback price; this warning cannot undo that stop.
 
 ## Codex
 

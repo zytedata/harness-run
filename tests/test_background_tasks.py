@@ -183,7 +183,7 @@ def test_turn_stays_open_across_task_reinvocation(tmp_path, monkeypatch):
             "claude-sonnet-5": {
                 "inputTokens": in_tok, "outputTokens": out_tok,
                 "cacheReadInputTokens": 0, "cacheCreationInputTokens": 0,
-                "costUSD": 0.01, "contextWindow": 200_000,
+                "costUSD": 0.01, "costBasis": "list", "contextWindow": 200_000,
             },
         }
 
@@ -476,6 +476,50 @@ def test_openrouter_exact_budget_interrupts_before_another_request(tmp_path, mon
     assert any((e.raw or {}).get("event") == "limit_interrupt" for e in events)
     assert events[-1].raw["subtype"] == "error_budget_exceeded"
     assert events[-1].cost_usd == 0.0123
+
+
+def test_native_unknown_cost_warns_without_reporting_cli_estimate(tmp_path, monkeypatch):
+    spec = AgentSpec(harness="claude-code", name="a", model="claude-sonnet-5-5", max_budget_usd=0.3)
+    unknown_usage = {
+        "claude-sonnet-5-5": {"costBasis": "unknown", "costUSD": 0.67},
+        "claude-haiku-4-5": {"costBasis": "list", "costUSD": 0.006},
+    }
+    events, client_cls = _events_of(
+        [init_msg(), result_msg(cost=0.676, model_usage=unknown_usage)],
+        tmp_path,
+        monkeypatch,
+        spec=spec,
+    )
+    # The native CLI cap remains in force; the harness cannot inspect costBasis until
+    # the CLI has already produced the result.
+    assert client_cls.instances[0].options.max_budget_usd == spec.max_budget_usd
+    assert [
+        e.raw["event"]
+        for e in events
+        if e.kind == "status" and (e.raw or {}).get("event") == "cost_unknown"
+    ] == ["cost_unknown"]
+    assert events[-1].cost_usd is None
+    assert events[-1].raw["cli_reported_cost_usd"] == 0.676
+    assert events[-1].raw["subtype"] == "success"
+
+
+def test_native_unknown_cost_preserves_cli_budget_error(tmp_path, monkeypatch):
+    spec = AgentSpec(harness="claude-code", name="a", model="claude-sonnet-5-5", max_budget_usd=0.3)
+    usage = {"claude-sonnet-5-5": {"costBasis": "unknown", "costUSD": 0.676}}
+    events, _ = _events_of(
+        [
+            result_msg(
+                subtype="error_max_budget_usd", is_error=True,
+                cost=0.676, model_usage=usage,
+            )
+        ],
+        tmp_path,
+        monkeypatch,
+        spec=spec,
+    )
+    assert any((e.raw or {}).get("event") == "cost_unknown" for e in events)
+    assert events[-1].raw["subtype"] == "error_max_budget_usd"
+    assert events[-1].cost_usd is None
 
 
 def test_openrouter_run_passes_provider_to_proxy(tmp_path, monkeypatch):

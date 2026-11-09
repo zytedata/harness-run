@@ -40,7 +40,7 @@ def result_msg(
             "claude-sonnet-5": {
                 "inputTokens": 1, "outputTokens": 2, "cacheReadInputTokens": 3,
                 "cacheCreationInputTokens": 4, "webSearchRequests": 0,
-                "costUSD": cost or 0.0, "contextWindow": 200_000,
+                "costUSD": cost or 0.0, "costBasis": "list", "contextWindow": 200_000,
             },
         }
     return ResultMessage(

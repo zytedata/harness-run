@@ -42,7 +42,12 @@ OPENROUTER_CONTEXT_WINDOWS: dict[str, int] = {
 # USD per 1M tokens: (input, cached input, output) — fallback only; LiteLLM wins when
 # reachable. Cache *writes* (billed at 1.25x input since 5.6) are not distinguishable in
 # Codex's usage breakdown, so cost is a slight undercount either way.
+# The gpt-6.x rows are OpenAI's Standard-tier short-context (<=272K input) prices, checked
+# against the official pricing page on 2026-11-18; the long-context rates are not modelled.
 _BUILTIN_PER_MTOK: dict[str, tuple[float, float, float]] = {
+    "gpt-6.2-sol": (2.00, 0.10, 10.00),
+    "gpt-6.1-sol": (2.00, 0.10, 10.00),
+    "gpt-6.1-terra": (1.00, 0.05, 5.00),
     "gpt-5.6-sol": (5.00, 0.50, 30.00),
     "gpt-5.6": (5.00, 0.50, 30.00),  # bare alias routes to sol
     "gpt-5.6-terra": (2.50, 0.25, 15.00),

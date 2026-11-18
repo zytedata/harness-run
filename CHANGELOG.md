@@ -84,12 +84,15 @@ TestPyPI never accepts the same version twice, so a second rehearsal needs a ver
 
 ### Changed
 
-- The bundled harness CLIs move to their current releases: `openai-codex` 0.159.2 (codex-cli
-  0.159.2) and `claude-agent-sdk` 0.2.162 (Claude Code 2.1.285), in the `local` extra, the dev
-  group and the sandbox image's requirements. These versions know the models released in
-  September 2026 (gpt-6.1-sol, claude-sonnet-5-5, claude-opus-5-5). ([#6])
+- The bundled harness CLIs move to their current releases: `openai-codex` 0.170.0 (codex-cli
+  0.170.0) and `claude-agent-sdk` 0.2.184 (Claude Code 2.1.327), in the `local` extra, the dev
+  group and the sandbox image's requirements. These versions know the models released through
+  November 2026 (gpt-6.1-terra, gpt-6.2-sol, claude-fable-5-2), and the offline price table used
+  to cost Codex turns when LiteLLM's dataset is unreachable now covers gpt-6.1-terra, gpt-6.1-sol
+  and gpt-6.2-sol. ([#6], [#12])
 
 [#6]: https://github.com/zytedata/harness-run/pull/6
+[#12]: https://github.com/zytedata/harness-run/pull/12
 
 ### Fixed
 

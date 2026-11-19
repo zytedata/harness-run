@@ -68,7 +68,11 @@ What to know when running Codex:
 - **Cost & caps**: Codex reports token counts but no dollars, and enforces no turn/budget caps of
   its own — the harness prices tokens via [LiteLLM's pricing dataset](https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json)
   (fetched once per process, so new models are priced without a library release; a small baked table
-  covers the GPT-5.6 family offline) and interrupts the run at `max_turns` / `max_budget_usd`. For a
+  covers the GPT-5.6 family offline) and interrupts the run at `max_turns` / `max_budget_usd`. A
+  model call whose input is above the model's long-context threshold (272K tokens on OpenAI's
+  models) is priced at the long-context rates, as OpenAI bills it: the whole call at the higher
+  rates (a subagent thread's calls stay at the standard rates, since its usage is recovered as a
+  total per thread). For a
   model neither source knows you get `cost_usd=None`, a `cost_unknown` status event, and no budget
   enforcement; the result event records which source priced the run (`price_source`). Collab-subagent
   spend is invisible on Codex's wire, so the harness recovers it post-hoc from the subagent rollout

@@ -335,6 +335,61 @@ def test_litellm_fetch_failure_is_cached_and_falls_back():
     assert pricing.model_price("gpt-5.6-terra").source == "builtin"
 
 
+def test_builtin_long_context_rates():
+    # terra: $1/M in, $0.05/M cached, $5/M out for a call of up to 272K input tokens;
+    # above that the whole call is billed at $2 / $0.10 / $7.50
+    price = pricing.model_price("gpt-6.1-terra")
+    assert price is not None and price.source == "builtin"
+    at_threshold = price.call_cost_usd(272_000, 262_000, 2_000)
+    assert at_threshold == pytest.approx((10_000 * 1.0 + 262_000 * 0.05 + 2_000 * 5.0) / 1e6)
+    above = price.call_cost_usd(400_000, 390_000, 2_000)
+    assert above == pytest.approx((10_000 * 2.0 + 390_000 * 0.10 + 2_000 * 7.50) / 1e6)
+    # cost_usd is for token totals, which do not say how large each call was: standard rates
+    total = price.cost_usd(400_000, 390_000, 2_000)
+    assert total == pytest.approx((10_000 * 1.0 + 390_000 * 0.05 + 2_000 * 5.0) / 1e6)
+
+    # a model with no long-context row: every call at the standard rates
+    luna = pricing.model_price("gpt-5.6-luna")
+    assert luna.long_context is None
+    assert luna.call_cost_usd(400_000, 0, 0) == luna.cost_usd(400_000, 0, 0)
+
+
+def test_litellm_long_context_rates(monkeypatch):
+    dataset = {
+        "gpt-9-hyperion": {
+            "input_cost_per_token": 2e-06,
+            "cache_read_input_token_cost": 1e-07,
+            "output_cost_per_token": 1e-05,
+            "input_cost_per_token_above_272k_tokens": 4e-06,
+            "cache_read_input_token_cost_above_272k_tokens": 2e-07,
+            "output_cost_per_token_above_272k_tokens": 1.5e-05,
+            # another service tier's rate carries a further suffix and is not read
+            "input_cost_per_token_above_272k_tokens_priority": 8e-06,
+        },
+        # no cache-read price at either rate → cached tokens bill as input at both
+        "gpt-9-hyperion-pro": {
+            "input_cost_per_token": 3e-05,
+            "output_cost_per_token": 1.8e-04,
+            "input_cost_per_token_above_272k_tokens": 6e-05,
+            "output_cost_per_token_above_272k_tokens": 2.7e-04,
+        },
+        "gpt-9-plain": {"input_cost_per_token": 1e-06, "output_cost_per_token": 2e-06},
+    }
+    monkeypatch.setattr(pricing, "_litellm_prices", lambda: dataset)
+
+    rates = pricing.model_price("gpt-9-hyperion").long_context
+    assert rates is not None and rates.above_input_tokens == 272_000
+    assert rates.input_per_token == pytest.approx(4e-06)
+    assert rates.cached_input_per_token == pytest.approx(2e-07)
+    assert rates.output_per_token == pytest.approx(1.5e-05)
+    cost = pricing.model_price("gpt-9-hyperion").call_cost_usd(300_000, 200_000, 1_000)
+    assert cost == pytest.approx(100_000 * 4e-06 + 200_000 * 2e-07 + 1_000 * 1.5e-05)
+
+    pro = pricing.model_price("gpt-9-hyperion-pro").long_context
+    assert pro is not None and pro.cached_input_per_token == pytest.approx(6e-05)
+    assert pricing.model_price("gpt-9-plain").long_context is None
+
+
 # -- translator ---------------------------------------------------------------
 
 
@@ -466,6 +521,41 @@ async def test_run_budget_interrupts(tmp_path, monkeypatch):
     result = events[-1]
     assert result.raw["subtype"] == "error_budget_exceeded"
     assert result.cost_usd == pytest.approx(1.0)
+
+
+async def test_run_prices_a_long_context_call_at_its_own_rates(tmp_path, monkeypatch):
+    # terra bills a call above 272K input tokens at $2 / $0.10 / $7.50 per M for the whole
+    # call, and the other calls of the turn at the standard $1 / $0.05 / $5
+    spec = AgentSpec(name="a", model="gpt-6.1-terra", harness="codex")
+    script = [
+        turn_started(),
+        token_usage(in_tok=200_000, cached=190_000, out_tok=2_000),
+        token_usage(in_tok=400_000, cached=390_000, out_tok=2_000),
+        agent_message("ok"),
+        turn_completed(),
+    ]
+    events, _ = await _events_of(script, tmp_path, monkeypatch, spec=spec)
+    result = events[-1]
+    short_call = (10_000 * 1.0 + 190_000 * 0.05 + 2_000 * 5.0) / 1e6
+    long_call = (10_000 * 2.0 + 390_000 * 0.10 + 2_000 * 7.50) / 1e6
+    assert result.raw["subtype"] == "success"
+    assert result.cost_usd == pytest.approx(short_call + long_call)
+
+
+async def test_run_budget_counts_long_context_rates(tmp_path, monkeypatch):
+    # one 400K-input call on terra costs $0.0395 at the standard rates and $0.074 at its
+    # own: a cap between the two stops the turn
+    spec = AgentSpec(name="a", model="gpt-6.1-terra", harness="codex", max_budget_usd=0.05)
+    script = [
+        turn_started(),
+        token_usage(in_tok=400_000, cached=390_000, out_tok=2_000),
+        turn_completed("interrupted"),
+    ]
+    events, client = await _events_of(script, tmp_path, monkeypatch, spec=spec)
+    assert client.interrupted
+    result = events[-1]
+    assert result.raw["subtype"] == "error_budget_exceeded"
+    assert result.cost_usd == pytest.approx(0.074)
 
 
 async def test_run_unknown_model_warns_and_skips_budget(tmp_path, monkeypatch):

@@ -1,4 +1,4 @@
-"""Model pricing for harnesses that report tokens but no USD (Codex on OpenAI).
+"""Model pricing for harnesses that report tokens but no USD (Codex, Antigravity).
 
 Primary: **LiteLLM's community-maintained pricing dataset** (the same upstream ``ccusage``
 prices Codex sessions with), fetched once per process — new models are priced the day the
@@ -52,7 +52,15 @@ OPENROUTER_CONTEXT_WINDOWS: dict[str, int] = {
 # The gpt-6.x rows are OpenAI's Standard-tier short-context (<=272K input) prices, checked
 # against the official pricing page on 2026-11-18; their long-context rates are in the
 # table below.
+# The gemini-4 rows are the Gemini Developer API's Standard paid-tier prices, checked against
+# the official pricing page on 2026-11-19: output includes thinking tokens, caching is
+# implicit (the cached rate), and there are no long-context rates. Carbon and Argon double
+# from 2026-12-01 (to 4.00 / 0.20 / 20.00); these rows are the rates through 2026-11-30.
 _BUILTIN_PER_MTOK: dict[str, tuple[float, float, float]] = {
+    "gemini-4-neon": (3.00, 0.15, 15.00),
+    "gemini-4-carbon": (2.00, 0.10, 10.00),
+    "gemini-4-argon": (2.00, 0.10, 10.00),
+    "gemini-4-hydrogen": (1.50, 0.075, 7.50),
     "gpt-6.2-sol": (2.00, 0.10, 10.00),
     "gpt-6.1-sol": (2.00, 0.10, 10.00),
     "gpt-6.1-terra": (1.00, 0.05, 5.00),
@@ -195,14 +203,15 @@ def _litellm_long_context(entry: dict) -> LongContextRates | None:
 def model_price(model: str) -> ModelPrice | None:
     """Resolve ``model`` to per-token USD prices, or ``None`` if unknown everywhere.
 
-    LiteLLM keys are tried as the bare id then ``openai/<id>`` (Codex calls OpenAI
-    directly). The harnesses never call this for an ``openrouter/`` model — see the module
+    LiteLLM keys are tried as the bare id, then ``openai/<id>`` (Codex calls OpenAI directly),
+    then ``gemini/<id>`` (Antigravity calls the Gemini Developer API; LiteLLM keys the Gemini 4
+    models only that way). The harnesses never call this for an ``openrouter/`` model — see the module
     docstring. The first call may block for the fetch timeout; callers on an event loop
     should run it in a worker thread.
     """
     data = _litellm_prices()
     if data:
-        for key in (model, f"openai/{model}"):
+        for key in (model, f"openai/{model}", f"gemini/{model}"):
             entry = data.get(key)
             if not isinstance(entry, dict):
                 continue

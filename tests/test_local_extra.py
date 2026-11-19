@@ -1,7 +1,7 @@
 """The ``[local]``-extra hint fires on the REAL import path (PR #37 review).
 
 The harness SDKs live in the ``local`` install extra. The guard used to sit only in
-``build_options``, but both harnesses' ``_run`` import the SDK a few lines before they
+``build_options``, but the harnesses' ``_run`` import the SDK a few lines before they
 call it, so a base install surfaced the bare ``No module named ...`` instead of the
 actionable message. These tests block the SDK import (``None`` in ``sys.modules``, what
 a base install looks like to the import system) and drive the harnesses' actual run
@@ -80,5 +80,22 @@ def test_codex_run_path_shows_the_extra_hint_without_the_sdk(tmp_path, monkeypat
     with pytest.raises(
         ModuleNotFoundError,
         match=r"openai-codex is not installed.*\[local\] extra",
+    ):
+        asyncio.run(drive())
+
+
+def test_antigravity_run_path_shows_the_extra_hint_without_the_sdk(tmp_path, monkeypatch):
+    from harness_run.harness.antigravity import AntigravityHarness
+
+    monkeypatch.setitem(sys.modules, "google.antigravity", None)
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    spec = AgentSpec(name="a", model="gemini-4-hydrogen", harness="antigravity")
+
+    async def drive():
+        return [ev async for ev in AntigravityHarness().run(spec, _ctx(tmp_path, spec))]
+
+    with pytest.raises(
+        ModuleNotFoundError,
+        match=r"google-antigravity is not installed.*\[local\] extra",
     ):
         asyncio.run(drive())

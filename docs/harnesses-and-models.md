@@ -1,13 +1,15 @@
 # Harnesses and models
 
-A **harness** is the coding-agent loop; the **model** is what it calls. Two harnesses ship, and
-both run on both backends (`local` and `sandbox`) through the same Engine/Session/Run API.
+A **harness** is the coding-agent loop; the **model** is what it calls. Three harnesses ship.
+Claude Code and Codex run on both backends (`local` and `sandbox`) through the same
+Engine/Session/Run API; Antigravity runs on `local` only for now.
 
 | Harness | Agent loop | Models it runs | Per-invocation secret |
 | --- | --- | --- | --- |
 | `claude-code` | Claude Code, via the Claude Agent SDK | Claude models (`claude-sonnet-4-6`, `claude-haiku-4-5`, …) | none on Vertex (the default), else `ANTHROPIC_API_KEY` |
 | `codex` | OpenAI Codex, via the `openai-codex` SDK | OpenAI models (`gpt-5.6-sol` / `-terra` / `-luna`, `gpt-5.3-codex`) | `OPENAI_API_KEY` |
-| **either one** | the same loop, pointed at OpenRouter | `openrouter/<vendor>/<model>` — Kimi, GLM, DeepSeek (see [below](openrouter.md)) | `OPENROUTER_API_KEY` |
+| `antigravity` | Google Antigravity, via the `google-antigravity` SDK (local only) | Gemini 4 models (`gemini-4-neon` / `-carbon` / `-hydrogen` / `-argon`) | `GEMINI_API_KEY` |
+| **claude-code or codex** | the same loop, pointed at OpenRouter | `openrouter/<vendor>/<model>` — Kimi, GLM, DeepSeek (see [below](openrouter.md)) | `OPENROUTER_API_KEY` |
 
 The harness is selected for a session, and its CLI must be included at deploy time.
 The model can change on each turn. One deployed engine can therefore serve several models:
@@ -24,8 +26,8 @@ engine.start_session(config=SessionConfig(harness="codex"))   # selects among wh
 
 Model ids are free-form strings passed to the harness — any id the underlying CLI accepts works, so a
 new model needs no library release. `max_budget_usd` is enforced against a different number per
-harness: Claude Code reports its own spend, the OpenAI ids listed above are priced offline by the
-library, and OpenRouter ids use the charge OpenRouter reports. The four OpenRouter models listed
+harness: Claude Code reports its own spend, the OpenAI and Gemini ids listed above are priced by the
+library from token counts, and OpenRouter ids use the charge OpenRouter reports. The four OpenRouter models listed
 above have been validated live on both harnesses.
 
 ## Claude Code
@@ -105,10 +107,55 @@ What to know when running Codex:
 - **OpenRouter models** reach the same surface — see below.
 
 
+## Antigravity
+
+`harness="antigravity"` runs Google's Antigravity agent loop with the Gemini 4 models, through the
+`google-antigravity` SDK (in the `local` extra; it bundles its own `localharness` binary). It runs on
+the local backend only for now: `sandbox.deploy` rejects it.
+
+```python
+spec = AgentSpec(name="gemini-agent", model="gemini-4-neon", harness="antigravity")
+result = await local.deploy(spec).start_session().run(
+    "Add type hints to utils.py and run the tests",
+    secrets={"GEMINI_API_KEY": os.environ["GEMINI_API_KEY"]},
+)
+```
+
+What to know when running Antigravity:
+
+- **Model auth**: the Gemini Developer API, with a `GEMINI_API_KEY` per-invocation secret (local
+  runs fall back to the ambient env var; `GOOGLE_API_KEY` is accepted too). The key is handed to the
+  SDK as configuration and blanked in the agent's shell environment, along with the other model
+  keys the caller did not pass on. There is no Vertex or OpenRouter route.
+- **Permissions**: only `permission_mode="bypassPermissions"` (all tools, no confirmations).
+  Antigravity's other modes ask a human, so they are rejected, as are `allowed_tools` /
+  `disallowed_tools` and `run(hooks=...)`.
+- **Skills** are staged into `<cwd>/.agents/skills`, as for Codex, and passed to the SDK.
+- **Cost & caps**: the SDK reports cumulative token usage after every model call, subagents
+  included; the harness prices it like Codex (LiteLLM, with a baked table for the Gemini 4 models)
+  and cancels the turn at `max_budget_usd`. Gemini's output price covers thinking tokens, so
+  `usage.output_tokens` includes them (`reasoning_output_tokens` is their share); caching is implicit,
+  so `cache_creation_input_tokens` is `None`. `max_turns` is the SDK's own model-call budget for the
+  run, which may count subagent calls too; `num_turns` counts the main agent's calls only.
+- **Subagents** (Antigravity's `invoke_subagent`) stream their steps into the same run, tagged
+  `raw["subagent"]` with their `trajectory_id`; their tokens are in `usage`/`cost_usd` and, per
+  trajectory, in the result's `raw["subagent_usage"]`.
+- **Structured output**: `output_schema` becomes the SDK's response schema; the model ends the
+  turn by calling `finish` with the object, which becomes the result text (JSON).
+- **Reasoning effort** maps to Gemini thinking levels: `minimal`, `low`, `medium`, `high`, and
+  `xhigh` → `extra_high`; `none` → `minimal` and `max` → `extra_high` with a status warning.
+- **Checkpoint/resume**: the conversation (the SDK's SQLite store and its `brain` directory) is
+  archived to the blob store with the workspace snapshot and restored on `send()`.
+- **Interrupt and steer**: an interrupt cancels the running turn and continues the same
+  conversation with the operator's message. The SDK cannot add a message to a running turn, so a
+  steer is delivered when the current turn ends, as the next turn of the same run.
+
+
 ## Reasoning effort
 
 `reasoning_effort` sets how much reasoning the model spends per response:
 `"none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"`; unset means the harness default. The
-vocabulary is the union of both harnesses'; each maps levels only the other supports to its nearest own
-(Claude: `minimal`/`none` → `low`; Codex: `max` → `xhigh`, with a status warning). It is a turn-scoped
+vocabulary is the union of the harnesses'; each maps levels it does not support to its nearest own
+(Claude: `minimal`/`none` → `low`; Codex: `max` → `xhigh`, with a status warning; Antigravity:
+`xhigh`/`max` → `extra_high`, `none` → `minimal`). It is a turn-scoped
 knob, so it can be set on the spec, a `SessionConfig` or a `TurnConfig`.

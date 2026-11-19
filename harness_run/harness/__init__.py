@@ -1,6 +1,7 @@
 """The harness seam (DESIGN.md §1, §7): the abstraction over "a coding agent loop".
 
-Two bindings ship: Claude Code (``claude_code``) and Codex (``codex``). Neither is a default.
+Three bindings ship: Claude Code (``claude_code``), Codex (``codex``) and Antigravity
+(``antigravity``, local runtime only for now). None is a default.
 ``resolve_harness`` is the single selection point — both runtimes call it instead of
 hardcoding a binding, so ``AgentSpec.harness`` picks the loop on either backend.
 Bindings are imported lazily inside the factory to keep the package import zero-dep.
@@ -24,7 +25,7 @@ def resolve_harness(spec: AgentSpec) -> Harness:
     if not name:
         raise ValueError(
             "AgentSpec.harness is not set — name the coding-agent loop explicitly "
-            "('claude-code' or 'codex'); there is no default"
+            "('claude-code', 'codex' or 'antigravity'); there is no default"
         )
     if name == "claude-code":
         from .claude_code import ClaudeCodeHarness
@@ -34,4 +35,10 @@ def resolve_harness(spec: AgentSpec) -> Harness:
         from .codex import CodexHarness
 
         return CodexHarness()
-    raise ValueError(f"unknown harness: {name!r} (expected 'claude-code' or 'codex')")
+    if name == "antigravity":
+        from .antigravity import AntigravityHarness
+
+        return AntigravityHarness()
+    raise ValueError(
+        f"unknown harness: {name!r} (expected 'claude-code', 'codex' or 'antigravity')"
+    )

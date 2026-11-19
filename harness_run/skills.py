@@ -38,7 +38,11 @@ if TYPE_CHECKING:
     from .spec import SkillSource
 
 # Where each harness discovers project-level skills, relative to the agent cwd.
-_SKILLS_SUBDIR = {"claude-code": ".claude/skills", "codex": ".agents/skills"}
+_SKILLS_SUBDIR = {
+    "claude-code": ".claude/skills",
+    "codex": ".agents/skills",
+    "antigravity": ".agents/skills",
+}
 
 # The provenance record written next to the staged skill folders (a file, so the harnesses'
 # folder-based discovery never sees it).

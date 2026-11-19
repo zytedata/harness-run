@@ -42,7 +42,8 @@ live-openrouter-remote:
 
 # Did the turn actually run the model we asked for? Checks both harnesses against evidence
 # that comes back from the CLI/app-server/provider, not from our own request. Concurrent,
-# a few cents, needs keys. COSTS REAL MONEY — by hand, never in CI.
+# a few cents, needs keys (GEMINI_API_KEY adds the antigravity checks). COSTS REAL MONEY — by
+# hand, never in CI.
 live-attribution:
 	$(VENV)/bin/python dev/live_model_attribution.py
 

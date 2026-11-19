@@ -7,7 +7,7 @@
 
 `harness-run` is a Python library for running coding agents locally and in remote sandbox environments through a common API.
 
-It provides an abstraction over agent harnesses such as Claude Code and Codex, with support for multiple model providers. Your application can switch harnesses or models without being tightly coupled to one vendor's agent runtime.
+It provides an abstraction over agent harnesses such as Claude Code, Codex and Antigravity, with support for multiple model providers. Your application can switch harnesses or models without being tightly coupled to one vendor's agent runtime.
 
 The same `Engine` → `Session` → `Run` API works locally for development and remotely on GCP Agent Sandbox for production. With a warm sandbox pool, remote agents can start and complete small tasks in just a few seconds.
 
@@ -26,7 +26,7 @@ pip install "harness-run[local]"
 ## Requirements
 
 - Python 3.12 or newer.
-- Credentials for the model the agent uses: an Anthropic, OpenAI or OpenRouter API key, or Vertex AI on the sandbox. See [Getting started](https://github.com/zytedata/harness-run/blob/main/docs/getting-started.md#credentials).
+- Credentials for the model the agent uses: an Anthropic, OpenAI, Gemini or OpenRouter API key, or Vertex AI on the sandbox. See [Getting started](https://github.com/zytedata/harness-run/blob/main/docs/getting-started.md#credentials).
 - For remote runs, a GCP project prepared with `harness-run-gcp-setup --project <your-project>`. See [GCP setup](https://github.com/zytedata/harness-run/blob/main/docs/gcp-setup.md).
 
 ## Example
@@ -184,7 +184,7 @@ The same spec deploys unchanged to the sandbox. Every other field has a default;
 
 Beyond the basic example, `harness-run` supports:
 
-- Multiple agent harnesses and models — Claude Code with Claude models, Codex with OpenAI models, and either harness with models served through OpenRouter.
+- Multiple agent harnesses and models — Claude Code with Claude models, Codex with OpenAI models, either of them with models served through OpenRouter, and (locally, for now) Antigravity with Gemini 4 models.
 - Local and remote execution through the same API, with remote runs on GCP Agent Sandbox.
 - Low-latency remote runs using warm sandbox pools.
 - Multi-turn sessions with checkpoint/resume and durable remote history.
@@ -200,7 +200,7 @@ Beyond the basic example, `harness-run` supports:
 
 Start with [Getting started](https://github.com/zytedata/harness-run/blob/main/docs/getting-started.md).
 
-- [Harnesses and models](https://github.com/zytedata/harness-run/blob/main/docs/harnesses-and-models.md) — Claude Code, Codex, model selection, and reasoning settings
+- [Harnesses and models](https://github.com/zytedata/harness-run/blob/main/docs/harnesses-and-models.md) — Claude Code, Codex, Antigravity, model selection, and reasoning settings
 - [Configuration](https://github.com/zytedata/harness-run/blob/main/docs/configuration.md) — `AgentSpec`, `SessionConfig`, and `TurnConfig`
 - [Sessions and runs](https://github.com/zytedata/harness-run/blob/main/docs/runs-and-sessions.md) — multi-turn conversations, streaming, polling, resume, steering, interruption, and `exec()`
 - [Local runtime](https://github.com/zytedata/harness-run/blob/main/docs/local-runtime.md) — local development and workspaces

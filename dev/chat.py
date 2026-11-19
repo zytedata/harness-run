@@ -42,7 +42,7 @@ except ImportError as exc:
 DEFAULT_MODELS = {"claude-code": "claude-haiku-4-5-20251001", "codex": "gpt-5.6-luna"}
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--harness", default="claude-code", choices=["claude-code", "codex"])
+parser.add_argument("--harness", default="claude-code", choices=["claude-code", "codex", "antigravity"])
 parser.add_argument("--model", default=None)
 parser.add_argument("--workdir", default=None, help="engine workdir (default: a temp dir)")
 parser.add_argument("--port", type=int, default=8765)

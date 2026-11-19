@@ -15,12 +15,19 @@ provider that happens to serve the call. Measured 2026-08-21 against the provide
 probes pin — a table calibrated for one provider was 40% under and 46% over on the two
 DeepSeeks. A missing charge is reported as unknown cost instead.
 
+**Long-context rates.** OpenAI bills a model call whose input is above a threshold (272K
+tokens today) at higher rates, for the whole call. A price carries those rates when its
+source lists them (``ModelPrice.long_context``), and ``ModelPrice.call_cost_usd`` prices one
+call with them. ``ModelPrice.cost_usd`` stays at the standard rates: it is for token totals,
+which do not say how large each call was.
+
 Stdlib-only (urllib). All prices are USD per single token.
 """
 
 from __future__ import annotations
 
 import json
+import re
 import threading
 from dataclasses import dataclass
 
@@ -43,7 +50,8 @@ OPENROUTER_CONTEXT_WINDOWS: dict[str, int] = {
 # reachable. Cache *writes* (billed at 1.25x input since 5.6) are not distinguishable in
 # Codex's usage breakdown, so cost is a slight undercount either way.
 # The gpt-6.x rows are OpenAI's Standard-tier short-context (<=272K input) prices, checked
-# against the official pricing page on 2026-11-18; the long-context rates are not modelled.
+# against the official pricing page on 2026-11-18; their long-context rates are in the
+# table below.
 _BUILTIN_PER_MTOK: dict[str, tuple[float, float, float]] = {
     "gpt-6.2-sol": (2.00, 0.10, 10.00),
     "gpt-6.1-sol": (2.00, 0.10, 10.00),
@@ -55,22 +63,72 @@ _BUILTIN_PER_MTOK: dict[str, tuple[float, float, float]] = {
     "gpt-5.3-codex": (1.75, 0.175, 14.00),
 }
 
+# OpenAI's Standard-tier long-context prices, same unit and order as the table above: a call
+# whose input is above 272K tokens is billed at these for the whole call (checked against
+# the official pricing page on 2026-11-18). A model has a row when codex-cli 0.170.0 gives it
+# a context window above that threshold (500K each); the other models of the table above run
+# with a 272K window, so their calls cannot reach it.
+_BUILTIN_LONG_CONTEXT_ABOVE = 272_000
+_BUILTIN_LONG_CONTEXT_PER_MTOK: dict[str, tuple[float, float, float]] = {
+    "gpt-6.2-sol": (4.00, 0.20, 15.00),
+    "gpt-6.1-sol": (4.00, 0.20, 15.00),
+    "gpt-6.1-terra": (2.00, 0.10, 7.50),
+}
+
+# LiteLLM lists a long-context rate under the standard key plus a suffix that names the
+# threshold: ``input_cost_per_token_above_272k_tokens``.
+_LITELLM_LONG_CONTEXT_INPUT_KEY = re.compile(r"input_cost_per_token_above_(\d+)k_tokens")
+
+
+@dataclass(frozen=True)
+class LongContextRates:
+    """USD per token for a model call whose input is above ``above_input_tokens``.
+
+    The rates apply to the whole call, not only to the tokens above the threshold.
+    """
+
+    above_input_tokens: int
+    input_per_token: float
+    cached_input_per_token: float
+    output_per_token: float
+
 
 @dataclass(frozen=True)
 class ModelPrice:
-    """USD per token, plus where the numbers came from (``litellm`` or ``builtin``)."""
+    """USD per token, plus where the numbers came from (``litellm`` or ``builtin``).
+
+    ``long_context`` is ``None`` when the source lists no long-context rates for the model.
+    """
 
     input_per_token: float
     cached_input_per_token: float
     output_per_token: float
     source: str
+    long_context: LongContextRates | None = None
 
     def cost_usd(self, input_tokens: int, cached_tokens: int, output_tokens: int) -> float:
+        """Cost at the standard rates, whatever the size: for token totals."""
         fresh = max(input_tokens - cached_tokens, 0)
         return (
             fresh * self.input_per_token
             + cached_tokens * self.cached_input_per_token
             + output_tokens * self.output_per_token
+        )
+
+    def call_cost_usd(self, input_tokens: int, cached_tokens: int, output_tokens: int) -> float:
+        """Cost of ONE model call.
+
+        At the long-context rates when its input is above their threshold, at the standard
+        rates otherwise. ``input_tokens`` includes the cached ones, as in :meth:`cost_usd`.
+        """
+        rates = self.long_context
+        if rates is None or input_tokens <= rates.above_input_tokens:
+            return self.cost_usd(input_tokens, cached_tokens, output_tokens)
+        fresh = max(input_tokens - cached_tokens, 0)
+        return (
+            fresh * rates.input_per_token
+            + cached_tokens * rates.cached_input_per_token
+            + output_tokens * rates.output_per_token
         )
 
 
@@ -109,6 +167,31 @@ def clear_cache() -> None:
         _litellm_attempted = False
 
 
+def _litellm_long_context(entry: dict) -> LongContextRates | None:
+    """The long-context rates of one LiteLLM entry; ``None`` when it lists none.
+
+    An entry that names more than one threshold is not read (no OpenAI model has one).
+    """
+    thresholds = [
+        match.group(1) for key in entry if (match := _LITELLM_LONG_CONTEXT_INPUT_KEY.fullmatch(key))
+    ]
+    if len(thresholds) != 1:
+        return None
+    suffix = f"_above_{thresholds[0]}k_tokens"
+    inp = entry.get(f"input_cost_per_token{suffix}")
+    out = entry.get(f"output_cost_per_token{suffix}")
+    if inp is None or out is None:
+        return None
+    cached = entry.get(f"cache_read_input_token_cost{suffix}")
+    return LongContextRates(
+        above_input_tokens=int(thresholds[0]) * 1000,
+        input_per_token=float(inp),
+        # As at the standard rates: no cache-read price listed → cached tokens bill as input.
+        cached_input_per_token=float(cached if cached is not None else inp),
+        output_per_token=float(out),
+    )
+
+
 def model_price(model: str) -> ModelPrice | None:
     """Resolve ``model`` to per-token USD prices, or ``None`` if unknown everywhere.
 
@@ -134,13 +217,24 @@ def model_price(model: str) -> ModelPrice | None:
                 cached_input_per_token=float(cached if cached is not None else inp),
                 output_per_token=float(out),
                 source="litellm",
+                long_context=_litellm_long_context(entry),
             )
     per_mtok = _BUILTIN_PER_MTOK.get(model)
     if per_mtok is not None:
+        long_context = None
+        long_per_mtok = _BUILTIN_LONG_CONTEXT_PER_MTOK.get(model)
+        if long_per_mtok is not None:
+            long_context = LongContextRates(
+                above_input_tokens=_BUILTIN_LONG_CONTEXT_ABOVE,
+                input_per_token=long_per_mtok[0] / 1e6,
+                cached_input_per_token=long_per_mtok[1] / 1e6,
+                output_per_token=long_per_mtok[2] / 1e6,
+            )
         return ModelPrice(
             input_per_token=per_mtok[0] / 1e6,
             cached_input_per_token=per_mtok[1] / 1e6,
             output_per_token=per_mtok[2] / 1e6,
             source="builtin",
+            long_context=long_context,
         )
     return None

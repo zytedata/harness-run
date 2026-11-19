@@ -104,8 +104,20 @@ TestPyPI never accepts the same version twice, so a second rehearsal needs a ver
   create` does), reported as its own row, `sandbox service agent`, a FIX item in `--check` while
   the grant is missing. Should the grant still fail, the error names the gcloud command to run,
   and a failing fix now ends the run with its message instead of a traceback. ([#8])
+- The cost of a Codex turn counts OpenAI's long-context rates. OpenAI bills a model call whose
+  input is above 272K tokens at higher rates for the whole call (on the GPT-6 models: 2x for
+  input and cached input, 1.5x for output). Such a call was priced at the standard rates, so
+  `cost_usd` came out low and `max_budget_usd` stopped the turn late. Each call of the turn is
+  now priced by its own size, from LiteLLM's `*_above_272k_tokens` rates or, when its dataset is
+  unreachable, from the offline price table (gpt-6.1-terra, gpt-6.1-sol, gpt-6.2-sol). This is
+  a defensive fix: no run has been seen to make such a call. The CLI bump above made it possible:
+  codex-cli 0.170.0 gives these three models a 500,000-token context window, where they ran
+  with 272,000 on 0.159.2, below the threshold. A subagent thread's calls stay at the standard
+  rates, because its usage is recovered as a total per thread, which does not say how large each
+  call was. ([#13])
 
 [#8]: https://github.com/zytedata/harness-run/pull/8
+[#13]: https://github.com/zytedata/harness-run/pull/13
 
 ## 0.4.0 — 2026-09-23
 

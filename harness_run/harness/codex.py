@@ -261,6 +261,10 @@ class _RunAccounting:
     double-bill resumed sessions. ``price`` comes from :mod:`pricing` (LiteLLM live
     dataset, baked fallback); ``None`` means cost is unreportable and the budget cap
     unenforceable.
+
+    A call whose input is above the model's long-context threshold is billed at higher
+    rates for the whole call, so the size of each call matters, not only the sums:
+    ``long_context_extra_usd`` collects what such calls cost above the standard rates.
     """
 
     def __init__(self, model: str, price: pricing.ModelPrice | None) -> None:
@@ -274,24 +278,36 @@ class _RunAccounting:
         # cache_write_input_tokens is optional on the wire; None until any call reports
         # it, so an older CLI's silence stays "not reported" instead of a fake 0.
         self.cache_write_input_tokens: int | None = None
+        self.long_context_extra_usd = 0.0
 
     def observe(self, last: Any) -> None:
         self.model_calls += 1
-        self.input_tokens += int(last.input_tokens or 0)
-        self.cached_input_tokens += int(last.cached_input_tokens or 0)
-        self.output_tokens += int(last.output_tokens or 0)
+        input_tokens = int(last.input_tokens or 0)
+        cached_input_tokens = int(last.cached_input_tokens or 0)
+        output_tokens = int(last.output_tokens or 0)
+        self.input_tokens += input_tokens
+        self.cached_input_tokens += cached_input_tokens
+        self.output_tokens += output_tokens
         self.reasoning_output_tokens += int(last.reasoning_output_tokens or 0)
         cache_write = getattr(last, "cache_write_input_tokens", None)
         if cache_write is not None:
             self.cache_write_input_tokens = (self.cache_write_input_tokens or 0) + int(
                 cache_write
             )
+        if self.price is not None:
+            call = (input_tokens, cached_input_tokens, output_tokens)
+            # 0.0 for a call at or under the threshold, and for a model without the rates.
+            extra = self.price.call_cost_usd(*call) - self.price.cost_usd(*call)
+            self.long_context_extra_usd += extra
 
     @property
     def cost_usd(self) -> float | None:
         if self.price is None:
             return None
-        return self.price.cost_usd(self.input_tokens, self.cached_input_tokens, self.output_tokens)
+        standard = self.price.cost_usd(
+            self.input_tokens, self.cached_input_tokens, self.output_tokens
+        )
+        return standard + self.long_context_extra_usd
 
     def usage(self) -> dict[str, int | None]:
         # The wire's input_tokens INCLUDES the cached and cache-written parts;
@@ -1033,6 +1049,10 @@ class CodexHarness:
         ``ModelPrice.cost_usd`` expects. ``None`` when the parent model is unpriced —
         or when any thread's price is explicitly ``None`` (an unpriced subagent model):
         a partial total would be a guess, and the contract is a real number or absent.
+
+        A subagent delta is a total over that thread's calls, which does not say how
+        large each call was, so it is priced at the standard rates; only the parent's
+        calls carry long-context rates (``_RunAccounting.long_context_extra_usd``).
         """
         cost_usd = acct.cost_usd
         if cost_usd is not None and subagent_usage:

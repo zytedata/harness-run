@@ -219,22 +219,39 @@ out["mds_token"] = f"{st} len={len(tok)}"
 if tok:
     out.update(reach(tok))
 out["env_token_names"] = sorted(k for k in os.environ if "TOKEN" in k or "KEY" in k)
-# The worker is an ancestor of this shell and runs as the same user. Its memory and
-# environment must still be closed to us (it marks itself non-dumpable at startup).
+# The worker is an ancestor of this shell and runs as the same user. Its memory must still
+# be closed to us (it marks itself non-dumpable at startup), by every route: /proc/<pid>/mem,
+# process_vm_readv and ptrace. Without the flag all three work in the sandbox (verified live
+# 2026-11-23 against a plain same-user process). Its /proc/<pid>/environ stays readable there
+# all the same; it is the image's environment, and no secret of a turn is ever in it.
+import ctypes
 pid, worker = os.getppid(), None
 while pid > 1 and worker is None:
-    cmdline = open(f"/proc/{pid}/cmdline", "rb").read().replace(b"\0", b" ").decode()
-    if "worker" in cmdline:
+    if b"worker" in open(f"/proc/{pid}/cmdline", "rb").read():
         worker = pid
     else:
         pid = int(open(f"/proc/{pid}/stat").read().rsplit(")", 1)[1].split()[1])
 out["worker_found"] = worker is not None
-for name in ("mem", "environ", "maps"):
+if worker is not None:
+    libc = ctypes.CDLL(None, use_errno=True)
     try:
-        open(f"/proc/{worker}/{name}", "rb").read(1)
-        out["worker_" + name] = "readable"
+        open(f"/proc/{worker}/mem", "rb").close()
+        out["worker_mem"] = "open"
     except OSError as exc:
-        out["worker_" + name] = "denied" if exc.errno in (1, 13) else f"errno {exc.errno}"
+        out["worker_mem"] = "denied" if exc.errno in (1, 13) else f"errno {exc.errno}"
+    class iovec(ctypes.Structure):
+        _fields_ = [("base", ctypes.c_void_p), ("len", ctypes.c_size_t)]
+    buf = ctypes.create_string_buffer(16)
+    local, remote = iovec(ctypes.cast(buf, ctypes.c_void_p), 16), iovec(ctypes.c_void_p(0x400000), 16)
+    libc.process_vm_readv.restype = ctypes.c_ssize_t
+    n = libc.process_vm_readv(worker, ctypes.byref(local), 1, ctypes.byref(remote), 1, 0)
+    # EPERM is the refusal. EFAULT would mean the access check passed and only the address was bad.
+    out["worker_vm_readv"] = "denied" if n < 0 and ctypes.get_errno() in (1, 13) else f"n={n} errno={ctypes.get_errno()}"
+    libc.ptrace.restype = ctypes.c_long
+    rc = libc.ptrace(0x4206, worker, 0, 0)  # PTRACE_SEIZE: attaches without stopping the worker
+    out["worker_ptrace"] = "denied" if rc != 0 and ctypes.get_errno() in (1, 13) else f"rc={rc} errno={ctypes.get_errno()}"
+    if rc == 0:
+        libc.ptrace(17, worker, 0, 0)  # PTRACE_DETACH
 print("ISOLATION " + json.dumps(out))
 PY
 """.strip()
@@ -517,7 +534,7 @@ async def check_isolation(engine, verdicts) -> None:
             and _refused(facts)
             and "ANTHROPIC_AUTH_TOKEN" not in facts.get("env_token_names", [])  # nothing outside a turn
             and facts.get("worker_found") is True
-            and all(facts.get(f"worker_{n}") == "denied" for n in ("mem", "environ", "maps"))
+            and all(facts.get(f"worker_{n}") == "denied" for n in ("mem", "vm_readv", "ptrace"))
         )
     except Exception:
         log(label, "FAILED:\n" + traceback.format_exc())

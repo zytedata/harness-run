@@ -59,9 +59,9 @@ the calling process (the worker, in a sandbox), and forwards the call, WebSocket
 `api.openai.com`. It serves only the Responses endpoint, its compaction endpoint and the model
 list; any other call gets a 403 and an `openai_proxy_refused` status event. A coerced agent can
 therefore spend model tokens while the turn runs, as it could anyway, but it has no key to take
-away: the token stops working when the turn ends. This is not OS isolation. Code running as the
-same user as the calling process could still inspect that process, and a local run that takes
-the key from your shell environment leaves it there. If `codex_config` sets `openai_base_url` or
+away: the token stops working when the turn ends. In a sandbox the worker also closes its own
+memory to the agent (see [What the agent's shell can reach](#what-the-agents-shell-can-reach)).
+A local run has no such protection, and a key taken from your shell environment stays there. If `codex_config` sets `openai_base_url` or
 `model_provider`, the proxy is not used and Codex is logged in with the key you passed.
 
 **In transit & at rest.** Secret values travel in exactly one place: the HTTPS body of the turn the client
@@ -85,6 +85,13 @@ its shell is therefore what the turn itself brought along, and the library keeps
   the worker's loopback metadata server (`GCE_METADATA_HOST` in the agent's env points at it): model calls,
   nothing else. Spend past the run's `max_budget_usd` is the only thing a coerced agent could add.
 - **The turn's own secrets** — those the caller passed, routed as the table above says.
+- **Not the worker's memory.** The worker holds the secrets the agent is not given (a model key
+  behind a local proxy, repo and MCP tokens) and runs as the same user as the agent. It marks
+  itself non-dumpable at startup, so the agent's shell cannot read its memory through
+  `/proc/<pid>/mem`, `process_vm_readv` or `ptrace`. Without the flag all three work in the
+  sandbox; with it all three are refused (verified live 2026-11-23, and re-checked by
+  `make live-smoke`'s isolation check). The worker's `/proc/<pid>/environ` stays readable, but it
+  is the image's environment and never holds a turn's secrets.
 
 Sandboxes are created per turn and deleted at its end, so nothing a run leaves behind survives into the
 next one; multi-turn continuity rides the checkpoint (a credential-scrubbed tar in your bucket). There is

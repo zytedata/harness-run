@@ -219,6 +219,22 @@ out["mds_token"] = f"{st} len={len(tok)}"
 if tok:
     out.update(reach(tok))
 out["env_token_names"] = sorted(k for k in os.environ if "TOKEN" in k or "KEY" in k)
+# The worker is an ancestor of this shell and runs as the same user. Its memory and
+# environment must still be closed to us (it marks itself non-dumpable at startup).
+pid, worker = os.getppid(), None
+while pid > 1 and worker is None:
+    cmdline = open(f"/proc/{pid}/cmdline", "rb").read().replace(b"\0", b" ").decode()
+    if "worker" in cmdline:
+        worker = pid
+    else:
+        pid = int(open(f"/proc/{pid}/stat").read().rsplit(")", 1)[1].split()[1])
+out["worker_found"] = worker is not None
+for name in ("mem", "environ", "maps"):
+    try:
+        open(f"/proc/{worker}/{name}", "rb").read(1)
+        out["worker_" + name] = "readable"
+    except OSError as exc:
+        out["worker_" + name] = "denied" if exc.errno in (1, 13) else f"errno {exc.errno}"
 print("ISOLATION " + json.dumps(out))
 PY
 """.strip()
@@ -500,6 +516,8 @@ async def check_isolation(engine, verdicts) -> None:
             and "gserviceaccount.com" not in identity  # a tenant identity, not one of ours
             and _refused(facts)
             and "ANTHROPIC_AUTH_TOKEN" not in facts.get("env_token_names", [])  # nothing outside a turn
+            and facts.get("worker_found") is True
+            and all(facts.get(f"worker_{n}") == "denied" for n in ("mem", "environ", "maps"))
         )
     except Exception:
         log(label, "FAILED:\n" + traceback.format_exc())

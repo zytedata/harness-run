@@ -59,6 +59,36 @@ from ...control import ControlMessage, run_shell
 from ...events import AgentEvent
 
 BOOT = time.time()
+
+_PR_GET_DUMPABLE, _PR_SET_DUMPABLE = 3, 4
+
+
+def _dumpable() -> bool | None:
+    """Whether same-user processes may inspect this one; ``None`` where that cannot be asked."""
+    try:
+        import ctypes
+
+        return bool(ctypes.CDLL(None, use_errno=True).prctl(_PR_GET_DUMPABLE, 0, 0, 0, 0))
+    except (OSError, AttributeError):
+        return None
+
+
+def _refuse_inspection() -> None:
+    """Close this process's memory to the agent's shell, which runs as the same user.
+
+    The worker holds what the turn brought along and the agent must not read: the model
+    key behind the local proxies, repo and MCP tokens. A non-dumpable process cannot be
+    ptraced by an unprivileged process, and its ``/proc/<pid>/mem`` and ``environ`` cannot be
+    opened. The flag is reset by ``execve``, so the CLIs the worker starts are unaffected;
+    they hold only what the harness chose to give them. Best-effort: on a kernel without
+    ``prctl`` the worker runs as before, and ``/health`` reports which it is.
+    """
+    try:
+        import ctypes
+
+        ctypes.CDLL(None, use_errno=True).prctl(_PR_SET_DUMPABLE, 0, 0, 0, 0)
+    except (OSError, AttributeError):
+        pass
 WORKSPACE_ROOT = os.environ.get("HARNESS_RUN_WORKSPACE_ROOT", "/workspace")
 # The model-token metadata server (loopback). Not a template port: never proxied.
 DEFAULT_METADATA_PORT = 8081
@@ -582,6 +612,7 @@ class Worker:
             "uptime_s": round(time.time() - BOOT, 3),
             "pid": os.getpid(),
             "uid": os.getuid(),
+            "dumpable": _dumpable(),
             "workspace_writable": os.access(self.workspace_root, os.W_OK),
             "home_writable": os.access(home, os.W_OK),
             "python": sys.version.split()[0],
@@ -818,6 +849,7 @@ def main() -> None:
     global WORKER
     port = int(os.environ.get("PORT", "8080"))
     os.makedirs(WORKSPACE_ROOT, exist_ok=True)
+    _refuse_inspection()
     WORKER = Worker()
     srv = ThreadingHTTPServer(("0.0.0.0", port), Handler)
     sys.stderr.write(f"harness-run sandbox worker on :{port} (uid {os.getuid()})\n")

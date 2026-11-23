@@ -565,7 +565,9 @@ Each is a `typing.Protocol`; concrete adapters ship for prod (GCP) and dev (loca
 - **`CodexHarness`** (OpenAI Codex binding, `openai-codex` SDK) — one `AsyncCodex` app-server per run,
   against a per-job `CODEX_HOME` (auth.json, rollouts — bookkeeping level, beside the workspace).
   OpenAI models are called **directly** (no Vertex path): the `OPENAI_API_KEY` travels as a
-  per-invocation secret, is routed to `codex login` and excluded from the agent's env/shell. Spec
+  per-invocation secret and stays in the harness process — Codex is logged in with a per-run token
+  for a localhost proxy (`_openai_proxy`) that swaps in the key — and is excluded from the agent's
+  env/shell. Spec
   translation: `permission_mode` → sandbox+approval (bypassPermissions = full access + never ask;
   default = workspace-write + Codex's auto-reviewer so headless runs never block); `system_prompt`
   str → `base_instructions`, `SystemPrompt.append` → `developer_instructions`; skills → staged into

@@ -38,6 +38,18 @@ TestPyPI never accepts the same version twice, so a second rehearsal needs a ver
 
 ## Unreleased
 
+### Changed
+
+- **The Codex harness no longer gives the `OPENAI_API_KEY` to the CLI.** Codex keeps the key it
+  is logged in with in `CODEX_HOME/auth.json`, which the agent's shell could read. Model calls
+  now go through a local proxy the library runs for the turn: the key stays in the calling
+  process and Codex is logged in with a random per-run token that is useless once the turn ends.
+  The proxy serves only the endpoints Codex needs for a turn. A spec whose `codex_config` sets
+  `openai_base_url` or `model_provider` is left alone and logs in with the key as before.
+  Pass the key on every turn: a turn with no `OPENAI_API_KEY` now fails even when an earlier
+  turn of the same session had one. See
+  [Secrets and security](docs/secrets-and-security.md).
+
 ### Backwards-incompatible
 
 - `harness_run.skills.provision()` returns a `StagedSkills` (`names`, `sources`) instead of

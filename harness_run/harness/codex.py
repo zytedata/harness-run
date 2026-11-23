@@ -9,9 +9,11 @@ methods, so importing this module needs no third-party deps.
 Spec translation (parity notes):
 
 * ``model``            → thread model (e.g. ``gpt-5.6-luna``); auth is the per-invocation
-                         ``OPENAI_API_KEY`` secret (or ambient env), routed to ``codex
-                         login`` inside the per-job ``CODEX_HOME`` — the OpenAI API is
-                         called directly (there is no Vertex path for OpenAI models).
+                         ``OPENAI_API_KEY`` secret (or ambient env). The key stays in this
+                         process: Codex reaches the OpenAI API (there is no Vertex path
+                         for OpenAI models) through a per-run localhost proxy
+                         (:mod:`._openai_proxy`) and is logged in, inside the per-job
+                         ``CODEX_HOME``, with that proxy's token only.
                          An ``openrouter/<vendor>/<model>`` id instead routes the turn
                          through OpenRouter (see "OpenRouter models" below).
 * ``permission_mode``  → sandbox + approval policy (see ``_PERMISSION_MAP``).
@@ -178,6 +180,9 @@ _GITHUB_MCP_URL = "https://api.githubcopilot.com/mcp/"
 _OPENROUTER_PROVIDER = "openrouter"
 _OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 _OPENROUTER_PROXY_KEY_ENV = "HARNESS_RUN_OPENROUTER_PROXY_TOKEN"
+# ``codex_config`` keys that send model calls somewhere of the caller's choosing. The
+# harness then leaves its own OpenAI proxy out of the way.
+_OWN_ENDPOINT_KEYS = frozenset({"openai_base_url", "model_provider"})
 _OPENROUTER_WIRE_API = "responses"
 # OpenRouter's Responses endpoint refuses a turn with reasoning disabled, and Codex sends
 # effort "none" for a model it has no metadata for.
@@ -250,6 +255,9 @@ class _CodexOptions:
     # True when the model routes through OpenRouter: auth is the provider's env_key, so
     # `run` must not call `codex login` (that path stores OpenAI credentials).
     openrouter: bool = False
+    # True when the OpenAI API is reached through the per-run local proxy: ``api_key`` is
+    # then the proxy's token, not the account key, and `run` logs in with it every time.
+    openai_proxied: bool = False
 
 
 class _RunAccounting:
@@ -673,6 +681,8 @@ class CodexHarness:
         *,
         openrouter_base_url: str | None = None,
         openrouter_client_token: str | None = None,
+        openai_base_url: str | None = None,
+        openai_client_token: str | None = None,
     ) -> _CodexOptions:
         """Build ``openai_codex`` config + thread/turn args from ``spec`` + runtime ``ctx``."""
         # These are restrictions, not optional hints. Validate before SDK setup or
@@ -710,6 +720,7 @@ class CodexHarness:
         model = spec.model or ""
         openrouter = model.startswith(OPENROUTER_PREFIX)
         env = runtime_env(spec, ctx)
+        openai_proxied = bool(not openrouter and openai_base_url and openai_client_token)
         # The agent's shell env: Codex filters *KEY*/*SECRET*/*TOKEN*-named vars from the
         # shell by default — the opposite of the toolkit's contract (the caller's own
         # secrets ARE for the agent). Lift the default excludes, but keep the ones the
@@ -735,6 +746,8 @@ class CodexHarness:
                 if openrouter
                 else []
             ),
+            # The per-run proxy that holds the account key (see :mod:`._openai_proxy`).
+            *([f"openai_base_url={json.dumps(openai_base_url)}"] if openai_proxied else []),
             *mcp_overrides,
             *(f"{k}={json.dumps(v)}" for k, v in (spec.codex_config or {}).items()),
         ]
@@ -753,6 +766,10 @@ class CodexHarness:
                 env[_OPENROUTER_PROXY_KEY_ENV] = openrouter_client_token
             else:
                 env[OPENROUTER_KEY_ENV] = api_key
+        if openai_proxied:
+            # Codex writes what it logs in with to CODEX_HOME/auth.json, which the agent's
+            # shell can read. Log it in with the proxy's token; the key stays in this process.
+            api_key = openai_client_token
 
         thread_args: dict[str, Any] = {
             "model": model[len(OPENROUTER_PREFIX) :] if openrouter else (model or None),
@@ -808,6 +825,7 @@ class CodexHarness:
             codex_home=codex_home,
             warnings=warnings,
             openrouter=openrouter,
+            openai_proxied=openai_proxied,
         )
 
     # -- conversation persistence (checkpoint/resume) ---------------------------
@@ -1148,18 +1166,55 @@ class CodexHarness:
         )
 
     async def run(self, spec: AgentSpec, ctx: RunContext) -> AsyncIterator[AgentEvent]:
-        """Run Codex, with a local metadata proxy for OpenRouter turns."""
-        async for event in run_with_openrouter_proxy(
-            spec, ctx, lambda proxy: self._run(spec, ctx, proxy)
-        ):
-            yield event
+        """Run Codex behind a local proxy that holds the model provider's key.
+
+        An OpenRouter turn gets the shared OpenRouter proxy, any other turn the OpenAI one
+        (:mod:`._openai_proxy`). Either way the CLI only ever holds a per-run token.
+        """
+        openai_proxy = self._start_openai_proxy(spec, ctx)
+        try:
+            async for event in run_with_openrouter_proxy(
+                spec, ctx, lambda proxy: self._run(spec, ctx, proxy, openai_proxy)
+            ):
+                yield event
+        finally:
+            if openai_proxy is not None:
+                openai_proxy.close()
+
+    @staticmethod
+    def _own_openai_endpoint(spec: AgentSpec) -> bool:
+        """Whether ``codex_config`` points Codex at an endpoint of the caller's choosing."""
+        return bool(_OWN_ENDPOINT_KEYS & (spec.codex_config or {}).keys())
+
+    def _start_openai_proxy(self, spec: AgentSpec, ctx: RunContext) -> Any | None:
+        """The per-run OpenAI proxy, or ``None`` when the turn does not call the OpenAI API
+        with a key of ours: an OpenRouter model, a caller-chosen endpoint, or no key (``_run``
+        raises for that)."""
+        if (spec.model or "").startswith(OPENROUTER_PREFIX) or self._own_openai_endpoint(spec):
+            return None
+        api_key = ctx.secrets.get("OPENAI_API_KEY") or os.environ.get("OPENAI_API_KEY")
+        if not api_key:
+            return None
+        from ._openai_proxy import OpenAIProxy
+
+        return OpenAIProxy(api_key).start()
+
+    @staticmethod
+    def _refused_events(openai_proxy: Any | None) -> Iterator[AgentEvent]:
+        """One status event per call the OpenAI proxy refused to forward."""
+        for call in openai_proxy.drain_refused() if openai_proxy is not None else ():
+            yield AgentEvent(
+                kind="status",
+                summary=f"the local OpenAI proxy refused {call}: not an endpoint Codex needs",
+                raw={"event": "openai_proxy_refused", "call": call},
+            )
 
     # After ``handle.interrupt()``: how long to wait for the ``turn/completed`` that
     # settles it (verified live: it arrives within milliseconds).
     _INTERRUPT_SETTLE_S = 5.0
 
     async def _run(
-        self, spec: AgentSpec, ctx: RunContext, proxy: Any | None
+        self, spec: AgentSpec, ctx: RunContext, proxy: Any | None, openai_proxy: Any | None = None
     ) -> AsyncIterator[AgentEvent]:
         """Drive one turn over an ``AsyncCodex`` app-server, yielding ``AgentEvent``s.
 
@@ -1186,6 +1241,10 @@ class CodexHarness:
             ctx,
             openrouter_base_url=(f"{proxy.base_url}/api/v1" if proxy is not None else None),
             openrouter_client_token=(proxy.client_token if proxy is not None else None),
+            openai_base_url=(openai_proxy.base_url if openai_proxy is not None else None),
+            openai_client_token=(
+                openai_proxy.client_token if openai_proxy is not None else None
+            ),
         )
         translator = CodexEventTranslator()
         # Price via the LiteLLM live dataset (baked fallback) — one fetch per process,
@@ -1224,9 +1283,16 @@ class CodexHarness:
                     # OpenAI credentials this path never reads.
                     if not options.api_key:
                         raise missing_openrouter_key_error("codex")
-                elif options.api_key and not (options.codex_home / "auth.json").exists():
+                elif options.openai_proxied:
+                    # Every turn: the token is this run's, and it replaces whatever an
+                    # earlier turn (or an older version, which stored the account key
+                    # itself) left in auth.json.
                     await codex.login_api_key(options.api_key)
-                elif not options.api_key and not (options.codex_home / "auth.json").exists():
+                elif self._own_openai_endpoint(spec):
+                    # The caller's own endpoint gets the caller's key, as given.
+                    if options.api_key and not (options.codex_home / "auth.json").exists():
+                        await codex.login_api_key(options.api_key)
+                else:
                     raise RuntimeError(
                         "codex harness has no OpenAI credentials: pass OPENAI_API_KEY in the "
                         "per-invocation secrets (or set it in the environment)"
@@ -1350,6 +1416,8 @@ class CodexHarness:
                     if proxy is not None:
                         for event in proxy.drain_events():
                             yield event
+                    for event in self._refused_events(openai_proxy):
+                        yield event
                     if notification.method == "thread/tokenUsage/updated":
                         acct.observe(notification.payload.token_usage.last)
                         if limit is None:

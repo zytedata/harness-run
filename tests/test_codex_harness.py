@@ -113,6 +113,18 @@ async def _events_of(
 # -- option building ----------------------------------------------------------
 
 
+def test_build_options_behind_the_openai_proxy(tmp_path):
+    spec = AgentSpec(name="a", model="gpt-5.6-luna", harness="codex")
+    ctx = _ctx(tmp_path, spec, secrets={"OPENAI_API_KEY": "sk-1"})
+    opts = CodexHarness().build_options(
+        spec, ctx, openai_base_url="http://127.0.0.1:4321/v1", openai_client_token="run-token"
+    )
+    assert opts.openai_proxied and opts.api_key == "run-token"
+    overrides = list(opts.codex_config.config_overrides)
+    assert 'openai_base_url="http://127.0.0.1:4321/v1"' in overrides
+    assert "sk-1" not in json.dumps([overrides, opts.codex_config.env])
+
+
 def test_build_options_defaults(tmp_path):
     spec = AgentSpec(name="a", model="gpt-5.6-luna", harness="codex")
     ctx = _ctx(tmp_path, spec, secrets={"OPENAI_API_KEY": "sk-1", "MY_TOKEN": "t"})
@@ -433,7 +445,11 @@ async def test_run_happy_path(tmp_path, monkeypatch):
         turn_completed("completed"),
     ]
     events, client = await _events_of(script, tmp_path, monkeypatch)
-    assert client.login_keys == ["sk-test"]  # fresh CODEX_HOME → API-key login
+    # Logged in with the per-run proxy token; the account key never reaches Codex.
+    assert len(client.login_keys) == 1 and client.login_keys[0] != "sk-test"
+    overrides = client.config.config_overrides
+    assert any(o.startswith('openai_base_url="http://127.0.0.1:') for o in overrides)
+    assert "sk-test" not in json.dumps([list(overrides), client.config.env])
     assert client.turns[0][0] == "go"
     assert client.closed
 
@@ -457,28 +473,59 @@ async def test_run_happy_path(tmp_path, monkeypatch):
     assert kinds[:1] == ["status"] and "tool_use" in kinds and "tool_result" in kinds
 
 
-async def test_run_skips_login_when_auth_exists(tmp_path, monkeypatch):
+async def test_run_logs_in_with_a_fresh_token_every_turn(tmp_path, monkeypatch):
+    """auth.json from an earlier turn holds a dead token (or, from an older version, the
+    account key itself): each turn replaces it."""
     spec = AgentSpec(name="a", model="gpt-5.6-luna", harness="codex")
-    ctx = _ctx(tmp_path, spec)
-    home = ctx.job_dir / "codex_home"
-    home.mkdir(parents=True)
-    (home / "auth.json").write_text("{}")
-    events, client = await _events_of(
-        [turn_started(), agent_message("hi"), token_usage(), turn_completed()],
-        tmp_path,
-        monkeypatch,
-        spec=spec,
-        ctx=ctx,
-    )
-    assert client.login_keys == []
+    script = [turn_started(), agent_message("hi"), token_usage(), turn_completed()]
+    tokens = []
+    for _ in range(2):
+        ctx = _ctx(tmp_path, spec)
+        home = ctx.job_dir / "codex_home"
+        home.mkdir(parents=True, exist_ok=True)
+        (home / "auth.json").write_text("{}")
+        _, client = await _events_of(script, tmp_path, monkeypatch, spec=spec, ctx=ctx)
+        tokens += client.login_keys
+    assert len(set(tokens)) == 2 and "sk-test" not in tokens
 
 
 async def test_run_no_credentials_raises(tmp_path, monkeypatch):
     spec = AgentSpec(name="a", model="gpt-5.6-luna", harness="codex")
     ctx = _ctx(tmp_path, spec, secrets={})
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    # An auth.json left by an earlier turn is no credential: its token died with that run.
+    home = ctx.job_dir / "codex_home"
+    home.mkdir(parents=True)
+    (home / "auth.json").write_text("{}")
     with pytest.raises(RuntimeError, match="no OpenAI credentials"):
         await _events_of([turn_completed()], tmp_path, monkeypatch, spec=spec, ctx=ctx)
+
+
+@pytest.mark.parametrize(
+    "codex_config",
+    [{"openai_base_url": "https://gateway.example/v1"}, {"model_provider": "mine"}],
+)
+async def test_a_caller_chosen_endpoint_is_not_proxied(tmp_path, monkeypatch, codex_config):
+    spec = AgentSpec(
+        name="a", model="gpt-5.6-luna", harness="codex", codex_config=codex_config
+    )
+    script = [turn_started(), agent_message("hi"), token_usage(), turn_completed()]
+    _, client = await _events_of(script, tmp_path, monkeypatch, spec=spec)
+    assert client.login_keys == ["sk-test"]
+    assert not any("127.0.0.1" in o for o in client.config.config_overrides)
+
+
+async def test_a_call_the_proxy_refused_is_reported(tmp_path, monkeypatch):
+    from harness_run.harness import _openai_proxy
+
+    monkeypatch.setattr(
+        _openai_proxy.OpenAIProxy, "drain_refused", lambda self: ["GET /v1/files"]
+    )
+    script = [turn_started(), agent_message("hi"), token_usage(), turn_completed()]
+    events, _ = await _events_of(script, tmp_path, monkeypatch)
+    refused = [e for e in events if (e.raw or {}).get("event") == "openai_proxy_refused"]
+    assert refused and refused[0].raw["call"] == "GET /v1/files"
+    assert events[-1].kind == "result"
 
 
 async def test_run_failed_turn(tmp_path, monkeypatch):

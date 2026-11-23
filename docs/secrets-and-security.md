@@ -21,6 +21,7 @@ result = await session.run(
 | a repo's `auth=` token | embedded in `git` `origin` for clone/push | **no** |
 | a `McpServer.github()` token (`GH_TOKEN`/`GITHUB_TOKEN`/`GH_PAT`) | injected into MCP request headers | **no** |
 | `OPENROUTER_API_KEY` | the local proxy, which is what calls OpenRouter | **no** — the CLI gets a per-run proxy token |
+| `OPENAI_API_KEY` (`codex` harness) | the local proxy, which is what calls the OpenAI API | **no** — the CLI gets a per-run proxy token |
 
 **The blast-radius model — the honest part.** A background agent can be steered by hostile input (a web page it
 reads, a file in a repo) into revealing whatever it can reach: environment variables, `.git/config`, a
@@ -47,8 +48,21 @@ switches to API-key mode, where you pass `ANTHROPIC_API_KEY` as a per-invocation
 read a long-lived key, so prefer Vertex for anything exposed to untrusted input. Locally the agent likewise inherits your shell's environment (including
 your own `ANTHROPIC_API_KEY`, or — with no key set — your `claude.ai` subscription login: see
 [which credential pays for a local run](local-runtime.md)); local is a trusted-dev context.
-An [OpenRouter model](openrouter.md) is the one case where a model key is never
-in the agent's environment even in API-key mode.
+An [OpenRouter model](openrouter.md) and an OpenAI model on the `codex` harness are the cases
+where the model key is never handed to the CLI at all.
+
+**OpenAI key (`codex` harness).** Codex stores the key it is logged in with in
+`CODEX_HOME/auth.json`, a file the agent's shell can read. So the library does not log Codex in
+with your key. It runs a proxy on `127.0.0.1` for the turn, points Codex at it and logs Codex in
+with a random token made for that run. The proxy swaps the token for the real key, which stays in
+the calling process (the worker, in a sandbox), and forwards the call, WebSocket or HTTP, to
+`api.openai.com`. It serves only the Responses endpoint, its compaction endpoint and the model
+list; any other call gets a 403 and an `openai_proxy_refused` status event. A coerced agent can
+therefore spend model tokens while the turn runs, as it could anyway, but it has no key to take
+away: the token stops working when the turn ends. This is not OS isolation. Code running as the
+same user as the calling process could still inspect that process, and a local run that takes
+the key from your shell environment leaves it there. If `codex_config` sets `openai_base_url` or
+`model_provider`, the proxy is not used and Codex is logged in with the key you passed.
 
 **In transit & at rest.** Secret values travel in exactly one place: the HTTPS body of the turn the client
 posts to the sandbox's worker through the platform's authenticated proxy. Nothing is persisted by the

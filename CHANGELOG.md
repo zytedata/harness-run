@@ -48,11 +48,13 @@ TestPyPI never accepts the same version twice, so a second rehearsal needs a ver
   `openai_base_url` or `model_provider` is left alone and logs in with the key as before.
   Pass the key on every turn: a turn with no `OPENAI_API_KEY` now fails even when an earlier
   turn of the same session had one. See
-  [Secrets and security](docs/secrets-and-security.md).
+  [Secrets and security](docs/secrets-and-security.md). ([#15])
 - **The sandbox worker closes its memory to the agent's shell.** The two run as the same user,
   so the shell could read the secrets the worker holds for a turn from the worker's memory.
   The worker now marks itself non-dumpable at startup, and `/health` reports the flag as
-  `dumpable`. Takes effect on the next `deploy`.
+  `dumpable`. Takes effect on the next `deploy`. ([#15])
+
+[#15]: https://github.com/zytedata/harness-run/pull/15
 
 ### Backwards-incompatible
 

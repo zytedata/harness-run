@@ -59,9 +59,12 @@ _CHUNK = 64 * 1024
 
 def _connect_upstream() -> socket.socket:
     """A TLS connection to the OpenAI API, for a WebSocket tunnel."""
+    context = ssl.create_default_context()
+    # Already the default on the Pythons we support; stated so it does not depend on one.
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
     raw = socket.create_connection((OPENAI_API_HOST, 443), timeout=30)
     try:
-        return ssl.create_default_context().wrap_socket(raw, server_hostname=OPENAI_API_HOST)
+        return context.wrap_socket(raw, server_hostname=OPENAI_API_HOST)
     except BaseException:
         raw.close()
         raise

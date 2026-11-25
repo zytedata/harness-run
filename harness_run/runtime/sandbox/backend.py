@@ -316,8 +316,9 @@ def deploy(
     refill is the one sandbox created after each dispatch, so a pool that idled out costs
     each next turn the creation latency until it warms again.
 
-    Model credentials: with ``use_vertex`` (default) every turn carries a one-hour Vertex
-    token minted by impersonating ``model_service_account`` (default the project's
+    Model credentials: with ``use_vertex`` (default) every turn that calls its model through
+    Vertex (Claude Code on a Claude model; not Codex, not an ``openrouter/`` model) carries a
+    one-hour Vertex token minted by impersonating ``model_service_account`` (default the project's
     ``harness-run-model@``, a predict-only account ``harness-run-gcp-setup`` creates; the deployer and
     every client need ``roles/iam.serviceAccountTokenCreator`` on it). The sandbox has no
     Google identity of its own. ``use_vertex=False`` is API-key mode: pass
@@ -662,6 +663,9 @@ class SandboxSession:
         self._refresh_stop: threading.Event | None = None  # stops the GCS token refresher
         self._gcs_token_expiry: str | None = None
         self._model_token_expiry: Any = None  # when the turn's model access ends
+        # Whether the current turn was given a model token: True/False for a turn started
+        # here (``_mint_tokens``), None for an adopted one, whose worker is asked instead.
+        self._turn_has_model_token: bool | None = None
         self._session_config = config
         self._session_config_uri: str | None = None
         self._session_config_resolved = config_resolved
@@ -859,12 +863,17 @@ class SandboxSession:
 
     # -- credentials for the turn -------------------------------------------------
 
-    def _mint_tokens(self, turn_id: str) -> tuple[str, dict[str, str], dict[str, Any] | None]:
+    def _mint_tokens(
+        self, turn_id: str, spec: AgentSpec | None = None,
+    ) -> tuple[str, dict[str, str], dict[str, Any] | None]:
         """Mint the run's GCS token and model token; start refreshing both while the run lives.
 
         Returns ``(gcs_token, model_env, model_token)`` — the env routes Claude Code to
         Vertex, the token (``model_token.token_record``) is what the worker's metadata
-        server serves; ``None`` on an API-key engine. Minting failures raise with the fix
+        server serves. Both are empty on an API-key engine, and for a turn whose effective
+        ``spec`` (default: the session's) does not call its model through Vertex
+        (``model_calls_use_vertex``): the agent's shell can use whatever the turn is given,
+        so a turn gets a model token only when it needs one. Minting failures raise with the fix
         spelled out: running a turn without the GCS token would leave the worker no way to
         write its record, and without a model token no way to call the model.
         """
@@ -887,7 +896,14 @@ class SandboxSession:
 
         model_env: dict[str, str] = {}
         model_token: dict[str, Any] | None = None
-        if engine._use_vertex:
+        from ...harness import model_calls_use_vertex
+
+        self._turn_has_model_token = False
+        if spec is None:
+            spec = self._client_spec()
+        # A handle rebuilt without its deploy record knows no harness (``_fallback_spec``):
+        # send the token then, and let the worker, which holds the baked spec, decide.
+        if engine._use_vertex and (not spec.harness or model_calls_use_vertex(spec)):
             from .model_token import vertex_model_env
 
             if not engine._model_service_account or not engine._project:
@@ -898,6 +914,7 @@ class SandboxSession:
                 )
             model_token = self._mint_model_token()
             model_env = vertex_model_env(engine._project, engine._vertex_region)
+            self._turn_has_model_token = True
 
         self._start_refresh()
         return token, model_env, model_token
@@ -921,13 +938,17 @@ class SandboxSession:
     def _refresh_model_token(self) -> bool:
         """Mint a fresh model token and hand it to the running turn's worker (``/token``).
 
-        ``True`` when there is nothing to retry: an API-key engine, no worker yet (the turn is
-        still being dispatched with a token minutes old), or the worker took it — also when
-        it *refused* it (the turn ended, or runs without a token). ``False`` on a transport
-        failure, so the refresher tries again soon.
+        ``True`` when there is nothing to retry: an API-key engine, a turn that was given no
+        model token, no worker yet (the turn is still being dispatched with a token minutes
+        old), or the worker took it — also when it *refused* it (the turn ended, or runs
+        without a token). ``False`` on a transport failure, so the refresher tries again soon.
+
+        An adopted turn was started elsewhere, so whether it carries a token is the worker's
+        to say: the first push asks, and a worker that answers ``no_model_token`` is not
+        sent another (nor is one minted). The refused token never enters the sandbox's turn.
         """
         engine = self._engine
-        if not engine._use_vertex:
+        if not engine._use_vertex or self._turn_has_model_token is False:
             return True
         sandbox, turn_id = self._sandbox, self._turn_id
         if sandbox is None or turn_id is None:
@@ -940,7 +961,9 @@ class SandboxSession:
         except Exception:  # noqa: BLE001 — IAM or the proxy: the worker keeps its current token
             logger.warning("model token refresh for %s failed; retrying", self._session_id, exc_info=True)
             return False
-        if not resp.get("ok"):
+        if resp.get("no_model_token"):
+            self._turn_has_model_token = False  # the turn runs without one: stop minting
+        elif not resp.get("ok"):
             logger.warning("worker refused the refreshed model token for %s: %s",
                            self._session_id, resp.get("error"))
         return True
@@ -1057,7 +1080,7 @@ class SandboxSession:
         turn_id = uuid.uuid4().hex
         self._resolve_session_config()
         client_spec = self._client_spec(turn_config)  # validates the overlay before anything else
-        gcs_token, model_env, model_token = self._mint_tokens(turn_id)
+        gcs_token, model_env, model_token = self._mint_tokens(turn_id, client_spec)
         turn_config_dict = turn_config.to_dict() if turn_config is not None and turn_config.set_fields() else None
         turn_config_uri = None
         if turn_config_dict:
@@ -1400,6 +1423,7 @@ class SandboxSession:
         self._control_ready = control_ready
         self._drop_pending_control()
         self._adopted = True
+        self._turn_has_model_token = None  # started elsewhere: the worker knows (``_refresh_model_token``)
         self._start_refresh()
         events_uri = f"{engine._output_bucket}/events"
         store_kwargs = engine._gcs_store_kwargs()

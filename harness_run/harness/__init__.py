@@ -15,7 +15,7 @@ from .base import Harness
 if TYPE_CHECKING:
     from ..spec import AgentSpec
 
-__all__ = ["Harness", "resolve_harness"]
+__all__ = ["Harness", "model_calls_use_vertex", "resolve_harness"]
 
 
 def resolve_harness(spec: AgentSpec) -> Harness:
@@ -35,3 +35,22 @@ def resolve_harness(spec: AgentSpec) -> Harness:
 
         return CodexHarness()
     raise ValueError(f"unknown harness: {name!r} (expected 'claude-code' or 'codex')")
+
+
+def model_calls_use_vertex(spec: AgentSpec) -> bool:
+    """Whether a turn with this effective spec sends its model calls to Vertex.
+
+    This decides which turns of a Vertex engine are given the model token and the Vertex
+    environment (the sandbox client mints them, the worker hands them to the CLI): only a
+    turn that calls its model through Vertex needs them, and anything a turn is given the
+    agent's shell can use. Today that is Claude Code on a Claude model. A turn on an
+    ``openrouter/`` model calls OpenRouter with the caller's key, and Codex calls OpenAI
+    with the caller's key, so neither gets a token. The question is where the model call
+    goes, not which harness runs: a harness that learns to call its model through Vertex
+    belongs here too.
+    """
+    from ._shared import OPENROUTER_PREFIX
+
+    if (getattr(spec, "model", None) or "").startswith(OPENROUTER_PREFIX):
+        return False
+    return getattr(spec, "harness", None) == "claude-code"

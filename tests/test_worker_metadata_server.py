@@ -87,7 +87,7 @@ def test_a_turn_without_a_model_token_refuses_token_pushes_and_serves_none(tmp_p
     worker = _worker(tmp_path)
     _running_turn(worker, "t1", None)
     assert worker.handle("/token", {"turn_id": "t1", "model_token": {"access_token": "x"}}) == {
-        "ok": False, "error": "this turn runs without a model token"}
+        "ok": False, "error": "this turn runs without a model token", "no_model_token": True}
     assert worker.served_model_token() is None
 
 

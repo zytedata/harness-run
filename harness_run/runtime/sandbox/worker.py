@@ -386,7 +386,7 @@ class Worker:
             apply_turn_config,
             validate_harness_choice,
         )
-        from ...harness import resolve_harness
+        from ...harness import model_calls_use_vertex, resolve_harness
         from ...harness.context import RunContext
         from ...ports.blobstore import parse_gcs_uri, set_default_gcs_credentials
         from .history import mirror_line, write_turn_mirror
@@ -467,6 +467,11 @@ class Worker:
             record.control = control
             record.workspace = job_dir / "workspace"  # RunContext.workspace, before it exists
         model_token = _token_record(body.get("model_token"))
+        if not model_calls_use_vertex(spec):
+            # The worker's merge of the configs is the ground truth for what this turn
+            # runs. A turn that does not call its model through Vertex gets neither the
+            # token nor the Vertex env, whatever the client sent: its shell could use them.
+            model_env, model_token = {}, None
         if model_token is not None:
             # Served by the metadata server, not placed in the env: the CLI fetches it and
             # re-fetches it near expiry, and /token swaps in the client's refreshed one.
@@ -713,7 +718,8 @@ class Worker:
             return {"ok": False, "error": "model_token {access_token, expires_at} is required"}
         with self._lock:
             if record.model_token is None:
-                return {"ok": False, "error": "this turn runs without a model token"}
+                return {"ok": False, "error": "this turn runs without a model token",
+                        "no_model_token": True}
             record.model_token = token
         return {"ok": True}
 

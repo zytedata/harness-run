@@ -88,6 +88,11 @@ its shell is therefore what the turn itself brought along, and the library keeps
 - **Model token.** An hourly Vertex token for the predict-only model service account (above), served by
   the worker's loopback metadata server (`GCE_METADATA_HOST` in the agent's env points at it): model calls,
   nothing else. Spend past the run's `max_budget_usd` is the only thing a coerced agent could add.
+  Only a turn that calls its model through Vertex gets it, which today means Claude Code on a Claude
+  model. A turn on the `codex` harness or on an `openrouter/` model gets no token and no Vertex
+  variables, and the worker starts no metadata server for it. The client decides this per turn from
+  the turn's effective harness and model, and the worker checks it again against its own merge of the
+  configs, so a token sent by mistake is dropped before the CLI starts.
 - **The turn's own secrets** — those the caller passed, routed as the table above says.
 - **Not the worker's memory.** The worker holds the secrets the agent is not given (a model key
   behind a local proxy, repo and MCP tokens) and runs as the same user as the agent. Two things

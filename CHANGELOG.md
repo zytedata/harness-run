@@ -55,6 +55,14 @@ TestPyPI never accepts the same version twice, so a second rehearsal needs a ver
   keeps that true without relying on the platform setting and also closes the worker's
   `/proc/<pid>/environ` and `maps`. `/health` reports the flag as `dumpable`. Takes effect on
   the next `deploy`. ([#15])
+- **A turn gets the Vertex model token only when its model call goes to Vertex.** On a Vertex
+  engine every turn used to be given the hourly model token and the Vertex environment,
+  including turns on the `codex` harness and on `openrouter/` models, which never use them.
+  The agent's shell could fetch that token and call Claude models on the project for up to an
+  hour. Now the client mints and refreshes the token only for a turn whose effective harness and
+  model call Claude through Vertex, and the worker drops one sent to any other turn. The worker
+  half takes effect on the next `deploy`; the client half as soon as the client is upgraded. See
+  [Secrets and security](docs/secrets-and-security.md).
 
 [#15]: https://github.com/zytedata/harness-run/pull/15
 

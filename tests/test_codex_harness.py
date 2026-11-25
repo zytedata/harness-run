@@ -515,6 +515,46 @@ async def test_a_caller_chosen_endpoint_is_not_proxied(tmp_path, monkeypatch, co
     assert not any("127.0.0.1" in o for o in client.config.config_overrides)
 
 
+async def test_a_caller_chosen_endpoint_still_needs_something_to_log_in_with(
+    tmp_path, monkeypatch
+):
+    """No key and no earlier login: fail before the turn, naming the secret."""
+    spec = AgentSpec(
+        name="a",
+        model="gpt-5.6-luna",
+        harness="codex",
+        codex_config={"openai_base_url": "https://gateway.example/v1"},
+    )
+    ctx = _ctx(tmp_path, spec, secrets={})
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    with pytest.raises(RuntimeError, match="no OpenAI credentials"):
+        await _events_of([turn_completed()], tmp_path, monkeypatch, spec=spec, ctx=ctx)
+    # With the login an earlier turn left for that endpoint, the turn runs as it did before.
+    (ctx.job_dir / "codex_home" / "auth.json").write_text("{}")
+    script = [turn_started(), agent_message("hi"), token_usage(), turn_completed()]
+    events, client = await _events_of(script, tmp_path, monkeypatch, spec=spec, ctx=ctx)
+    assert client.login_keys == [] and events[-1].kind == "result"
+
+
+async def test_a_call_refused_during_the_last_notification_is_still_reported(
+    tmp_path, monkeypatch
+):
+    from harness_run.harness import _openai_proxy
+
+    drains = []
+
+    def drain(self):
+        drains.append(1)
+        # Nothing until the per-notification drain of turn/completed has run.
+        return ["POST /v1/files"] if len(drains) == 3 else []
+
+    monkeypatch.setattr(_openai_proxy.OpenAIProxy, "drain_refused", drain)
+    events, _ = await _events_of([turn_started(), turn_completed()], tmp_path, monkeypatch)
+    kinds = [(e.raw or {}).get("event") for e in events]
+    assert "openai_proxy_refused" in kinds
+    assert events[-1].kind == "result"
+
+
 async def test_a_call_the_proxy_refused_is_reported(tmp_path, monkeypatch):
     from harness_run.harness import _openai_proxy
 

@@ -49,10 +49,12 @@ TestPyPI never accepts the same version twice, so a second rehearsal needs a ver
   Pass the key on every turn: a turn with no `OPENAI_API_KEY` now fails even when an earlier
   turn of the same session had one. See
   [Secrets and security](docs/secrets-and-security.md). ([#15])
-- **The sandbox worker closes its memory to the agent's shell.** The two run as the same user,
-  so the shell could read the secrets the worker holds for a turn from the worker's memory.
-  The worker now marks itself non-dumpable at startup, and `/health` reports the flag as
-  `dumpable`. Takes effect on the next `deploy`. ([#15])
+- **The sandbox worker marks itself non-dumpable at startup.** The worker holds the secrets a
+  turn does not give the agent, and the two run as the same user. The sandbox already refuses
+  the agent's shell the worker's memory (it may inspect only its own descendants); the flag
+  keeps that true without relying on the platform setting and also closes the worker's
+  `/proc/<pid>/environ` and `maps`. `/health` reports the flag as `dumpable`. Takes effect on
+  the next `deploy`. ([#15])
 
 [#15]: https://github.com/zytedata/harness-run/pull/15
 

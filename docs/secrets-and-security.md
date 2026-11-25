@@ -57,10 +57,14 @@ with your key. It runs a proxy on `127.0.0.1` for the turn, points Codex at it a
 with a random token made for that run. The proxy swaps the token for the real key, which stays in
 the calling process (the worker, in a sandbox), and forwards the call, WebSocket or HTTP, to
 `api.openai.com`. It serves only the Responses endpoint, its compaction endpoint and the model
-list; any other call gets a 403 and an `openai_proxy_refused` status event. A coerced agent can
-therefore spend model tokens while the turn runs, as it could anyway, but it has no key to take
-away: the token stops working when the turn ends. In a sandbox the worker also closes its own
-memory to the agent (see [What the agent's shell can reach](#what-the-agents-shell-can-reach)).
+list; any other call gets a 403 and an `openai_proxy_refused` status event. A coerced agent has
+no key to take away: the token stops working when the turn ends. While the turn runs, though, its
+shell can read the token and call the proxy itself, and those calls are outside `max_budget_usd`
+and `max_turns`: the harness counts only the usage Codex reports for its own calls, and the proxy
+does not meter what passes through it. What bounds that spend is the length of the turn and the
+limits on the key, so give the harness a project key with a spend limit of its own. In a sandbox
+the worker also closes its own memory to the agent (see
+[What the agent's shell can reach](#what-the-agents-shell-can-reach)).
 A local run has no such protection, and a key taken from your shell environment stays there. If `codex_config` sets `openai_base_url` or
 `model_provider`, the proxy is not used and Codex is logged in with the key you passed.
 
@@ -86,12 +90,14 @@ its shell is therefore what the turn itself brought along, and the library keeps
   nothing else. Spend past the run's `max_budget_usd` is the only thing a coerced agent could add.
 - **The turn's own secrets** — those the caller passed, routed as the table above says.
 - **Not the worker's memory.** The worker holds the secrets the agent is not given (a model key
-  behind a local proxy, repo and MCP tokens) and runs as the same user as the agent. It marks
-  itself non-dumpable at startup, so the agent's shell cannot read its memory through
-  `/proc/<pid>/mem`, `process_vm_readv` or `ptrace`. Without the flag all three work in the
-  sandbox; with it all three are refused (verified live 2026-11-23, and re-checked by
-  `make live-smoke`'s isolation check). The worker's `/proc/<pid>/environ` stays readable, but it
-  is the image's environment and never holds a turn's secrets.
+  behind a local proxy, repo and MCP tokens) and runs as the same user as the agent. Two things
+  keep the agent's shell out of it. The sandbox itself lets a process inspect only its own
+  descendants (Yama `ptrace_scope=1`), so `/proc/<pid>/mem`, `process_vm_readv` and `ptrace` on
+  the worker are refused. The worker also marks itself non-dumpable at startup, which does not
+  depend on that platform setting and closes its `/proc/<pid>/environ` and `maps` as well; both
+  were readable without the flag. The environment is the image's and never holds a turn's
+  secrets, so this is defence in depth (verified live 2026-11-25, and re-checked by
+  `make live-smoke`'s isolation check).
 
 Sandboxes are created per turn and deleted at its end, so nothing a run leaves behind survives into the
 next one; multi-turn continuity rides the checkpoint (a credential-scrubbed tar in your bucket). There is

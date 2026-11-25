@@ -1288,11 +1288,15 @@ class CodexHarness:
                     # earlier turn (or an older version, which stored the account key
                     # itself) left in auth.json.
                     await codex.login_api_key(options.api_key)
-                elif self._own_openai_endpoint(spec):
-                    # The caller's own endpoint gets the caller's key, as given.
-                    if options.api_key and not (options.codex_home / "auth.json").exists():
+                elif options.api_key and self._own_openai_endpoint(spec):
+                    # The caller's own endpoint gets what the caller passed, as given.
+                    if not (options.codex_home / "auth.json").exists():
                         await codex.login_api_key(options.api_key)
-                else:
+                elif not (
+                    self._own_openai_endpoint(spec) and (options.codex_home / "auth.json").exists()
+                ):
+                    # Also for a caller's own endpoint with nothing to log in with: failing
+                    # here names the missing secret, where Codex would fail later without it.
                     raise RuntimeError(
                         "codex harness has no OpenAI credentials: pass OPENAI_API_KEY in the "
                         "per-invocation secrets (or set it in the environment)"
@@ -1457,6 +1461,10 @@ class CodexHarness:
                                 yield await continue_with(msg)
                                 continue
                         async for event in drain_proxy(proxy):
+                            yield event
+                        # Once more before the result: a call refused while this last
+                        # notification was being handled has no later one to report it.
+                        for event in self._refused_events(openai_proxy):
                             yield event
                         exact_cost = proxy.exact_cost_usd if proxy is not None else None
                         if (

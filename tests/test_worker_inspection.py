@@ -42,3 +42,15 @@ def test_a_child_process_cannot_open_the_workers_memory_or_environment():
 
 def test_the_test_process_itself_stays_inspectable():
     assert worker._dumpable() is True
+
+
+def test_a_failing_prctl_reports_unknown(monkeypatch):
+    import ctypes
+
+    class Libc:
+        @staticmethod
+        def prctl(*_args):
+            return -1
+
+    monkeypatch.setattr(ctypes, "CDLL", lambda *a, **k: Libc())
+    assert worker._dumpable() is None

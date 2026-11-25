@@ -219,26 +219,27 @@ out["mds_token"] = f"{st} len={len(tok)}"
 if tok:
     out.update(reach(tok))
 out["env_token_names"] = sorted(k for k in os.environ if "TOKEN" in k or "KEY" in k)
-# The worker is an ancestor of this shell and runs as the same user. Its memory must still
-# be closed to us (it marks itself non-dumpable at startup), by every route: /proc/<pid>/mem,
-# process_vm_readv and ptrace. Without the flag all three work in the sandbox (verified live
-# 2026-11-23 against a plain same-user process). Its /proc/<pid>/environ stays readable there
-# all the same; it is the image's environment, and no secret of a turn is ever in it.
+# The worker runs as the same user as this shell and holds the secrets the agent is not
+# given. The sandbox already refuses a process that is not our descendant on the memory
+# routes (/proc/<pid>/mem, process_vm_readv, ptrace: Yama ptrace_scope=1). The worker marks
+# itself non-dumpable on top of that, which also closes its /proc/<pid>/environ and maps,
+# and is what this asks for (verified live 2026-11-25: readable without the flag, denied
+# with it). The pid comes from /health: the shell above us has the word "worker" in its
+# command line too, since it carries this script.
 import ctypes
-pid, worker = os.getppid(), None
-while pid > 1 and worker is None:
-    if b"worker" in open(f"/proc/{pid}/cmdline", "rb").read():
-        worker = pid
-    else:
-        pid = int(open(f"/proc/{pid}/stat").read().rsplit(")", 1)[1].split()[1])
+st, body = get("http://127.0.0.1:" + os.environ.get("PORT", "8080") + "/health")
+health = json.loads(body) if st == 200 else {}
+worker = health.get("pid")
+out["worker_dumpable"] = health.get("dumpable")
 out["worker_found"] = worker is not None
 if worker is not None:
     libc = ctypes.CDLL(None, use_errno=True)
-    try:
-        open(f"/proc/{worker}/mem", "rb").close()
-        out["worker_mem"] = "open"
-    except OSError as exc:
-        out["worker_mem"] = "denied" if exc.errno in (1, 13) else f"errno {exc.errno}"
+    for name in ("mem", "environ", "maps"):
+        try:
+            open(f"/proc/{worker}/{name}", "rb").close()
+            out["worker_" + name] = "open"
+        except OSError as exc:
+            out["worker_" + name] = "denied" if exc.errno in (1, 13) else f"errno {exc.errno}"
     class iovec(ctypes.Structure):
         _fields_ = [("base", ctypes.c_void_p), ("len", ctypes.c_size_t)]
     buf = ctypes.create_string_buffer(16)
@@ -534,7 +535,11 @@ async def check_isolation(engine, verdicts) -> None:
             and _refused(facts)
             and "ANTHROPIC_AUTH_TOKEN" not in facts.get("env_token_names", [])  # nothing outside a turn
             and facts.get("worker_found") is True
-            and all(facts.get(f"worker_{n}") == "denied" for n in ("mem", "vm_readv", "ptrace"))
+            and facts.get("worker_dumpable") is False
+            and all(
+                facts.get(f"worker_{n}") == "denied"
+                for n in ("mem", "environ", "maps", "vm_readv", "ptrace")
+            )
         )
     except Exception:
         log(label, "FAILED:\n" + traceback.format_exc())

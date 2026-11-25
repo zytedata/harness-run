@@ -62,9 +62,10 @@ TestPyPI never accepts the same version twice, so a second rehearsal needs a ver
   hour. Now the client mints and refreshes the token only for a turn whose effective harness and
   model call Claude through Vertex, and the worker drops one sent to any other turn. The worker
   half takes effect on the next `deploy`; the client half as soon as the client is upgraded. See
-  [Secrets and security](docs/secrets-and-security.md).
+  [Secrets and security](docs/secrets-and-security.md). ([#18])
 
 [#15]: https://github.com/zytedata/harness-run/pull/15
+[#18]: https://github.com/zytedata/harness-run/pull/18
 
 ### Backwards-incompatible
 

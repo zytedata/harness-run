@@ -1,4 +1,4 @@
-"""Helpers shared by the harness bindings (``claude_code``, ``codex``).
+"""Helpers shared by the harness bindings (``claude_code``, ``codex``, ``antigravity``).
 
 Everything here is harness-agnostic policy — how secrets are routed, how the agent
 subprocess env is layered, the interactive-mode prompt suffix, the inline workspace
@@ -32,6 +32,10 @@ OPENROUTER_KEY_ENV = "OPENROUTER_API_KEY"
 # ``openrouter/``-prefixed model (see ``harness.codex``).
 CODEX_MODEL_AUTH_KEYS = ("OPENAI_API_KEY", OPENROUTER_KEY_ENV)
 
+# Model-auth secrets the Antigravity binding hands to its SDK as config (the Gemini API key
+# and its google-genai alias); see ``harness.antigravity``.
+ANTIGRAVITY_MODEL_AUTH_KEYS = ("GEMINI_API_KEY", "GOOGLE_API_KEY")
+
 
 def harness_consumed_secret_names(spec: AgentSpec) -> set[str]:
     """Secret names the *harness* consumes on the agent's behalf, so they stay OUT of its env.
@@ -42,7 +46,9 @@ def harness_consumed_secret_names(spec: AgentSpec) -> set[str]:
     can read. The Codex binding additionally consumes its model-auth
     keys: ``OPENAI_API_KEY`` (routed to ``codex login``) and ``OPENROUTER_API_KEY`` (routed to
     the OpenRouter provider config). Codex lists both whichever model the turn runs, so passing
-    one the turn doesn't use still doesn't leak it into the agent's shell. The Claude binding
+    one the turn doesn't use still doesn't leak it into the agent's shell. The Antigravity
+    binding consumes ``GEMINI_API_KEY`` and ``GOOGLE_API_KEY`` (handed to its SDK as
+    config). The Claude binding
     consumes ``OPENROUTER_API_KEY`` only for an ``openrouter/`` model (routed to
     ``ANTHROPIC_AUTH_TOKEN``); on a native Anthropic turn it has no model-auth key to route,
     so one passed anyway stays the agent's own. Everything else the caller passes is the
@@ -57,6 +63,8 @@ def harness_consumed_secret_names(spec: AgentSpec) -> set[str]:
         names.update(GITHUB_MCP_TOKEN_KEYS)
     if getattr(spec, "harness", "") == "codex":
         names.update(CODEX_MODEL_AUTH_KEYS)
+    elif getattr(spec, "harness", "") == "antigravity":
+        names.update(ANTIGRAVITY_MODEL_AUTH_KEYS)
     elif (getattr(spec, "model", "") or "").startswith(OPENROUTER_PREFIX):
         # claude-code reaches OpenRouter through ANTHROPIC_AUTH_TOKEN, so the key is the
         # harness's to route here too.

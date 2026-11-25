@@ -15,7 +15,7 @@ authors = [
     { name = "Ivan Sanchez" },
     { name = "Julia Medina" },
 ]
-keywords = ["agent", "claude-code", "codex", "sandbox", "llm", "remote-execution"]
+keywords = ["agent", "claude-code", "codex", "antigravity", "sandbox", "llm", "remote-execution"]
 classifiers = [
     "Environment :: Console",
     "Development Status :: 4 - Beta",
@@ -45,10 +45,12 @@ dependencies = [
 # claude-agent-sdk from its own baked requirements (runtime/sandbox/_image.py), which
 # stay pinned regardless of this extra. Kept out of the base install because the SDKs drag in heavyweight or
 # conflicting pins (claude-agent-sdk requires mcp<2, which blocks apps on the mcp 2.x
-# SDK; openai-codex bundles the codex CLI binary).
+# SDK; openai-codex bundles the codex CLI binary; google-antigravity bundles its
+# localharness binary).
 local = [
     "claude-agent-sdk==0.2.184",  # matches the image pin; validated on both runtimes
     "openai-codex==0.170.0",  # custom-provider config used by the OpenRouter route
+    "google-antigravity==0.1.23",  # local runtime only (the sandbox image does not bake it)
 ]
 
 # Dev tooling lives in a dependency group (PEP 735), not an install extra: `pip install
@@ -56,10 +58,11 @@ local = [
 # `uv sync` / `uv pip install --group dev`.
 [dependency-groups]
 dev = [
-    # The suite exercises both harnesses, so the dev group carries the `local` extra's
-    # SDKs too — keep these two lines in lockstep with [project.optional-dependencies].
+    # The suite exercises every harness, so the dev group carries the `local` extra's
+    # SDKs too — keep these lines in lockstep with [project.optional-dependencies].
     "claude-agent-sdk==0.2.184",
     "openai-codex==0.170.0",
+    "google-antigravity==0.1.23",
     "pytest",
     "pytest-asyncio",
     # Pinned to the CI-green series: 0.16 added rules (RUF022, UP035/41, S110, ...)

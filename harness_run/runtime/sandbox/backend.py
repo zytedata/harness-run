@@ -353,6 +353,13 @@ def deploy(
                 "CHANGELOG, 'Backwards-incompatible'). Drop the argument rather than assume it took effect."
             )
         raise TypeError(f"deploy() got unexpected keyword argument(s) {sorted(kwargs)}")
+    if "antigravity" in spec.baked_harnesses:
+        # The image does not install google-antigravity, and the worker has no Gemini
+        # credential route; fail before minutes of image build rather than at the first turn.
+        raise ValueError(
+            "the antigravity harness runs on the local runtime only for now; deploy it with "
+            "harness_run.local.deploy()"
+        )
     from .handoff import ensure_handoff_lifecycle, write_deploy_record
     from .model_token import default_model_service_account
 

@@ -322,10 +322,12 @@ class AgentSpec:
 
     Attributes:
         name: Stable agent name. Maps to a deployed engine's display name (§5).
-        model: Model id the harness runs, e.g. ``"claude-sonnet-4-6"`` (Claude Code) or
-            a GPT model id (Codex). An ``openrouter/<vendor>/<model>`` id runs through
-            OpenRouter on either harness.
-        harness: The coding-agent loop to run: ``"claude-code"`` or ``"codex"``. Required —
+        model: Model id the harness runs, e.g. ``"claude-sonnet-4-6"`` (Claude Code), a GPT
+            model id (Codex) or a Gemini 4 model id such as ``"gemini-4-neon"``
+            (Antigravity). An ``openrouter/<vendor>/<model>`` id runs through OpenRouter on
+            Claude Code and Codex.
+        harness: The coding-agent loop to run: ``"claude-code"``, ``"codex"`` or
+            ``"antigravity"`` (Gemini models; local runtime only for now). Required —
             there is no default, because which loop runs an agent is a choice worth making
             rather than inheriting.
             The spec's harness-shaped fields (``permission_mode``, tool lists, skills)

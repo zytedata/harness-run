@@ -1,7 +1,7 @@
 """Harness-SDK import with the ``[local]`` install-extra hint.
 
-The harness SDKs (``claude-agent-sdk``, ``openai-codex``) live in the ``local`` install
-extra; the base install covers only the remote path. Every lazy SDK import in the
+The harness SDKs (``claude-agent-sdk``, ``openai-codex``, ``google-antigravity``) live in
+the ``local`` install extra; the base install covers only the remote path. Every lazy SDK import in the
 harnesses goes through :func:`import_local_sdk`, so a missing SDK fails with the
 actionable message on whichever path imports it first — the ``_run`` imports fire before
 ``build_options``, so guarding only the latter showed users the bare

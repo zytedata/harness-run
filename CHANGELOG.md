@@ -45,9 +45,19 @@ TestPyPI never accepts the same version twice, so a second rehearsal needs a ver
   return value (`for name in provision(...)`) reads `provision(...).names` now. ([#11])
 
 [#11]: https://github.com/zytedata/harness-run/pull/11
+[#14]: https://github.com/zytedata/harness-run/pull/14
 
 ### Added
 
+- An `antigravity` harness runs Google's Antigravity agent loop (the `google-antigravity` SDK
+  0.1.23, in the `local` extra) with the Gemini 4 models (`gemini-4-neon`, `-carbon`,
+  `-hydrogen`, `-argon`) over the Gemini Developer API: `AgentSpec(harness="antigravity",
+  model="gemini-4-neon")` with a `GEMINI_API_KEY` per-invocation secret. Local runtime only for
+  now (`sandbox.deploy` rejects it). Skills, MCP servers, `output_schema`, `reasoning_effort`
+  (Gemini thinking levels), `max_turns`, `max_budget_usd` (priced from LiteLLM, with a baked
+  fallback table), checkpoint/resume, interrupt and steering are supported; `permission_mode`
+  other than `bypassPermissions`, tool allow/deny lists and hooks are rejected. See
+  [Harnesses and models](docs/harnesses-and-models.md#antigravity). ([#14])
 - Skills can be resolved at session start instead of being baked into the sandbox image:
   `AgentSpec(skills_resolution="session")` bakes no skills, and every session's first turn resolves the
   effective sources (the spec's, or a `SessionConfig(skills=...)` override) on the worker, so a push to

@@ -1,7 +1,9 @@
-"""Paid local attribution check for both harnesses.
+"""Paid local attribution check for the harnesses.
 
 Claude Code must report its resolved model. Codex must report its bound provider. Every
-OpenRouter response must report the selected upstream and exact cost. Checks run concurrently
+OpenRouter response must report the selected upstream and exact cost. Antigravity reports no
+served model, so its check is that the requested id reaches the Gemini API: the model runs and
+is priced, and an id that does not exist fails the turn instead of falling back to a default. Checks run concurrently
 unless ``SERIAL=1``. Run by hand with ``make live-attribution``; never run this in CI.
 """
 
@@ -17,6 +19,7 @@ from harness_run import AgentSpec, local
 TASK = "Reply with just the word: ok"
 CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL", "claude-haiku-4-5")
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-5.6-luna")
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-4-hydrogen")
 OR_MODELS = [
     "openrouter/moonshotai/kimi-k3",
     "openrouter/z-ai/glm-5.3",
@@ -133,6 +136,33 @@ async def check_codex_openai(key: str) -> None:
     )
 
 
+async def check_antigravity(key: str) -> None:
+    """The requested Gemini model runs and is priced; a nonexistent id is not replaced."""
+    spec = AgentSpec(
+        name="attr-agy", model=GEMINI_MODEL, harness="antigravity", max_turns=4, max_budget_usd=0.20
+    )
+    events, result = await _events(spec, {"GEMINI_API_KEY": key})
+    final = next((e for e in reversed(events) if e.kind == "result"), None)
+    check(
+        f"antigravity: {GEMINI_MODEL} ran and was priced",
+        not result.is_error
+        and isinstance(result.cost_usd, float)
+        and result.cost_usd > 0
+        and (final.raw or {}).get("price_source") in ("litellm", "builtin"),
+        f"cost={result.cost_usd!r} source={(final.raw or {}).get('price_source') if final else None} "
+        f"text={(result.text or '')[:40]!r}",
+    )
+    bogus = "gemini-4-does-not-exist"
+    spec = AgentSpec(name="attr-agy-bogus", model=bogus, harness="antigravity", max_turns=2,
+                     max_budget_usd=0.05)
+    events, result = await _events(spec, {"GEMINI_API_KEY": key})
+    check(
+        "antigravity: an unknown model id fails the turn (no silent default)",
+        result.is_error and "404" in (result.text or ""),
+        f"text={(result.text or '')[:120]!r}",
+    )
+
+
 async def check_codex_openrouter(model: str, key: str) -> None:
     """The override must actually bind the thread to the openrouter provider."""
     label = model.removeprefix("openrouter/")
@@ -177,6 +207,7 @@ async def main() -> int:
     ork = os.environ.get("OPENROUTER_API_KEY")
     oak = os.environ.get("OPENAI_API_KEY")
     ank = os.environ.get("ANTHROPIC_API_KEY")
+    gk = os.environ.get("GEMINI_API_KEY")
     print("model-attribution probe — spends real money", flush=True)
 
     tasks = []
@@ -187,6 +218,10 @@ async def main() -> int:
         tasks.append(("codex+openai", check_codex_openai(oak)))
     else:
         skip("codex+OpenAI: thread routing reported", "OPENAI_API_KEY unset")
+    if gk:
+        tasks.append(("antigravity", check_antigravity(gk)))
+    else:
+        skip("antigravity checks", "GEMINI_API_KEY unset")
     if ork:
         for m in OR_MODELS:
             tasks.append((f"codex+{m}", check_codex_openrouter(m, ork)))

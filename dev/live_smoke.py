@@ -229,6 +229,40 @@ out["mds_token"] = f"{st} len={len(tok)}"
 if tok:
     out.update(reach(tok))
 out["env_token_names"] = sorted(k for k in os.environ if "TOKEN" in k or "KEY" in k)
+# The worker runs as the same user as this shell and holds the secrets the agent is not
+# given. The sandbox already refuses a process that is not our descendant on the memory
+# routes (/proc/<pid>/mem, process_vm_readv, ptrace: Yama ptrace_scope=1). The worker marks
+# itself non-dumpable on top of that, which also closes its /proc/<pid>/environ and maps,
+# and is what this asks for (verified live 2026-11-25: readable without the flag, denied
+# with it). The pid comes from /health: the shell above us has the word "worker" in its
+# command line too, since it carries this script.
+import ctypes
+st, body = get("http://127.0.0.1:" + os.environ.get("PORT", "8080") + "/health")
+health = json.loads(body) if st == 200 else {}
+worker = health.get("pid")
+out["worker_dumpable"] = health.get("dumpable")
+out["worker_found"] = worker is not None
+if worker is not None:
+    libc = ctypes.CDLL(None, use_errno=True)
+    for name in ("mem", "environ", "maps"):
+        try:
+            open(f"/proc/{worker}/{name}", "rb").close()
+            out["worker_" + name] = "open"
+        except OSError as exc:
+            out["worker_" + name] = "denied" if exc.errno in (1, 13) else f"errno {exc.errno}"
+    class iovec(ctypes.Structure):
+        _fields_ = [("base", ctypes.c_void_p), ("len", ctypes.c_size_t)]
+    buf = ctypes.create_string_buffer(16)
+    local, remote = iovec(ctypes.cast(buf, ctypes.c_void_p), 16), iovec(ctypes.c_void_p(0x400000), 16)
+    libc.process_vm_readv.restype = ctypes.c_ssize_t
+    n = libc.process_vm_readv(worker, ctypes.byref(local), 1, ctypes.byref(remote), 1, 0)
+    # EPERM is the refusal. EFAULT would mean the access check passed and only the address was bad.
+    out["worker_vm_readv"] = "denied" if n < 0 and ctypes.get_errno() in (1, 13) else f"n={n} errno={ctypes.get_errno()}"
+    libc.ptrace.restype = ctypes.c_long
+    rc = libc.ptrace(0x4206, worker, 0, 0)  # PTRACE_SEIZE: attaches without stopping the worker
+    out["worker_ptrace"] = "denied" if rc != 0 and ctypes.get_errno() in (1, 13) else f"rc={rc} errno={ctypes.get_errno()}"
+    if rc == 0:
+        libc.ptrace(17, worker, 0, 0)  # PTRACE_DETACH
 print("ISOLATION " + json.dumps(out))
 PY
 """.strip()
@@ -511,6 +545,12 @@ async def check_isolation(engine, verdicts) -> None:
             and "gserviceaccount.com" not in identity  # a tenant identity, not one of ours
             and _refused(facts)
             and "ANTHROPIC_AUTH_TOKEN" not in facts.get("env_token_names", [])  # nothing outside a turn
+            and facts.get("worker_found") is True
+            and facts.get("worker_dumpable") is False
+            and all(
+                facts.get(f"worker_{n}") == "denied"
+                for n in ("mem", "environ", "maps", "vm_readv", "ptrace")
+            )
         )
     except Exception:
         log(label, "FAILED:\n" + traceback.format_exc())

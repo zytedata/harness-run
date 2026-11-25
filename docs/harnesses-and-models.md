@@ -60,8 +60,9 @@ What to know when running Codex:
 
 - **Model auth**: OpenAI models are called directly (they have no Vertex path), so every run —
   local or remote — needs an `OPENAI_API_KEY` per-invocation secret (local runs fall back to the
-  ambient env var). The harness routes it to `codex login` inside an isolated per-job `CODEX_HOME`;
-  it never appears in the agent's shell environment.
+  ambient env var). The key stays in the calling process: model calls go through a per-run local
+  proxy and Codex is logged in with a throwaway token, so the key is neither in the agent's shell
+  environment nor in `CODEX_HOME` (see [Secrets and security](secrets-and-security.md)).
 - **Skills** use the same `<name>/SKILL.md` format and the same `SkillSource` list — they are staged
   into `<cwd>/.agents/skills`, Codex's discovery path (that's the layout of
   [zytedata/codex-skills](https://github.com/zytedata/codex-skills)).

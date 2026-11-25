@@ -21,6 +21,7 @@ result = await session.run(
 | a repo's `auth=` token | embedded in `git` `origin` for clone/push | **no** |
 | a `McpServer.github()` token (`GH_TOKEN`/`GITHUB_TOKEN`/`GH_PAT`) | injected into MCP request headers | **no** |
 | `OPENROUTER_API_KEY` | the local proxy, which is what calls OpenRouter | **no** — the CLI gets a per-run proxy token |
+| `OPENAI_API_KEY` (`codex` harness) | the local proxy, which is what calls the OpenAI API | **no** — the CLI gets a per-run proxy token |
 
 **The blast-radius model — the honest part.** A background agent can be steered by hostile input (a web page it
 reads, a file in a repo) into revealing whatever it can reach: environment variables, `.git/config`, a
@@ -47,8 +48,25 @@ switches to API-key mode, where you pass `ANTHROPIC_API_KEY` as a per-invocation
 read a long-lived key, so prefer Vertex for anything exposed to untrusted input. Locally the agent likewise inherits your shell's environment (including
 your own `ANTHROPIC_API_KEY`, or — with no key set — your `claude.ai` subscription login: see
 [which credential pays for a local run](local-runtime.md)); local is a trusted-dev context.
-An [OpenRouter model](openrouter.md) is the one case where a model key is never
-in the agent's environment even in API-key mode.
+An [OpenRouter model](openrouter.md) and an OpenAI model on the `codex` harness are the cases
+where the model key is never handed to the CLI at all.
+
+**OpenAI key (`codex` harness).** Codex stores the key it is logged in with in
+`CODEX_HOME/auth.json`, a file the agent's shell can read. So the library does not log Codex in
+with your key. It runs a proxy on `127.0.0.1` for the turn, points Codex at it and logs Codex in
+with a random token made for that run. The proxy swaps the token for the real key, which stays in
+the calling process (the worker, in a sandbox), and forwards the call, WebSocket or HTTP, to
+`api.openai.com`. It serves only the Responses endpoint, its compaction endpoint and the model
+list; any other call gets a 403 and an `openai_proxy_refused` status event. A coerced agent has
+no key to take away: the token stops working when the turn ends. While the turn runs, though, its
+shell can read the token and call the proxy itself, and those calls are outside `max_budget_usd`
+and `max_turns`: the harness counts only the usage Codex reports for its own calls, and the proxy
+does not meter what passes through it. What bounds that spend is the length of the turn and the
+limits on the key, so give the harness a project key with a spend limit of its own. In a sandbox
+the worker also closes its own memory to the agent (see
+[What the agent's shell can reach](#what-the-agents-shell-can-reach)).
+A local run has no such protection, and a key taken from your shell environment stays there. If `codex_config` sets `openai_base_url` or
+`model_provider`, the proxy is not used and Codex is logged in with the key you passed.
 
 **In transit & at rest.** Secret values travel in exactly one place: the HTTPS body of the turn the client
 posts to the sandbox's worker through the platform's authenticated proxy. Nothing is persisted by the
@@ -71,6 +89,15 @@ its shell is therefore what the turn itself brought along, and the library keeps
   the worker's loopback metadata server (`GCE_METADATA_HOST` in the agent's env points at it): model calls,
   nothing else. Spend past the run's `max_budget_usd` is the only thing a coerced agent could add.
 - **The turn's own secrets** — those the caller passed, routed as the table above says.
+- **Not the worker's memory.** The worker holds the secrets the agent is not given (a model key
+  behind a local proxy, repo and MCP tokens) and runs as the same user as the agent. Two things
+  keep the agent's shell out of it. The sandbox itself lets a process inspect only its own
+  descendants (Yama `ptrace_scope=1`), so `/proc/<pid>/mem`, `process_vm_readv` and `ptrace` on
+  the worker are refused. The worker also marks itself non-dumpable at startup, which does not
+  depend on that platform setting and closes its `/proc/<pid>/environ` and `maps` as well; both
+  were readable without the flag. The environment is the image's and never holds a turn's
+  secrets, so this is defence in depth (verified live 2026-11-25, and re-checked by
+  `make live-smoke`'s isolation check).
 
 Sandboxes are created per turn and deleted at its end, so nothing a run leaves behind survives into the
 next one; multi-turn continuity rides the checkpoint (a credential-scrubbed tar in your bucket). There is

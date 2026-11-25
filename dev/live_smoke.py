@@ -176,8 +176,18 @@ JSON_TASK = (
     'Run `python3 -c "print(6 * 7)"` in the shell, then reply with a JSON object of the '
     'form {"answer": <the number it printed>}.'
 )
+def wait_command(seconds: int) -> str:
+    """A foreground shell command that takes ``seconds`` to finish, for a turn to sit in.
+
+    Not ``sleep N``: Claude Code refuses a foreground Bash call that starts with a long
+    ``sleep`` ("Blocked: standalone sleep 25", seen from CLI 2.1.327 for 25 s and up, while
+    20 s still ran), and the turn then ends before the check can steer or interrupt it.
+    """
+    return f"python3 -c 'import time; time.sleep({seconds})'"
+
+
 STEER_TASK = (
-    "First run `sleep 25` in the shell (a single Bash call; do not skip it). Then reply with "
+    f"First run `{wait_command(25)}` in the shell (a single Bash call; do not skip it). Then reply with "
     "one line: the word FOLLOWUP followed by any extra instruction you received while waiting, "
     "or NONE if you received none."
 )
@@ -442,7 +452,8 @@ async def check_exec(engine, verdicts) -> None:
 
         session = engine.start_session()
         run = session.run("Create a file named probe.txt containing exactly the word PAPAYA in your "
-                          "working directory, then wait 20 seconds (sleep 20), then reply with just 'done'.")
+                          f"working directory, then run `{wait_command(20)}` in the shell, then reply "
+                          "with just 'done'.")
         t0 = time.time()
         early = await session.exec("pwd", timeout=30)  # no sandbox yet: waits for dispatch
         log(label, f"early exec after {time.time() - t0:.1f}s: rc={early.returncode} "
@@ -517,7 +528,7 @@ async def check_model_token(engine, verdicts) -> None:
 
     try:
         session = engine.start_session()
-        run = session.run("Run `sleep 20` in the shell (a single Bash call; do not skip it), then run "
+        run = session.run(f"Run `{wait_command(20)}` in the shell (a single Bash call; do not skip it), then run "
                           '`python3 -c "print(6 * 7)"` and reply with just the number it prints.')
         await session.exec("true", timeout=30)  # waits for the dispatch: the worker is reachable now
         host = None
@@ -564,7 +575,7 @@ async def check_long(engine, verdicts) -> None:
                        f"the turn sleeps {secs}s, so the CLI's second model call needs a refreshed token")
         started = time.time()
         driving = asyncio.ensure_future(_drive(label, session.run(
-            f'Run `sleep {secs} && python3 -c "print(6 * 7)"` in the shell as ONE Bash call (it takes '
+            f'Run `{wait_command(secs)} && python3 -c "print(6 * 7)"` in the shell as ONE Bash call (it takes '
             f"{LONG_MINUTES:g} minutes; wait for it) and reply with just the number it prints.",
             config=TurnConfig(max_turns=6))))
         await asyncio.sleep(min(60, secs / 3))

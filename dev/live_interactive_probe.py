@@ -37,16 +37,20 @@ from harness_run.events import RunStatus, StopReason
 
 MODELS = {"claude-code": "claude-haiku-4-5-20251001", "codex": "gpt-5.6-luna"}
 
+# The waits are Python, not ``sleep N``: Claude Code refuses a foreground Bash call that starts
+# with a long ``sleep`` ("Blocked: sleep 40 followed by: echo slow", CLI 2.1.327), and the turn
+# then ends before the probe can interrupt it.
+_WAIT = "python3 -c 'import time; time.sleep({})'"
 STEER_TASK = (
-    "Run the shell command `sleep 8 && echo one`, then run `sleep 8 && echo two`, then "
+    f"Run the shell command `{_WAIT.format(8)} && echo one`, then run `{_WAIT.format(8)} && echo two`, then "
     "reply with the word DONE."
 )
 STEER_MSG = "STOP whatever you were doing. Do not run more commands. Reply with just the single word BANANA."
-INTERRUPT_TASK = "Run the shell command `sleep 40 && echo slow`, then reply with the word DONE."
+INTERRUPT_TASK = f"Run the shell command `{_WAIT.format(40)} && echo slow`, then reply with the word DONE."
 INTERRUPT_MSG = "Forget that. Do not run more commands. Reply with just the single word OK."
 STOP_TASK = (
     "First create a file named note.txt in the current directory containing the word "
-    "partial. Then run the shell command `sleep 40 && echo slow`. Then reply with DONE."
+    f"partial. Then run the shell command `{_WAIT.format(40)} && echo slow`. Then reply with DONE."
 )
 RESUME_MSG = "Which files are in the current directory? Reply with just their names."
 

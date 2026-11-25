@@ -50,7 +50,7 @@ a paid manual test (Haiku, a few cents). `ENGINE=<engine name>` targets a deploy
 engine with a ready pool; the caller must arrange its deployment and teardown.
 
 The control channel adds nothing measurable on `local`; the time is the model's. A steer
-waits for the running tool call to finish (here a `sleep 8`), because the model reads the
+waits for the running tool call to finish (here an 8-second wait), because the model reads the
 message at its next step. On `sandbox` a steer is one HTTPS call into the sandbox (~0.3 s);
 `make live-smoke` exercises it on every run.
 
@@ -122,7 +122,7 @@ one), runs Haiku turns against it, and tears everything down in `finally`:
   `TurnConfig(output_schema=...)`: the client parses `structured_output`, and the worker's
   `effective_spec` echo must still carry the marker. The second turn re-attaches by session id
   the way an application does.
-- **steer** — `session.send()` into a running turn (the model is inside a `sleep 25`): the
+- **steer** — `session.send()` into a running turn (the model is inside a 25-second shell wait; not `sleep 25`, which Claude Code refuses to run in the foreground): the
   `user` event must acknowledge the message id and the reply must reflect it.
 - **isolation** — a fixed read-only script run through the worker's `/exec` on a fresh
   sandbox (no model involved): the metadata server's identity must not be one of ours, its

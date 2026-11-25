@@ -965,3 +965,58 @@ def test_worker_restored_workspace_reports_the_first_turns_resolution(tmp_path):
     ready = worker_mod._prepare_workspace(rc, prefer_baked_skills=False)
     assert ready["restored"] is True and ready["skill_sources"] == record
     assert (tmp_path / "ws" / ".claude" / "skills" / "wkdb" / "SKILL.md").read_text() == "resolved on turn 1"
+
+
+# -- the worker: a turn that does not call Vertex gets no model token ---------------------
+
+
+def _vertex_body():
+    return _body(model_env={"CLAUDE_CODE_USE_VERTEX": "1", "ANTHROPIC_VERTEX_PROJECT_ID": "p",
+                            "CLOUD_ML_REGION": "global"},
+                 model_token={"access_token": "TOK", "expires_at": None})
+
+
+def _assert_turn_ran_without_vertex(worker, events):
+    assert events[-1].kind == "result"
+    _spec, rc = _DoneHarness.seen[0]
+    assert not rc.env  # no Vertex variables, no GCE_METADATA_HOST
+    assert worker.metadata_host is None  # the metadata server was never started
+
+
+def test_worker_drops_the_model_token_for_a_codex_turn(tmp_path, monkeypatch):
+    import harness_run.harness.codex as codex_mod
+
+    _DoneHarness.seen = []
+    served_during_turn = []
+
+    class _Probing(_DoneHarness):
+        async def run(self, spec, rc):
+            served_during_turn.append(worker.served_model_token())
+            async for ev in super().run(spec, rc):
+                yield ev
+
+    monkeypatch.setattr(codex_mod, "CodexHarness", _Probing)
+    worker = _real_worker_factory(tmp_path, AgentSpec(harness="codex", name="w", model="gpt-5"))("s1")
+    body = _vertex_body()
+    events = _drive(worker, body)
+    _assert_turn_ran_without_vertex(worker, events)
+    assert served_during_turn == [None]
+    assert worker.handle("/token", {"turn_id": body["turn_id"], "model_token": {"access_token": "x"}}) == {
+        "ok": False, "error": "this turn runs without a model token", "no_model_token": True}
+
+
+def test_worker_drops_the_model_token_for_an_openrouter_turn(tmp_path, monkeypatch):
+    _DoneHarness.seen = []
+    _patch_harness(monkeypatch, _DoneHarness)
+    spec = AgentSpec(harness="claude-code", name="w", model="openrouter/z-ai/glm-4.6")
+    worker = _real_worker_factory(tmp_path, spec)("s1")
+    _assert_turn_ran_without_vertex(worker, _drive(worker, _vertex_body()))
+
+
+def test_worker_decides_by_the_effective_spec_not_the_baked_one(tmp_path, monkeypatch):
+    """A Claude engine whose turn config picks an OpenRouter model: the token is dropped."""
+    _DoneHarness.seen = []
+    _patch_harness(monkeypatch, _DoneHarness)
+    worker = _real_worker_factory(tmp_path, AgentSpec(harness="claude-code", name="w", model="claude-sonnet-4-5"))("s1")
+    body = {**_vertex_body(), "turn_config": {"model": "openrouter/z-ai/glm-4.6"}}
+    _assert_turn_ran_without_vertex(worker, _drive(worker, body))

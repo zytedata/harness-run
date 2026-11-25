@@ -863,7 +863,8 @@ it is off the hot path, and `deploy` does not block on it.
   the token object under the run's prefix), and the **model token**. Nothing is persisted by the platform.
   Session/turn configs are written to GCS by the client for the 30-day post-mortem record, but the worker
   never reads them from there.
-- **Model credentials.** The sandbox has no Google identity, so the model token is ours to provide. The
+- **Model credentials.** The sandbox has no Google identity, so the model token is ours to provide, and
+  only to a turn whose model call goes to Vertex (`harness.model_calls_use_vertex`; the worker re-checks). The
   client mints it by impersonating a **predict-only service account** (the `harnessRunPredict` custom
   role; the client needs `serviceAccountTokenCreator` on it) with a 1 h lifetime and re-pushes a fresh one
   over `/token` every 25 minutes for as long as it holds the running turn. The worker serves it from a

@@ -37,6 +37,10 @@ branch that touches any deploy/runtime contract — it validates, on real infras
     the token is good for the model; a token that can list any of those is a MODEL_SA with
     more than the predict-only role, and the check fails. Only statuses and lengths are
     printed, never the token
+  * optional **codex-no-model-token** (with ``OPENAI_API_KEY`` set; the engine then bakes the
+    ``codex`` CLI too): a Codex turn on an OpenAI model gets no Vertex model token — the
+    worker has no metadata server up, nothing answers a token request on its port, and the
+    CLI's environment carries none of the Vertex variables (``CODEX_MODEL`` picks the model)
   * optional ``LONG_MINUTES=n``: a turn whose one Bash call sleeps that long (the model
     token, the sandbox TTL and the /events long-poll all have to hold). While it sleeps the
     check probes the container's ``/proc`` and cgroup files through ``session.exec()`` and
@@ -301,8 +305,14 @@ def log(label: str, msg: str) -> None:
     print(f"[{label}] {time.strftime('%H:%M:%S')} {msg}", flush=True)
 
 
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")  # opts in to the codex check; never logged
+CODEX_MODEL = os.environ.get("CODEX_MODEL", "gpt-5.6-luna")
+
+
 def _spec() -> AgentSpec:
-    return AgentSpec(harness="claude-code", name=NAME, model="claude-haiku-4-5", checkpoint=True, max_turns=8, max_budget_usd=1.0)
+    harnesses = ("claude-code", "codex") if OPENAI_API_KEY else ()
+    return AgentSpec(harness="claude-code", harnesses=harnesses, name=NAME, model="claude-haiku-4-5",
+                     checkpoint=True, max_turns=8, max_budget_usd=1.0)
 
 
 async def _drive(label: str, run, *, on_event=None):
@@ -596,6 +606,53 @@ async def check_model_token(engine, verdicts) -> None:
         verdicts[label] = False
 
 
+_VERTEX_VARS = "GCE_METADATA_HOST|CLAUDE_CODE_USE_VERTEX|ANTHROPIC_VERTEX_PROJECT_ID|CLOUD_ML_REGION"
+
+# Run through ``session.exec()`` during a turn that should carry no model token: the
+# worker's metadata port must not hand one out (nothing listens there, or it answers 404).
+NO_MODEL_TOKEN_SCRIPT = r"""
+python3 - <<'PY'
+%(prelude)s
+st, tok = token_from("127.0.0.1:%(port)s")
+print("NO-MODEL-TOKEN " + json.dumps({"loopback_token": f"{st} len={len(tok)}"}))
+PY
+""".strip()
+
+
+async def check_codex_no_model_token(engine, verdicts) -> None:
+    """A Codex turn on an OpenAI model calls OpenAI, not Vertex, so it must not be given the
+    Vertex model token: no metadata server, no token on its port, no Vertex env in the CLI."""
+    label = "codex-no-model-token"
+    import json as _json
+
+    from harness_run.runtime.sandbox.worker import DEFAULT_METADATA_PORT
+
+    try:
+        session = engine.start_session(config=SessionConfig(harness="codex", model=CODEX_MODEL))
+        run = session.run(
+            f"Run `{wait_command(20)}` in the shell (do not skip it), then run "
+            f"`echo VERTEX_VARS=$(env | grep -cE '^({_VERTEX_VARS})=')` and reply with exactly the line it prints.",
+            secrets={"OPENAI_API_KEY": OPENAI_API_KEY})
+        await session.exec("true", timeout=30)  # waits for the dispatch: the worker is reachable now
+        await asyncio.sleep(3)  # a Claude turn's metadata server would be up by now
+        health = await asyncio.to_thread(engine._provider().call, session._sandbox, "/health", {}, timeout_s=30)
+        host = health.get("metadata_host")
+        probe = await session.exec(_probe_script(NO_MODEL_TOKEN_SCRIPT, port=str(DEFAULT_METADATA_PORT)), timeout=60)
+        line = next((ln for ln in probe.stdout.splitlines() if ln.startswith("NO-MODEL-TOKEN ")), "")
+        facts = _json.loads(line[len("NO-MODEL-TOKEN "):]) if line else {}
+        log(label, f"worker metadata server: {host!r} (running turn {str(health.get('running_turn'))[:8]}); "
+                   f"rc={probe.returncode} facts={facts} stderr={probe.stderr[-120:]!r}")
+        r, _events, _ = await _drive(label, run)
+        no_token = bool(facts) and not str(facts.get("loopback_token", "")).startswith("200") \
+            and str(facts.get("loopback_token", "")).endswith("len=0")
+        verdicts[label] = _ok(r, "VERTEX_VARS=0") and host is None and no_token
+        log(label, f"client minted a model token for this turn: {session._turn_has_model_token}")
+        verdicts[label] = verdicts[label] and session._turn_has_model_token is False
+    except Exception:
+        log(label, "FAILED:\n" + traceback.format_exc())
+        verdicts[label] = False
+
+
 PROC_PROBE = (
     "echo '--- meminfo'; head -3 /proc/meminfo; echo '--- cpus'; nproc; grep -c ^processor /proc/cpuinfo; "
     "echo '--- cgroup'; cat /sys/fs/cgroup/memory.max /sys/fs/cgroup/memory.current /sys/fs/cgroup/cpu.max "
@@ -665,7 +722,8 @@ async def main() -> int:
         await asyncio.gather(check_configs(verdicts), check_steer(engine, verdicts),
                              check_early_steer(engine, verdicts), check_exec(engine, verdicts),
                              check_reattach_control(engine, verdicts), check_isolation(engine, verdicts),
-                             check_model_token(engine, verdicts))
+                             check_model_token(engine, verdicts),
+                             *([check_codex_no_model_token(engine, verdicts)] if OPENAI_API_KEY else []))
         if LONG_MINUTES:
             await check_long(engine, verdicts)
     except Exception:

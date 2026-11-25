@@ -189,3 +189,119 @@ def test_an_api_key_engine_sends_no_model_token(monkeypatch):
     assert model_env == {} and model_token is None
     assert session._refresh_model_token() is True  # nothing to push, nothing to retry
     session._stop_refresh()
+
+
+# -- which turns get a model token (only those whose model call goes to Vertex) ----------
+
+
+def _both_harnesses_engine(provider):
+    from harness_run.spec import AgentSpec
+
+    return make_engine(provider, spec=AgentSpec(
+        harness="claude-code", harnesses=("claude-code", "codex"), name="g", model="claude-sonnet-4-5"))
+
+
+def _count_mints(monkeypatch):
+    from harness_run.runtime.sandbox import model_token
+
+    minted = []
+    monkeypatch.setattr(model_token, "mint_model_token",
+                        lambda *a, **kw: minted.append(1) or ("model", None))
+    return minted
+
+
+def test_model_calls_use_vertex_follows_where_the_model_call_goes():
+    from harness_run.harness import model_calls_use_vertex
+    from harness_run.spec import AgentSpec
+
+    def spec(harness, model):
+        return AgentSpec(harness=harness, name="g", model=model)
+
+    assert model_calls_use_vertex(spec("claude-code", "claude-sonnet-4-5"))
+    assert not model_calls_use_vertex(spec("codex", "gpt-5"))
+    assert not model_calls_use_vertex(spec("claude-code", "openrouter/z-ai/glm-4.6"))
+    assert not model_calls_use_vertex(spec("codex", "openrouter/openai/gpt-5"))
+
+
+def test_a_claude_turn_on_a_vertex_engine_gets_the_model_token(monkeypatch):
+    minted = _count_mints(monkeypatch)
+    session = _both_harnesses_engine(FakeSandboxProvider()).start_session()
+    _token, model_env, model_token = session._mint_tokens("t" * 32)
+    assert model_token == {"access_token": "model", "expires_at": None}
+    assert model_env["CLAUDE_CODE_USE_VERTEX"] == "1" and minted == [1]
+    assert session._turn_has_model_token is True
+    session._stop_refresh()
+
+
+@pytest.mark.parametrize("config", [
+    {"harness": "codex", "model": "gpt-5"},
+    {"model": "openrouter/z-ai/glm-4.6"},
+    {"harness": "codex", "model": "openrouter/openai/gpt-5"},
+])
+def test_a_turn_that_does_not_call_vertex_gets_no_model_token_and_none_is_minted(monkeypatch, config):
+    from harness_run.config import SessionConfig
+
+    minted = _count_mints(monkeypatch)
+    session = _both_harnesses_engine(FakeSandboxProvider()).start_session()
+    session._session_config = SessionConfig(**config)  # bound without the GCS record a real open writes
+    _token, model_env, model_token = session._mint_tokens("t" * 32, session._client_spec())
+    assert model_env == {} and model_token is None and minted == []
+    # The 25-minute refresh has nothing to push either, even with a worker to push to.
+    session._sandbox, session._turn_id = "sb", "t" * 32
+    assert session._refresh_model_token() is True and minted == []
+    session._stop_refresh()
+
+
+def test_the_model_token_follows_each_turns_own_model(monkeypatch):
+    """Turns of one session: Claude, then an OpenRouter model for one turn, then Claude again."""
+    import asyncio
+
+    from sandbox_fakes import ScriptedWorker, result_event
+
+    from harness_run.config import TurnConfig
+
+    minted = _count_mints(monkeypatch)
+    provider = FakeSandboxProvider(lambda name: ScriptedWorker(auto=[result_event("done")]))
+    engine = _both_harnesses_engine(provider)
+    session = engine.start_session()
+
+    async def go():
+        await session.run("one")
+        await session.run("two", config=TurnConfig(model="openrouter/z-ai/glm-4.6"))
+        await session.run("three")
+
+    asyncio.run(go())
+    engine._join_background()
+    bodies = [body for _sb, path, body in provider.calls if path == "/turn"]
+    assert [b["model_token"] is not None for b in bodies] == [True, False, True]
+    assert [bool(b["model_env"]) for b in bodies] == [True, False, True]
+    assert len(minted) == 2
+
+
+def test_an_adopter_stops_minting_once_the_worker_says_the_turn_has_no_model_token(monkeypatch):
+    minted = _count_mints(monkeypatch)
+    provider = FakeSandboxProvider()
+    session = _both_harnesses_engine(provider).start_session()
+    session._sandbox, session._turn_id = "sb", "t" * 32
+    session._turn_has_model_token = None  # an adopted turn: started elsewhere
+    pushes = []
+
+    def call(sandbox, path, body=None, *, timeout_s=None):
+        pushes.append(path)
+        return {"ok": False, "error": "this turn runs without a model token", "no_model_token": True}
+
+    monkeypatch.setattr(provider, "call", call)
+    assert session._refresh_model_token() is True  # asks the worker once
+    assert session._turn_has_model_token is False
+    assert session._refresh_model_token() is True
+    assert pushes == ["/token"] and minted == [1]
+
+
+def test_a_handle_without_its_deploy_record_leaves_the_decision_to_the_worker(monkeypatch):
+    minted = _count_mints(monkeypatch)
+    engine = make_engine(FakeSandboxProvider())
+    engine.spec = backend._fallback_spec("g")  # no harness known client-side
+    session = engine.start_session()
+    _token, _env, model_token = session._mint_tokens("t" * 32)
+    assert model_token is not None and minted == [1]
+    session._stop_refresh()

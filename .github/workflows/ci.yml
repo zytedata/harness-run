@@ -26,7 +26,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.12", "3.13"]  # full requires-python range (>=3.12,<3.14)
+        # requires-python is >=3.12 with no upper bound, so the matrix runs the floor
+        # through the newest release (3.15, 2026-10-09). Add the next one when it ships.
+        python-version: ["3.12", "3.13", "3.14", "3.15"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

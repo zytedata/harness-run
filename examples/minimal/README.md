@@ -11,7 +11,7 @@ output, with a verifiable answer.
 
 ## Prerequisites
 
-- **Python 3.12** (the `claude-agent-sdk` supports ≤3.13; the repo pins `>=3.12,<3.14`).
+- **Python 3.12 or newer** (the toolkit requires `>=3.12`).
 - The toolkit installed into that environment, e.g. with [uv](https://docs.astral.sh/uv/):
 
   ```bash

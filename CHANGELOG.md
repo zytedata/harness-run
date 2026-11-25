@@ -77,10 +77,15 @@ TestPyPI never accepts the same version twice, so a second rehearsal needs a ver
   sandbox. Returns `False`, changing nothing, when there is no turn to leave (including while the
   turn is still being handed to a sandbox); `local` sessions always return `False`, since a local
   turn ends with its process. ([#5])
+- Python 3.14 and 3.15 are supported and covered by CI. `requires-python` is unchanged (`>=3.12`);
+  the new versions are now advertised in the package classifiers and run in the test matrix. This
+  is the client-side range only — the sandbox engine image and the local `packages` venv still
+  pin the engine contract's Python 3.12. ([#17])
 
 [#1]: https://github.com/zytedata/harness-run/issues/1
 [#3]: https://github.com/zytedata/harness-run/pull/3
 [#5]: https://github.com/zytedata/harness-run/pull/5
+[#17]: https://github.com/zytedata/harness-run/pull/17
 
 ### Changed
 
